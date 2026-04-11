@@ -219,9 +219,22 @@
   <div class="card">
     <div class="section-title">Recherche rapide</div>
     <div class="section-note">Scannez un code-barres avec la camera pour trouver directement le produit.</div>
-    <button class="btn btn-outline" onclick="startSearchScan()">Scanner pour rechercher</button>
+    <div class="card scanner" style="margin-top:10px;margin-bottom:0">
+      <video id="searchCameraPreview" playsinline muted></video>
+      <div id="searchHtml5Reader"></div>
+      <div class="scanner-bar">
+        <span id="searchScannerStatus" class="pill">Camera arretee</span>
+        <button class="btn btn-inline secondary" onclick="startSearchScan()" id="searchCameraButton">Ouvrir camera</button>
+      </div>
+    </div>
   </div>
-  <input type="text" id="searchInput" placeholder="Nom du produit ou code-barres..." oninput="doSearch()"/>
+  <div class="scan-tools">
+    <div class="field">
+      <label class="label" for="searchInput">Recherche</label>
+      <input type="text" id="searchInput" placeholder="Nom du produit ou code-barres..." oninput="doSearch()"/>
+    </div>
+    <button class="btn btn-outline btn-inline" onclick="clearSearchInput()">Effacer</button>
+  </div>
   <div id="searchResults"></div>
 </div>
 
@@ -1158,6 +1171,23 @@ function showLayoutMsg(message, type) {
   }
 }
 
+function getCameraDom() {
+  if (cameraUsageMode === 'search') {
+    return {
+      status: document.getElementById('searchScannerStatus'),
+      button: document.getElementById('searchCameraButton'),
+      video: document.getElementById('searchCameraPreview'),
+      reader: document.getElementById('searchHtml5Reader')
+    };
+  }
+  return {
+    status: document.getElementById('scannerStatus'),
+    button: document.getElementById('cameraButton'),
+    video: document.getElementById('cameraPreview'),
+    reader: document.getElementById('html5Reader')
+  };
+}
+
 async function doSearch() {
   const q = document.getElementById('searchInput').value.trim();
   const div = document.getElementById('searchResults');
@@ -1167,15 +1197,12 @@ async function doSearch() {
 }
 
 async function startSearchScan() {
+  if (scannerStream || html5Scanner) {
+    await stopCamera();
+  }
   cameraUsageMode = 'search';
   document.getElementById('searchResults').innerHTML = '<div class="msg info">Ouverture de la camera pour rechercher un produit...</div>';
-  switchTab('scan');
-  document.getElementById('scanResult').innerHTML = '<div class="msg info">Scannez un code-barres pour rechercher directement le produit.</div>';
-  if (!scannerStream && !html5Scanner) {
-    await startCamera();
-  } else {
-    document.getElementById('scannerStatus').textContent = 'Recherche code...';
-  }
+  await startCamera();
 }
 
 async function toggleCamera() {
@@ -1183,14 +1210,12 @@ async function toggleCamera() {
     await stopCamera();
     return;
   }
+  cameraUsageMode = 'scan';
   await startCamera();
 }
 
 async function startCamera() {
-  const status = document.getElementById('scannerStatus');
-  const button = document.getElementById('cameraButton');
-  const video = document.getElementById('cameraPreview');
-  const reader = document.getElementById('html5Reader');
+  const {status, button, video, reader} = getCameraDom();
 
   if (!('mediaDevices' in navigator) || !navigator.mediaDevices.getUserMedia) {
     status.textContent = 'Camera non disponible';
@@ -1225,7 +1250,7 @@ async function startCamera() {
       resetCameraCandidate();
       video.style.display = 'none';
       reader.style.display = 'block';
-      html5Scanner = new Html5Qrcode('html5Reader', html5ScannerConfig());
+      html5Scanner = new Html5Qrcode(reader.id, html5ScannerConfig());
       await html5Scanner.start(
         {facingMode: 'environment'},
         {fps: 10, qrbox: responsiveScanBox},
@@ -1283,9 +1308,9 @@ function injectScript(src) {
 }
 
 async function stopCamera() {
+  const {status, button, video, reader} = getCameraDom();
   scanLoopRunning = false;
   scanPaused = false;
-  cameraUsageMode = 'scan';
   resetCameraCandidate();
   if (scannerStream) {
     scannerStream.getTracks().forEach(track => track.stop());
@@ -1299,11 +1324,25 @@ async function stopCamera() {
   scannerStream = null;
   html5Scanner = null;
   scannerMode = null;
-  document.getElementById('cameraPreview').srcObject = null;
-  document.getElementById('cameraPreview').style.display = 'block';
-  document.getElementById('html5Reader').style.display = 'none';
-  document.getElementById('scannerStatus').textContent = 'Camera arretee';
-  document.getElementById('cameraButton').textContent = 'Ouvrir camera';
+  video.srcObject = null;
+  video.style.display = 'block';
+  reader.style.display = 'none';
+  status.textContent = 'Camera arretee';
+  button.textContent = 'Ouvrir camera';
+  if (cameraUsageMode === 'search') {
+    document.getElementById('cameraPreview').srcObject = null;
+    document.getElementById('cameraPreview').style.display = 'block';
+    document.getElementById('html5Reader').style.display = 'none';
+    document.getElementById('scannerStatus').textContent = 'Camera arretee';
+    document.getElementById('cameraButton').textContent = 'Ouvrir camera';
+  } else {
+    document.getElementById('searchCameraPreview').srcObject = null;
+    document.getElementById('searchCameraPreview').style.display = 'block';
+    document.getElementById('searchHtml5Reader').style.display = 'none';
+    document.getElementById('searchScannerStatus').textContent = 'Camera arretee';
+    document.getElementById('searchCameraButton').textContent = 'Ouvrir camera';
+  }
+  cameraUsageMode = 'scan';
 }
 
 function responsiveScanBox(viewfinderWidth, viewfinderHeight) {
@@ -1335,11 +1374,9 @@ async function onDecodedCode(decodedText) {
   if (!confirmStableCameraBarcode(rawValue)) return;
   scanPaused = true;
   setScannedBarcode(rawValue);
-  document.getElementById('scannerStatus').textContent = 'Code detecte';
+  getCameraDom().status.textContent = 'Code detecte';
   if (cameraUsageMode === 'search') {
-    document.getElementById('searchInput').value = rawValue;
     await stopCamera();
-    switchTab('search');
     await doSearch();
     document.getElementById('searchResults').insertAdjacentHTML('afterbegin', `<div class="msg success">Code-barres scanne: ${esc(rawValue)}</div>`);
     return;
@@ -1362,7 +1399,7 @@ function confirmStableCameraBarcode(barcode) {
   cameraCandidateTimer = window.setTimeout(resetCameraCandidate, 900);
 
   if (cameraCandidateCount < 2) {
-    document.getElementById('scannerStatus').textContent = 'Verification du code...';
+    getCameraDom().status.textContent = 'Verification du code...';
     return false;
   }
 
@@ -1377,14 +1414,24 @@ function resetCameraCandidate() {
   cameraCandidateTimer = null;
 }
 
+function getActiveBarcodeInput() {
+  return cameraUsageMode === 'search'
+    ? document.getElementById('searchInput')
+    : document.getElementById('scanInput');
+}
+
 function setScannedBarcode(barcode) {
-  const input = document.getElementById('scanInput');
-  input.value = barcode;
-  input.setAttribute('value', barcode);
+  const input = getActiveBarcodeInput();
+  const currentValue = String(input.value || '');
+  const nextValue = `${currentValue}${barcode}`;
+  input.value = nextValue;
+  input.setAttribute('value', nextValue);
   input.dispatchEvent(new Event('input', {bubbles: true}));
   input.dispatchEvent(new Event('change', {bubbles: true}));
-  input.setSelectionRange(input.value.length, input.value.length);
-  persistScanDraft();
+  if (typeof input.setSelectionRange === 'function') {
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+  if (input.id === 'scanInput') persistScanDraft();
 }
 
 function clearScanInput() {
@@ -1395,8 +1442,14 @@ function clearScanInput() {
   scanPaused = false;
   resetCameraCandidate();
   persistScanDraft();
-  if (scannerStream || html5Scanner) document.getElementById('scannerStatus').textContent = 'Recherche code...';
+  if (scannerStream || html5Scanner) getCameraDom().status.textContent = 'Recherche code...';
   focusScanInput();
+}
+
+function clearSearchInput() {
+  document.getElementById('searchInput').value = '';
+  document.getElementById('searchResults').innerHTML = '';
+  if (scannerStream || html5Scanner) getCameraDom().status.textContent = 'Recherche code...';
 }
 
 function looksLikeBarcode(value) {
@@ -1491,7 +1544,7 @@ function updateDeviceSupport() {
 
 async function scanFrame() {
   if (!scanLoopRunning || !detector) return;
-  const video = document.getElementById('cameraPreview');
+  const video = getCameraDom().video;
   try {
     if (scanPaused) {
       requestAnimationFrame(scanFrame);
@@ -1502,7 +1555,7 @@ async function scanFrame() {
       await onDecodedCode(codes[0].rawValue);
     }
   } catch (error) {
-    document.getElementById('scannerStatus').textContent = 'Lecture en cours';
+    getCameraDom().status.textContent = 'Lecture en cours';
   }
   requestAnimationFrame(scanFrame);
 }
@@ -1668,11 +1721,11 @@ function finishConfirmed(message) {
   activeLookupBarcode = '';
   currentScanProduct = null;
   document.getElementById('scanResult').innerHTML = `<div class="msg success">${esc(message)} Prochaine position: ${esc(cursorLabel())}</div>`;
-  document.getElementById('scannerStatus').textContent = `Confirme: ${oldLocation}`;
+  getCameraDom().status.textContent = `Confirme: ${oldLocation}`;
   window.setTimeout(() => {
     scanPaused = false;
     resetCameraCandidate();
-    if (scannerStream || html5Scanner) document.getElementById('scannerStatus').textContent = 'Recherche code...';
+    if (scannerStream || html5Scanner) getCameraDom().status.textContent = 'Recherche code...';
     focusScanInput();
   }, 1200);
 }
