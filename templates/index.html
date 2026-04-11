@@ -87,6 +87,7 @@
   .shell-title{font-size:13px;font-weight:800;color:#2f343b}
   .shell-copy{font-size:12px;color:#666;line-height:1.4;margin-top:6px}
   .shell-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .shell-sync{margin-top:10px}
   .status-dot{display:inline-block;width:8px;height:8px;border-radius:999px;background:#16a34a;margin-right:6px}
   .status-dot.offline{background:#dc2626}
   .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
@@ -115,12 +116,14 @@
       <div class="shell-title" id="appModeLabel">Mode web</div>
       <div class="small" id="networkStatus"><span class="status-dot"></span>En ligne</div>
     </div>
-    <div class="shell-copy" id="installHint">Sur iPhone: Safari -> Partager -> Ajouter a l ecran d accueil.</div>
+    <div class="shell-copy" id="installHint">Sur mobile: ouvrez le site puis ajoutez-le a l ecran d accueil pour un acces rapide.</div>
     <div class="shell-actions">
-      <button class="btn btn-outline btn-inline" onclick="enablePhoneMode()">Utiliser cet iPhone</button>
+      <button class="btn btn-outline btn-inline" onclick="enablePhoneMode()">Activer la copie locale synchronisee</button>
       <button class="btn btn-outline btn-inline" onclick="exportLocalDatabase()">Exporter JSON</button>
       <button class="btn btn-outline btn-inline" onclick="document.getElementById('importDbInput').click()">Importer JSON</button>
+      <button class="btn btn-outline btn-inline" id="restoreImportButton" style="display:none" onclick="restoreLastImportBackup()">Annuler dernier import</button>
     </div>
+    <div id="syncNotice" class="msg info shell-sync" style="display:none"></div>
     <input id="importDbInput" type="file" accept="application/json,.json" style="display:none" onchange="importLocalDatabase(event)"/>
   </div>
 </div>
@@ -213,6 +216,11 @@
 </div>
 
 <div id="search" class="section content">
+  <div class="card">
+    <div class="section-title">Recherche rapide</div>
+    <div class="section-note">Scannez un code-barres avec la camera pour trouver directement le produit.</div>
+    <button class="btn btn-outline" onclick="startSearchScan()">Scanner pour rechercher</button>
+  </div>
   <input type="text" id="searchInput" placeholder="Nom du produit ou code-barres..." oninput="doSearch()"/>
   <div id="searchResults"></div>
 </div>
@@ -285,6 +293,7 @@ let cameraCandidateCount = 0;
 let cameraCandidateTimer = null;
 let activeLookupBarcode = '';
 let barcodeLibraryPromise = null;
+let cameraUsageMode = 'scan';
 const STORAGE_KEYS = {
   cursor: 'familiprixCursor',
   activeTab: 'familiprixActiveTab',
@@ -292,7 +301,10 @@ const STORAGE_KEYS = {
   addDraft: 'familiprixAddDraft',
   products: 'familiprixProducts',
   nextId: 'familiprixNextProductId',
-  forceLocal: 'familiprixForceLocal'
+  forceLocal: 'familiprixForceLocal',
+  pendingExport: 'familiprixPendingExport',
+  lastImportBackup: 'familiprixLastImportBackup',
+  lastServerBackup: 'familiprixLastServerBackup'
 };
 
 let dataMode = 'server';
@@ -315,7 +327,7 @@ function isStandaloneApp() {
   return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
 }
 
-function prefersLocalDataMode() {
+function prefersPhoneMode() {
   return isStandaloneApp() || localStorage.getItem(STORAGE_KEYS.forceLocal) === '1';
 }
 
@@ -360,6 +372,126 @@ function getNextLocalProductId() {
   return next;
 }
 
+function hasPendingExport() {
+  return localStorage.getItem(STORAGE_KEYS.pendingExport) === '1';
+}
+
+function markPendingExport(reason='') {
+  localStorage.setItem(STORAGE_KEYS.pendingExport, '1');
+  updateSyncNotice(reason || 'Des changements sont gardes seulement sur cet appareil pour le moment.');
+}
+
+function clearPendingExport() {
+  localStorage.removeItem(STORAGE_KEYS.pendingExport);
+  updateSyncNotice();
+}
+
+function saveImportBackup(label='') {
+  localStorage.setItem(STORAGE_KEYS.lastImportBackup, JSON.stringify({
+    saved_at: new Date().toISOString(),
+    label,
+    products: loadLocalProducts()
+  }));
+  updateRestoreImportButton();
+}
+
+function updateRestoreImportButton() {
+  const button = document.getElementById('restoreImportButton');
+  if (!button) return;
+  button.style.display = localStorage.getItem(STORAGE_KEYS.lastImportBackup) ? 'inline-block' : 'none';
+}
+
+function restoreLastImportBackup() {
+  const raw = localStorage.getItem(STORAGE_KEYS.lastImportBackup);
+  if (!raw) return;
+  try {
+    const backup = JSON.parse(raw);
+    const products = Array.isArray(backup.products) ? backup.products : [];
+    saveLocalProducts(products);
+    localStorage.setItem(STORAGE_KEYS.forceLocal, '1');
+    dataMode = 'hybrid';
+    updateAppShellState();
+    updateSyncNotice('Version locale precedente restauree. Verifiez avant toute exportation vers la base partagee.');
+    if (browseAisle) loadBrowse(true);
+    doSearch();
+  } catch (error) {
+    document.getElementById('syncNotice').style.display = 'block';
+    document.getElementById('syncNotice').className = 'msg error shell-sync';
+    document.getElementById('syncNotice').textContent = 'Impossible de restaurer la sauvegarde precedente.';
+  }
+}
+
+function updateSyncNotice(message='') {
+  const notice = document.getElementById('syncNotice');
+  if (!notice) return;
+  const pending = hasPendingExport();
+  if (!pending && !message) {
+    notice.style.display = 'none';
+    notice.innerHTML = '';
+    return;
+  }
+  notice.style.display = 'block';
+  if (pending && navigator.onLine) {
+    notice.className = 'msg success shell-sync';
+    notice.innerHTML = `${esc(message || 'Les changements locaux peuvent maintenant etre exportes vers la base partagee.')} <div class="tool-row"><button class="btn btn-inline" onclick="syncLocalProductsToServer()">Exporter vers la base partagee</button></div>`;
+  } else if (pending) {
+    notice.className = 'msg info shell-sync';
+    notice.textContent = message || 'Cet appareil a des changements locaux non exportes. Ils restent ici jusqu au retour du reseau.';
+  } else {
+    notice.className = 'msg info shell-sync';
+    notice.textContent = message;
+  }
+}
+
+async function syncLocalProductsToServer() {
+  if (!navigator.onLine) {
+    updateSyncNotice('Le reseau n est pas disponible. Les changements restent gardes sur cet appareil.');
+    return;
+  }
+  const local = loadLocalProducts().sort(productSort);
+  try {
+    const currentServerRes = await fetch('/api/products');
+    const serverProducts = await currentServerRes.json();
+    localStorage.setItem(STORAGE_KEYS.lastServerBackup, JSON.stringify({
+      saved_at: new Date().toISOString(),
+      products: serverProducts
+    }));
+
+    const byId = new Map(serverProducts.map(product => [Number(product.id), product]));
+    const byBarcode = new Map(serverProducts.filter(product => product.barcode).map(product => [product.barcode, product]));
+    const syncedProducts = [];
+
+    for (const product of local) {
+      const serverMatch = byId.get(Number(product.id)) || (product.barcode ? byBarcode.get(product.barcode) : null);
+      if (serverMatch) {
+        const payload = {...serverMatch, ...product, id: serverMatch.id};
+        const res = await fetch(`/api/products/${serverMatch.id}`, {
+          method: 'PUT',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error('update failed');
+        syncedProducts.push(normalizeProduct(payload));
+      } else {
+        const res = await fetch('/api/products', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify(product)
+        });
+        const data = await res.json();
+        if (!res.ok || !data.product) throw new Error(data.error || 'create failed');
+        syncedProducts.push(normalizeProduct(data.product));
+      }
+    }
+
+    saveLocalProducts(syncedProducts);
+    clearPendingExport();
+    updateSyncNotice('Les changements de cet appareil ont ete exportes vers la base partagee.');
+  } catch (error) {
+    markPendingExport('Export incomplet. Les donnees locales sont toujours gardees sur cet appareil.');
+  }
+}
+
 async function seedLocalProductsFromServer() {
   if (localStorage.getItem(STORAGE_KEYS.products)) {
     loadLocalProducts();
@@ -376,8 +508,8 @@ async function seedLocalProductsFromServer() {
 }
 
 async function initializeDataMode() {
-  if (prefersLocalDataMode()) {
-    dataMode = 'local';
+  if (prefersPhoneMode()) {
+    dataMode = 'hybrid';
     await seedLocalProductsFromServer();
   } else {
     dataMode = 'server';
@@ -385,32 +517,72 @@ async function initializeDataMode() {
   }
 }
 
+function upsertLocalProduct(product) {
+  const normalized = normalizeProduct(product);
+  const products = loadLocalProducts();
+  const index = products.findIndex(item => Number(item.id) === Number(normalized.id));
+  if (index >= 0) {
+    products[index] = normalized;
+  } else {
+    products.push(normalized);
+  }
+  saveLocalProducts(products);
+}
+
+function localSearchProducts(query) {
+  const q = String(query || '').trim().toLowerCase();
+  return loadLocalProducts()
+    .filter(product =>
+      product.name.toLowerCase().includes(q) ||
+      product.brand.toLowerCase().includes(q) ||
+      product.barcode.toLowerCase().includes(q)
+    )
+    .sort(productSort);
+}
+
 async function apiGetProducts() {
-  if (dataMode === 'local') return [...loadLocalProducts()].sort(productSort);
+  if (dataMode === 'hybrid') {
+    try {
+      const res = await fetch('/api/products');
+      const products = await res.json();
+      saveLocalProducts(products);
+      return products;
+    } catch (error) {
+      return [...loadLocalProducts()].sort(productSort);
+    }
+  }
   const res = await fetch('/api/products');
   return res.json();
 }
 
 async function apiSearchProducts(query) {
-  if (dataMode === 'local') {
-    const q = String(query || '').trim().toLowerCase();
-    return loadLocalProducts()
-      .filter(product =>
-        product.name.toLowerCase().includes(q) ||
-        product.brand.toLowerCase().includes(q) ||
-        product.barcode.toLowerCase().includes(q)
-      )
-      .sort(productSort);
+  if (dataMode === 'hybrid') {
+    try {
+      const res = await fetch(`/api/products/search?q=${encodeURIComponent(query)}`);
+      const products = await res.json();
+      products.forEach(upsertLocalProduct);
+      return products.sort(productSort);
+    } catch (error) {
+      return localSearchProducts(query);
+    }
   }
   const res = await fetch(`/api/products/search?q=${encodeURIComponent(query)}`);
   return res.json();
 }
 
 async function apiGetProductByBarcode(barcode) {
-  if (dataMode === 'local') {
-    const product = loadLocalProducts().find(item => item.barcode === barcode);
-    if (!product) throw new Error('not-found');
-    return product;
+  if (dataMode === 'hybrid') {
+    try {
+      const res = await fetch(`/api/products/barcode/${encodeURIComponent(barcode)}`);
+      if (!res.ok) throw new Error('not-found');
+      const product = await res.json();
+      upsertLocalProduct(product);
+      return product;
+    } catch (error) {
+      const product = loadLocalProducts().find(item => item.barcode === barcode);
+      if (!product) throw error;
+      return product;
+    }
   }
   const res = await fetch(`/api/products/barcode/${encodeURIComponent(barcode)}`);
   if (!res.ok) throw new Error('not-found');
@@ -418,12 +590,28 @@ async function apiGetProductByBarcode(barcode) {
 }
 
 async function apiAddProduct(payload) {
-  if (dataMode === 'local') {
-    const product = normalizeProduct({...payload, id: getNextLocalProductId()});
-    const products = loadLocalProducts();
-    products.push(product);
-    saveLocalProducts(products);
-    return {success: true, message: `"${product.name}" ajoute avec succes!`, product};
+  if (dataMode === 'hybrid') {
+    try {
+      const res = await fetch('/api/products', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (res.ok && data.product) upsertLocalProduct(data.product);
+      return res.ok ? data : {success: false, error: data.error || 'Erreur serveur pendant l ajout.'};
+    } catch (error) {
+      const product = normalizeProduct({...payload, id: getNextLocalProductId()});
+      const products = loadLocalProducts();
+      products.push(product);
+      saveLocalProducts(products);
+      markPendingExport(`"${product.name}" a ete garde seulement sur cet appareil.`);
+      return {
+        success: true,
+        message: `"${product.name}" ajoute sur cet appareil. La synchro serveur reprendra plus tard.`,
+        product
+      };
+    }
   }
   try {
     const res = await fetch('/api/products', {
@@ -439,13 +627,19 @@ async function apiAddProduct(payload) {
 }
 
 async function apiUpdateProduct(product) {
-  if (dataMode === 'local') {
-    const products = loadLocalProducts();
-    const index = products.findIndex(item => Number(item.id) === Number(product.id));
-    if (index === -1) return {success: false, error: 'Produit non trouve'};
-    products[index] = normalizeProduct(product);
-    saveLocalProducts(products);
-    return {success: true};
+  if (dataMode === 'hybrid') {
+    upsertLocalProduct(product);
+    try {
+      const res = await fetch(`/api/products/${product.id}`, {
+        method: 'PUT',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(product)
+      });
+      return res.json();
+    } catch (error) {
+      markPendingExport(`Les changements de "${product.name}" sont gardes seulement sur cet appareil.`);
+      return {success: true, warning: 'Sauve sur cet appareil seulement pour le moment.'};
+    }
   }
   const res = await fetch(`/api/products/${product.id}`, {
     method: 'PUT',
@@ -456,12 +650,22 @@ async function apiUpdateProduct(product) {
 }
 
 async function apiBulkUpdateProducts(products) {
-  if (dataMode === 'local') {
+  if (dataMode === 'hybrid') {
     const nextProducts = loadLocalProducts();
     const byId = new Map(nextProducts.map(product => [Number(product.id), product]));
     products.forEach(product => byId.set(Number(product.id), normalizeProduct(product)));
     saveLocalProducts(Array.from(byId.values()));
-    return {success: true, updated: products.length};
+    try {
+      const res = await fetch('/api/products/bulk', {
+        method: 'PUT',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({products})
+      });
+      return res.json();
+    } catch (error) {
+      markPendingExport('Des changements de structure sont gardes seulement sur cet appareil.');
+      return {success: true, updated: products.length};
+    }
   }
   const res = await fetch('/api/products/bulk', {
     method: 'PUT',
@@ -472,17 +676,27 @@ async function apiBulkUpdateProducts(products) {
 }
 
 async function apiDeleteProduct(id) {
-  if (dataMode === 'local') {
+  if (dataMode === 'hybrid') {
     const products = loadLocalProducts().filter(product => Number(product.id) !== Number(id));
     saveLocalProducts(products);
-    return {success: true};
+    try {
+      const res = await fetch(`/api/products/${id}`, {method:'DELETE'});
+      return res.json();
+    } catch (error) {
+      markPendingExport('Une suppression est gardee seulement sur cet appareil.');
+      return {success: true};
+    }
   }
   const res = await fetch(`/api/products/${id}`, {method:'DELETE'});
   return res.json();
 }
 
 async function apiGetAisles() {
-  if (dataMode === 'local') {
+  if (dataMode === 'hybrid') {
+    try {
+      const res = await fetch('/api/aisles');
+      return res.json();
+    } catch (error) {}
     const counts = new Map();
     loadLocalProducts().forEach(product => {
       counts.set(product.aisle, (counts.get(product.aisle) || 0) + 1);
@@ -532,17 +746,20 @@ async function importLocalDatabase(event) {
   const file = event.target.files && event.target.files[0];
   if (!file) return;
   try {
+    saveImportBackup(`Avant import ${file.name}`);
     const text = await file.text();
     const payload = JSON.parse(text);
     const products = Array.isArray(payload) ? payload : payload.products;
     if (!Array.isArray(products)) throw new Error('invalid');
     saveLocalProducts(products);
     localStorage.setItem(STORAGE_KEYS.forceLocal, '1');
-    dataMode = 'local';
+    dataMode = 'hybrid';
     if (browseAisle) await loadBrowse(true);
     await doSearch();
-    document.getElementById('scanResult').innerHTML = '<div class="msg success">Base locale importee sur cet iPhone.</div>';
+    markPendingExport('Import termine. Verifiez la base locale avant toute exportation vers la base partagee.');
+    document.getElementById('scanResult').innerHTML = '<div class="msg success">Base locale importee sur cet appareil. Vous pouvez annuler ce dernier import si besoin.</div>';
     updateAppShellState();
+    updateRestoreImportButton();
   } catch (error) {
     document.getElementById('scanResult').innerHTML = '<div class="msg error">Le fichier JSON est invalide.</div>';
   } finally {
@@ -619,13 +836,13 @@ function loadAddDraft() {
 
 function updateAppShellState() {
   const standalone = isStandaloneApp();
-  const modeLabel = standalone ? 'Mode app iPhone' : 'Mode web';
-  document.getElementById('appModeLabel').textContent = dataMode === 'local' ? `${modeLabel} - base locale` : `${modeLabel} - base serveur`;
-  document.getElementById('installHint').textContent = dataMode === 'local'
-    ? 'Cette copie garde les produits sur cet iPhone. Exportez un JSON de temps en temps pour sauvegarder.'
+  const modeLabel = standalone ? 'Mode app' : 'Mode web';
+  document.getElementById('appModeLabel').textContent = dataMode === 'hybrid' ? `${modeLabel} - copie locale + base partagee` : `${modeLabel} - base serveur`;
+  document.getElementById('installHint').textContent = dataMode === 'hybrid'
+    ? 'Cet appareil garde une copie locale et continue a synchroniser la base partagee quand le reseau repond.'
     : (standalone
       ? 'L app garde votre position et vos formulaires meme si Safari se ferme.'
-      : 'Sur iPhone: Safari -> Partager -> Ajouter a l ecran d accueil.');
+      : 'Sur mobile: ouvrez le site puis ajoutez-le a l ecran d accueil pour un acces rapide.');
 }
 
 function updateNetworkStatus() {
@@ -949,6 +1166,18 @@ async function doSearch() {
   div.innerHTML = data.length ? data.map(p => productCard(p)).join('') : '<div class="empty">Aucun produit trouve.</div>';
 }
 
+async function startSearchScan() {
+  cameraUsageMode = 'search';
+  document.getElementById('searchResults').innerHTML = '<div class="msg info">Ouverture de la camera pour rechercher un produit...</div>';
+  switchTab('scan');
+  document.getElementById('scanResult').innerHTML = '<div class="msg info">Scannez un code-barres pour rechercher directement le produit.</div>';
+  if (!scannerStream && !html5Scanner) {
+    await startCamera();
+  } else {
+    document.getElementById('scannerStatus').textContent = 'Recherche code...';
+  }
+}
+
 async function toggleCamera() {
   if (scannerStream || html5Scanner) {
     await stopCamera();
@@ -965,7 +1194,7 @@ async function startCamera() {
 
   if (!('mediaDevices' in navigator) || !navigator.mediaDevices.getUserMedia) {
     status.textContent = 'Camera non disponible';
-    showCameraHint('Ce navigateur ne donne pas acces a la camera. Utilisez Chrome/Edge Android, Safari recent sur iPhone, ou entrez le code manuellement.');
+    showCameraHint('Ce navigateur ne donne pas acces a la camera. Utilisez un navigateur mobile recent ou entrez le code manuellement.');
     return;
   }
 
@@ -1056,6 +1285,7 @@ function injectScript(src) {
 async function stopCamera() {
   scanLoopRunning = false;
   scanPaused = false;
+  cameraUsageMode = 'scan';
   resetCameraCandidate();
   if (scannerStream) {
     scannerStream.getTracks().forEach(track => track.stop());
@@ -1106,6 +1336,14 @@ async function onDecodedCode(decodedText) {
   scanPaused = true;
   setScannedBarcode(rawValue);
   document.getElementById('scannerStatus').textContent = 'Code detecte';
+  if (cameraUsageMode === 'search') {
+    document.getElementById('searchInput').value = rawValue;
+    await stopCamera();
+    switchTab('search');
+    await doSearch();
+    document.getElementById('searchResults').insertAdjacentHTML('afterbegin', `<div class="msg success">Code-barres scanne: ${esc(rawValue)}</div>`);
+    return;
+  }
   await lookupScanFromInput(true, rawValue);
 }
 
@@ -1243,7 +1481,7 @@ function updateDeviceSupport() {
   if (!isSecure) {
     supportHint.textContent = 'Pour la camera sur telephone, utilisez une URL HTTPS. En HTTP local, la page peut ouvrir mais la camera peut etre bloquee.';
   } else if (!nativeScanner && fallbackScanner) {
-    supportHint.textContent = 'Ce navigateur utilise le scanner de secours. C est normal sur certains iPhone et tablettes.';
+    supportHint.textContent = 'Ce navigateur utilise le scanner de secours. C est normal sur certains telephones et tablettes.';
   } else if (!nativeScanner && !fallbackScanner) {
     supportHint.textContent = 'Le scan code-barres automatique n est pas disponible ici. Le champ manuel et les scanners clavier restent utilisables.';
   } else {
@@ -1523,10 +1761,24 @@ document.getElementById('scanInput').addEventListener('input', persistScanDraft)
   document.getElementById(id).addEventListener('change', persistAddDraft);
 });
 window.addEventListener('online', updateNetworkStatus);
+window.addEventListener('online', () => {
+  updateNetworkStatus();
+  if (hasPendingExport()) {
+    updateSyncNotice('Le reseau est revenu. Voulez-vous exporter les donnees gardees sur cet appareil vers la base partagee ?');
+  }
+});
 window.addEventListener('offline', updateNetworkStatus);
+window.addEventListener('offline', () => {
+  updateNetworkStatus();
+  if (hasPendingExport()) {
+    updateSyncNotice('Le reseau est parti. Les changements restent gardes sur cet appareil.');
+  }
+});
 window.addEventListener('pageshow', () => {
   updateAppShellState();
   updateNetworkStatus();
+  updateRestoreImportButton();
+  if (hasPendingExport()) updateSyncNotice();
 });
 window.addEventListener('pagehide', () => {
   persistScanDraft();
@@ -1541,6 +1793,8 @@ async function bootApp() {
   updateDeviceSupport();
   updateAppShellState();
   updateNetworkStatus();
+  updateRestoreImportButton();
+  if (hasPendingExport()) updateSyncNotice();
   const savedTab = localStorage.getItem(STORAGE_KEYS.activeTab);
   if (savedTab && ['scan','search','browse','add'].includes(savedTab)) switchTab(savedTab);
   focusScanInput();
