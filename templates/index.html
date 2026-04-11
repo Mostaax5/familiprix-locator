@@ -88,6 +88,9 @@
   .shell-copy{font-size:12px;color:#666;line-height:1.4;margin-top:6px}
   .shell-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
   .shell-sync{margin-top:10px}
+  .auth-grid{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;margin-top:10px;align-items:end}
+  .inline-note{font-size:12px;color:#666;line-height:1.4;margin-top:8px}
+  .swap-row{display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:8px}
   .status-dot{display:inline-block;width:8px;height:8px;border-radius:999px;background:#16a34a;margin-right:6px}
   .status-dot.offline{background:#dc2626}
   .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
@@ -107,7 +110,7 @@
   <button class="tab active" onclick="switchTab('scan')">Scan</button>
   <button class="tab" onclick="switchTab('search')">Recherche</button>
   <button class="tab" onclick="switchTab('browse')">Allees</button>
-  <button class="tab" onclick="switchTab('add')">Ajouter</button>
+  <button class="tab" onclick="switchTab('add')">Plan</button>
 </div>
 
 <div class="app-shell">
@@ -117,6 +120,18 @@
       <div class="small" id="networkStatus"><span class="status-dot"></span>En ligne</div>
     </div>
     <div class="shell-copy" id="installHint">Sur mobile: ouvrez le site puis ajoutez-le a l ecran d accueil pour un acces rapide.</div>
+    <div class="auth-grid">
+      <div class="field">
+        <label class="label" for="editorName">Utilisateur</label>
+        <input id="editorName" type="text" placeholder="Ex: Amine"/>
+      </div>
+      <div class="field">
+        <label class="label" for="editorPassword">Mot de passe</label>
+        <input id="editorPassword" type="password" placeholder="Mot de passe partage"/>
+      </div>
+      <button class="btn btn-inline" onclick="openEditorSession()">Activer 24h</button>
+    </div>
+    <div id="editorSessionInfo" class="inline-note">Les changements et le scan demandent une session editeur valide pendant 24 heures sur cet appareil.</div>
     <div class="shell-actions">
       <button class="btn btn-outline btn-inline" onclick="enablePhoneMode()">Activer la copie locale synchronisee</button>
       <button class="btn btn-outline btn-inline" onclick="exportLocalDatabase()">Exporter JSON</button>
@@ -244,48 +259,26 @@
 
 <div id="add" class="section content">
   <div class="card">
-    <div class="section-title">Information du produit</div>
-    <div class="field">
-      <label class="label" for="addName">Nom du produit *</label>
-      <input type="text" id="addName" placeholder="Ex: Advil 200mg"/>
-    </div>
-    <div class="field">
-      <label class="label" for="addBarcode">Code-barres</label>
-      <input type="text" id="addBarcode" placeholder="Ex: 0305730170109"/>
-    </div>
-    <div class="field">
-      <label class="label" for="addBrand">Marque</label>
-      <input type="text" id="addBrand" placeholder="Ex: Tylenol"/>
-    </div>
-    <div class="field">
-      <label class="label" for="addDescription">Description</label>
-      <input type="text" id="addDescription" placeholder="Ex: Extra fort 500mg"/>
-    </div>
-    <div class="section-title" style="margin-top:14px">Emplacement en magasin</div>
-    <div class="field">
-      <label class="label" for="addAisle">Allee *</label>
-      <input type="text" id="addAisle" placeholder="Ex: 3"/>
-    </div>
-    <div class="row2">
+    <div class="section-title">Plan du magasin</div>
+    <div class="section-note">Ajoutez ou retirez des allees, puis fixez combien de tablettes et de positions chaque allee peut contenir. Les produits continuent a se creer avec le scan.</div>
+    <div class="row3">
       <div class="field">
-        <label class="label" for="addSide">Cote *</label>
-        <select id="addSide">
-          <option value="Gauche">Gauche</option>
-          <option value="Droite">Droite</option>
-        </select>
+        <label class="label" for="mapAisle">Nouvelle allee</label>
+        <input type="number" id="mapAisle" min="1" placeholder="Ex: 9"/>
       </div>
       <div class="field">
-        <label class="label" for="addShelf">Tablette *</label>
-        <input type="text" id="addShelf" placeholder="Ex: 2"/>
+        <label class="label" for="mapShelf">Tablettes par cote</label>
+        <input type="number" id="mapShelf" min="1" value="5"/>
+      </div>
+      <div class="field">
+        <label class="label" for="mapPosition">Positions par tablette</label>
+        <input type="number" id="mapPosition" min="1" value="8"/>
       </div>
     </div>
-    <div class="field">
-      <label class="label" for="addPos">Position *</label>
-      <input type="text" id="addPos" placeholder="Ex: 4"/>
-    </div>
-    <button class="btn" onclick="addProduct()">Enregistrer</button>
+    <button class="btn" onclick="createAisleLayout()">Ajouter cette allee</button>
     <div id="addMsg"></div>
   </div>
+  <div id="mapContent"></div>
 </div>
 
 <script>
@@ -309,6 +302,8 @@ let lastAcceptedCameraAt = 0;
 let activeLookupBarcode = '';
 let barcodeLibraryPromise = null;
 let cameraUsageMode = 'scan';
+let allProductsCache = [];
+let mapLayouts = [];
 const STORAGE_KEYS = {
   cursor: 'familiprixCursor',
   activeTab: 'familiprixActiveTab',
@@ -319,11 +314,14 @@ const STORAGE_KEYS = {
   forceLocal: 'familiprixForceLocal',
   pendingExport: 'familiprixPendingExport',
   lastImportBackup: 'familiprixLastImportBackup',
-  lastServerBackup: 'familiprixLastServerBackup'
+  lastServerBackup: 'familiprixLastServerBackup',
+  editorSession: 'familiprixEditorSession',
+  mapDraft: 'familiprixMapDraft'
 };
 
 let dataMode = 'server';
 let localProducts = [];
+let editorSession = null;
 
 const cursor = {
   aisle: 1,
@@ -356,8 +354,78 @@ function normalizeProduct(product) {
     aisle: String(product.aisle || '').trim(),
     side: String(product.side || 'Gauche').trim() || 'Gauche',
     shelf: String(product.shelf || '').trim(),
-    position: String(product.position || '').trim()
+    position: String(product.position || '').trim(),
+    modified_by: String(product.modified_by || '').trim(),
+    modified_at: String(product.modified_at || '').trim(),
+    created_by: String(product.created_by || '').trim(),
+    created_at: String(product.created_at || '').trim(),
+    last_change_by: String(product.last_change_by || product.modified_by || product.created_by || '').trim(),
+    last_change_at: String(product.last_change_at || product.modified_at || product.created_at || '').trim()
   };
+}
+
+function loadEditorSession() {
+  const raw = localStorage.getItem(STORAGE_KEYS.editorSession);
+  if (!raw) {
+    editorSession = null;
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed.expiresAt || new Date(parsed.expiresAt).getTime() <= Date.now()) {
+      localStorage.removeItem(STORAGE_KEYS.editorSession);
+      editorSession = null;
+      return null;
+    }
+    editorSession = parsed;
+    return parsed;
+  } catch (error) {
+    localStorage.removeItem(STORAGE_KEYS.editorSession);
+    editorSession = null;
+    return null;
+  }
+}
+
+function saveEditorSession(session) {
+  editorSession = session;
+  localStorage.setItem(STORAGE_KEYS.editorSession, JSON.stringify(session));
+}
+
+function hasValidEditorSession() {
+  return !!loadEditorSession();
+}
+
+function getEditorHeaders() {
+  const session = loadEditorSession();
+  if (!session) return {};
+  return {
+    'X-User-Name': session.username,
+    'X-Shared-Password': session.password
+  };
+}
+
+function showEditorRequirement(actionLabel='utiliser le scan') {
+  const message = `Une session editeur de 24 heures est requise pour ${actionLabel}.`;
+  const target = document.getElementById('scan').classList.contains('active')
+    ? document.getElementById('scanResult')
+    : document.getElementById('addMsg');
+  if (target) target.innerHTML = `<div class="msg error">${esc(message)}</div>`;
+  document.getElementById('editorSessionInfo').textContent = `${message} Entrez votre nom puis le mot de passe partage.`;
+}
+
+function requireEditorSession(actionLabel='utiliser le scan') {
+  if (hasValidEditorSession()) return true;
+  showEditorRequirement(actionLabel);
+  return false;
+}
+
+async function apiFetch(url, options = {}) {
+  const opts = {...options};
+  opts.headers = {...(options.headers || {})};
+  const res = await fetch(url, opts);
+  const contentType = res.headers.get('content-type') || '';
+  const data = contentType.includes('application/json') ? await res.json() : await res.text();
+  return {res, data};
 }
 
 function saveLocalProducts(products) {
@@ -459,6 +527,10 @@ function updateSyncNotice(message='') {
 }
 
 async function syncLocalProductsToServer() {
+  if (!hasValidEditorSession()) {
+    updateSyncNotice('La session editeur a expire. Reconnectez-vous avant d exporter vers la base partagee.');
+    return;
+  }
   if (!navigator.onLine) {
     updateSyncNotice('Le reseau n est pas disponible. Les changements restent gardes sur cet appareil.');
     return;
@@ -482,7 +554,7 @@ async function syncLocalProductsToServer() {
         const payload = {...serverMatch, ...product, id: serverMatch.id};
         const res = await fetch(`/api/products/${serverMatch.id}`, {
           method: 'PUT',
-          headers: {'Content-Type':'application/json'},
+          headers: {'Content-Type':'application/json', ...getEditorHeaders()},
           body: JSON.stringify(payload)
         });
         if (!res.ok) throw new Error('update failed');
@@ -490,7 +562,7 @@ async function syncLocalProductsToServer() {
       } else {
         const res = await fetch('/api/products', {
           method: 'POST',
-          headers: {'Content-Type':'application/json'},
+          headers: {'Content-Type':'application/json', ...getEditorHeaders()},
           body: JSON.stringify(product)
         });
         const data = await res.json();
@@ -605,18 +677,23 @@ async function apiGetProductByBarcode(barcode) {
 }
 
 async function apiAddProduct(payload) {
+  if (!hasValidEditorSession()) {
+    return {success: false, error: 'Session editeur requise.'};
+  }
+  const headers = {'Content-Type':'application/json', ...getEditorHeaders()};
   if (dataMode === 'hybrid') {
     try {
-      const res = await fetch('/api/products', {
+      const {res, data} = await apiFetch('/api/products', {
         method: 'POST',
-        headers: {'Content-Type':'application/json'},
+        headers,
         body: JSON.stringify(payload)
       });
-      const data = await res.json();
       if (res.ok && data.product) upsertLocalProduct(data.product);
+      if (!res.ok) return {success: false, error: data.error || 'Erreur serveur pendant l ajout.'};
       return res.ok ? data : {success: false, error: data.error || 'Erreur serveur pendant l ajout.'};
     } catch (error) {
       const product = normalizeProduct({...payload, id: getNextLocalProductId()});
+      product.last_change_by = loadEditorSession()?.username || '';
       const products = loadLocalProducts();
       products.push(product);
       saveLocalProducts(products);
@@ -629,12 +706,11 @@ async function apiAddProduct(payload) {
     }
   }
   try {
-    const res = await fetch('/api/products', {
+    const {res, data} = await apiFetch('/api/products', {
       method: 'POST',
-      headers: {'Content-Type':'application/json'},
+      headers,
       body: JSON.stringify(payload)
     });
-    const data = await res.json();
     return res.ok ? data : {success: false, error: data.error || 'Erreur serveur pendant l ajout.'};
   } catch (error) {
     return {success: false, error: 'Impossible d ajouter le produit pour le moment.'};
@@ -642,68 +718,120 @@ async function apiAddProduct(payload) {
 }
 
 async function apiUpdateProduct(product) {
+  if (!hasValidEditorSession()) {
+    return {success: false, error: 'Session editeur requise.'};
+  }
+  const headers = {'Content-Type':'application/json', ...getEditorHeaders()};
   if (dataMode === 'hybrid') {
-    upsertLocalProduct(product);
+    const session = loadEditorSession();
+    upsertLocalProduct({...product, last_change_by: session?.username || product.last_change_by || ''});
     try {
-      const res = await fetch(`/api/products/${product.id}`, {
+      const {res, data} = await apiFetch(`/api/products/${product.id}`, {
         method: 'PUT',
-        headers: {'Content-Type':'application/json'},
+        headers,
         body: JSON.stringify(product)
       });
-      return res.json();
+      return res.ok ? data : {success: false, error: data.error || 'Erreur de sauvegarde.'};
     } catch (error) {
       markPendingExport(`Les changements de "${product.name}" sont gardes seulement sur cet appareil.`);
       return {success: true, warning: 'Sauve sur cet appareil seulement pour le moment.'};
     }
   }
-  const res = await fetch(`/api/products/${product.id}`, {
+  const {res, data} = await apiFetch(`/api/products/${product.id}`, {
     method: 'PUT',
-    headers: {'Content-Type':'application/json'},
+    headers,
     body: JSON.stringify(product)
   });
-  return res.json();
+  return res.ok ? data : {success: false, error: data.error || 'Erreur de sauvegarde.'};
 }
 
 async function apiBulkUpdateProducts(products) {
+  if (!hasValidEditorSession()) {
+    return {success: false, error: 'Session editeur requise.'};
+  }
+  const headers = {'Content-Type':'application/json', ...getEditorHeaders()};
   if (dataMode === 'hybrid') {
     const nextProducts = loadLocalProducts();
     const byId = new Map(nextProducts.map(product => [Number(product.id), product]));
-    products.forEach(product => byId.set(Number(product.id), normalizeProduct(product)));
+    const session = loadEditorSession();
+    products.forEach(product => byId.set(Number(product.id), normalizeProduct({...product, last_change_by: session?.username || product.last_change_by || ''})));
     saveLocalProducts(Array.from(byId.values()));
     try {
-      const res = await fetch('/api/products/bulk', {
+      const {res, data} = await apiFetch('/api/products/bulk', {
         method: 'PUT',
-        headers: {'Content-Type':'application/json'},
+        headers,
         body: JSON.stringify({products})
       });
-      return res.json();
+      return res.ok ? data : {success: false, error: data.error || 'Erreur de structure.'};
     } catch (error) {
       markPendingExport('Des changements de structure sont gardes seulement sur cet appareil.');
       return {success: true, updated: products.length};
     }
   }
-  const res = await fetch('/api/products/bulk', {
+  const {res, data} = await apiFetch('/api/products/bulk', {
     method: 'PUT',
-    headers: {'Content-Type':'application/json'},
+    headers,
     body: JSON.stringify({products})
   });
-  return res.json();
+  return res.ok ? data : {success: false, error: data.error || 'Erreur de structure.'};
 }
 
 async function apiDeleteProduct(id) {
+  if (!hasValidEditorSession()) {
+    return {success: false, error: 'Session editeur requise.'};
+  }
   if (dataMode === 'hybrid') {
     const products = loadLocalProducts().filter(product => Number(product.id) !== Number(id));
     saveLocalProducts(products);
     try {
-      const res = await fetch(`/api/products/${id}`, {method:'DELETE'});
-      return res.json();
+      const {res, data} = await apiFetch(`/api/products/${id}`, {method:'DELETE', headers: getEditorHeaders()});
+      return res.ok ? data : {success: false, error: data.error || 'Erreur de suppression.'};
     } catch (error) {
       markPendingExport('Une suppression est gardee seulement sur cet appareil.');
       return {success: true};
     }
   }
-  const res = await fetch(`/api/products/${id}`, {method:'DELETE'});
-  return res.json();
+  const {res, data} = await apiFetch(`/api/products/${id}`, {method:'DELETE', headers: getEditorHeaders()});
+  return res.ok ? data : {success: false, error: data.error || 'Erreur de suppression.'};
+}
+
+async function apiGetEditors() {
+  const {data} = await apiFetch('/api/editors');
+  return Array.isArray(data) ? data : [];
+}
+
+async function apiGetLayoutAisles() {
+  const {data} = await apiFetch('/api/layout/aisles');
+  return Array.isArray(data) ? data : [];
+}
+
+async function apiCreateLayoutAisle(payload) {
+  if (!hasValidEditorSession()) return {success: false, error: 'Session editeur requise.'};
+  const {res, data} = await apiFetch('/api/layout/aisles', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+    body: JSON.stringify(payload)
+  });
+  return res.ok ? data : {success: false, error: data.error || 'Erreur de creation d allee.'};
+}
+
+async function apiUpdateLayoutAisle(aisle, payload) {
+  if (!hasValidEditorSession()) return {success: false, error: 'Session editeur requise.'};
+  const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}`, {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+    body: JSON.stringify(payload)
+  });
+  return res.ok ? data : {success: false, error: data.error || 'Erreur de mise a jour d allee.'};
+}
+
+async function apiDeleteLayoutAisle(aisle) {
+  if (!hasValidEditorSession()) return {success: false, error: 'Session editeur requise.'};
+  const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}`, {
+    method: 'DELETE',
+    headers: getEditorHeaders()
+  });
+  return res.ok ? data : {success: false, error: data.error || 'Erreur de suppression d allee.'};
 }
 
 async function apiGetAisles() {
@@ -731,6 +859,31 @@ async function apiLookupOnline(barcode, signal) {
   } catch (error) {
     return {found: false};
   }
+}
+
+async function openEditorSession() {
+  const username = document.getElementById('editorName').value.trim();
+  const password = document.getElementById('editorPassword').value.trim();
+  if (!username || !password) {
+    document.getElementById('editorSessionInfo').textContent = 'Entrez un utilisateur et le mot de passe partage pour ouvrir la session.';
+    return;
+  }
+  const {res, data} = await apiFetch('/api/auth/session', {
+    method: 'POST',
+    headers: {
+      'Content-Type':'application/json',
+      'X-User-Name': username,
+      'X-Shared-Password': password
+    },
+    body: JSON.stringify({})
+  });
+  if (!res.ok || !data.success) {
+    document.getElementById('editorSessionInfo').textContent = data.error || 'Impossible d ouvrir la session.';
+    return;
+  }
+  saveEditorSession({username, password, expiresAt: data.expires_at});
+  document.getElementById('editorPassword').value = '';
+  updateAppShellState();
 }
 
 function enablePhoneMode() {
@@ -822,14 +975,9 @@ function loadScanDraft() {
 
 function persistAddDraft() {
   localStorage.setItem(STORAGE_KEYS.addDraft, JSON.stringify({
-    name: document.getElementById('addName').value.trim(),
-    brand: document.getElementById('addBrand').value.trim(),
-    description: document.getElementById('addDescription').value.trim(),
-    barcode: document.getElementById('addBarcode').value.trim(),
-    aisle: document.getElementById('addAisle').value.trim(),
-    side: document.getElementById('addSide').value,
-    shelf: document.getElementById('addShelf').value.trim(),
-    position: document.getElementById('addPos').value.trim()
+    aisle: document.getElementById('mapAisle').value.trim(),
+    shelf: document.getElementById('mapShelf').value.trim(),
+    position: document.getElementById('mapPosition').value.trim()
   }));
 }
 
@@ -838,14 +986,9 @@ function loadAddDraft() {
   if (!saved) return;
   try {
     const draft = JSON.parse(saved);
-    document.getElementById('addName').value = draft.name || '';
-    document.getElementById('addBrand').value = draft.brand || '';
-    document.getElementById('addDescription').value = draft.description || '';
-    document.getElementById('addBarcode').value = draft.barcode || '';
-    document.getElementById('addAisle').value = draft.aisle || '';
-    document.getElementById('addSide').value = draft.side || 'Gauche';
-    document.getElementById('addShelf').value = draft.shelf || '';
-    document.getElementById('addPos').value = draft.position || '';
+    document.getElementById('mapAisle').value = draft.aisle || '';
+    document.getElementById('mapShelf').value = draft.shelf || '5';
+    document.getElementById('mapPosition').value = draft.position || '8';
   } catch (error) {}
 }
 
@@ -858,6 +1001,13 @@ function updateAppShellState() {
     : (standalone
       ? 'L app garde votre position et vos formulaires meme si Safari se ferme.'
       : 'Sur mobile: ouvrez le site puis ajoutez-le a l ecran d accueil pour un acces rapide.');
+  const session = loadEditorSession();
+  document.getElementById('editorSessionInfo').textContent = session
+    ? `Session editeur active pour ${session.username} jusqu au ${new Date(session.expiresAt).toLocaleString('fr-CA')}.`
+    : 'Les changements et le scan demandent une session editeur valide pendant 24 heures sur cet appareil.';
+  if (session) {
+    document.getElementById('editorName').value = session.username;
+  }
 }
 
 function updateNetworkStatus() {
@@ -913,6 +1063,7 @@ function productCard(p, showDelete=true) {
     ${p.brand ? `<div class="barcode-text">Marque: ${esc(p.brand)}</div>` : ''}
     <div class="location">Allee ${esc(p.aisle)} - ${esc(p.side)} - Tablette ${esc(p.shelf)} - Pos. ${esc(p.position)}</div>
     <div class="barcode-text">${p.barcode ? 'Code: ' + esc(p.barcode) : ''}</div>
+    ${p.last_change_by ? `<div class="barcode-text">Dernier changement: ${esc(p.last_change_by)}</div>` : ''}
     ${p.description ? `<div class="desc-text">${esc(p.description)}</div>` : ''}
   </div>`;
 }
@@ -931,9 +1082,15 @@ function productSort(a, b) {
 }
 
 function layoutRow(p, index, total) {
+  const swapOptions = allProductsCache
+    .filter(item => Number(item.id) !== Number(p.id))
+    .sort(productSort)
+    .map(item => `<option value="${item.id}">Allee ${esc(item.aisle)} - ${esc(item.side)} - T${esc(item.shelf)} P${esc(item.position)} - ${esc(item.name)}</option>`)
+    .join('');
   return `<div class="layout-card">
     <div class="name">${esc(p.name)}</div>
     <div class="barcode-text">Code: ${esc(p.barcode || 'aucun')} | ID ${p.id}</div>
+    ${p.last_change_by ? `<div class="barcode-text">Dernier changement: ${esc(p.last_change_by)}</div>` : ''}
     <div class="section-title" style="margin-top:12px">Emplacement</div>
     <div class="layout-grid">
       <div class="field">
@@ -981,6 +1138,13 @@ function layoutRow(p, index, total) {
       <button class="mini-btn primary" onclick="saveLayoutProduct(${p.id})">Sauver</button>
       <button class="mini-btn" onclick="useAsScannerCursor(${p.id})">Scanner ici</button>
       <button class="mini-btn danger" onclick="deleteProduct(${p.id})">Supprimer</button>
+    </div>
+    <div class="swap-row">
+      <select id="layoutSwapTarget-${p.id}">
+        <option value="">Echanger avec un autre produit</option>
+        ${swapOptions}
+      </select>
+      <button class="mini-btn" onclick="swapLayoutWithSelected(${p.id})">Echanger</button>
     </div>
   </div>`;
 }
@@ -1059,17 +1223,23 @@ async function putProduct(product) {
 }
 
 async function saveLayoutProduct(id) {
+  if (!requireEditorSession('modifier les allees')) return;
   const product = readLayoutProduct(id);
   if (!product.name || !product.aisle || !product.shelf || !product.position) {
     showLayoutMsg('Nom, allee, tablette et position sont requis.', 'error');
     return;
   }
-  await putProduct(product);
+  const data = await putProduct(product);
+  if (!data.success) {
+    showLayoutMsg(data.error || 'Erreur pendant la sauvegarde.', 'error');
+    return;
+  }
   await loadBrowse(true);
   showLayoutMsg('Produit sauve.', 'success');
 }
 
 async function saveAllLayout() {
+  if (!requireEditorSession('modifier les allees')) return;
   const products = currentLayoutFromFields();
   const invalid = products.find(p => !p.name || !p.aisle || !p.shelf || !p.position);
   if (invalid) {
@@ -1082,6 +1252,7 @@ async function saveAllLayout() {
 }
 
 async function swapLayoutProduct(id, direction) {
+  if (!requireEditorSession('echanger des produits')) return;
   const sorted = currentLayoutFromFields().sort(productSort);
   const index = sorted.findIndex(p => p.id === id);
   const other = sorted[index + direction];
@@ -1098,12 +1269,44 @@ async function swapLayoutProduct(id, direction) {
   other.shelf = productSpot.shelf;
   other.position = productSpot.position;
 
-  await apiBulkUpdateProducts([product, other]);
+  const data = await apiBulkUpdateProducts([product, other]);
+  if (!data.success) {
+    showLayoutMsg(data.error || 'Echange impossible.', 'error');
+    return;
+  }
   await loadBrowse(true);
   showLayoutMsg('Produits echanges.', 'success');
 }
 
+async function swapLayoutWithSelected(id) {
+  if (!requireEditorSession('echanger des produits')) return;
+  const targetId = Number(document.getElementById(`layoutSwapTarget-${id}`).value);
+  if (!targetId) {
+    showLayoutMsg('Choisissez d abord le produit avec lequel echanger.', 'error');
+    return;
+  }
+  const current = {...allProductsCache.find(item => Number(item.id) === Number(id)), ...readLayoutProduct(id)};
+  const target = allProductsCache.find(item => Number(item.id) === targetId);
+  if (!current || !target) {
+    showLayoutMsg('Produit cible introuvable.', 'error');
+    return;
+  }
+  const currentSpot = {aisle: current.aisle, side: current.side, shelf: current.shelf, position: current.position};
+  const payload = [
+    {...current, aisle: target.aisle, side: target.side, shelf: target.shelf, position: target.position},
+    {...target, aisle: currentSpot.aisle, side: currentSpot.side, shelf: currentSpot.shelf, position: currentSpot.position}
+  ];
+  const data = await apiBulkUpdateProducts(payload);
+  if (!data.success) {
+    showLayoutMsg(data.error || 'Echange impossible.', 'error');
+    return;
+  }
+  await loadBrowse(true);
+  showLayoutMsg('Produits echanges entre allees.', 'success');
+}
+
 async function reflowCurrentAisle() {
+  if (!requireEditorSession('modifier le plan')) return;
   const maxPosition = positiveInt('layoutMaxPosition', cursor.maxPosition);
   const maxShelf = positiveInt('layoutMaxShelf', cursor.maxShelf);
   const mode = document.getElementById('layoutReflowMode').value;
@@ -1147,7 +1350,11 @@ async function reflowCurrentAisle() {
     assign(products, browseAisle, 'Gauche');
   }
 
-  await apiBulkUpdateProducts(reflowed);
+  const data = await apiBulkUpdateProducts(reflowed);
+  if (!data.success) {
+    showLayoutMsg(data.error || 'Recalcul impossible.', 'error');
+    return;
+  }
   cursor.maxPosition = maxPosition;
   cursor.maxShelf = maxShelf;
   updateCursorUi();
@@ -1223,6 +1430,7 @@ async function toggleCamera() {
     await stopCamera();
     return;
   }
+  if (!requireEditorSession('ouvrir la camera de scan')) return;
   cameraUsageMode = 'scan';
   await startCamera();
 }
@@ -1505,6 +1713,10 @@ function handleScanInputKey(event) {
   if (event.key !== 'Enter' && event.key !== 'Tab') return;
   const value = document.getElementById('scanInput').value.trim();
   if (!value) return;
+  if (!requireEditorSession('utiliser le scan')) {
+    event.preventDefault();
+    return;
+  }
   event.preventDefault();
   lookupScanFromInput(true);
 }
@@ -1512,6 +1724,7 @@ function handleScanInputKey(event) {
 function handleHardwareScannerKey(event) {
   if (!document.getElementById('scan').classList.contains('active')) return;
   if (event.ctrlKey || event.altKey || event.metaKey) return;
+  if (!hasValidEditorSession()) return;
 
   const target = event.target;
   const tag = target && target.tagName ? target.tagName.toLowerCase() : '';
@@ -1595,6 +1808,7 @@ async function scanFrame() {
 }
 
 async function lookupScanFromInput(force=false, barcodeOverride='') {
+  if (!requireEditorSession('utiliser le scan')) return;
   const barcode = String(barcodeOverride || document.getElementById('scanInput').value || '').trim();
   const div = document.getElementById('scanResult');
   if (!barcode) return;
@@ -1684,6 +1898,7 @@ async function hydrateOnlineLookup(barcode) {
 }
 
 async function confirmExistingLocation() {
+  if (!requireEditorSession('confirmer un emplacement')) return;
   if (!currentScanProduct) return;
   const payload = {
     name: currentScanProduct.name,
@@ -1695,11 +1910,16 @@ async function confirmExistingLocation() {
     shelf: String(cursor.shelf),
     position: String(cursor.position)
   };
-  await apiUpdateProduct({...payload, id: currentScanProduct.id});
+  const data = await apiUpdateProduct({...payload, id: currentScanProduct.id});
+  if (!data.success) {
+    document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Deplacement impossible.')}</div>`;
+    return;
+  }
   finishConfirmed(`"${currentScanProduct.name}" place a ${cursorLabel()}.`);
 }
 
 async function confirmNewProduct() {
+  if (!requireEditorSession('ajouter un produit')) return;
   const barcode = document.getElementById('scanInput').value.trim();
   const name = document.getElementById('scanProductName').value.trim() || `A identifier - ${barcode}`;
   const brand = document.getElementById('scanProductBrand')?.value.trim() || '';
@@ -1726,6 +1946,7 @@ async function confirmNewProduct() {
 }
 
 async function confirmUnknownProduct() {
+  if (!requireEditorSession('ajouter un produit')) return;
   const barcode = document.getElementById('scanInput').value.trim();
   if (!barcode) return;
   const placeholderName = `A identifier - ${barcode}`;
@@ -1766,6 +1987,7 @@ function finishConfirmed(message) {
 
 async function loadBrowse(keepAisle=false) {
   const div = document.getElementById('browseContent');
+  allProductsCache = await apiGetProducts();
   if (!browseAisle) {
     const aisles = await apiGetAisles();
     div.innerHTML = aisles.length
@@ -1775,8 +1997,7 @@ async function loadBrowse(keepAisle=false) {
         </div>`).join('')
       : '<div class="empty">Aucune allee enregistree.</div>';
   } else {
-    const all = await apiGetProducts();
-    layoutProducts = all.filter(p => p.aisle === browseAisle);
+    layoutProducts = allProductsCache.filter(p => p.aisle === browseAisle);
     if (!layoutProducts.length && !keepAisle) {
       browseAisle = null;
       await loadBrowse();
@@ -1786,36 +2007,106 @@ async function loadBrowse(keepAisle=false) {
   }
 }
 
-async function addProduct() {
-  const name = document.getElementById('addName').value.trim();
-  const brand = document.getElementById('addBrand').value.trim();
-  const description = document.getElementById('addDescription').value.trim();
-  const barcode = document.getElementById('addBarcode').value.trim();
-  const aisle = document.getElementById('addAisle').value.trim();
-  const side = document.getElementById('addSide').value;
-  const shelf = document.getElementById('addShelf').value.trim();
-  const position = document.getElementById('addPos').value.trim();
+function renderMapEditor() {
   const msgDiv = document.getElementById('addMsg');
+  const div = document.getElementById('mapContent');
+  div.innerHTML = mapLayouts.length
+    ? mapLayouts.map(layout => `<div class="card">
+        <div class="cursor">
+          <div>
+            <span class="small">Configuration d allee</span>
+            <strong>Allee ${esc(layout.aisle)}</strong>
+          </div>
+          <span class="pill">${layout.product_count || 0} produit${Number(layout.product_count || 0) > 1 ? 's' : ''}</span>
+        </div>
+        <div class="row2" style="margin-top:12px">
+          <div class="field">
+            <label class="label" for="mapShelf-${layout.aisle}">Tablettes par cote</label>
+            <input id="mapShelf-${layout.aisle}" type="number" min="1" value="${esc(layout.max_shelf)}"/>
+          </div>
+          <div class="field">
+            <label class="label" for="mapPosition-${layout.aisle}">Positions par tablette</label>
+            <input id="mapPosition-${layout.aisle}" type="number" min="1" value="${esc(layout.max_position)}"/>
+          </div>
+        </div>
+        ${layout.modified_by ? `<div class="barcode-text">Dernier changement: ${esc(layout.modified_by)}</div>` : ''}
+        <div class="tool-row">
+          <button class="btn btn-inline" onclick="saveAisleLayout('${esc(layout.aisle)}')">Sauver</button>
+          <button class="btn btn-outline btn-inline" onclick="applyAisleLayoutToCursor('${esc(layout.aisle)}')">Utiliser pour le scan</button>
+          <button class="btn btn-outline btn-inline" onclick="removeAisleLayout('${esc(layout.aisle)}')">Retirer</button>
+        </div>
+      </div>`).join('')
+    : '<div class="empty">Aucune allee configuree.</div>';
+  if (!msgDiv.textContent) msgDiv.innerHTML = '';
+}
 
-  if (!name || !aisle || !shelf || !position) {
-    msgDiv.className = 'msg error';
-    msgDiv.textContent = 'Veuillez remplir tous les champs obligatoires (*).';
-    return;
-  }
+async function loadMapEditor() {
+  mapLayouts = await apiGetLayoutAisles();
+  renderMapEditor();
+}
 
-  const data = await apiAddProduct({name, brand, description, barcode, aisle, side, shelf, position});
+async function createAisleLayout() {
+  if (!requireEditorSession('modifier le plan du magasin')) return;
+  const aisle = document.getElementById('mapAisle').value.trim();
+  const max_shelf = document.getElementById('mapShelf').value.trim() || '5';
+  const max_position = document.getElementById('mapPosition').value.trim() || '8';
+  const msgDiv = document.getElementById('addMsg');
+  const data = await apiCreateLayoutAisle({aisle, max_shelf, max_position});
   msgDiv.className = data.success ? 'msg success' : 'msg error';
-  msgDiv.textContent = data.success ? data.message : data.error;
+  msgDiv.textContent = data.success ? `Allee ${aisle} ajoutee.` : (data.error || 'Creation impossible.');
   if (data.success) {
-    ['addName','addBrand','addDescription','addBarcode','addAisle','addShelf','addPos'].forEach(id => document.getElementById(id).value = '');
-    document.getElementById('addSide').value = 'Gauche';
-    persistAddDraft();
+    document.getElementById('mapAisle').value = '';
+    await loadMapEditor();
   }
 }
 
+async function saveAisleLayout(aisle) {
+  if (!requireEditorSession('modifier le plan du magasin')) return;
+  const max_shelf = document.getElementById(`mapShelf-${aisle}`).value.trim() || '5';
+  const max_position = document.getElementById(`mapPosition-${aisle}`).value.trim() || '8';
+  const data = await apiUpdateLayoutAisle(aisle, {max_shelf, max_position, enabled: true});
+  const msgDiv = document.getElementById('addMsg');
+  msgDiv.className = data.success ? 'msg success' : 'msg error';
+  msgDiv.textContent = data.success ? `Allee ${aisle} sauvee.` : (data.error || 'Sauvegarde impossible.');
+  if (data.success) await loadMapEditor();
+}
+
+function applyAisleLayoutToCursor(aisle) {
+  const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
+  cursor.aisle = Number(aisle) || cursor.aisle;
+  if (layout) {
+    cursor.maxShelf = Number(layout.max_shelf) || cursor.maxShelf;
+    cursor.maxPosition = Number(layout.max_position) || cursor.maxPosition;
+  }
+  updateCursorUi();
+  document.getElementById('addMsg').innerHTML = `<div class="msg success">Le scan utilisera maintenant l allee ${esc(aisle)} avec ${esc(layout?.max_shelf || cursor.maxShelf)} tablette(s) et ${esc(layout?.max_position || cursor.maxPosition)} position(s).</div>`;
+}
+
+async function removeAisleLayout(aisle) {
+  if (!requireEditorSession('modifier le plan du magasin')) return;
+  if (!confirm(`Retirer l allee ${aisle} ?`)) return;
+  const data = await apiDeleteLayoutAisle(aisle);
+  const msgDiv = document.getElementById('addMsg');
+  msgDiv.className = data.success ? 'msg success' : 'msg error';
+  msgDiv.textContent = data.success ? (data.message || `Allee ${aisle} retiree.`) : (data.error || 'Suppression impossible.');
+  if (data.success) await loadMapEditor();
+}
+
+async function addProduct() {
+  const msgDiv = document.getElementById('addMsg');
+  msgDiv.className = 'msg info';
+  msgDiv.textContent = 'L onglet Plan sert maintenant a gerer les allees. Ajoutez les produits avec le scan, puis modifiez-les dans Allees.';
+}
+
 async function deleteProduct(id) {
+  if (!requireEditorSession('supprimer un produit')) return;
   if (!confirm('Supprimer ce produit ?')) return;
-  await apiDeleteProduct(id);
+  const data = await apiDeleteProduct(id);
+  if (!data.success) {
+    const target = browseAisle ? document.getElementById('layoutMsg') : document.getElementById('searchResults');
+    if (target) target.innerHTML = `<div class="msg error">${esc(data.error || 'Suppression impossible.')}</div>`;
+    return;
+  }
   doSearch();
   if (browseAisle) loadBrowse();
 }
@@ -1828,6 +2119,7 @@ function switchTab(tab) {
   document.querySelectorAll('.tab')[tabs.indexOf(tab)].classList.add('active');
   localStorage.setItem(STORAGE_KEYS.activeTab, tab);
   if (tab === 'browse') loadBrowse();
+  if (tab === 'add') loadMapEditor();
   if (tab === 'scan') window.setTimeout(focusScanInput, 50);
 }
 
@@ -1843,7 +2135,7 @@ if ('serviceWorker' in navigator) {
 
 document.addEventListener('keydown', handleHardwareScannerKey);
 document.getElementById('scanInput').addEventListener('input', persistScanDraft);
-['addName','addBrand','addDescription','addBarcode','addAisle','addSide','addShelf','addPos'].forEach(id => {
+['mapAisle','mapShelf','mapPosition'].forEach(id => {
   document.getElementById(id).addEventListener('input', persistAddDraft);
   document.getElementById(id).addEventListener('change', persistAddDraft);
 });

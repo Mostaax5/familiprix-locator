@@ -22,7 +22,30 @@ def init_db():
             aisle       TEXT    NOT NULL,
             side        TEXT    NOT NULL,
             shelf       TEXT    NOT NULL,
-            position    TEXT    NOT NULL
+            position    TEXT    NOT NULL,
+            modified_by TEXT    DEFAULT '',
+            modified_at TEXT    DEFAULT '',
+            created_by  TEXT    DEFAULT '',
+            created_at  TEXT    DEFAULT ''
+        )
+    """)
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            username   TEXT PRIMARY KEY,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            last_seen  TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS aisle_layouts (
+            aisle        TEXT PRIMARY KEY,
+            max_shelf    TEXT NOT NULL DEFAULT '5',
+            max_position TEXT NOT NULL DEFAULT '8',
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            modified_by  TEXT DEFAULT '',
+            modified_at  TEXT DEFAULT ''
         )
     """)
 
@@ -33,20 +56,35 @@ def init_db():
         db.execute("ALTER TABLE products ADD COLUMN brand TEXT DEFAULT ''")
     if "description" not in existing_columns:
         db.execute("ALTER TABLE products ADD COLUMN description TEXT DEFAULT ''")
+    if "modified_by" not in existing_columns:
+        db.execute("ALTER TABLE products ADD COLUMN modified_by TEXT DEFAULT ''")
+    if "modified_at" not in existing_columns:
+        db.execute("ALTER TABLE products ADD COLUMN modified_at TEXT DEFAULT ''")
+    if "created_by" not in existing_columns:
+        db.execute("ALTER TABLE products ADD COLUMN created_by TEXT DEFAULT ''")
+    if "created_at" not in existing_columns:
+        db.execute("ALTER TABLE products ADD COLUMN created_at TEXT DEFAULT ''")
 
     count = db.execute("SELECT COUNT(*) FROM products").fetchone()[0]
     if count == 0:
         sample = [
-            ("Advil Liqui-Gels 200mg", "", "", "0305730170109", "3", "Droite", "2", "4"),
-            ("Tylenol Extra Fort 500mg", "", "", "0621038161908", "3", "Gauche", "1", "2"),
-            ("Gaviscon menthe", "", "", "0305732278498", "5", "Droite", "3", "1"),
-            ("Reactine 10mg", "", "", "0629014107239", "4", "Gauche", "2", "3"),
-            ("Polysporin onguent", "", "", "0305730112101", "6", "Droite", "1", "5"),
-            ("Pantene shampoing", "", "", "0080878015048", "8", "Gauche", "3", "2"),
+            ("Advil Liqui-Gels 200mg", "", "", "0305730170109", "3", "Droite", "2", "4", "systeme", "systeme"),
+            ("Tylenol Extra Fort 500mg", "", "", "0621038161908", "3", "Gauche", "1", "2", "systeme", "systeme"),
+            ("Gaviscon menthe", "", "", "0305732278498", "5", "Droite", "3", "1", "systeme", "systeme"),
+            ("Reactine 10mg", "", "", "0629014107239", "4", "Gauche", "2", "3", "systeme", "systeme"),
+            ("Polysporin onguent", "", "", "0305730112101", "6", "Droite", "1", "5", "systeme", "systeme"),
+            ("Pantene shampoing", "", "", "0080878015048", "8", "Gauche", "3", "2", "systeme", "systeme"),
         ]
         db.executemany(
-            "INSERT INTO products (name, brand, description, barcode, aisle, side, shelf, position) VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO products (name, brand, description, barcode, aisle, side, shelf, position, created_by, modified_by) VALUES (?,?,?,?,?,?,?,?,?,?)",
             sample,
+        )
+
+    aisle_count = db.execute("SELECT COUNT(*) FROM aisle_layouts").fetchone()[0]
+    if aisle_count == 0:
+        db.executemany(
+            "INSERT INTO aisle_layouts (aisle, max_shelf, max_position, modified_by) VALUES (?,?,?,?)",
+            [(str(index), "5", "8", "systeme") for index in range(1, 9)],
         )
 
     db.commit()
