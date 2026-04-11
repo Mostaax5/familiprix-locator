@@ -8,6 +8,7 @@ import json
 import re
 
 app = Flask(__name__)
+init_db()
 
 PHARMACY_LOOKUP_SOURCES = [
     ("Familiprix", None),

@@ -425,12 +425,17 @@ async function apiAddProduct(payload) {
     saveLocalProducts(products);
     return {success: true, message: `"${product.name}" ajoute avec succes!`, product};
   }
-  const res = await fetch('/api/products', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify(payload)
-  });
-  return res.json();
+  try {
+    const res = await fetch('/api/products', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    return res.ok ? data : {success: false, error: data.error || 'Erreur serveur pendant l ajout.'};
+  } catch (error) {
+    return {success: false, error: 'Impossible d ajouter le produit pour le moment.'};
+  }
 }
 
 async function apiUpdateProduct(product) {
@@ -1101,7 +1106,7 @@ async function onDecodedCode(decodedText) {
   scanPaused = true;
   setScannedBarcode(rawValue);
   document.getElementById('scannerStatus').textContent = 'Code detecte';
-  await lookupScanFromInput(true);
+  await lookupScanFromInput(true, rawValue);
 }
 
 function confirmStableCameraBarcode(barcode) {
@@ -1137,8 +1142,11 @@ function resetCameraCandidate() {
 function setScannedBarcode(barcode) {
   const input = document.getElementById('scanInput');
   input.value = barcode;
+  input.setAttribute('value', barcode);
+  input.dispatchEvent(new Event('input', {bubbles: true}));
+  input.dispatchEvent(new Event('change', {bubbles: true}));
+  input.setSelectionRange(input.value.length, input.value.length);
   persistScanDraft();
-  input.focus({preventScroll: true});
 }
 
 function clearScanInput() {
@@ -1261,10 +1269,13 @@ async function scanFrame() {
   requestAnimationFrame(scanFrame);
 }
 
-async function lookupScanFromInput(force=false) {
-  const barcode = document.getElementById('scanInput').value.trim();
+async function lookupScanFromInput(force=false, barcodeOverride='') {
+  const barcode = String(barcodeOverride || document.getElementById('scanInput').value || '').trim();
   const div = document.getElementById('scanResult');
   if (!barcode) return;
+  if (document.getElementById('scanInput').value.trim() !== barcode) {
+    setScannedBarcode(barcode);
+  }
   activeLookupBarcode = barcode;
   if (!force && barcode === lastLookedUpBarcode) return;
   lastLookedUpBarcode = barcode;
@@ -1314,7 +1325,6 @@ function showOnlineLookupForm(barcode) {
       <button class="btn btn-outline" onclick="confirmUnknownProduct()">Ajouter comme produit a identifier</button>
     </div>
   </div>`;
-  document.getElementById('scanProductName').focus();
   hydrateOnlineLookup(barcode);
 }
 
