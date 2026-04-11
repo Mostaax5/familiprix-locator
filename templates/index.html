@@ -1424,6 +1424,13 @@ function setScannedBarcode(barcode) {
   const input = getActiveBarcodeInput();
   const currentValue = String(input.value || '');
   const nextValue = `${currentValue}${barcode}`;
+  try {
+    input.focus({preventScroll: true});
+  } catch (error) {
+    try {
+      input.focus();
+    } catch (innerError) {}
+  }
   input.value = nextValue;
   input.setAttribute('value', nextValue);
   input.dispatchEvent(new Event('input', {bubbles: true}));
