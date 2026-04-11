@@ -304,6 +304,8 @@ let hardwareScanTimer = null;
 let cameraCandidateBarcode = '';
 let cameraCandidateCount = 0;
 let cameraCandidateTimer = null;
+let lastAcceptedCameraBarcode = '';
+let lastAcceptedCameraAt = 0;
 let activeLookupBarcode = '';
 let barcodeLibraryPromise = null;
 let cameraUsageMode = 'scan';
@@ -1190,8 +1192,19 @@ function getCameraDom() {
 
 async function doSearch() {
   const q = document.getElementById('searchInput').value.trim();
+  return doSearchValue(q);
+}
+
+async function doSearchValue(q) {
   const div = document.getElementById('searchResults');
   if (!q) { div.innerHTML = ''; return; }
+  if (looksLikeCompleteRetailBarcode(q)) {
+    try {
+      const product = await apiGetProductByBarcode(q);
+      div.innerHTML = productCard(product, false);
+      return;
+    } catch (error) {}
+  }
   const data = await apiSearchProducts(q);
   div.innerHTML = data.length ? data.map(p => productCard(p)).join('') : '<div class="empty">Aucun produit trouve.</div>';
 }
@@ -1253,7 +1266,7 @@ async function startCamera() {
       html5Scanner = new Html5Qrcode(reader.id, html5ScannerConfig());
       await html5Scanner.start(
         {facingMode: 'environment'},
-        {fps: 10, qrbox: responsiveScanBox},
+        {fps: 18, qrbox: responsiveScanBox},
         onDecodedCode,
         () => {}
       );
@@ -1348,8 +1361,8 @@ async function stopCamera() {
 function responsiveScanBox(viewfinderWidth, viewfinderHeight) {
   const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
   return {
-    width: Math.max(240, Math.floor(viewfinderWidth * 0.82)),
-    height: Math.max(120, Math.floor(minEdge * 0.34))
+    width: Math.max(260, Math.floor(viewfinderWidth * 0.88)),
+    height: Math.max(96, Math.floor(minEdge * 0.22))
   };
 }
 
@@ -1377,7 +1390,7 @@ async function onDecodedCode(decodedText) {
   getCameraDom().status.textContent = 'Code detecte';
   if (cameraUsageMode === 'search') {
     await stopCamera();
-    await doSearch();
+    await doSearchValue(rawValue);
     document.getElementById('searchResults').insertAdjacentHTML('afterbegin', `<div class="msg success">Code-barres scanne: ${esc(rawValue)}</div>`);
     return;
   }
@@ -1387,6 +1400,18 @@ async function onDecodedCode(decodedText) {
 function confirmStableCameraBarcode(barcode) {
   const normalized = barcode.trim();
   if (!looksLikeBarcode(normalized)) return false;
+  const now = Date.now();
+
+  if (normalized === lastAcceptedCameraBarcode && now - lastAcceptedCameraAt < 1500) {
+    return false;
+  }
+
+  if (looksLikeCompleteRetailBarcode(normalized)) {
+    lastAcceptedCameraBarcode = normalized;
+    lastAcceptedCameraAt = now;
+    resetCameraCandidate();
+    return true;
+  }
 
   if (normalized === cameraCandidateBarcode) {
     cameraCandidateCount += 1;
@@ -1396,13 +1421,15 @@ function confirmStableCameraBarcode(barcode) {
   }
 
   window.clearTimeout(cameraCandidateTimer);
-  cameraCandidateTimer = window.setTimeout(resetCameraCandidate, 900);
+  cameraCandidateTimer = window.setTimeout(resetCameraCandidate, 450);
 
   if (cameraCandidateCount < 2) {
     getCameraDom().status.textContent = 'Verification du code...';
     return false;
   }
 
+  lastAcceptedCameraBarcode = normalized;
+  lastAcceptedCameraAt = now;
   resetCameraCandidate();
   return true;
 }

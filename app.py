@@ -387,6 +387,15 @@ def first_present(product, keys):
     return ""
 
 
+def find_product_at_position(db, aisle, side, shelf, position, exclude_id=None):
+    query = "SELECT * FROM products WHERE aisle=? AND side=? AND shelf=? AND position=?"
+    params = [aisle, side, shelf, position]
+    if exclude_id is not None:
+        query += " AND id != ?"
+        params.append(exclude_id)
+    return db.execute(query, tuple(params)).fetchone()
+
+
 def resolve_ssl_context():
     use_https = os.environ.get("FLASK_USE_HTTPS", "").strip().lower() in {"1", "true", "yes", "on"}
     cert_path = os.environ.get("FLASK_SSL_CERT", DEFAULT_CERT_PATH)
@@ -422,18 +431,43 @@ def add_product():
         return jsonify({"error": "Champs obligatoires manquants"}), 400
 
     db = get_db()
-    db.execute(
+    occupied = find_product_at_position(db, aisle, side, shelf, position)
+    if occupied:
+        return jsonify({
+            "error": f'Position deja occupee par "{occupied["name"]}" (code {occupied["barcode"] or "sans code"}).'
+        }), 409
+
+    cursor = db.execute(
         "INSERT INTO products (name, brand, description, barcode, aisle, side, shelf, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (name, brand, description, barcode, aisle, side, shelf, position)
     )
     db.commit()
-    return jsonify({"success": True, "message": f'"{name}" ajouté avec succès!'})
+    product_id = cursor.lastrowid
+    product = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
+    return jsonify({
+        "success": True,
+        "message": f'"{name}" ajoute avec succes!',
+        "product": dict(product) if product else None
+    })
 
 
 @app.route("/api/products/<int:product_id>", methods=["PUT"])
 def update_product(product_id):
     data = request.get_json()
     db = get_db()
+    occupied = find_product_at_position(
+        db,
+        str(data["aisle"]).strip(),
+        str(data["side"]).strip(),
+        str(data["shelf"]).strip(),
+        str(data["position"]).strip(),
+        exclude_id=product_id,
+    )
+    if occupied:
+        return jsonify({
+            "error": f'Position deja occupee par "{occupied["name"]}" (code {occupied["barcode"] or "sans code"}).'
+        }), 409
+
     result = db.execute(
         "UPDATE products SET name=?, brand=?, description=?, barcode=?, aisle=?, side=?, shelf=?, position=? WHERE id=?",
         (
@@ -464,9 +498,25 @@ def bulk_update_products():
 
     required = ["id", "name", "aisle", "side", "shelf", "position"]
     db = get_db()
+    seen_positions = {}
     for product in products:
         if not all(str(product.get(field, "")).strip() for field in required):
             return jsonify({"error": "Produit incomplet dans la mise a jour"}), 400
+        key = (
+            str(product["aisle"]).strip(),
+            str(product["side"]).strip(),
+            str(product["shelf"]).strip(),
+            str(product["position"]).strip(),
+        )
+        if key in seen_positions and int(product["id"]) != seen_positions[key]:
+            return jsonify({"error": "Deux produits visent la meme position dans cette mise a jour"}), 409
+        seen_positions[key] = int(product["id"])
+
+        occupied = find_product_at_position(db, key[0], key[1], key[2], key[3], exclude_id=int(product["id"]))
+        if occupied:
+            return jsonify({
+                "error": f'Position deja occupee par "{occupied["name"]}" (code {occupied["barcode"] or "sans code"}).'
+            }), 409
         db.execute(
             "UPDATE products SET name=?, brand=?, description=?, barcode=?, aisle=?, side=?, shelf=?, position=? WHERE id=?",
             (
