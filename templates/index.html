@@ -1,0 +1,1542 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+<meta name="theme-color" content="#c8102e"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-title" content="Localisateur"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="format-detection" content="telephone=no"/>
+<link rel="manifest" href="/manifest.json"/>
+<link rel="apple-touch-icon" href="/static/icon.svg"/>
+<title>FamiliPrix - Localisateur</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{min-height:100%;-webkit-text-size-adjust:100%}
+  body{min-height:100%;font-family:system-ui,sans-serif;background:#f6f7f9;color:#1a1a1a;padding-bottom:env(safe-area-inset-bottom)}
+  .header{background:#c8102e;color:white;padding:calc(14px + env(safe-area-inset-top)) 16px 14px;position:sticky;top:0;z-index:10}
+  .header h1{font-size:17px;font-weight:650}
+  .header p{font-size:12px;opacity:.85;margin-top:2px}
+  .tabs{display:flex;background:white;border-bottom:1px solid #e5e7eb;position:sticky;top:calc(64px + env(safe-area-inset-top));z-index:9}
+  .tab{flex:1;padding:11px 4px;font-size:12px;text-align:center;border:none;background:none;color:#555;cursor:pointer;border-bottom:2px solid transparent;touch-action:manipulation}
+  .tab.active{color:#c8102e;border-bottom-color:#c8102e;font-weight:700}
+  .content{padding:14px;max-width:720px;margin:0 auto}
+  .app-shell{padding:10px 14px 0;max-width:720px;margin:0 auto}
+  input,select{width:100%;padding:12px;border:1px solid #d8dce2;border-radius:8px;font-size:16px;background:white;margin-bottom:2px}
+  input:focus,select:focus{outline:none;border-color:#c8102e;box-shadow:0 0 0 2px rgba(200,16,46,.12)}
+  .card{background:white;border-radius:8px;padding:14px;margin-bottom:10px;border:1px solid #e6e8ec}
+  .card .name{font-size:15px;font-weight:700;margin-bottom:6px}
+  .location{display:inline-flex;align-items:center;gap:5px;background:#eef4ff;color:#1a56db;border-radius:6px;padding:4px 10px;font-size:12px;font-weight:600;margin-bottom:6px}
+  .barcode-text{font-size:12px;color:#777}
+  .desc-text{font-size:12px;color:#555;line-height:1.4;margin-top:4px}
+  .lookup-image{width:86px;height:86px;object-fit:contain;border:1px solid #e6e8ec;border-radius:8px;background:#fff}
+  .btn{width:100%;padding:12px;background:#c8102e;color:white;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;margin-top:10px;touch-action:manipulation}
+  .btn:active{opacity:.86}
+  .btn.secondary{background:#2f343b}
+  .btn-outline{background:white;color:#c8102e;border:1px solid #c8102e}
+  .btn-inline{width:auto;padding:9px 12px;margin-top:0;font-size:13px}
+  .label{font-size:12px;color:#555;margin-bottom:4px;margin-top:12px;display:block;font-weight:650}
+  .label:first-child{margin-top:0}
+  .field{display:flex;flex-direction:column;gap:4px}
+  .field .label{margin:0}
+  .section-title{font-size:13px;font-weight:800;color:#2f343b;margin:4px 0 10px}
+  .section-note{font-size:12px;color:#777;line-height:1.4;margin:-4px 0 10px}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+  .msg{font-size:13px;margin-top:8px;padding:9px 12px;border-radius:6px}
+  .msg.success{background:#ecfdf5;color:#065f46}
+  .msg.error{background:#fef2f2;color:#991b1b}
+  .msg.info{background:#eef4ff;color:#1a56db}
+  .empty{text-align:center;padding:2rem;color:#777;font-size:14px}
+  .aisle-row{background:white;border-radius:8px;padding:12px 14px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;border:1px solid #e6e8ec}
+  .aisle-row:active{background:#f9fafb}
+  .aisle-title{font-size:14px;font-weight:700}
+  .aisle-sub{font-size:12px;color:#777}
+  .back{background:none;border:none;color:#c8102e;font-size:13px;cursor:pointer;margin-bottom:12px;padding:0;font-weight:700}
+  .section{display:none}
+  .section.active{display:block}
+  .delete-btn{float:right;background:none;border:none;color:#999;font-size:18px;cursor:pointer;padding:0 0 0 8px}
+  .delete-btn:hover{color:#c8102e}
+  .scanner{overflow:hidden;padding:0}
+  .scanner video{width:100%;min-height:220px;max-height:360px;background:#17191d;display:block;object-fit:cover}
+  #html5Reader{display:none;background:#17191d}
+  #html5Reader video{width:100% !important;min-height:220px;max-height:360px;object-fit:cover}
+  #html5Reader img{display:none}
+  .scanner-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;background:#fff}
+  .pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:5px 9px;font-size:12px;font-weight:700;background:#eef4ff;color:#1a56db}
+  .cursor{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .cursor strong{font-size:18px}
+  .small{font-size:12px;color:#777;line-height:1.4}
+  .confirm-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+  .tool-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+  .tool-row .btn{width:auto;margin-top:0}
+  .shelf-title{font-size:13px;font-weight:800;margin:14px 0 8px;color:#2f343b}
+  .layout-card{background:white;border:1px solid #e6e8ec;border-radius:8px;padding:12px;margin-bottom:8px}
+  .layout-card .name{font-size:14px;font-weight:800;margin-bottom:8px}
+  .layout-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px}
+  .layout-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin-top:8px}
+  .mini-btn{padding:9px 8px;border-radius:8px;border:1px solid #d8dce2;background:#fff;color:#2f343b;font-size:12px;font-weight:800;cursor:pointer}
+  .mini-btn.danger{color:#c8102e;border-color:#f1b8c2}
+  .mini-btn.primary{background:#c8102e;color:#fff;border-color:#c8102e}
+  .device-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .scan-tools{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end}
+  .btn-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .shell-banner{background:white;border:1px solid #e6e8ec;border-radius:8px;padding:10px 12px;margin-bottom:10px}
+  .shell-top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .shell-title{font-size:13px;font-weight:800;color:#2f343b}
+  .shell-copy{font-size:12px;color:#666;line-height:1.4;margin-top:6px}
+  .shell-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .status-dot{display:inline-block;width:8px;height:8px;border-radius:999px;background:#16a34a;margin-right:6px}
+  .status-dot.offline{background:#dc2626}
+  .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+  @media (min-width:860px){.content{max-width:900px}.layout-grid{grid-template-columns:1fr 1fr 1fr 1fr}.layout-actions{grid-template-columns:repeat(5,1fr)}}
+  @media (max-width:520px){.row2,.row3,.confirm-grid,.device-grid,.scan-tools,.btn-row{grid-template-columns:1fr}.tabs{top:calc(66px + env(safe-area-inset-top))}.tab{font-size:11px}.content{padding:10px}.cursor{align-items:flex-start;flex-direction:column}.btn-inline{width:100%}}
+  @media (max-width:420px){.layout-grid,.layout-actions{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Localisateur produits</h1>
+  <p>Scan mobile, confirmation, puis prochaine position.</p>
+</div>
+
+<div class="tabs">
+  <button class="tab active" onclick="switchTab('scan')">Scan</button>
+  <button class="tab" onclick="switchTab('search')">Recherche</button>
+  <button class="tab" onclick="switchTab('browse')">Allees</button>
+  <button class="tab" onclick="switchTab('add')">Ajouter</button>
+</div>
+
+<div class="app-shell">
+  <div class="shell-banner">
+    <div class="shell-top">
+      <div class="shell-title" id="appModeLabel">Mode web</div>
+      <div class="small" id="networkStatus"><span class="status-dot"></span>En ligne</div>
+    </div>
+    <div class="shell-copy" id="installHint">Sur iPhone: Safari -> Partager -> Ajouter a l ecran d accueil.</div>
+    <div class="shell-actions">
+      <button class="btn btn-outline btn-inline" onclick="enablePhoneMode()">Utiliser cet iPhone</button>
+      <button class="btn btn-outline btn-inline" onclick="exportLocalDatabase()">Exporter JSON</button>
+      <button class="btn btn-outline btn-inline" onclick="document.getElementById('importDbInput').click()">Importer JSON</button>
+    </div>
+    <input id="importDbInput" type="file" accept="application/json,.json" style="display:none" onchange="importLocalDatabase(event)"/>
+  </div>
+</div>
+
+<div id="scan" class="section active content">
+  <div class="card">
+    <div class="cursor">
+      <div>
+        <span class="small">Position actuelle</span>
+        <strong id="cursorText">Allee 1 - Gauche - Tablette 1 - Pos. 1</strong>
+      </div>
+      <button class="btn btn-outline btn-inline" onclick="toggleLocationEditor()">Modifier</button>
+    </div>
+  </div>
+
+  <div id="locationEditor" class="card" style="display:none">
+    <div class="section-title">Point de depart du scan</div>
+    <div class="section-note">Choisissez l endroit ou le prochain produit scanne sera place.</div>
+    <div class="row2">
+      <div class="field">
+        <label class="label" for="scanAisle">Allee</label>
+        <input type="number" id="scanAisle" min="1" value="1" placeholder="Ex: 3"/>
+      </div>
+      <div class="field">
+        <label class="label" for="scanSide">Cote</label>
+        <select id="scanSide">
+          <option value="Gauche">Gauche</option>
+          <option value="Droite">Droite</option>
+        </select>
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label class="label" for="scanShelf">Tablette</label>
+        <input type="number" id="scanShelf" min="1" value="1" placeholder="Ex: 2"/>
+      </div>
+      <div class="field">
+        <label class="label" for="scanPosition">Position</label>
+        <input type="number" id="scanPosition" min="1" value="1" placeholder="Ex: 4"/>
+      </div>
+    </div>
+    <div class="section-title" style="margin-top:14px">Structure automatique</div>
+    <div class="section-note">Ces limites disent au scanner quand passer a la tablette suivante, puis au cote ou a l allee suivante.</div>
+    <div class="row2">
+      <div class="field">
+        <label class="label" for="maxPosition">Positions par tablette</label>
+        <input type="number" id="maxPosition" min="1" value="8" placeholder="Ex: 8"/>
+      </div>
+      <div class="field">
+        <label class="label" for="maxShelf">Tablettes par cote</label>
+        <input type="number" id="maxShelf" min="1" value="5" placeholder="Ex: 5"/>
+      </div>
+    </div>
+    <button class="btn" onclick="saveCursor()">Utiliser cette position</button>
+  </div>
+
+  <div class="card scanner">
+    <video id="cameraPreview" playsinline muted></video>
+    <div id="html5Reader"></div>
+    <div class="scanner-bar">
+      <span id="scannerStatus" class="pill">Camera arretee</span>
+      <button class="btn btn-inline secondary" onclick="toggleCamera()" id="cameraButton">Ouvrir camera</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="section-title">Code-barres detecte</div>
+    <div class="section-note">Tapez le code au complet, puis appuyez sur Enter ou Verifier. La camera attend un code-barres complet. Les scanners Zebra valident avec Enter ou Tab.</div>
+    <div class="scan-tools">
+      <div class="field">
+        <label class="label" for="scanInput">Code-barres</label>
+        <input type="text" id="scanInput" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Entrez ou scannez le code-barres..." onkeydown="handleScanInputKey(event)"/>
+      </div>
+      <button class="btn btn-outline btn-inline" onclick="clearScanInput()">Effacer</button>
+    </div>
+    <button class="btn btn-outline" onclick="lookupScanFromInput(true)">Verifier le code</button>
+    <div class="small" style="margin-top:8px">Si un scanner ne valide pas avec Enter ou Tab, le code sera rempli dans le champ; appuyez ensuite sur Verifier.</div>
+  </div>
+
+  <div class="card">
+    <div class="section-title">Compatibilite appareil</div>
+    <div class="device-grid">
+      <div><span class="small">Camera</span><div id="cameraSupport" class="pill">Verification...</div></div>
+      <div><span class="small">Lecteur code-barres</span><div id="scannerSupport" class="pill">Verification...</div></div>
+    </div>
+    <div id="supportHint" class="section-note" style="margin-top:10px">Sur iPhone et Android, ouvrez l app en HTTPS pour permettre l acces camera.</div>
+  </div>
+
+  <div id="scanResult"></div>
+</div>
+
+<div id="search" class="section content">
+  <input type="text" id="searchInput" placeholder="Nom du produit ou code-barres..." oninput="doSearch()"/>
+  <div id="searchResults"></div>
+</div>
+
+<div id="browse" class="section content">
+  <div id="browseContent"></div>
+</div>
+
+<div id="add" class="section content">
+  <div class="card">
+    <div class="section-title">Information du produit</div>
+    <div class="field">
+      <label class="label" for="addName">Nom du produit *</label>
+      <input type="text" id="addName" placeholder="Ex: Advil 200mg"/>
+    </div>
+    <div class="field">
+      <label class="label" for="addBarcode">Code-barres</label>
+      <input type="text" id="addBarcode" placeholder="Ex: 0305730170109"/>
+    </div>
+    <div class="field">
+      <label class="label" for="addBrand">Marque</label>
+      <input type="text" id="addBrand" placeholder="Ex: Tylenol"/>
+    </div>
+    <div class="field">
+      <label class="label" for="addDescription">Description</label>
+      <input type="text" id="addDescription" placeholder="Ex: Extra fort 500mg"/>
+    </div>
+    <div class="section-title" style="margin-top:14px">Emplacement en magasin</div>
+    <div class="field">
+      <label class="label" for="addAisle">Allee *</label>
+      <input type="text" id="addAisle" placeholder="Ex: 3"/>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label class="label" for="addSide">Cote *</label>
+        <select id="addSide">
+          <option value="Gauche">Gauche</option>
+          <option value="Droite">Droite</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="label" for="addShelf">Tablette *</label>
+        <input type="text" id="addShelf" placeholder="Ex: 2"/>
+      </div>
+    </div>
+    <div class="field">
+      <label class="label" for="addPos">Position *</label>
+      <input type="text" id="addPos" placeholder="Ex: 4"/>
+    </div>
+    <button class="btn" onclick="addProduct()">Enregistrer</button>
+    <div id="addMsg"></div>
+  </div>
+</div>
+
+<script>
+let browseAisle = null;
+let scannerStream = null;
+let detector = null;
+let scanLoopRunning = false;
+let scanPaused = false;
+let currentScanProduct = null;
+let layoutProducts = [];
+let html5Scanner = null;
+let scannerMode = null;
+let lastLookedUpBarcode = '';
+let hardwareScanBuffer = '';
+let hardwareScanTimer = null;
+let cameraCandidateBarcode = '';
+let cameraCandidateCount = 0;
+let cameraCandidateTimer = null;
+let activeLookupBarcode = '';
+let barcodeLibraryPromise = null;
+const STORAGE_KEYS = {
+  cursor: 'familiprixCursor',
+  activeTab: 'familiprixActiveTab',
+  scanDraft: 'familiprixScanDraft',
+  addDraft: 'familiprixAddDraft',
+  products: 'familiprixProducts',
+  nextId: 'familiprixNextProductId',
+  forceLocal: 'familiprixForceLocal'
+};
+
+let dataMode = 'server';
+let localProducts = [];
+
+const cursor = {
+  aisle: 1,
+  side: 'Gauche',
+  shelf: 1,
+  position: 1,
+  maxPosition: 8,
+  maxShelf: 5
+};
+
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function isStandaloneApp() {
+  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+}
+
+function prefersLocalDataMode() {
+  return isStandaloneApp() || localStorage.getItem(STORAGE_KEYS.forceLocal) === '1';
+}
+
+function normalizeProduct(product) {
+  return {
+    id: Number(product.id),
+    name: String(product.name || '').trim(),
+    brand: String(product.brand || '').trim(),
+    description: String(product.description || '').trim(),
+    barcode: String(product.barcode || '').trim(),
+    aisle: String(product.aisle || '').trim(),
+    side: String(product.side || 'Gauche').trim() || 'Gauche',
+    shelf: String(product.shelf || '').trim(),
+    position: String(product.position || '').trim()
+  };
+}
+
+function saveLocalProducts(products) {
+  localProducts = products.map(normalizeProduct);
+  localStorage.setItem(STORAGE_KEYS.products, JSON.stringify(localProducts));
+  const maxId = localProducts.reduce((highest, product) => Math.max(highest, Number(product.id) || 0), 0);
+  localStorage.setItem(STORAGE_KEYS.nextId, String(maxId + 1));
+}
+
+function loadLocalProducts() {
+  const raw = localStorage.getItem(STORAGE_KEYS.products);
+  if (!raw) {
+    localProducts = [];
+    return [];
+  }
+  try {
+    localProducts = JSON.parse(raw).map(normalizeProduct);
+  } catch (error) {
+    localProducts = [];
+  }
+  return [...localProducts];
+}
+
+function getNextLocalProductId() {
+  const next = parseInt(localStorage.getItem(STORAGE_KEYS.nextId) || '1', 10);
+  localStorage.setItem(STORAGE_KEYS.nextId, String(next + 1));
+  return next;
+}
+
+async function seedLocalProductsFromServer() {
+  if (localStorage.getItem(STORAGE_KEYS.products)) {
+    loadLocalProducts();
+    return;
+  }
+  try {
+    const res = await fetch('/api/products');
+    if (!res.ok) throw new Error('server unavailable');
+    const products = await res.json();
+    saveLocalProducts(products);
+  } catch (error) {
+    saveLocalProducts([]);
+  }
+}
+
+async function initializeDataMode() {
+  if (prefersLocalDataMode()) {
+    dataMode = 'local';
+    await seedLocalProductsFromServer();
+  } else {
+    dataMode = 'server';
+    loadLocalProducts();
+  }
+}
+
+async function apiGetProducts() {
+  if (dataMode === 'local') return [...loadLocalProducts()].sort(productSort);
+  const res = await fetch('/api/products');
+  return res.json();
+}
+
+async function apiSearchProducts(query) {
+  if (dataMode === 'local') {
+    const q = String(query || '').trim().toLowerCase();
+    return loadLocalProducts()
+      .filter(product =>
+        product.name.toLowerCase().includes(q) ||
+        product.brand.toLowerCase().includes(q) ||
+        product.barcode.toLowerCase().includes(q)
+      )
+      .sort(productSort);
+  }
+  const res = await fetch(`/api/products/search?q=${encodeURIComponent(query)}`);
+  return res.json();
+}
+
+async function apiGetProductByBarcode(barcode) {
+  if (dataMode === 'local') {
+    const product = loadLocalProducts().find(item => item.barcode === barcode);
+    if (!product) throw new Error('not-found');
+    return product;
+  }
+  const res = await fetch(`/api/products/barcode/${encodeURIComponent(barcode)}`);
+  if (!res.ok) throw new Error('not-found');
+  return res.json();
+}
+
+async function apiAddProduct(payload) {
+  if (dataMode === 'local') {
+    const product = normalizeProduct({...payload, id: getNextLocalProductId()});
+    const products = loadLocalProducts();
+    products.push(product);
+    saveLocalProducts(products);
+    return {success: true, message: `"${product.name}" ajoute avec succes!`, product};
+  }
+  const res = await fetch('/api/products', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  return res.json();
+}
+
+async function apiUpdateProduct(product) {
+  if (dataMode === 'local') {
+    const products = loadLocalProducts();
+    const index = products.findIndex(item => Number(item.id) === Number(product.id));
+    if (index === -1) return {success: false, error: 'Produit non trouve'};
+    products[index] = normalizeProduct(product);
+    saveLocalProducts(products);
+    return {success: true};
+  }
+  const res = await fetch(`/api/products/${product.id}`, {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(product)
+  });
+  return res.json();
+}
+
+async function apiBulkUpdateProducts(products) {
+  if (dataMode === 'local') {
+    const nextProducts = loadLocalProducts();
+    const byId = new Map(nextProducts.map(product => [Number(product.id), product]));
+    products.forEach(product => byId.set(Number(product.id), normalizeProduct(product)));
+    saveLocalProducts(Array.from(byId.values()));
+    return {success: true, updated: products.length};
+  }
+  const res = await fetch('/api/products/bulk', {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({products})
+  });
+  return res.json();
+}
+
+async function apiDeleteProduct(id) {
+  if (dataMode === 'local') {
+    const products = loadLocalProducts().filter(product => Number(product.id) !== Number(id));
+    saveLocalProducts(products);
+    return {success: true};
+  }
+  const res = await fetch(`/api/products/${id}`, {method:'DELETE'});
+  return res.json();
+}
+
+async function apiGetAisles() {
+  if (dataMode === 'local') {
+    const counts = new Map();
+    loadLocalProducts().forEach(product => {
+      counts.set(product.aisle, (counts.get(product.aisle) || 0) + 1);
+    });
+    return Array.from(counts.entries())
+      .map(([aisle, count]) => ({aisle, count}))
+      .sort((a, b) => Number(a.aisle) - Number(b.aisle));
+  }
+  const res = await fetch('/api/aisles');
+  return res.json();
+}
+
+async function apiLookupOnline(barcode, signal) {
+  try {
+    const res = await fetch(`/api/products/lookup/${encodeURIComponent(barcode)}`, {signal});
+    return res.json();
+  } catch (error) {
+    return {found: false};
+  }
+}
+
+function enablePhoneMode() {
+  localStorage.setItem(STORAGE_KEYS.forceLocal, '1');
+  updateAppShellState();
+  window.location.reload();
+}
+
+function exportLocalDatabase() {
+  const products = loadLocalProducts();
+  const payload = {
+    exported_at: new Date().toISOString(),
+    source: 'familiprix-locator-pwa',
+    products
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `familiprix-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function importLocalDatabase(event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const payload = JSON.parse(text);
+    const products = Array.isArray(payload) ? payload : payload.products;
+    if (!Array.isArray(products)) throw new Error('invalid');
+    saveLocalProducts(products);
+    localStorage.setItem(STORAGE_KEYS.forceLocal, '1');
+    dataMode = 'local';
+    if (browseAisle) await loadBrowse(true);
+    await doSearch();
+    document.getElementById('scanResult').innerHTML = '<div class="msg success">Base locale importee sur cet iPhone.</div>';
+    updateAppShellState();
+  } catch (error) {
+    document.getElementById('scanResult').innerHTML = '<div class="msg error">Le fichier JSON est invalide.</div>';
+  } finally {
+    event.target.value = '';
+  }
+}
+
+function cursorLabel() {
+  return `Allee ${cursor.aisle} - ${cursor.side} - Tablette ${cursor.shelf} - Pos. ${cursor.position}`;
+}
+
+function updateCursorUi() {
+  document.getElementById('cursorText').textContent = cursorLabel();
+  document.getElementById('scanAisle').value = cursor.aisle;
+  document.getElementById('scanSide').value = cursor.side;
+  document.getElementById('scanShelf').value = cursor.shelf;
+  document.getElementById('scanPosition').value = cursor.position;
+  document.getElementById('maxPosition').value = cursor.maxPosition;
+  document.getElementById('maxShelf').value = cursor.maxShelf;
+  localStorage.setItem(STORAGE_KEYS.cursor, JSON.stringify(cursor));
+}
+
+function loadCursor() {
+  const saved = localStorage.getItem(STORAGE_KEYS.cursor);
+  if (saved) {
+    Object.assign(cursor, JSON.parse(saved));
+  }
+  updateCursorUi();
+}
+
+function persistScanDraft() {
+  localStorage.setItem(STORAGE_KEYS.scanDraft, JSON.stringify({
+    barcode: document.getElementById('scanInput').value.trim()
+  }));
+}
+
+function loadScanDraft() {
+  const saved = localStorage.getItem(STORAGE_KEYS.scanDraft);
+  if (!saved) return;
+  try {
+    const draft = JSON.parse(saved);
+    if (draft.barcode) document.getElementById('scanInput').value = draft.barcode;
+  } catch (error) {}
+}
+
+function persistAddDraft() {
+  localStorage.setItem(STORAGE_KEYS.addDraft, JSON.stringify({
+    name: document.getElementById('addName').value.trim(),
+    brand: document.getElementById('addBrand').value.trim(),
+    description: document.getElementById('addDescription').value.trim(),
+    barcode: document.getElementById('addBarcode').value.trim(),
+    aisle: document.getElementById('addAisle').value.trim(),
+    side: document.getElementById('addSide').value,
+    shelf: document.getElementById('addShelf').value.trim(),
+    position: document.getElementById('addPos').value.trim()
+  }));
+}
+
+function loadAddDraft() {
+  const saved = localStorage.getItem(STORAGE_KEYS.addDraft);
+  if (!saved) return;
+  try {
+    const draft = JSON.parse(saved);
+    document.getElementById('addName').value = draft.name || '';
+    document.getElementById('addBrand').value = draft.brand || '';
+    document.getElementById('addDescription').value = draft.description || '';
+    document.getElementById('addBarcode').value = draft.barcode || '';
+    document.getElementById('addAisle').value = draft.aisle || '';
+    document.getElementById('addSide').value = draft.side || 'Gauche';
+    document.getElementById('addShelf').value = draft.shelf || '';
+    document.getElementById('addPos').value = draft.position || '';
+  } catch (error) {}
+}
+
+function updateAppShellState() {
+  const standalone = isStandaloneApp();
+  const modeLabel = standalone ? 'Mode app iPhone' : 'Mode web';
+  document.getElementById('appModeLabel').textContent = dataMode === 'local' ? `${modeLabel} - base locale` : `${modeLabel} - base serveur`;
+  document.getElementById('installHint').textContent = dataMode === 'local'
+    ? 'Cette copie garde les produits sur cet iPhone. Exportez un JSON de temps en temps pour sauvegarder.'
+    : (standalone
+      ? 'L app garde votre position et vos formulaires meme si Safari se ferme.'
+      : 'Sur iPhone: Safari -> Partager -> Ajouter a l ecran d accueil.');
+}
+
+function updateNetworkStatus() {
+  const online = navigator.onLine;
+  document.getElementById('networkStatus').innerHTML = online
+    ? '<span class="status-dot"></span>En ligne'
+    : '<span class="status-dot offline"></span>Hors ligne';
+}
+
+function toggleLocationEditor() {
+  const editor = document.getElementById('locationEditor');
+  editor.style.display = editor.style.display === 'none' ? 'block' : 'none';
+}
+
+function positiveInt(id, fallback) {
+  const value = parseInt(document.getElementById(id).value, 10);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function saveCursor() {
+  cursor.aisle = positiveInt('scanAisle', cursor.aisle);
+  cursor.side = document.getElementById('scanSide').value;
+  cursor.shelf = positiveInt('scanShelf', cursor.shelf);
+  cursor.position = positiveInt('scanPosition', cursor.position);
+  cursor.maxPosition = positiveInt('maxPosition', cursor.maxPosition);
+  cursor.maxShelf = positiveInt('maxShelf', cursor.maxShelf);
+  updateCursorUi();
+  document.getElementById('locationEditor').style.display = 'none';
+}
+
+function advanceCursor() {
+  cursor.position += 1;
+  if (cursor.position > cursor.maxPosition) {
+    cursor.position = 1;
+    cursor.shelf += 1;
+  }
+  if (cursor.shelf > cursor.maxShelf) {
+    cursor.shelf = 1;
+    if (cursor.side === 'Gauche') {
+      cursor.side = 'Droite';
+    } else {
+      cursor.side = 'Gauche';
+      cursor.aisle += 1;
+    }
+  }
+  updateCursorUi();
+}
+
+function productCard(p, showDelete=true) {
+  return `<div class="card">
+    ${showDelete ? `<button class="delete-btn" onclick="deleteProduct(${p.id})" title="Supprimer">x</button>` : ''}
+    <div class="name">${esc(p.name)}</div>
+    ${p.brand ? `<div class="barcode-text">Marque: ${esc(p.brand)}</div>` : ''}
+    <div class="location">Allee ${esc(p.aisle)} - ${esc(p.side)} - Tablette ${esc(p.shelf)} - Pos. ${esc(p.position)}</div>
+    <div class="barcode-text">${p.barcode ? 'Code: ' + esc(p.barcode) : ''}</div>
+    ${p.description ? `<div class="desc-text">${esc(p.description)}</div>` : ''}
+  </div>`;
+}
+
+function productSort(a, b) {
+  const sideOrder = {Gauche: 0, Droite: 1};
+  const byAisle = Number(a.aisle) - Number(b.aisle);
+  if (byAisle) return byAisle;
+  const bySide = (sideOrder[a.side] ?? 9) - (sideOrder[b.side] ?? 9);
+  if (bySide) return bySide;
+  const byShelf = Number(a.shelf) - Number(b.shelf);
+  if (byShelf) return byShelf;
+  const byPosition = Number(a.position) - Number(b.position);
+  if (byPosition) return byPosition;
+  return a.name.localeCompare(b.name);
+}
+
+function layoutRow(p, index, total) {
+  return `<div class="layout-card">
+    <div class="name">${esc(p.name)}</div>
+    <div class="barcode-text">Code: ${esc(p.barcode || 'aucun')} | ID ${p.id}</div>
+    <div class="section-title" style="margin-top:12px">Emplacement</div>
+    <div class="layout-grid">
+      <div class="field">
+        <label class="label" for="layoutAisle-${p.id}">Allee</label>
+        <input id="layoutAisle-${p.id}" type="number" min="1" value="${esc(p.aisle)}" placeholder="Ex: 3"/>
+      </div>
+      <div class="field">
+        <label class="label" for="layoutSide-${p.id}">Cote</label>
+        <select id="layoutSide-${p.id}">
+          <option value="Gauche" ${p.side === 'Gauche' ? 'selected' : ''}>Gauche</option>
+          <option value="Droite" ${p.side === 'Droite' ? 'selected' : ''}>Droite</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="label" for="layoutShelf-${p.id}">Tablette</label>
+        <input id="layoutShelf-${p.id}" type="number" min="1" value="${esc(p.shelf)}" placeholder="Ex: 2"/>
+      </div>
+      <div class="field">
+        <label class="label" for="layoutPosition-${p.id}">Position</label>
+        <input id="layoutPosition-${p.id}" type="number" min="1" value="${esc(p.position)}" placeholder="Ex: 4"/>
+      </div>
+    </div>
+    <div class="section-title" style="margin-top:12px">Information du produit</div>
+    <div class="row2">
+      <div class="field">
+        <label class="label" for="layoutName-${p.id}">Nom</label>
+        <input id="layoutName-${p.id}" value="${esc(p.name)}" placeholder="Nom du produit"/>
+      </div>
+      <div class="field">
+        <label class="label" for="layoutBarcode-${p.id}">Code-barres</label>
+        <input id="layoutBarcode-${p.id}" value="${esc(p.barcode || '')}" placeholder="Code-barres"/>
+      </div>
+      <div class="field">
+        <label class="label" for="layoutBrand-${p.id}">Marque</label>
+        <input id="layoutBrand-${p.id}" value="${esc(p.brand || '')}" placeholder="Marque"/>
+      </div>
+      <div class="field">
+        <label class="label" for="layoutDescription-${p.id}">Description</label>
+        <input id="layoutDescription-${p.id}" value="${esc(p.description || '')}" placeholder="Description"/>
+      </div>
+    </div>
+    <div class="layout-actions">
+      <button class="mini-btn" onclick="swapLayoutProduct(${p.id}, -1)" ${index === 0 ? 'disabled' : ''}>Monter</button>
+      <button class="mini-btn" onclick="swapLayoutProduct(${p.id}, 1)" ${index === total - 1 ? 'disabled' : ''}>Descendre</button>
+      <button class="mini-btn primary" onclick="saveLayoutProduct(${p.id})">Sauver</button>
+      <button class="mini-btn" onclick="useAsScannerCursor(${p.id})">Scanner ici</button>
+      <button class="mini-btn danger" onclick="deleteProduct(${p.id})">Supprimer</button>
+    </div>
+  </div>`;
+}
+
+function renderLayoutEditor() {
+  const div = document.getElementById('browseContent');
+  const sorted = [...layoutProducts].sort(productSort);
+  let lastGroup = '';
+  let html = `<button class="back" onclick="browseAisle=null; layoutProducts=[]; loadBrowse();">Retour aux allees</button>
+    <div class="card">
+      <div class="cursor">
+        <div>
+          <span class="small">Edition de l allee</span>
+          <strong>Allee ${esc(browseAisle)}</strong>
+        </div>
+        <span class="pill">${sorted.length} produit${sorted.length !== 1 ? 's' : ''}</span>
+      </div>
+      <div class="section-title" style="margin-top:14px">Structure de l allee</div>
+      <div class="section-note">Utilise ces valeurs pour redistribuer les produits quand une tablette ou un cote est plein.</div>
+      <div class="row3">
+        <div class="field">
+          <label class="label" for="layoutMaxPosition">Positions par tablette</label>
+          <input id="layoutMaxPosition" type="number" min="1" value="${cursor.maxPosition}" placeholder="Ex: 8"/>
+        </div>
+        <div class="field">
+          <label class="label" for="layoutMaxShelf">Tablettes par cote</label>
+          <input id="layoutMaxShelf" type="number" min="1" value="${cursor.maxShelf}" placeholder="Ex: 5"/>
+        </div>
+        <div class="field">
+          <label class="label" for="layoutReflowMode">Mode de redistribution</label>
+          <select id="layoutReflowMode">
+            <option value="aisle">Toute l allee</option>
+            <option value="side">Cote par cote</option>
+          </select>
+        </div>
+      </div>
+      <div class="tool-row">
+        <button class="btn btn-outline btn-inline" onclick="reflowCurrentAisle()">Recalculer les positions</button>
+        <button class="btn btn-inline" onclick="saveAllLayout()">Sauver tout</button>
+      </div>
+      <div id="layoutMsg"></div>
+    </div>`;
+
+  sorted.forEach((p, index) => {
+    const group = `${p.side} - Tablette ${p.shelf}`;
+    if (group !== lastGroup) {
+      html += `<div class="shelf-title">${esc(group)}</div>`;
+      lastGroup = group;
+    }
+    html += layoutRow(p, index, sorted.length);
+  });
+
+  div.innerHTML = html || '<div class="empty">Aucun produit.</div>';
+}
+
+function readLayoutProduct(id) {
+  return {
+    id,
+    name: document.getElementById(`layoutName-${id}`).value.trim(),
+    brand: document.getElementById(`layoutBrand-${id}`).value.trim(),
+    description: document.getElementById(`layoutDescription-${id}`).value.trim(),
+    barcode: document.getElementById(`layoutBarcode-${id}`).value.trim(),
+    aisle: document.getElementById(`layoutAisle-${id}`).value.trim(),
+    side: document.getElementById(`layoutSide-${id}`).value,
+    shelf: document.getElementById(`layoutShelf-${id}`).value.trim(),
+    position: document.getElementById(`layoutPosition-${id}`).value.trim()
+  };
+}
+
+function currentLayoutFromFields() {
+  return layoutProducts.map(p => ({...p, ...readLayoutProduct(p.id)}));
+}
+
+async function putProduct(product) {
+  return apiUpdateProduct(product);
+}
+
+async function saveLayoutProduct(id) {
+  const product = readLayoutProduct(id);
+  if (!product.name || !product.aisle || !product.shelf || !product.position) {
+    showLayoutMsg('Nom, allee, tablette et position sont requis.', 'error');
+    return;
+  }
+  await putProduct(product);
+  await loadBrowse(true);
+  showLayoutMsg('Produit sauve.', 'success');
+}
+
+async function saveAllLayout() {
+  const products = currentLayoutFromFields();
+  const invalid = products.find(p => !p.name || !p.aisle || !p.shelf || !p.position);
+  if (invalid) {
+    showLayoutMsg('Un produit est incomplet.', 'error');
+    return;
+  }
+  const data = await apiBulkUpdateProducts(products);
+  await loadBrowse(true);
+  showLayoutMsg(data.success ? `${data.updated} produit(s) sauve(s).` : data.error, data.success ? 'success' : 'error');
+}
+
+async function swapLayoutProduct(id, direction) {
+  const sorted = currentLayoutFromFields().sort(productSort);
+  const index = sorted.findIndex(p => p.id === id);
+  const other = sorted[index + direction];
+  const product = sorted[index];
+  if (!product || !other) return;
+
+  const productSpot = {aisle: product.aisle, side: product.side, shelf: product.shelf, position: product.position};
+  product.aisle = other.aisle;
+  product.side = other.side;
+  product.shelf = other.shelf;
+  product.position = other.position;
+  other.aisle = productSpot.aisle;
+  other.side = productSpot.side;
+  other.shelf = productSpot.shelf;
+  other.position = productSpot.position;
+
+  await apiBulkUpdateProducts([product, other]);
+  await loadBrowse(true);
+  showLayoutMsg('Produits echanges.', 'success');
+}
+
+async function reflowCurrentAisle() {
+  const maxPosition = positiveInt('layoutMaxPosition', cursor.maxPosition);
+  const maxShelf = positiveInt('layoutMaxShelf', cursor.maxShelf);
+  const mode = document.getElementById('layoutReflowMode').value;
+  const products = currentLayoutFromFields().sort(productSort);
+  const reflowed = [];
+
+  function assign(list, startAisle, startSide) {
+    let aisle = Number(startAisle);
+    let side = startSide;
+    let shelf = 1;
+    let position = 1;
+    list.forEach(product => {
+      product.aisle = String(aisle);
+      product.side = side;
+      product.shelf = String(shelf);
+      product.position = String(position);
+      reflowed.push(product);
+      position += 1;
+      if (position > maxPosition) {
+        position = 1;
+        shelf += 1;
+      }
+      if (shelf > maxShelf) {
+        shelf = 1;
+        if (side === 'Gauche') {
+          side = 'Droite';
+        } else {
+          side = 'Gauche';
+          aisle += 1;
+        }
+      }
+    });
+  }
+
+  if (mode === 'side') {
+    ['Gauche', 'Droite'].forEach(side => {
+      const sideProducts = products.filter(p => p.side === side);
+      assign(sideProducts, browseAisle, side);
+    });
+  } else {
+    assign(products, browseAisle, 'Gauche');
+  }
+
+  await apiBulkUpdateProducts(reflowed);
+  cursor.maxPosition = maxPosition;
+  cursor.maxShelf = maxShelf;
+  updateCursorUi();
+  await loadBrowse(true);
+  showLayoutMsg('Positions recalculees.', 'success');
+}
+
+function useAsScannerCursor(id) {
+  const product = readLayoutProduct(id);
+  cursor.aisle = Number(product.aisle) || cursor.aisle;
+  cursor.side = product.side;
+  cursor.shelf = Number(product.shelf) || cursor.shelf;
+  cursor.position = Number(product.position) || cursor.position;
+  updateCursorUi();
+  showLayoutMsg('Le scanner commencera a cet emplacement.', 'success');
+}
+
+function showLayoutMsg(message, type) {
+  const msg = document.getElementById('layoutMsg');
+  if (msg) {
+    msg.className = `msg ${type}`;
+    msg.textContent = message;
+  }
+}
+
+async function doSearch() {
+  const q = document.getElementById('searchInput').value.trim();
+  const div = document.getElementById('searchResults');
+  if (!q) { div.innerHTML = ''; return; }
+  const data = await apiSearchProducts(q);
+  div.innerHTML = data.length ? data.map(p => productCard(p)).join('') : '<div class="empty">Aucun produit trouve.</div>';
+}
+
+async function toggleCamera() {
+  if (scannerStream || html5Scanner) {
+    await stopCamera();
+    return;
+  }
+  await startCamera();
+}
+
+async function startCamera() {
+  const status = document.getElementById('scannerStatus');
+  const button = document.getElementById('cameraButton');
+  const video = document.getElementById('cameraPreview');
+  const reader = document.getElementById('html5Reader');
+
+  if (!('mediaDevices' in navigator) || !navigator.mediaDevices.getUserMedia) {
+    status.textContent = 'Camera non disponible';
+    showCameraHint('Ce navigateur ne donne pas acces a la camera. Utilisez Chrome/Edge Android, Safari recent sur iPhone, ou entrez le code manuellement.');
+    return;
+  }
+
+  try {
+    if ('BarcodeDetector' in window) {
+      scannerMode = 'native';
+      detector = new BarcodeDetector({formats:['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf']});
+      scannerStream = await navigator.mediaDevices.getUserMedia({
+        video: {facingMode: {ideal: 'environment'}},
+        audio: false
+      });
+      reader.style.display = 'none';
+      video.style.display = 'block';
+      video.srcObject = scannerStream;
+      await video.play();
+      status.textContent = 'Recherche code...';
+      button.textContent = 'Fermer camera';
+      scanLoopRunning = true;
+      scanPaused = false;
+      resetCameraCandidate();
+      scanFrame();
+      return;
+    }
+
+    await ensureBarcodeLibraryLoaded();
+    if ('Html5Qrcode' in window) {
+      scannerMode = 'html5';
+      resetCameraCandidate();
+      video.style.display = 'none';
+      reader.style.display = 'block';
+      html5Scanner = new Html5Qrcode('html5Reader', html5ScannerConfig());
+      await html5Scanner.start(
+        {facingMode: 'environment'},
+        {fps: 10, qrbox: responsiveScanBox},
+        onDecodedCode,
+        () => {}
+      );
+      status.textContent = 'Recherche code...';
+      button.textContent = 'Fermer camera';
+      return;
+    }
+
+    status.textContent = 'Scanner non supporte';
+    showCameraHint('Le moteur de scan de secours n est pas charge. Verifiez la connexion internet ou entrez le code manuellement.');
+  } catch (error) {
+    status.textContent = 'Camera bloquee';
+    showCameraHint(error.message || 'Impossible d ouvrir la camera. Sur telephone, utilisez une adresse HTTPS.');
+  }
+}
+
+async function ensureBarcodeLibraryLoaded() {
+  if ('Html5Qrcode' in window) return true;
+  if (barcodeLibraryPromise) return barcodeLibraryPromise;
+
+  const sources = [
+    'https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js',
+    'https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js'
+  ];
+
+  barcodeLibraryPromise = (async () => {
+    for (const src of sources) {
+      const loaded = await injectScript(src);
+      if (loaded && 'Html5Qrcode' in window) return true;
+    }
+    return false;
+  })();
+
+  return barcodeLibraryPromise;
+}
+
+function injectScript(src) {
+  return new Promise(resolve => {
+    const existing = document.querySelector(`script[data-src="${src}"]`);
+    if (existing) {
+      resolve('Html5Qrcode' in window);
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = src;
+    script.async = true;
+    script.dataset.src = src;
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+    document.head.appendChild(script);
+  });
+}
+
+async function stopCamera() {
+  scanLoopRunning = false;
+  scanPaused = false;
+  resetCameraCandidate();
+  if (scannerStream) {
+    scannerStream.getTracks().forEach(track => track.stop());
+  }
+  if (html5Scanner) {
+    try {
+      await html5Scanner.stop();
+      await html5Scanner.clear();
+    } catch (error) {}
+  }
+  scannerStream = null;
+  html5Scanner = null;
+  scannerMode = null;
+  document.getElementById('cameraPreview').srcObject = null;
+  document.getElementById('cameraPreview').style.display = 'block';
+  document.getElementById('html5Reader').style.display = 'none';
+  document.getElementById('scannerStatus').textContent = 'Camera arretee';
+  document.getElementById('cameraButton').textContent = 'Ouvrir camera';
+}
+
+function responsiveScanBox(viewfinderWidth, viewfinderHeight) {
+  const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+  return {
+    width: Math.max(240, Math.floor(viewfinderWidth * 0.82)),
+    height: Math.max(120, Math.floor(minEdge * 0.34))
+  };
+}
+
+function html5ScannerConfig() {
+  if (!('Html5QrcodeSupportedFormats' in window)) return {};
+  return {
+    formatsToSupport: [
+      Html5QrcodeSupportedFormats.EAN_13,
+      Html5QrcodeSupportedFormats.EAN_8,
+      Html5QrcodeSupportedFormats.UPC_A,
+      Html5QrcodeSupportedFormats.UPC_E,
+      Html5QrcodeSupportedFormats.CODE_128,
+      Html5QrcodeSupportedFormats.CODE_39,
+      Html5QrcodeSupportedFormats.ITF
+    ].filter(Boolean)
+  };
+}
+
+async function onDecodedCode(decodedText) {
+  const rawValue = String(decodedText || '').trim();
+  if (!rawValue || scanPaused) return;
+  if (!confirmStableCameraBarcode(rawValue)) return;
+  scanPaused = true;
+  setScannedBarcode(rawValue);
+  document.getElementById('scannerStatus').textContent = 'Code detecte';
+  await lookupScanFromInput(true);
+}
+
+function confirmStableCameraBarcode(barcode) {
+  const normalized = barcode.trim();
+  if (!looksLikeBarcode(normalized)) return false;
+
+  if (normalized === cameraCandidateBarcode) {
+    cameraCandidateCount += 1;
+  } else {
+    cameraCandidateBarcode = normalized;
+    cameraCandidateCount = 1;
+  }
+
+  window.clearTimeout(cameraCandidateTimer);
+  cameraCandidateTimer = window.setTimeout(resetCameraCandidate, 900);
+
+  if (cameraCandidateCount < 2) {
+    document.getElementById('scannerStatus').textContent = 'Verification du code...';
+    return false;
+  }
+
+  resetCameraCandidate();
+  return true;
+}
+
+function resetCameraCandidate() {
+  cameraCandidateBarcode = '';
+  cameraCandidateCount = 0;
+  window.clearTimeout(cameraCandidateTimer);
+  cameraCandidateTimer = null;
+}
+
+function setScannedBarcode(barcode) {
+  const input = document.getElementById('scanInput');
+  input.value = barcode;
+  persistScanDraft();
+  input.focus({preventScroll: true});
+}
+
+function clearScanInput() {
+  document.getElementById('scanInput').value = '';
+  currentScanProduct = null;
+  lastLookedUpBarcode = '';
+  activeLookupBarcode = '';
+  scanPaused = false;
+  resetCameraCandidate();
+  persistScanDraft();
+  if (scannerStream || html5Scanner) document.getElementById('scannerStatus').textContent = 'Recherche code...';
+  focusScanInput();
+}
+
+function looksLikeBarcode(value) {
+  return /^[0-9A-Za-z.-]{6,}$/.test(value);
+}
+
+function looksLikeCompleteRetailBarcode(value) {
+  return /^[0-9]{8}$|^[0-9]{12}$|^[0-9]{13}$|^[0-9]{14}$/.test(value);
+}
+
+function focusScanInput() {
+  const input = document.getElementById('scanInput');
+  if (input && document.getElementById('scan').classList.contains('active')) {
+    input.focus({preventScroll: true});
+  }
+}
+
+function handleScanInputKey(event) {
+  if (event.key !== 'Enter' && event.key !== 'Tab') return;
+  const value = document.getElementById('scanInput').value.trim();
+  if (!value) return;
+  event.preventDefault();
+  lookupScanFromInput(true);
+}
+
+function handleHardwareScannerKey(event) {
+  if (!document.getElementById('scan').classList.contains('active')) return;
+  if (event.ctrlKey || event.altKey || event.metaKey) return;
+
+  const target = event.target;
+  const tag = target && target.tagName ? target.tagName.toLowerCase() : '';
+  const isEditable = tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable;
+
+  if (isEditable) return;
+
+  if (event.key === 'Enter' || event.key === 'Tab') {
+    if (hardwareScanBuffer.length >= 6) {
+      event.preventDefault();
+      setScannedBarcode(hardwareScanBuffer);
+      hardwareScanBuffer = '';
+      lookupScanFromInput(true);
+    }
+    return;
+  }
+
+  if (event.key.length !== 1) return;
+  hardwareScanBuffer += event.key;
+  window.clearTimeout(hardwareScanTimer);
+  hardwareScanTimer = window.setTimeout(() => {
+    if (looksLikeCompleteRetailBarcode(hardwareScanBuffer)) {
+      setScannedBarcode(hardwareScanBuffer);
+      lookupScanFromInput(true);
+    } else if (looksLikeBarcode(hardwareScanBuffer)) {
+      setScannedBarcode(hardwareScanBuffer);
+      document.getElementById('scannerStatus').textContent = 'Code rempli - appuyez sur Verifier';
+    }
+    hardwareScanBuffer = '';
+  }, 500);
+}
+
+function showCameraHint(message) {
+  document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(message)}</div>`;
+}
+
+function updateDeviceSupport() {
+  const cameraSupport = document.getElementById('cameraSupport');
+  const scannerSupport = document.getElementById('scannerSupport');
+  const supportHint = document.getElementById('supportHint');
+  const hasCamera = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  const isSecure = window.isSecureContext || location.hostname === '127.0.0.1' || location.hostname === 'localhost';
+  const nativeScanner = 'BarcodeDetector' in window;
+  const fallbackScanner = 'Html5Qrcode' in window;
+
+  cameraSupport.textContent = hasCamera && isSecure ? 'Disponible' : 'HTTPS requis';
+  cameraSupport.style.background = hasCamera && isSecure ? '#ecfdf5' : '#fef2f2';
+  cameraSupport.style.color = hasCamera && isSecure ? '#065f46' : '#991b1b';
+
+  scannerSupport.textContent = nativeScanner ? 'Natif' : (fallbackScanner ? 'Fallback' : 'Manuel');
+  scannerSupport.style.background = nativeScanner || fallbackScanner ? '#ecfdf5' : '#fef2f2';
+  scannerSupport.style.color = nativeScanner || fallbackScanner ? '#065f46' : '#991b1b';
+
+  if (!isSecure) {
+    supportHint.textContent = 'Pour la camera sur telephone, utilisez une URL HTTPS. En HTTP local, la page peut ouvrir mais la camera peut etre bloquee.';
+  } else if (!nativeScanner && fallbackScanner) {
+    supportHint.textContent = 'Ce navigateur utilise le scanner de secours. C est normal sur certains iPhone et tablettes.';
+  } else if (!nativeScanner && !fallbackScanner) {
+    supportHint.textContent = 'Le scan code-barres automatique n est pas disponible ici. Le champ manuel et les scanners clavier restent utilisables.';
+  } else {
+    supportHint.textContent = 'Cet appareil peut utiliser le scan code-barres par camera.';
+  }
+}
+
+async function scanFrame() {
+  if (!scanLoopRunning || !detector) return;
+  const video = document.getElementById('cameraPreview');
+  try {
+    if (scanPaused) {
+      requestAnimationFrame(scanFrame);
+      return;
+    }
+    const codes = await detector.detect(video);
+    if (codes.length) {
+      await onDecodedCode(codes[0].rawValue);
+    }
+  } catch (error) {
+    document.getElementById('scannerStatus').textContent = 'Lecture en cours';
+  }
+  requestAnimationFrame(scanFrame);
+}
+
+async function lookupScanFromInput(force=false) {
+  const barcode = document.getElementById('scanInput').value.trim();
+  const div = document.getElementById('scanResult');
+  if (!barcode) return;
+  activeLookupBarcode = barcode;
+  if (!force && barcode === lastLookedUpBarcode) return;
+  lastLookedUpBarcode = barcode;
+  try {
+    currentScanProduct = await apiGetProductByBarcode(barcode);
+    div.innerHTML = `<div class="card">
+      <div class="pill">Produit existant</div>
+      <div class="name" style="margin-top:10px">${esc(currentScanProduct.name)}</div>
+      ${currentScanProduct.brand ? `<div class="barcode-text">Marque: ${esc(currentScanProduct.brand)}</div>` : ''}
+      <div class="barcode-text">Ancien: Allee ${esc(currentScanProduct.aisle)} - ${esc(currentScanProduct.side)} - Tablette ${esc(currentScanProduct.shelf)} - Pos. ${esc(currentScanProduct.position)}</div>
+      ${currentScanProduct.description ? `<div class="desc-text">${esc(currentScanProduct.description)}</div>` : ''}
+      <div class="msg info">Nouveau: ${esc(cursorLabel())}</div>
+      <button class="btn" onclick="confirmExistingLocation()">Confirmer ce nouvel emplacement</button>
+    </div>`;
+  } catch (error) {
+    showOnlineLookupForm(barcode);
+  }
+}
+
+function showOnlineLookupForm(barcode) {
+  const div = document.getElementById('scanResult');
+  currentScanProduct = null;
+  div.innerHTML = `<div class="card">
+    <div class="pill">Nouveau produit</div>
+    <div id="lookupStatus" class="msg info">Code-barres enregistre pour cette position. Recherche du produit en ligne...</div>
+    <div style="display:flex;gap:10px;align-items:flex-start;margin-top:10px">
+      <div id="lookupImageWrap"></div>
+      <div style="flex:1">
+        <div class="field">
+          <label class="label" for="scanProductName">Nom du produit</label>
+          <input type="text" id="scanProductName" value="" placeholder="Nom a confirmer"/>
+        </div>
+        <div class="field">
+          <label class="label" for="scanProductBrand">Marque</label>
+          <input type="text" id="scanProductBrand" value="" placeholder="Marque"/>
+        </div>
+      </div>
+    </div>
+    <div class="field">
+      <label class="label" for="scanProductDescription">Description</label>
+      <input type="text" id="scanProductDescription" value="" placeholder="Description"/>
+    </div>
+    <div id="lookupSource" class="barcode-text"></div>
+    <div class="msg info">Emplacement: ${esc(cursorLabel())}</div>
+    <div class="btn-row">
+      <button class="btn" onclick="confirmNewProduct()">Enregistrer ce code-barres a cette position</button>
+      <button class="btn btn-outline" onclick="confirmUnknownProduct()">Ajouter comme produit a identifier</button>
+    </div>
+  </div>`;
+  document.getElementById('scanProductName').focus();
+  hydrateOnlineLookup(barcode);
+}
+
+async function hydrateOnlineLookup(barcode) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 4000);
+  let lookupProduct = null;
+  try {
+    const lookupData = await apiLookupOnline(barcode, controller.signal);
+    if (lookupData.found) lookupProduct = lookupData.product;
+  } catch (error) {}
+  window.clearTimeout(timeoutId);
+
+  if (activeLookupBarcode !== barcode) return;
+  const status = document.getElementById('lookupStatus');
+  if (!status) return;
+
+  if (lookupProduct) {
+    if (!document.getElementById('scanProductName').value.trim()) document.getElementById('scanProductName').value = lookupProduct.name || '';
+    if (!document.getElementById('scanProductBrand').value.trim()) document.getElementById('scanProductBrand').value = lookupProduct.brand || '';
+    if (!document.getElementById('scanProductDescription').value.trim()) document.getElementById('scanProductDescription').value = lookupProduct.description || '';
+    status.className = 'msg success';
+    status.textContent = `Trouve dans ${lookupProduct.source}. Verifiez avant de confirmer.`;
+    document.getElementById('lookupSource').textContent = lookupProduct.source_url ? `Source: ${lookupProduct.source_url}` : '';
+    if (lookupProduct.image_url) {
+      document.getElementById('lookupImageWrap').innerHTML = `<img class="lookup-image" src="${esc(lookupProduct.image_url)}" alt="Image produit">`;
+    }
+  } else {
+    status.className = 'msg error';
+    status.textContent = 'Produit non trouve en ligne. Ajoutez-le comme produit a identifier et continuez le scan.';
+  }
+}
+
+async function confirmExistingLocation() {
+  if (!currentScanProduct) return;
+  const payload = {
+    name: currentScanProduct.name,
+    brand: currentScanProduct.brand || '',
+    description: currentScanProduct.description || '',
+    barcode: currentScanProduct.barcode || '',
+    aisle: String(cursor.aisle),
+    side: cursor.side,
+    shelf: String(cursor.shelf),
+    position: String(cursor.position)
+  };
+  await apiUpdateProduct({...payload, id: currentScanProduct.id});
+  finishConfirmed(`"${currentScanProduct.name}" place a ${cursorLabel()}.`);
+}
+
+async function confirmNewProduct() {
+  const barcode = document.getElementById('scanInput').value.trim();
+  const name = document.getElementById('scanProductName').value.trim() || `A identifier - ${barcode}`;
+  const brand = document.getElementById('scanProductBrand')?.value.trim() || '';
+  const description = document.getElementById('scanProductDescription')?.value.trim() || '';
+  if (!barcode) {
+    document.getElementById('scanResult').insertAdjacentHTML('beforeend', '<div class="msg error">Code requis.</div>');
+    return;
+  }
+  const data = await apiAddProduct({
+    name,
+    brand,
+    description,
+    barcode,
+    aisle: String(cursor.aisle),
+    side: cursor.side,
+    shelf: String(cursor.shelf),
+    position: String(cursor.position)
+  });
+  if (data.success) {
+    finishConfirmed(`"${name}" ajoute a ${cursorLabel()}.`);
+  } else {
+    document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur pendant l ajout.')}</div>`;
+  }
+}
+
+async function confirmUnknownProduct() {
+  const barcode = document.getElementById('scanInput').value.trim();
+  if (!barcode) return;
+  const placeholderName = `A identifier - ${barcode}`;
+  const data = await apiAddProduct({
+    name: placeholderName,
+    brand: '',
+    description: 'A identifier',
+    barcode,
+    aisle: String(cursor.aisle),
+    side: cursor.side,
+    shelf: String(cursor.shelf),
+    position: String(cursor.position)
+  });
+  if (data.success) {
+    finishConfirmed(`"${placeholderName}" ajoute a ${cursorLabel()}.`);
+  } else {
+    document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur pendant l ajout.')}</div>`;
+  }
+}
+
+function finishConfirmed(message) {
+  const oldLocation = cursorLabel();
+  advanceCursor();
+  document.getElementById('scanInput').value = '';
+  persistScanDraft();
+  lastLookedUpBarcode = '';
+  activeLookupBarcode = '';
+  currentScanProduct = null;
+  document.getElementById('scanResult').innerHTML = `<div class="msg success">${esc(message)} Prochaine position: ${esc(cursorLabel())}</div>`;
+  document.getElementById('scannerStatus').textContent = `Confirme: ${oldLocation}`;
+  window.setTimeout(() => {
+    scanPaused = false;
+    resetCameraCandidate();
+    if (scannerStream || html5Scanner) document.getElementById('scannerStatus').textContent = 'Recherche code...';
+    focusScanInput();
+  }, 1200);
+}
+
+async function loadBrowse(keepAisle=false) {
+  const div = document.getElementById('browseContent');
+  if (!browseAisle) {
+    const aisles = await apiGetAisles();
+    div.innerHTML = aisles.length
+      ? aisles.map(a => `<div class="aisle-row" onclick="browseAisle='${esc(a.aisle)}'; loadBrowse();">
+          <div><div class="aisle-title">Allee ${esc(a.aisle)}</div><div class="aisle-sub">${a.count} produit${a.count>1?'s':''}</div></div>
+          <span style="color:#999">></span>
+        </div>`).join('')
+      : '<div class="empty">Aucune allee enregistree.</div>';
+  } else {
+    const all = await apiGetProducts();
+    layoutProducts = all.filter(p => p.aisle === browseAisle);
+    if (!layoutProducts.length && !keepAisle) {
+      browseAisle = null;
+      await loadBrowse();
+      return;
+    }
+    renderLayoutEditor();
+  }
+}
+
+async function addProduct() {
+  const name = document.getElementById('addName').value.trim();
+  const brand = document.getElementById('addBrand').value.trim();
+  const description = document.getElementById('addDescription').value.trim();
+  const barcode = document.getElementById('addBarcode').value.trim();
+  const aisle = document.getElementById('addAisle').value.trim();
+  const side = document.getElementById('addSide').value;
+  const shelf = document.getElementById('addShelf').value.trim();
+  const position = document.getElementById('addPos').value.trim();
+  const msgDiv = document.getElementById('addMsg');
+
+  if (!name || !aisle || !shelf || !position) {
+    msgDiv.className = 'msg error';
+    msgDiv.textContent = 'Veuillez remplir tous les champs obligatoires (*).';
+    return;
+  }
+
+  const data = await apiAddProduct({name, brand, description, barcode, aisle, side, shelf, position});
+  msgDiv.className = data.success ? 'msg success' : 'msg error';
+  msgDiv.textContent = data.success ? data.message : data.error;
+  if (data.success) {
+    ['addName','addBrand','addDescription','addBarcode','addAisle','addShelf','addPos'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('addSide').value = 'Gauche';
+    persistAddDraft();
+  }
+}
+
+async function deleteProduct(id) {
+  if (!confirm('Supprimer ce produit ?')) return;
+  await apiDeleteProduct(id);
+  doSearch();
+  if (browseAisle) loadBrowse();
+}
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.getElementById(tab).classList.add('active');
+  const tabs = ['scan','search','browse','add'];
+  document.querySelectorAll('.tab')[tabs.indexOf(tab)].classList.add('active');
+  localStorage.setItem(STORAGE_KEYS.activeTab, tab);
+  if (tab === 'browse') loadBrowse();
+  if (tab === 'scan') window.setTimeout(focusScanInput, 50);
+}
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/service-worker.js').catch(() => {});
+    updateDeviceSupport();
+    updateAppShellState();
+    updateNetworkStatus();
+    focusScanInput();
+  });
+}
+
+document.addEventListener('keydown', handleHardwareScannerKey);
+document.getElementById('scanInput').addEventListener('input', persistScanDraft);
+['addName','addBrand','addDescription','addBarcode','addAisle','addSide','addShelf','addPos'].forEach(id => {
+  document.getElementById(id).addEventListener('input', persistAddDraft);
+  document.getElementById(id).addEventListener('change', persistAddDraft);
+});
+window.addEventListener('online', updateNetworkStatus);
+window.addEventListener('offline', updateNetworkStatus);
+window.addEventListener('pageshow', () => {
+  updateAppShellState();
+  updateNetworkStatus();
+});
+window.addEventListener('pagehide', () => {
+  persistScanDraft();
+  persistAddDraft();
+});
+
+async function bootApp() {
+  await initializeDataMode();
+  loadCursor();
+  loadScanDraft();
+  loadAddDraft();
+  updateDeviceSupport();
+  updateAppShellState();
+  updateNetworkStatus();
+  const savedTab = localStorage.getItem(STORAGE_KEYS.activeTab);
+  if (savedTab && ['scan','search','browse','add'].includes(savedTab)) switchTab(savedTab);
+  focusScanInput();
+}
+
+bootApp();
+</script>
+</body>
+</html>
