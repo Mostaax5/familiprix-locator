@@ -1,7 +1,7 @@
 import os
 from flask import Flask, render_template, request, jsonify, send_from_directory
 from database import init_db, get_db
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -26,8 +26,6 @@ PRODUCT_LOOKUP_SOURCES = [
 
 DEFAULT_CERT_PATH = os.path.join(os.path.dirname(__file__), "certs", "localhost.pem")
 DEFAULT_KEY_PATH = os.path.join(os.path.dirname(__file__), "certs", "localhost-key.pem")
-DEFAULT_SHARED_PASSWORD = os.environ.get("APP_SHARED_PASSWORD", "familiprix")
-
 LOOKUP_FIELDS = [
     "code",
     "product_name",
@@ -64,7 +62,7 @@ def service_worker():
 @app.route("/api/products", methods=["GET"])
 def get_products():
     db = get_db()
-    products = db.execute("SELECT * FROM products ORDER BY aisle, side, shelf, position").fetchall()
+    products = db.execute("SELECT * FROM products ORDER BY aisle, side, section, shelf, position").fetchall()
     return jsonify([row_to_product(p) for p in products])
 
 
@@ -90,20 +88,6 @@ def get_by_barcode(barcode):
     return jsonify({"error": "Produit non trouvé"}), 404
 
 
-@app.route("/api/auth/session", methods=["POST"])
-def open_editor_session():
-    username, error = require_editor()
-    if error:
-        return error
-    expires_at = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0).isoformat()
-    return jsonify({
-        "success": True,
-        "username": username,
-        "expires_at": expires_at,
-        "message": f"Session ouverte pour {username} pendant 24 heures sur cet appareil."
-    })
-
-
 @app.route("/api/editors", methods=["GET"])
 def get_editors():
     db = get_db()
@@ -118,11 +102,11 @@ def get_layout_aisles():
     db = get_db()
     aisles = db.execute(
         """
-        SELECT l.aisle, l.max_shelf, l.max_position, l.enabled, l.modified_by, l.modified_at,
+        SELECT l.aisle, l.max_section, l.max_shelf, l.max_position, l.enabled, l.modified_by, l.modified_at,
                COUNT(p.id) AS product_count
         FROM aisle_layouts l
         LEFT JOIN products p ON p.aisle = l.aisle
-        GROUP BY l.aisle, l.max_shelf, l.max_position, l.enabled, l.modified_by, l.modified_at
+        GROUP BY l.aisle, l.max_section, l.max_shelf, l.max_position, l.enabled, l.modified_by, l.modified_at
         ORDER BY CAST(l.aisle AS INTEGER), l.aisle
         """
     ).fetchall()
@@ -136,6 +120,7 @@ def create_layout_aisle():
         return error
     data = request.get_json() or {}
     aisle = str(data.get("aisle", "")).strip()
+    max_section = str(data.get("max_section", "1")).strip() or "1"
     max_shelf = str(data.get("max_shelf", "5")).strip() or "5"
     max_position = str(data.get("max_position", "8")).strip() or "8"
     if not aisle:
@@ -146,10 +131,10 @@ def create_layout_aisle():
         return jsonify({"error": f"L allee {aisle} existe deja."}), 409
     db.execute(
         """
-        INSERT INTO aisle_layouts (aisle, max_shelf, max_position, enabled, modified_by, modified_at)
-        VALUES (?, ?, ?, 1, ?, ?)
+        INSERT INTO aisle_layouts (aisle, max_section, max_shelf, max_position, enabled, modified_by, modified_at)
+        VALUES (?, ?, ?, ?, 1, ?, ?)
         """,
-        (aisle, max_shelf, max_position, username, utc_now_iso()),
+        (aisle, max_section, max_shelf, max_position, username, utc_now_iso()),
     )
     db.commit()
     return jsonify({"success": True})
@@ -161,6 +146,7 @@ def update_layout_aisle(aisle):
     if error:
         return error
     data = request.get_json() or {}
+    max_section = str(data.get("max_section", "1")).strip() or "1"
     max_shelf = str(data.get("max_shelf", "5")).strip() or "5"
     max_position = str(data.get("max_position", "8")).strip() or "8"
     enabled = 1 if data.get("enabled", True) else 0
@@ -168,10 +154,10 @@ def update_layout_aisle(aisle):
     result = db.execute(
         """
         UPDATE aisle_layouts
-        SET max_shelf=?, max_position=?, enabled=?, modified_by=?, modified_at=?
+        SET max_section=?, max_shelf=?, max_position=?, enabled=?, modified_by=?, modified_at=?
         WHERE aisle=?
         """,
-        (max_shelf, max_position, enabled, username, utc_now_iso(), aisle),
+        (max_section, max_shelf, max_position, enabled, username, utc_now_iso(), aisle),
     )
     db.commit()
     if result.rowcount == 0:
@@ -185,14 +171,13 @@ def delete_layout_aisle(aisle):
     if error:
         return error
     db = get_db()
-    product = db.execute("SELECT name FROM products WHERE aisle=? LIMIT 1", (aisle,)).fetchone()
-    if product:
-        return jsonify({"error": f'L allee {aisle} contient encore "{product["name"]}".'}), 409
+    removed_products = db.execute("SELECT COUNT(*) FROM products WHERE aisle=?", (aisle,)).fetchone()[0]
+    db.execute("DELETE FROM products WHERE aisle=?", (aisle,))
     result = db.execute("DELETE FROM aisle_layouts WHERE aisle=?", (aisle,))
     db.commit()
     if result.rowcount == 0:
         return jsonify({"error": "Allee non trouvee."}), 404
-    return jsonify({"success": True, "message": f"Allee {aisle} retiree par {username}."})
+    return jsonify({"success": True, "message": f"Allee {aisle} retiree par {username}. {removed_products} produit(s) supprime(s)."})
 
 
 @app.route("/api/products/lookup/<barcode>", methods=["GET"])
@@ -494,9 +479,9 @@ def first_present(product, keys):
     return ""
 
 
-def find_product_at_position(db, aisle, side, shelf, position, exclude_id=None):
-    query = "SELECT * FROM products WHERE aisle=? AND side=? AND shelf=? AND position=?"
-    params = [aisle, side, shelf, position]
+def find_product_at_position(db, aisle, side, section, shelf, position, exclude_id=None):
+    query = "SELECT * FROM products WHERE aisle=? AND side=? AND section=? AND shelf=? AND position=?"
+    params = [aisle, side, section, shelf, position]
     if exclude_id is not None:
         query += " AND id != ?"
         params.append(exclude_id)
@@ -531,22 +516,13 @@ def auth_payload_from_request():
     username = (
         request.headers.get("X-User-Name")
         or data.get("_username")
-        or ""
+        or "appareil"
     ).strip()
-    password = (
-        request.headers.get("X-Shared-Password")
-        or data.get("_password")
-        or ""
-    ).strip()
-    return username, password
+    return username
 
 
 def require_editor():
-    username, password = auth_payload_from_request()
-    if not username:
-        return None, (jsonify({"error": "Utilisateur requis pour modifier la base."}), 401)
-    if password != DEFAULT_SHARED_PASSWORD:
-        return None, (jsonify({"error": "Mot de passe invalide."}), 401)
+    username = auth_payload_from_request() or "appareil"
     db = get_db()
     db.execute(
         """
@@ -581,14 +557,15 @@ def add_product():
     barcode  = data.get("barcode", "").strip()
     aisle    = data.get("aisle", "").strip()
     side     = data.get("side", "").strip()
+    section  = data.get("section", "").strip() or "1"
     shelf    = data.get("shelf", "").strip()
     position = data.get("position", "").strip()
 
-    if not all([name, aisle, side, shelf, position]):
+    if not all([name, aisle, side, section, shelf, position]):
         return jsonify({"error": "Champs obligatoires manquants"}), 400
 
     db = get_db()
-    occupied = find_product_at_position(db, aisle, side, shelf, position)
+    occupied = find_product_at_position(db, aisle, side, section, shelf, position)
     if occupied:
         return jsonify({
             "error": f'Position deja occupee par "{occupied["name"]}" (code {occupied["barcode"] or "sans code"}).'
@@ -596,10 +573,10 @@ def add_product():
 
     cursor = db.execute(
         """
-        INSERT INTO products (name, brand, description, barcode, aisle, side, shelf, position, created_by, created_at, modified_by, modified_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO products (name, brand, description, barcode, aisle, side, section, shelf, position, created_by, created_at, modified_by, modified_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (name, brand, description, barcode, aisle, side, shelf, position, username, utc_now_iso(), username, utc_now_iso())
+        (name, brand, description, barcode, aisle, side, section, shelf, position, username, utc_now_iso(), username, utc_now_iso())
     )
     db.commit()
     product_id = cursor.lastrowid
@@ -622,6 +599,7 @@ def update_product(product_id):
         db,
         str(data["aisle"]).strip(),
         str(data["side"]).strip(),
+        str(data.get("section", "1")).strip() or "1",
         str(data["shelf"]).strip(),
         str(data["position"]).strip(),
         exclude_id=product_id,
@@ -632,7 +610,7 @@ def update_product(product_id):
         }), 409
 
     result = db.execute(
-        "UPDATE products SET name=?, brand=?, description=?, barcode=?, aisle=?, side=?, shelf=?, position=?, modified_by=?, modified_at=? WHERE id=?",
+        "UPDATE products SET name=?, brand=?, description=?, barcode=?, aisle=?, side=?, section=?, shelf=?, position=?, modified_by=?, modified_at=? WHERE id=?",
         (
             data["name"],
             data.get("brand", ""),
@@ -640,6 +618,7 @@ def update_product(product_id):
             data.get("barcode", ""),
             data["aisle"],
             data["side"],
+            data.get("section", "1"),
             data["shelf"],
             data["position"],
             username,
@@ -664,7 +643,7 @@ def bulk_update_products():
     if not isinstance(products, list):
         return jsonify({"error": "Liste de produits invalide"}), 400
 
-    required = ["id", "name", "aisle", "side", "shelf", "position"]
+    required = ["id", "name", "aisle", "side", "section", "shelf", "position"]
     db = get_db()
     seen_positions = {}
     for product in products:
@@ -673,6 +652,7 @@ def bulk_update_products():
         key = (
             str(product["aisle"]).strip(),
             str(product["side"]).strip(),
+            str(product.get("section", "1")).strip() or "1",
             str(product["shelf"]).strip(),
             str(product["position"]).strip(),
         )
@@ -680,13 +660,13 @@ def bulk_update_products():
             return jsonify({"error": "Deux produits visent la meme position dans cette mise a jour"}), 409
         seen_positions[key] = int(product["id"])
 
-        occupied = find_product_at_position(db, key[0], key[1], key[2], key[3], exclude_id=int(product["id"]))
+        occupied = find_product_at_position(db, key[0], key[1], key[2], key[3], key[4], exclude_id=int(product["id"]))
         if occupied:
             return jsonify({
                 "error": f'Position deja occupee par "{occupied["name"]}" (code {occupied["barcode"] or "sans code"}).'
             }), 409
         db.execute(
-            "UPDATE products SET name=?, brand=?, description=?, barcode=?, aisle=?, side=?, shelf=?, position=?, modified_by=?, modified_at=? WHERE id=?",
+            "UPDATE products SET name=?, brand=?, description=?, barcode=?, aisle=?, side=?, section=?, shelf=?, position=?, modified_by=?, modified_at=? WHERE id=?",
             (
                 str(product["name"]).strip(),
                 str(product.get("brand", "")).strip(),
@@ -694,6 +674,7 @@ def bulk_update_products():
                 str(product.get("barcode", "")).strip(),
                 str(product["aisle"]).strip(),
                 str(product["side"]).strip(),
+                str(product.get("section", "1")).strip() or "1",
                 str(product["shelf"]).strip(),
                 str(product["position"]).strip(),
                 username,

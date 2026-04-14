@@ -88,7 +88,7 @@
   .shell-copy{font-size:12px;color:#666;line-height:1.4;margin-top:6px}
   .shell-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
   .shell-sync{margin-top:10px}
-  .auth-grid{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;margin-top:10px;align-items:end}
+  .auth-grid{display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:10px;align-items:end}
   .inline-note{font-size:12px;color:#666;line-height:1.4;margin-top:8px}
   .swap-row{display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:8px}
   .status-dot{display:inline-block;width:8px;height:8px;border-radius:999px;background:#16a34a;margin-right:6px}
@@ -122,16 +122,12 @@
     <div class="shell-copy" id="installHint">Sur mobile: ouvrez le site puis ajoutez-le a l ecran d accueil pour un acces rapide.</div>
     <div class="auth-grid">
       <div class="field">
-        <label class="label" for="editorName">Utilisateur</label>
+        <label class="label" for="editorName">Nom sur cet appareil</label>
         <input id="editorName" type="text" placeholder="Ex: Amine"/>
       </div>
-      <div class="field">
-        <label class="label" for="editorPassword">Mot de passe</label>
-        <input id="editorPassword" type="password" placeholder="Mot de passe partage"/>
-      </div>
-      <button class="btn btn-inline" onclick="openEditorSession()">Activer 24h</button>
+      <button class="btn btn-inline" onclick="saveEditorName()">Nommer cet appareil</button>
     </div>
-    <div id="editorSessionInfo" class="inline-note">Les changements et le scan demandent une session editeur valide pendant 24 heures sur cet appareil.</div>
+    <div id="editorSessionInfo" class="inline-note">Aucun mot de passe pour l instant. Si vous entrez un nom, il sera garde sur cet appareil pour suivre qui a change quoi.</div>
     <div class="shell-actions">
       <button class="btn btn-outline btn-inline" onclick="enablePhoneMode()">Activer la copie locale synchronisee</button>
       <button class="btn btn-outline btn-inline" onclick="exportLocalDatabase()">Exporter JSON</button>
@@ -148,7 +144,7 @@
     <div class="cursor">
       <div>
         <span class="small">Position actuelle</span>
-        <strong id="cursorText">Allee 1 - Gauche - Tablette 1 - Pos. 1</strong>
+        <strong id="cursorText">Allee 1 - Avant - Gauche - Section 1 - Tablette 1 - Pos. 1</strong>
       </div>
       <button class="btn btn-outline btn-inline" onclick="toggleLocationEditor()">Modifier</button>
     </div>
@@ -163,11 +159,24 @@
         <input type="number" id="scanAisle" min="1" value="1" placeholder="Ex: 3"/>
       </div>
       <div class="field">
-        <label class="label" for="scanSide">Cote</label>
+        <label class="label" for="scanFacing">Vue</label>
+        <select id="scanFacing">
+          <option value="Avant">Face avant</option>
+          <option value="Arriere">Face arriere</option>
+        </select>
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label class="label" for="scanSide">Cote vue</label>
         <select id="scanSide">
           <option value="Gauche">Gauche</option>
           <option value="Droite">Droite</option>
         </select>
+      </div>
+      <div class="field">
+        <label class="label" for="scanSection">Section</label>
+        <input type="number" id="scanSection" min="1" value="1" placeholder="Ex: 2"/>
       </div>
     </div>
     <div class="row2">
@@ -181,8 +190,12 @@
       </div>
     </div>
     <div class="section-title" style="margin-top:14px">Structure automatique</div>
-    <div class="section-note">Ces limites disent au scanner quand passer a la tablette suivante, puis au cote ou a l allee suivante.</div>
-    <div class="row2">
+    <div class="section-note">Ces limites disent au scanner quand passer a la tablette suivante, puis a la section suivante, puis au cote ou a l allee suivante.</div>
+    <div class="row3">
+      <div class="field">
+        <label class="label" for="maxSection">Sections par cote</label>
+        <input type="number" id="maxSection" min="1" value="1" placeholder="Ex: 3"/>
+      </div>
       <div class="field">
         <label class="label" for="maxPosition">Positions par tablette</label>
         <input type="number" id="maxPosition" min="1" value="8" placeholder="Ex: 8"/>
@@ -260,11 +273,15 @@
 <div id="add" class="section content">
   <div class="card">
     <div class="section-title">Plan du magasin</div>
-    <div class="section-note">Ajoutez ou retirez des allees, puis fixez combien de tablettes et de positions chaque allee peut contenir. Les produits continuent a se creer avec le scan.</div>
+    <div class="section-note">Ajoutez ou retirez des allees, puis fixez combien de sections, de tablettes et de positions chaque allee peut contenir. Les produits continuent a se creer avec le scan.</div>
     <div class="row3">
       <div class="field">
         <label class="label" for="mapAisle">Nouvelle allee</label>
         <input type="number" id="mapAisle" min="1" placeholder="Ex: 9"/>
+      </div>
+      <div class="field">
+        <label class="label" for="mapSection">Sections par cote</label>
+        <input type="number" id="mapSection" min="1" value="1"/>
       </div>
       <div class="field">
         <label class="label" for="mapShelf">Tablettes par cote</label>
@@ -321,13 +338,15 @@ const STORAGE_KEYS = {
 
 let dataMode = 'server';
 let localProducts = [];
-let editorSession = null;
 
 const cursor = {
   aisle: 1,
+  facing: 'Avant',
   side: 'Gauche',
+  section: 1,
   shelf: 1,
   position: 1,
+  maxSection: 1,
   maxPosition: 8,
   maxShelf: 5
 };
@@ -353,6 +372,7 @@ function normalizeProduct(product) {
     barcode: String(product.barcode || '').trim(),
     aisle: String(product.aisle || '').trim(),
     side: String(product.side || 'Gauche').trim() || 'Gauche',
+    section: String(product.section || '1').trim() || '1',
     shelf: String(product.shelf || '').trim(),
     position: String(product.position || '').trim(),
     modified_by: String(product.modified_by || '').trim(),
@@ -366,57 +386,43 @@ function normalizeProduct(product) {
 
 function loadEditorSession() {
   const raw = localStorage.getItem(STORAGE_KEYS.editorSession);
-  if (!raw) {
-    editorSession = null;
-    return null;
-  }
+  if (!raw) return {username: 'appareil'};
   try {
     const parsed = JSON.parse(raw);
-    if (!parsed.expiresAt || new Date(parsed.expiresAt).getTime() <= Date.now()) {
-      localStorage.removeItem(STORAGE_KEYS.editorSession);
-      editorSession = null;
-      return null;
-    }
-    editorSession = parsed;
-    return parsed;
+    return {username: parsed.username || 'appareil'};
   } catch (error) {
-    localStorage.removeItem(STORAGE_KEYS.editorSession);
-    editorSession = null;
-    return null;
+    return {username: 'appareil'};
   }
 }
 
-function saveEditorSession(session) {
-  editorSession = session;
-  localStorage.setItem(STORAGE_KEYS.editorSession, JSON.stringify(session));
+function saveEditorName() {
+  const username = document.getElementById('editorName').value.trim() || 'appareil';
+  localStorage.setItem(STORAGE_KEYS.editorSession, JSON.stringify({username}));
+  updateAppShellState();
 }
 
-function hasValidEditorSession() {
-  return !!loadEditorSession();
+function requireEditorSession() {
+  return true;
 }
 
 function getEditorHeaders() {
-  const session = loadEditorSession();
-  if (!session) return {};
   return {
-    'X-User-Name': session.username,
-    'X-Shared-Password': session.password
+    'X-User-Name': loadEditorSession().username || 'appareil'
   };
 }
 
-function showEditorRequirement(actionLabel='utiliser le scan') {
-  const message = `Une session editeur de 24 heures est requise pour ${actionLabel}.`;
-  const target = document.getElementById('scan').classList.contains('active')
-    ? document.getElementById('scanResult')
-    : document.getElementById('addMsg');
-  if (target) target.innerHTML = `<div class="msg error">${esc(message)}</div>`;
-  document.getElementById('editorSessionInfo').textContent = `${message} Entrez votre nom puis le mot de passe partage.`;
+function canonicalSide(facing, viewedSide) {
+  if (facing === 'Arriere') {
+    return viewedSide === 'Gauche' ? 'Droite' : 'Gauche';
+  }
+  return viewedSide;
 }
 
-function requireEditorSession(actionLabel='utiliser le scan') {
-  if (hasValidEditorSession()) return true;
-  showEditorRequirement(actionLabel);
-  return false;
+function viewedSideFromCanonical(facing, storedSide) {
+  if (facing === 'Arriere') {
+    return storedSide === 'Gauche' ? 'Droite' : 'Gauche';
+  }
+  return storedSide;
 }
 
 async function apiFetch(url, options = {}) {
@@ -527,10 +533,6 @@ function updateSyncNotice(message='') {
 }
 
 async function syncLocalProductsToServer() {
-  if (!hasValidEditorSession()) {
-    updateSyncNotice('La session editeur a expire. Reconnectez-vous avant d exporter vers la base partagee.');
-    return;
-  }
   if (!navigator.onLine) {
     updateSyncNotice('Le reseau n est pas disponible. Les changements restent gardes sur cet appareil.');
     return;
@@ -677,9 +679,6 @@ async function apiGetProductByBarcode(barcode) {
 }
 
 async function apiAddProduct(payload) {
-  if (!hasValidEditorSession()) {
-    return {success: false, error: 'Session editeur requise.'};
-  }
   const headers = {'Content-Type':'application/json', ...getEditorHeaders()};
   if (dataMode === 'hybrid') {
     try {
@@ -718,9 +717,6 @@ async function apiAddProduct(payload) {
 }
 
 async function apiUpdateProduct(product) {
-  if (!hasValidEditorSession()) {
-    return {success: false, error: 'Session editeur requise.'};
-  }
   const headers = {'Content-Type':'application/json', ...getEditorHeaders()};
   if (dataMode === 'hybrid') {
     const session = loadEditorSession();
@@ -746,9 +742,6 @@ async function apiUpdateProduct(product) {
 }
 
 async function apiBulkUpdateProducts(products) {
-  if (!hasValidEditorSession()) {
-    return {success: false, error: 'Session editeur requise.'};
-  }
   const headers = {'Content-Type':'application/json', ...getEditorHeaders()};
   if (dataMode === 'hybrid') {
     const nextProducts = loadLocalProducts();
@@ -777,9 +770,6 @@ async function apiBulkUpdateProducts(products) {
 }
 
 async function apiDeleteProduct(id) {
-  if (!hasValidEditorSession()) {
-    return {success: false, error: 'Session editeur requise.'};
-  }
   if (dataMode === 'hybrid') {
     const products = loadLocalProducts().filter(product => Number(product.id) !== Number(id));
     saveLocalProducts(products);
@@ -806,7 +796,6 @@ async function apiGetLayoutAisles() {
 }
 
 async function apiCreateLayoutAisle(payload) {
-  if (!hasValidEditorSession()) return {success: false, error: 'Session editeur requise.'};
   const {res, data} = await apiFetch('/api/layout/aisles', {
     method: 'POST',
     headers: {'Content-Type':'application/json', ...getEditorHeaders()},
@@ -816,7 +805,6 @@ async function apiCreateLayoutAisle(payload) {
 }
 
 async function apiUpdateLayoutAisle(aisle, payload) {
-  if (!hasValidEditorSession()) return {success: false, error: 'Session editeur requise.'};
   const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}`, {
     method: 'PUT',
     headers: {'Content-Type':'application/json', ...getEditorHeaders()},
@@ -826,7 +814,6 @@ async function apiUpdateLayoutAisle(aisle, payload) {
 }
 
 async function apiDeleteLayoutAisle(aisle) {
-  if (!hasValidEditorSession()) return {success: false, error: 'Session editeur requise.'};
   const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}`, {
     method: 'DELETE',
     headers: getEditorHeaders()
@@ -859,31 +846,6 @@ async function apiLookupOnline(barcode, signal) {
   } catch (error) {
     return {found: false};
   }
-}
-
-async function openEditorSession() {
-  const username = document.getElementById('editorName').value.trim();
-  const password = document.getElementById('editorPassword').value.trim();
-  if (!username || !password) {
-    document.getElementById('editorSessionInfo').textContent = 'Entrez un utilisateur et le mot de passe partage pour ouvrir la session.';
-    return;
-  }
-  const {res, data} = await apiFetch('/api/auth/session', {
-    method: 'POST',
-    headers: {
-      'Content-Type':'application/json',
-      'X-User-Name': username,
-      'X-Shared-Password': password
-    },
-    body: JSON.stringify({})
-  });
-  if (!res.ok || !data.success) {
-    document.getElementById('editorSessionInfo').textContent = data.error || 'Impossible d ouvrir la session.';
-    return;
-  }
-  saveEditorSession({username, password, expiresAt: data.expires_at});
-  document.getElementById('editorPassword').value = '';
-  updateAppShellState();
 }
 
 function enablePhoneMode() {
@@ -936,15 +898,18 @@ async function importLocalDatabase(event) {
 }
 
 function cursorLabel() {
-  return `Allee ${cursor.aisle} - ${cursor.side} - Tablette ${cursor.shelf} - Pos. ${cursor.position}`;
+  return `Allee ${cursor.aisle} - ${cursor.facing} - ${viewedSideFromCanonical(cursor.facing, cursor.side)} - Section ${cursor.section} - Tablette ${cursor.shelf} - Pos. ${cursor.position}`;
 }
 
 function updateCursorUi() {
   document.getElementById('cursorText').textContent = cursorLabel();
   document.getElementById('scanAisle').value = cursor.aisle;
-  document.getElementById('scanSide').value = cursor.side;
+  document.getElementById('scanFacing').value = cursor.facing;
+  document.getElementById('scanSide').value = viewedSideFromCanonical(cursor.facing, cursor.side);
+  document.getElementById('scanSection').value = cursor.section;
   document.getElementById('scanShelf').value = cursor.shelf;
   document.getElementById('scanPosition').value = cursor.position;
+  document.getElementById('maxSection').value = cursor.maxSection;
   document.getElementById('maxPosition').value = cursor.maxPosition;
   document.getElementById('maxShelf').value = cursor.maxShelf;
   localStorage.setItem(STORAGE_KEYS.cursor, JSON.stringify(cursor));
@@ -976,6 +941,7 @@ function loadScanDraft() {
 function persistAddDraft() {
   localStorage.setItem(STORAGE_KEYS.addDraft, JSON.stringify({
     aisle: document.getElementById('mapAisle').value.trim(),
+    section: document.getElementById('mapSection').value.trim(),
     shelf: document.getElementById('mapShelf').value.trim(),
     position: document.getElementById('mapPosition').value.trim()
   }));
@@ -987,6 +953,7 @@ function loadAddDraft() {
   try {
     const draft = JSON.parse(saved);
     document.getElementById('mapAisle').value = draft.aisle || '';
+    document.getElementById('mapSection').value = draft.section || '1';
     document.getElementById('mapShelf').value = draft.shelf || '5';
     document.getElementById('mapPosition').value = draft.position || '8';
   } catch (error) {}
@@ -1002,12 +969,10 @@ function updateAppShellState() {
       ? 'L app garde votre position et vos formulaires meme si Safari se ferme.'
       : 'Sur mobile: ouvrez le site puis ajoutez-le a l ecran d accueil pour un acces rapide.');
   const session = loadEditorSession();
-  document.getElementById('editorSessionInfo').textContent = session
-    ? `Session editeur active pour ${session.username} jusqu au ${new Date(session.expiresAt).toLocaleString('fr-CA')}.`
-    : 'Les changements et le scan demandent une session editeur valide pendant 24 heures sur cet appareil.';
-  if (session) {
-    document.getElementById('editorName').value = session.username;
-  }
+  document.getElementById('editorSessionInfo').textContent = session?.username && session.username !== 'appareil'
+    ? `Cet appareil signe les changements avec le nom ${session.username}.`
+    : 'Aucun mot de passe pour l instant. Si vous entrez un nom, il sera garde sur cet appareil pour suivre qui a change quoi.';
+  document.getElementById('editorName').value = session?.username === 'appareil' ? '' : (session?.username || '');
 }
 
 function updateNetworkStatus() {
@@ -1029,9 +994,12 @@ function positiveInt(id, fallback) {
 
 function saveCursor() {
   cursor.aisle = positiveInt('scanAisle', cursor.aisle);
-  cursor.side = document.getElementById('scanSide').value;
+  cursor.facing = document.getElementById('scanFacing').value;
+  cursor.side = canonicalSide(cursor.facing, document.getElementById('scanSide').value);
+  cursor.section = positiveInt('scanSection', cursor.section);
   cursor.shelf = positiveInt('scanShelf', cursor.shelf);
   cursor.position = positiveInt('scanPosition', cursor.position);
+  cursor.maxSection = positiveInt('maxSection', cursor.maxSection);
   cursor.maxPosition = positiveInt('maxPosition', cursor.maxPosition);
   cursor.maxShelf = positiveInt('maxShelf', cursor.maxShelf);
   updateCursorUi();
@@ -1046,6 +1014,10 @@ function advanceCursor() {
   }
   if (cursor.shelf > cursor.maxShelf) {
     cursor.shelf = 1;
+    cursor.section += 1;
+  }
+  if (cursor.section > cursor.maxSection) {
+    cursor.section = 1;
     if (cursor.side === 'Gauche') {
       cursor.side = 'Droite';
     } else {
@@ -1061,7 +1033,7 @@ function productCard(p, showDelete=true) {
     ${showDelete ? `<button class="delete-btn" onclick="deleteProduct(${p.id})" title="Supprimer">x</button>` : ''}
     <div class="name">${esc(p.name)}</div>
     ${p.brand ? `<div class="barcode-text">Marque: ${esc(p.brand)}</div>` : ''}
-    <div class="location">Allee ${esc(p.aisle)} - ${esc(p.side)} - Tablette ${esc(p.shelf)} - Pos. ${esc(p.position)}</div>
+    <div class="location">Allee ${esc(p.aisle)} - ${esc(p.side)} - Section ${esc(p.section || '1')} - Tablette ${esc(p.shelf)} - Pos. ${esc(p.position)}</div>
     <div class="barcode-text">${p.barcode ? 'Code: ' + esc(p.barcode) : ''}</div>
     ${p.last_change_by ? `<div class="barcode-text">Dernier changement: ${esc(p.last_change_by)}</div>` : ''}
     ${p.description ? `<div class="desc-text">${esc(p.description)}</div>` : ''}
@@ -1074,6 +1046,8 @@ function productSort(a, b) {
   if (byAisle) return byAisle;
   const bySide = (sideOrder[a.side] ?? 9) - (sideOrder[b.side] ?? 9);
   if (bySide) return bySide;
+  const bySection = Number(a.section || 1) - Number(b.section || 1);
+  if (bySection) return bySection;
   const byShelf = Number(a.shelf) - Number(b.shelf);
   if (byShelf) return byShelf;
   const byPosition = Number(a.position) - Number(b.position);
@@ -1085,7 +1059,7 @@ function layoutRow(p, index, total) {
   const swapOptions = allProductsCache
     .filter(item => Number(item.id) !== Number(p.id))
     .sort(productSort)
-    .map(item => `<option value="${item.id}">Allee ${esc(item.aisle)} - ${esc(item.side)} - T${esc(item.shelf)} P${esc(item.position)} - ${esc(item.name)}</option>`)
+    .map(item => `<option value="${item.id}">Allee ${esc(item.aisle)} - ${esc(item.side)} - S${esc(item.section || '1')} - T${esc(item.shelf)} P${esc(item.position)} - ${esc(item.name)}</option>`)
     .join('');
   return `<div class="layout-card">
     <div class="name">${esc(p.name)}</div>
@@ -1103,6 +1077,10 @@ function layoutRow(p, index, total) {
           <option value="Gauche" ${p.side === 'Gauche' ? 'selected' : ''}>Gauche</option>
           <option value="Droite" ${p.side === 'Droite' ? 'selected' : ''}>Droite</option>
         </select>
+      </div>
+      <div class="field">
+        <label class="label" for="layoutSection-${p.id}">Section</label>
+        <input id="layoutSection-${p.id}" type="number" min="1" value="${esc(p.section || '1')}" placeholder="Ex: 2"/>
       </div>
       <div class="field">
         <label class="label" for="layoutShelf-${p.id}">Tablette</label>
@@ -1163,8 +1141,12 @@ function renderLayoutEditor() {
         <span class="pill">${sorted.length} produit${sorted.length !== 1 ? 's' : ''}</span>
       </div>
       <div class="section-title" style="margin-top:14px">Structure de l allee</div>
-      <div class="section-note">Utilise ces valeurs pour redistribuer les produits quand une tablette ou un cote est plein.</div>
+      <div class="section-note">Utilise ces valeurs pour redistribuer les produits quand une tablette ou une section est pleine.</div>
       <div class="row3">
+        <div class="field">
+          <label class="label" for="layoutMaxSection">Sections par cote</label>
+          <input id="layoutMaxSection" type="number" min="1" value="${cursor.maxSection}" placeholder="Ex: 3"/>
+        </div>
         <div class="field">
           <label class="label" for="layoutMaxPosition">Positions par tablette</label>
           <input id="layoutMaxPosition" type="number" min="1" value="${cursor.maxPosition}" placeholder="Ex: 8"/>
@@ -1189,7 +1171,7 @@ function renderLayoutEditor() {
     </div>`;
 
   sorted.forEach((p, index) => {
-    const group = `${p.side} - Tablette ${p.shelf}`;
+    const group = `${p.side} - Section ${p.section || '1'} - Tablette ${p.shelf}`;
     if (group !== lastGroup) {
       html += `<div class="shelf-title">${esc(group)}</div>`;
       lastGroup = group;
@@ -1209,6 +1191,7 @@ function readLayoutProduct(id) {
     barcode: document.getElementById(`layoutBarcode-${id}`).value.trim(),
     aisle: document.getElementById(`layoutAisle-${id}`).value.trim(),
     side: document.getElementById(`layoutSide-${id}`).value,
+    section: document.getElementById(`layoutSection-${id}`).value.trim() || '1',
     shelf: document.getElementById(`layoutShelf-${id}`).value.trim(),
     position: document.getElementById(`layoutPosition-${id}`).value.trim()
   };
@@ -1307,6 +1290,7 @@ async function swapLayoutWithSelected(id) {
 
 async function reflowCurrentAisle() {
   if (!requireEditorSession('modifier le plan')) return;
+  const maxSection = positiveInt('layoutMaxSection', cursor.maxSection);
   const maxPosition = positiveInt('layoutMaxPosition', cursor.maxPosition);
   const maxShelf = positiveInt('layoutMaxShelf', cursor.maxShelf);
   const mode = document.getElementById('layoutReflowMode').value;
@@ -1316,11 +1300,13 @@ async function reflowCurrentAisle() {
   function assign(list, startAisle, startSide) {
     let aisle = Number(startAisle);
     let side = startSide;
+    let section = 1;
     let shelf = 1;
     let position = 1;
     list.forEach(product => {
       product.aisle = String(aisle);
       product.side = side;
+      product.section = String(section);
       product.shelf = String(shelf);
       product.position = String(position);
       reflowed.push(product);
@@ -1331,6 +1317,10 @@ async function reflowCurrentAisle() {
       }
       if (shelf > maxShelf) {
         shelf = 1;
+        section += 1;
+      }
+      if (section > maxSection) {
+        section = 1;
         if (side === 'Gauche') {
           side = 'Droite';
         } else {
@@ -1357,6 +1347,7 @@ async function reflowCurrentAisle() {
   }
   cursor.maxPosition = maxPosition;
   cursor.maxShelf = maxShelf;
+  cursor.maxSection = maxSection;
   updateCursorUi();
   await loadBrowse(true);
   showLayoutMsg('Positions recalculees.', 'success');
@@ -1366,6 +1357,7 @@ function useAsScannerCursor(id) {
   const product = readLayoutProduct(id);
   cursor.aisle = Number(product.aisle) || cursor.aisle;
   cursor.side = product.side;
+  cursor.section = Number(product.section) || cursor.section;
   cursor.shelf = Number(product.shelf) || cursor.shelf;
   cursor.position = Number(product.position) || cursor.position;
   updateCursorUi();
@@ -1724,7 +1716,6 @@ function handleScanInputKey(event) {
 function handleHardwareScannerKey(event) {
   if (!document.getElementById('scan').classList.contains('active')) return;
   if (event.ctrlKey || event.altKey || event.metaKey) return;
-  if (!hasValidEditorSession()) return;
 
   const target = event.target;
   const tag = target && target.tagName ? target.tagName.toLowerCase() : '';
@@ -1824,7 +1815,7 @@ async function lookupScanFromInput(force=false, barcodeOverride='') {
       <div class="pill">Produit existant</div>
       <div class="name" style="margin-top:10px">${esc(currentScanProduct.name)}</div>
       ${currentScanProduct.brand ? `<div class="barcode-text">Marque: ${esc(currentScanProduct.brand)}</div>` : ''}
-      <div class="barcode-text">Ancien: Allee ${esc(currentScanProduct.aisle)} - ${esc(currentScanProduct.side)} - Tablette ${esc(currentScanProduct.shelf)} - Pos. ${esc(currentScanProduct.position)}</div>
+      <div class="barcode-text">Ancien: Allee ${esc(currentScanProduct.aisle)} - ${esc(currentScanProduct.side)} - Section ${esc(currentScanProduct.section || '1')} - Tablette ${esc(currentScanProduct.shelf)} - Pos. ${esc(currentScanProduct.position)}</div>
       ${currentScanProduct.description ? `<div class="desc-text">${esc(currentScanProduct.description)}</div>` : ''}
       <div class="msg info">Nouveau: ${esc(cursorLabel())}</div>
       <button class="btn" onclick="confirmExistingLocation()">Confirmer ce nouvel emplacement</button>
@@ -1907,6 +1898,7 @@ async function confirmExistingLocation() {
     barcode: currentScanProduct.barcode || '',
     aisle: String(cursor.aisle),
     side: cursor.side,
+    section: String(cursor.section),
     shelf: String(cursor.shelf),
     position: String(cursor.position)
   };
@@ -1935,6 +1927,7 @@ async function confirmNewProduct() {
     barcode,
     aisle: String(cursor.aisle),
     side: cursor.side,
+    section: String(cursor.section),
     shelf: String(cursor.shelf),
     position: String(cursor.position)
   });
@@ -1957,6 +1950,7 @@ async function confirmUnknownProduct() {
     barcode,
     aisle: String(cursor.aisle),
     side: cursor.side,
+    section: String(cursor.section),
     shelf: String(cursor.shelf),
     position: String(cursor.position)
   });
@@ -2021,9 +2015,15 @@ function renderMapEditor() {
         </div>
         <div class="row2" style="margin-top:12px">
           <div class="field">
+            <label class="label" for="mapSection-${layout.aisle}">Sections par cote</label>
+            <input id="mapSection-${layout.aisle}" type="number" min="1" value="${esc(layout.max_section || '1')}"/>
+          </div>
+          <div class="field">
             <label class="label" for="mapShelf-${layout.aisle}">Tablettes par cote</label>
             <input id="mapShelf-${layout.aisle}" type="number" min="1" value="${esc(layout.max_shelf)}"/>
           </div>
+        </div>
+        <div class="row2" style="margin-top:8px">
           <div class="field">
             <label class="label" for="mapPosition-${layout.aisle}">Positions par tablette</label>
             <input id="mapPosition-${layout.aisle}" type="number" min="1" value="${esc(layout.max_position)}"/>
@@ -2048,23 +2048,28 @@ async function loadMapEditor() {
 async function createAisleLayout() {
   if (!requireEditorSession('modifier le plan du magasin')) return;
   const aisle = document.getElementById('mapAisle').value.trim();
+  const max_section = document.getElementById('mapSection').value.trim() || '1';
   const max_shelf = document.getElementById('mapShelf').value.trim() || '5';
   const max_position = document.getElementById('mapPosition').value.trim() || '8';
   const msgDiv = document.getElementById('addMsg');
-  const data = await apiCreateLayoutAisle({aisle, max_shelf, max_position});
+  const data = await apiCreateLayoutAisle({aisle, max_section, max_shelf, max_position});
   msgDiv.className = data.success ? 'msg success' : 'msg error';
   msgDiv.textContent = data.success ? `Allee ${aisle} ajoutee.` : (data.error || 'Creation impossible.');
   if (data.success) {
     document.getElementById('mapAisle').value = '';
+    document.getElementById('mapSection').value = '1';
+    document.getElementById('mapShelf').value = '5';
+    document.getElementById('mapPosition').value = '8';
     await loadMapEditor();
   }
 }
 
 async function saveAisleLayout(aisle) {
   if (!requireEditorSession('modifier le plan du magasin')) return;
+  const max_section = document.getElementById(`mapSection-${aisle}`).value.trim() || '1';
   const max_shelf = document.getElementById(`mapShelf-${aisle}`).value.trim() || '5';
   const max_position = document.getElementById(`mapPosition-${aisle}`).value.trim() || '8';
-  const data = await apiUpdateLayoutAisle(aisle, {max_shelf, max_position, enabled: true});
+  const data = await apiUpdateLayoutAisle(aisle, {max_section, max_shelf, max_position, enabled: true});
   const msgDiv = document.getElementById('addMsg');
   msgDiv.className = data.success ? 'msg success' : 'msg error';
   msgDiv.textContent = data.success ? `Allee ${aisle} sauvee.` : (data.error || 'Sauvegarde impossible.');
@@ -2075,11 +2080,12 @@ function applyAisleLayoutToCursor(aisle) {
   const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
   cursor.aisle = Number(aisle) || cursor.aisle;
   if (layout) {
+    cursor.maxSection = Number(layout.max_section) || cursor.maxSection;
     cursor.maxShelf = Number(layout.max_shelf) || cursor.maxShelf;
     cursor.maxPosition = Number(layout.max_position) || cursor.maxPosition;
   }
   updateCursorUi();
-  document.getElementById('addMsg').innerHTML = `<div class="msg success">Le scan utilisera maintenant l allee ${esc(aisle)} avec ${esc(layout?.max_shelf || cursor.maxShelf)} tablette(s) et ${esc(layout?.max_position || cursor.maxPosition)} position(s).</div>`;
+  document.getElementById('addMsg').innerHTML = `<div class="msg success">Le scan utilisera maintenant l allee ${esc(aisle)} avec ${esc(layout?.max_section || cursor.maxSection)} section(s), ${esc(layout?.max_shelf || cursor.maxShelf)} tablette(s) et ${esc(layout?.max_position || cursor.maxPosition)} position(s).</div>`;
 }
 
 async function removeAisleLayout(aisle) {
@@ -2135,7 +2141,7 @@ if ('serviceWorker' in navigator) {
 
 document.addEventListener('keydown', handleHardwareScannerKey);
 document.getElementById('scanInput').addEventListener('input', persistScanDraft);
-['mapAisle','mapShelf','mapPosition'].forEach(id => {
+['mapAisle','mapSection','mapShelf','mapPosition'].forEach(id => {
   document.getElementById(id).addEventListener('input', persistAddDraft);
   document.getElementById(id).addEventListener('change', persistAddDraft);
 });
