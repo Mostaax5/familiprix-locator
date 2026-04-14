@@ -59,10 +59,13 @@
   .delete-btn{float:right;background:none;border:none;color:#999;font-size:18px;cursor:pointer;padding:0 0 0 8px}
   .delete-btn:hover{color:#c8102e}
   .scanner{overflow:hidden;padding:0}
-  .scanner video{width:100%;min-height:220px;max-height:360px;background:#17191d;display:block;object-fit:cover}
-  #html5Reader{display:none;background:#17191d}
-  #html5Reader video{width:100% !important;min-height:220px;max-height:360px;object-fit:cover}
-  #html5Reader img{display:none}
+  .scanner-viewport{position:relative;width:100%;height:clamp(180px, 34vh, 300px);background:#17191d;overflow:hidden}
+  .scanner video{width:100%;height:100%;background:#17191d;display:block;object-fit:cover}
+  #html5Reader,#searchHtml5Reader{display:none;background:#17191d;width:100%;height:100%;overflow:hidden;position:relative}
+  #html5Reader video,#searchHtml5Reader video{width:100% !important;height:100% !important;object-fit:cover}
+  #html5Reader canvas,#searchHtml5Reader canvas{width:100% !important;height:100% !important;object-fit:cover}
+  #html5Reader img,#searchHtml5Reader img{display:none}
+  #html5Reader > video,#html5Reader > canvas,#html5Reader video,#html5Reader canvas,#searchHtml5Reader > video,#searchHtml5Reader > canvas,#searchHtml5Reader video,#searchHtml5Reader canvas{max-width:100% !important;max-height:100% !important}
   .scanner-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;background:#fff}
   .pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:5px 9px;font-size:12px;font-weight:700;background:#eef4ff;color:#1a56db}
   .cursor{display:flex;align-items:center;justify-content:space-between;gap:10px}
@@ -95,7 +98,7 @@
   .status-dot.offline{background:#dc2626}
   .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
   @media (min-width:860px){.content{max-width:900px}.layout-grid{grid-template-columns:1fr 1fr 1fr 1fr}.layout-actions{grid-template-columns:repeat(5,1fr)}}
-  @media (max-width:520px){.row2,.row3,.confirm-grid,.device-grid,.scan-tools,.btn-row{grid-template-columns:1fr}.tabs{top:calc(66px + env(safe-area-inset-top))}.tab{font-size:11px}.content{padding:10px}.cursor{align-items:flex-start;flex-direction:column}.btn-inline{width:100%}}
+  @media (max-width:520px){.row2,.row3,.confirm-grid,.device-grid,.scan-tools,.btn-row{grid-template-columns:1fr}.tabs{top:calc(66px + env(safe-area-inset-top))}.tab{font-size:11px}.content{padding:10px}.cursor{align-items:flex-start;flex-direction:column}.btn-inline{width:100%}.scanner-viewport{height:min(34vh,220px)}}
   @media (max-width:420px){.layout-grid,.layout-actions{grid-template-columns:1fr}}
 </style>
 </head>
@@ -209,8 +212,10 @@
   </div>
 
   <div class="card scanner">
-    <video id="cameraPreview" playsinline muted></video>
-    <div id="html5Reader"></div>
+    <div class="scanner-viewport">
+      <video id="cameraPreview" playsinline muted></video>
+      <div id="html5Reader"></div>
+    </div>
     <div class="scanner-bar">
       <span id="scannerStatus" class="pill">Camera arretee</span>
       <button class="btn btn-inline secondary" onclick="toggleCamera()" id="cameraButton">Ouvrir camera</button>
@@ -248,8 +253,10 @@
     <div class="section-title">Recherche rapide</div>
     <div class="section-note">Scannez un code-barres avec la camera pour trouver directement le produit.</div>
     <div class="card scanner" style="margin-top:10px;margin-bottom:0">
-      <video id="searchCameraPreview" playsinline muted></video>
-      <div id="searchHtml5Reader"></div>
+      <div class="scanner-viewport">
+        <video id="searchCameraPreview" playsinline muted></video>
+        <div id="searchHtml5Reader"></div>
+      </div>
       <div class="scanner-bar">
         <span id="searchScannerStatus" class="pill">Camera arretee</span>
         <button class="btn btn-inline secondary" onclick="startSearchScan()" id="searchCameraButton">Ouvrir camera</button>
@@ -1643,6 +1650,8 @@ async function maybeRunOcrFallback(reader, status) {
 }
 
 async function startQuaggaScanner(reader, status, button) {
+  reader.style.height = '100%';
+  reader.style.minHeight = '0';
   const config = {
     inputStream: {
       type: 'LiveStream',
