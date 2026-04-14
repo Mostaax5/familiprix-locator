@@ -79,6 +79,14 @@
   .layout-card .name{font-size:14px;font-weight:800;margin-bottom:8px}
   .layout-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px}
   .layout-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin-top:8px}
+  .plan-aisle{background:white;border:1px solid #e6e8ec;border-radius:8px;padding:14px;margin-bottom:12px}
+  .plan-sides{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+  .plan-side{border:1px solid #e6e8ec;border-radius:8px;padding:12px;background:#fafbfc}
+  .plan-side h4{font-size:13px;font-weight:800;margin-bottom:6px}
+  .plan-meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  .plan-meta .pill{background:#f3f4f6;color:#374151}
+  .map-textarea{width:100%;min-height:120px;padding:12px;border:1px solid #d8dce2;border-radius:8px;font-size:15px;line-height:1.5;resize:vertical;background:white}
+  .plan-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
   .mini-btn{padding:9px 8px;border-radius:8px;border:1px solid #d8dce2;background:#fff;color:#2f343b;font-size:12px;font-weight:800;cursor:pointer}
   .mini-btn.danger{color:#c8102e;border-color:#f1b8c2}
   .mini-btn.primary{background:#c8102e;color:#fff;border-color:#c8102e}
@@ -99,6 +107,7 @@
   .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
   @media (min-width:860px){.content{max-width:900px}.layout-grid{grid-template-columns:1fr 1fr 1fr 1fr}.layout-actions{grid-template-columns:repeat(5,1fr)}}
   @media (max-width:520px){.row2,.row3,.confirm-grid,.device-grid,.scan-tools,.btn-row{grid-template-columns:1fr}.tabs{top:calc(66px + env(safe-area-inset-top))}.tab{font-size:11px}.content{padding:10px}.cursor{align-items:flex-start;flex-direction:column}.btn-inline{width:100%}.scanner-viewport{height:min(34vh,220px)}}
+  @media (max-width:520px){.plan-sides{grid-template-columns:1fr}}
   @media (max-width:420px){.layout-grid,.layout-actions{grid-template-columns:1fr}}
 </style>
 </head>
@@ -280,7 +289,7 @@
 <div id="add" class="section content">
   <div class="card">
     <div class="section-title">Plan du magasin</div>
-    <div class="section-note">Ajoutez ou retirez des allees, puis fixez combien de sections, de tablettes et de positions chaque allee peut contenir. Les produits continuent a se creer avec le scan.</div>
+    <div class="section-note">Ici, on construit le plan du magasin. Une allee contient deux cotes. Chaque cote contient des sections. Chaque section contient des tablettes. Et chaque tablette a son propre nombre de positions.</div>
     <div class="row3">
       <div class="field">
         <label class="label" for="mapAisle">Nouvelle allee</label>
@@ -299,6 +308,7 @@
         <input type="number" id="mapPosition" min="1" value="8"/>
       </div>
     </div>
+    <div class="inline-note">Ces 3 nombres servent seulement a creer une base de depart. Ensuite, vous pouvez ajuster chaque cote, chaque section et chaque tablette dans la liste juste dessous.</div>
     <button class="btn" onclick="createAisleLayout()">Ajouter cette allee</button>
     <div id="addMsg"></div>
   </div>
@@ -2236,7 +2246,7 @@ function renderMapEditor() {
   const msgDiv = document.getElementById('addMsg');
   const div = document.getElementById('mapContent');
   div.innerHTML = mapLayouts.length
-    ? mapLayouts.map(layout => `<div class="card">
+    ? mapLayouts.map(layout => `<div class="plan-aisle">
         <div class="cursor">
           <div>
             <span class="small">Configuration d allee</span>
@@ -2244,28 +2254,30 @@ function renderMapEditor() {
           </div>
           <span class="pill">${layout.product_count || 0} produit${Number(layout.product_count || 0) > 1 ? 's' : ''}</span>
         </div>
+        <div class="section-note" style="margin-top:10px">Pour chaque cote: une ligne = une section. Dans chaque ligne: nombres de positions par tablette, separes par des virgules. Exemple: <span class="mono">8,8,6</span> signifie 3 tablettes avec 8, 8 puis 6 positions.</div>
+        <div class="plan-sides">
         ${['Gauche','Droite'].map(side => {
           const sections = normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position).sides[side].sections;
-          return `<div class="card" style="margin-top:12px">
-            <div class="section-title">${side}</div>
-            <div class="section-note">Chaque section contient une liste de tablettes. Entrez le nombre de positions par tablette separe par des virgules.</div>
-            ${sections.map((section, index) => `
-              <div class="field" style="margin-top:8px">
-                <label class="label" for="mapConfig-${layout.aisle}-${side}-${index}">Section ${index + 1}</label>
-                <input id="mapConfig-${layout.aisle}-${side}-${index}" value="${esc(section.shelves.join(','))}" placeholder="Ex: 8,8,6"/>
-              </div>
-            `).join('')}
-            <div class="tool-row">
-              <button class="btn btn-outline btn-inline" onclick="addMapSection('${esc(layout.aisle)}','${side}')">Ajouter une section</button>
-              <button class="btn btn-outline btn-inline" onclick="removeMapSection('${esc(layout.aisle)}','${side}')">Retirer la derniere section</button>
+          return `<div class="plan-side">
+            <h4>${side}</h4>
+            <div class="small">Section 1 sur la ligne 1, section 2 sur la ligne 2, etc.</div>
+            <div class="field" style="margin-top:8px">
+              <label class="label" for="mapConfig-${layout.aisle}-${side}">Sections du cote ${side}</label>
+              <textarea id="mapConfig-${layout.aisle}-${side}" class="map-textarea" placeholder="Exemple&#10;8,8,6&#10;4,4">${esc(formatSectionsForTextarea(sections))}</textarea>
             </div>
           </div>`;
         }).join('')}
+        </div>
+        <div class="plan-meta">
+          <span class="pill">Gauche et droite peuvent etre differents</span>
+          <span class="pill">Chaque section peut avoir un nombre different de tablettes</span>
+          <span class="pill">Chaque tablette peut avoir son propre nombre de positions</span>
+        </div>
         ${layout.modified_by ? `<div class="barcode-text">Dernier changement: ${esc(layout.modified_by)}</div>` : ''}
-        <div class="tool-row">
+        <div class="plan-actions">
           <button class="btn btn-inline" onclick="saveAisleLayout('${esc(layout.aisle)}')">Sauver</button>
           <button class="btn btn-outline btn-inline" onclick="applyAisleLayoutToCursor('${esc(layout.aisle)}')">Utiliser pour le scan</button>
-          <button class="btn btn-outline btn-inline" onclick="removeAisleLayout('${esc(layout.aisle)}')">Retirer</button>
+          <button class="btn btn-outline btn-inline" style="border-color:#f1b8c2;color:#c8102e" onclick="removeAisleLayout('${esc(layout.aisle)}')">Supprimer cette allee</button>
         </div>
       </div>`).join('')
     : '<div class="empty">Aucune allee configuree.</div>';
@@ -2283,6 +2295,12 @@ function getEditableLayout(aisle) {
   return normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position);
 }
 
+function formatSectionsForTextarea(sections) {
+  return (sections || [])
+    .map(section => (section.shelves || []).join(','))
+    .join('\n');
+}
+
 function parseShelfList(value) {
   const numbers = String(value || '')
     .split(',')
@@ -2291,37 +2309,24 @@ function parseShelfList(value) {
   return numbers.length ? numbers : [8];
 }
 
+function parseSectionsTextarea(value) {
+  const lines = String(value || '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean);
+  const sections = lines.map(line => ({shelves: parseShelfList(line)}));
+  return sections.length ? sections : [{shelves:[8]}];
+}
+
 function readAisleLayoutConfig(aisle) {
   const layout = getEditableLayout(aisle);
   if (!layout) return null;
   ['Gauche', 'Droite'].forEach(side => {
-    layout.sides[side].sections = layout.sides[side].sections.map((section, index) => ({
-      shelves: parseShelfList(document.getElementById(`mapConfig-${aisle}-${side}-${index}`)?.value || section.shelves.join(','))
-    }));
+    layout.sides[side].sections = parseSectionsTextarea(
+      document.getElementById(`mapConfig-${aisle}-${side}`)?.value || formatSectionsForTextarea(layout.sides[side].sections)
+    );
   });
   return layout;
-}
-
-function addMapSection(aisle, side) {
-  const layout = readAisleLayoutConfig(aisle) || getEditableLayout(aisle);
-  if (!layout) return;
-  layout.sides[side].sections.push({shelves:[8]});
-  const target = mapLayouts.find(item => String(item.aisle) === String(aisle));
-  target.config = layout;
-  renderMapEditor();
-}
-
-function removeMapSection(aisle, side) {
-  const layout = readAisleLayoutConfig(aisle) || getEditableLayout(aisle);
-  if (!layout) return;
-  if (layout.sides[side].sections.length <= 1) {
-    document.getElementById('addMsg').innerHTML = `<div class="msg error">Il faut garder au moins une section sur le cote ${esc(side)}.</div>`;
-    return;
-  }
-  layout.sides[side].sections.pop();
-  const target = mapLayouts.find(item => String(item.aisle) === String(aisle));
-  target.config = layout;
-  renderMapEditor();
 }
 
 async function createAisleLayout() {
@@ -2379,12 +2384,29 @@ function applyAisleLayoutToCursor(aisle) {
 
 async function removeAisleLayout(aisle) {
   if (!requireEditorSession('modifier le plan du magasin')) return;
-  if (!confirm(`Retirer l allee ${aisle} ?`)) return;
-  const data = await apiDeleteLayoutAisle(aisle);
+  const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
+  const productCount = Number(layout?.product_count || 0);
+  const question = productCount
+    ? `Supprimer l allee ${aisle} ?\\n\\nCela supprimera aussi ${productCount} produit(s) qui sont dans cette allee.`
+    : `Supprimer l allee ${aisle} ?`;
+  if (!confirm(question)) return;
+  let data = null;
+  try {
+    data = await apiDeleteLayoutAisle(aisle);
+  } catch (error) {
+    data = {success: false, error: 'Suppression impossible pour le moment.'};
+  }
   const msgDiv = document.getElementById('addMsg');
-  msgDiv.className = data.success ? 'msg success' : 'msg error';
-  msgDiv.textContent = data.success ? (data.message || `Allee ${aisle} retiree.`) : (data.error || 'Suppression impossible.');
-  if (data.success) await loadMapEditor();
+  const success = Boolean(data && data.success);
+  msgDiv.className = success ? 'msg success' : 'msg error';
+  msgDiv.textContent = success
+    ? (data.message || `Allee ${aisle} retiree.`)
+    : ((data && data.error) || `Impossible de supprimer l allee ${aisle}.`);
+  if (success) {
+    mapLayouts = mapLayouts.filter(item => String(item.aisle) !== String(aisle));
+    renderMapEditor();
+    await loadMapEditor();
+  }
 }
 
 async function addProduct() {
