@@ -83,6 +83,9 @@
   .plan-sides{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
   .plan-side{border:1px solid #e6e8ec;border-radius:8px;padding:12px;background:#fafbfc}
   .plan-side h4{font-size:13px;font-weight:800;margin-bottom:6px}
+  .plan-section{border:1px solid #e6e8ec;border-radius:8px;padding:10px;background:white;margin-top:10px}
+  .plan-section h5{font-size:13px;font-weight:800;margin-bottom:8px}
+  .plan-shelf-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
   .plan-meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
   .plan-meta .pill{background:#f3f4f6;color:#374151}
   .map-textarea{width:100%;min-height:120px;padding:12px;border:1px solid #d8dce2;border-radius:8px;font-size:15px;line-height:1.5;resize:vertical;background:white}
@@ -106,7 +109,7 @@
   .status-dot.offline{background:#dc2626}
   .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
   @media (min-width:860px){.content{max-width:900px}.layout-grid{grid-template-columns:1fr 1fr 1fr 1fr}.layout-actions{grid-template-columns:repeat(5,1fr)}}
-  @media (max-width:520px){.row2,.row3,.confirm-grid,.device-grid,.scan-tools,.btn-row{grid-template-columns:1fr}.tabs{top:calc(66px + env(safe-area-inset-top))}.tab{font-size:11px}.content{padding:10px}.cursor{align-items:flex-start;flex-direction:column}.btn-inline{width:100%}.scanner-viewport{height:min(34vh,220px)}}
+  @media (max-width:520px){.row2,.row3,.confirm-grid,.device-grid,.scan-tools,.btn-row,.plan-sides,.plan-shelf-grid{grid-template-columns:1fr}.tabs{top:calc(66px + env(safe-area-inset-top))}.tab{font-size:11px}.content{padding:10px}.cursor{align-items:flex-start;flex-direction:column}.btn-inline{width:100%}.scanner-viewport{height:min(34vh,220px)}}
   @media (max-width:520px){.plan-sides{grid-template-columns:1fr}}
   @media (max-width:420px){.layout-grid,.layout-actions{grid-template-columns:1fr}}
 </style>
@@ -296,19 +299,23 @@
         <input type="number" id="mapAisle" min="1" placeholder="Ex: 9"/>
       </div>
       <div class="field">
-        <label class="label" for="mapSection">Sections par cote</label>
-        <input type="number" id="mapSection" min="1" value="1"/>
+        <label class="label" for="mapLeftSections">Sections cote gauche</label>
+        <input type="number" id="mapLeftSections" min="1" value="1"/>
       </div>
       <div class="field">
-        <label class="label" for="mapShelf">Tablettes par cote</label>
-        <input type="number" id="mapShelf" min="1" value="5"/>
+        <label class="label" for="mapRightSections">Sections cote droit</label>
+        <input type="number" id="mapRightSections" min="1" value="1"/>
       </div>
       <div class="field">
-        <label class="label" for="mapPosition">Positions par tablette</label>
-        <input type="number" id="mapPosition" min="1" value="8"/>
+        <label class="label" for="mapInitialShelves">Tablettes de depart par section</label>
+        <input type="number" id="mapInitialShelves" min="1" value="5"/>
+      </div>
+      <div class="field">
+        <label class="label" for="mapInitialPositions">Positions de depart par tablette</label>
+        <input type="number" id="mapInitialPositions" min="1" value="8"/>
       </div>
     </div>
-    <div class="inline-note">Ces 3 nombres servent seulement a creer une base de depart. Ensuite, vous pouvez ajuster chaque cote, chaque section et chaque tablette dans la liste juste dessous.</div>
+    <div class="inline-note">Choisissez d abord le nombre de sections a gauche et a droite. Ensuite, dans chaque allee, vous reglerez chaque section, chaque tablette, puis chaque nombre de positions separement.</div>
     <button class="btn" onclick="createAisleLayout()">Ajouter cette allee</button>
     <div id="addMsg"></div>
   </div>
@@ -463,6 +470,18 @@ function defaultLayoutConfig(maxSection = 1, maxShelf = 5, maxPosition = 8) {
     sides: {
       Gauche: {sections: makeSections()},
       Droite: {sections: makeSections()}
+    }
+  };
+}
+
+function buildLayoutWithSideCounts(leftSections = 1, rightSections = 1, shelfCount = 5, positionCount = 8) {
+  const makeSections = (count) => Array.from({length: Math.max(1, Number(count) || 1)}, () => ({
+    shelves: Array.from({length: Math.max(1, Number(shelfCount) || 1)}, () => Math.max(1, Number(positionCount) || 1))
+  }));
+  return {
+    sides: {
+      Gauche: {sections: makeSections(leftSections)},
+      Droite: {sections: makeSections(rightSections)}
     }
   };
 }
@@ -1010,9 +1029,10 @@ function loadScanDraft() {
 function persistAddDraft() {
   localStorage.setItem(STORAGE_KEYS.addDraft, JSON.stringify({
     aisle: document.getElementById('mapAisle').value.trim(),
-    section: document.getElementById('mapSection').value.trim(),
-    shelf: document.getElementById('mapShelf').value.trim(),
-    position: document.getElementById('mapPosition').value.trim()
+    leftSections: document.getElementById('mapLeftSections').value.trim(),
+    rightSections: document.getElementById('mapRightSections').value.trim(),
+    initialShelves: document.getElementById('mapInitialShelves').value.trim(),
+    initialPositions: document.getElementById('mapInitialPositions').value.trim()
   }));
 }
 
@@ -1022,9 +1042,10 @@ function loadAddDraft() {
   try {
     const draft = JSON.parse(saved);
     document.getElementById('mapAisle').value = draft.aisle || '';
-    document.getElementById('mapSection').value = draft.section || '1';
-    document.getElementById('mapShelf').value = draft.shelf || '5';
-    document.getElementById('mapPosition').value = draft.position || '8';
+    document.getElementById('mapLeftSections').value = draft.leftSections || '1';
+    document.getElementById('mapRightSections').value = draft.rightSections || '1';
+    document.getElementById('mapInitialShelves').value = draft.initialShelves || '5';
+    document.getElementById('mapInitialPositions').value = draft.initialPositions || '8';
   } catch (error) {}
 }
 
@@ -2254,17 +2275,29 @@ function renderMapEditor() {
           </div>
           <span class="pill">${layout.product_count || 0} produit${Number(layout.product_count || 0) > 1 ? 's' : ''}</span>
         </div>
-        <div class="section-note" style="margin-top:10px">Pour chaque cote: une ligne = une section. Dans chaque ligne: nombres de positions par tablette, separes par des virgules. Exemple: <span class="mono">8,8,6</span> signifie 3 tablettes avec 8, 8 puis 6 positions.</div>
+        <div class="section-note" style="margin-top:10px">Choisissez d abord le nombre de sections pour chaque cote. Ensuite, dans chaque section, choisissez le nombre de tablettes. Enfin, dans chaque tablette, indiquez le nombre de positions.</div>
         <div class="plan-sides">
         ${['Gauche','Droite'].map(side => {
           const sections = normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position).sides[side].sections;
           return `<div class="plan-side">
             <h4>${side}</h4>
-            <div class="small">Section 1 sur la ligne 1, section 2 sur la ligne 2, etc.</div>
             <div class="field" style="margin-top:8px">
-              <label class="label" for="mapConfig-${layout.aisle}-${side}">Sections du cote ${side}</label>
-              <textarea id="mapConfig-${layout.aisle}-${side}" class="map-textarea" placeholder="Exemple&#10;8,8,6&#10;4,4">${esc(formatSectionsForTextarea(sections))}</textarea>
+              <label class="label" for="sectionCount-${layout.aisle}-${side}">Nombre de sections</label>
+              <input id="sectionCount-${layout.aisle}-${side}" type="number" min="1" value="${sections.length}" onchange="setSideSectionCount('${esc(layout.aisle)}','${side}', this.value)"/>
             </div>
+            ${sections.map((section, sectionIndex) => `<div class="plan-section">
+              <h5>Section ${sectionIndex + 1}</h5>
+              <div class="field">
+                <label class="label" for="shelfCount-${layout.aisle}-${side}-${sectionIndex}">Nombre de tablettes</label>
+                <input id="shelfCount-${layout.aisle}-${side}-${sectionIndex}" type="number" min="1" value="${section.shelves.length}" onchange="setSectionShelfCount('${esc(layout.aisle)}','${side}', ${sectionIndex}, this.value)"/>
+              </div>
+              <div class="plan-shelf-grid">
+                ${section.shelves.map((positions, shelfIndex) => `<div class="field">
+                  <label class="label" for="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}">Tablette ${shelfIndex + 1} - positions</label>
+                  <input id="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}" type="number" min="1" value="${positions}" onchange="setShelfPositionCount('${esc(layout.aisle)}','${side}', ${sectionIndex}, ${shelfIndex}, this.value)"/>
+                </div>`).join('')}
+              </div>
+            </div>`).join('')}
           </div>`;
         }).join('')}
         </div>
@@ -2295,61 +2328,73 @@ function getEditableLayout(aisle) {
   return normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position);
 }
 
-function formatSectionsForTextarea(sections) {
-  return (sections || [])
-    .map(section => (section.shelves || []).join(','))
-    .join('\n');
-}
-
-function parseShelfList(value) {
-  const numbers = String(value || '')
-    .split(',')
-    .map(item => Math.max(1, Number(item.trim()) || 0))
-    .filter(Boolean);
-  return numbers.length ? numbers : [8];
-}
-
-function parseSectionsTextarea(value) {
-  const lines = String(value || '')
-    .split(/\r?\n/)
-    .map(line => line.trim())
-    .filter(Boolean);
-  const sections = lines.map(line => ({shelves: parseShelfList(line)}));
-  return sections.length ? sections : [{shelves:[8]}];
+function getMutableLayout(aisle) {
+  const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
+  if (!layout) return null;
+  layout.config = normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position);
+  return layout;
 }
 
 function readAisleLayoutConfig(aisle) {
-  const layout = getEditableLayout(aisle);
-  if (!layout) return null;
-  ['Gauche', 'Droite'].forEach(side => {
-    layout.sides[side].sections = parseSectionsTextarea(
-      document.getElementById(`mapConfig-${aisle}-${side}`)?.value || formatSectionsForTextarea(layout.sides[side].sections)
-    );
-  });
-  return layout;
+  return getEditableLayout(aisle);
+}
+
+function setSideSectionCount(aisle, side, rawValue) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const count = Math.max(1, Number(rawValue) || 1);
+  const sections = layout.config.sides[side].sections;
+  const fallbackShelves = sections[sections.length - 1]?.shelves?.slice() || [8];
+  while (sections.length < count) sections.push({shelves: fallbackShelves.slice()});
+  sections.length = count;
+  renderMapEditor();
+}
+
+function setSectionShelfCount(aisle, side, sectionIndex, rawValue) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const section = layout.config.sides[side].sections[sectionIndex];
+  if (!section) return;
+  const count = Math.max(1, Number(rawValue) || 1);
+  const shelves = section.shelves;
+  const fallbackValue = shelves[shelves.length - 1] || 8;
+  while (shelves.length < count) shelves.push(fallbackValue);
+  shelves.length = count;
+  renderMapEditor();
+}
+
+function setShelfPositionCount(aisle, side, sectionIndex, shelfIndex, rawValue) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const section = layout.config.sides[side].sections[sectionIndex];
+  if (!section || section.shelves[shelfIndex] == null) return;
+  section.shelves[shelfIndex] = Math.max(1, Number(rawValue) || 1);
 }
 
 async function createAisleLayout() {
   if (!requireEditorSession('modifier le plan du magasin')) return;
   const aisle = document.getElementById('mapAisle').value.trim();
-  const max_section = document.getElementById('mapSection').value.trim() || '1';
-  const max_shelf = document.getElementById('mapShelf').value.trim() || '5';
-  const max_position = document.getElementById('mapPosition').value.trim() || '8';
+  const leftSections = document.getElementById('mapLeftSections').value.trim() || '1';
+  const rightSections = document.getElementById('mapRightSections').value.trim() || '1';
+  const max_shelf = document.getElementById('mapInitialShelves').value.trim() || '5';
+  const max_position = document.getElementById('mapInitialPositions').value.trim() || '8';
   const msgDiv = document.getElementById('addMsg');
+  const max_section = Math.max(Number(leftSections) || 1, Number(rightSections) || 1);
   const data = await apiCreateLayoutAisle({
     aisle,
     max_section,
     max_shelf,
     max_position,
-    config: defaultLayoutConfig(max_section, max_shelf, max_position)
+    config: buildLayoutWithSideCounts(leftSections, rightSections, max_shelf, max_position)
   });
   msgDiv.className = data.success ? 'msg success' : 'msg error';
   msgDiv.textContent = data.success ? `Allee ${aisle} ajoutee.` : (data.error || 'Creation impossible.');
   if (data.success) {
     document.getElementById('mapAisle').value = '';
-    document.getElementById('mapSection').value = '1';
-    document.getElementById('mapShelf').value = '5';
-    document.getElementById('mapPosition').value = '8';
+    document.getElementById('mapLeftSections').value = '1';
+    document.getElementById('mapRightSections').value = '1';
+    document.getElementById('mapInitialShelves').value = '5';
+    document.getElementById('mapInitialPositions').value = '8';
     await loadMapEditor();
   }
 }
@@ -2464,7 +2509,7 @@ if ('serviceWorker' in navigator) {
 
 document.addEventListener('keydown', handleHardwareScannerKey);
 document.getElementById('scanInput').addEventListener('input', persistScanDraft);
-['mapAisle','mapSection','mapShelf','mapPosition'].forEach(id => {
+['mapAisle','mapLeftSections','mapRightSections','mapInitialShelves','mapInitialPositions'].forEach(id => {
   document.getElementById(id).addEventListener('input', persistAddDraft);
   document.getElementById(id).addEventListener('change', persistAddDraft);
 });
