@@ -100,6 +100,7 @@ def get_editors():
 @app.route("/api/layout/aisles", methods=["GET"])
 def get_layout_aisles():
     db = get_db()
+    ensure_layout_rows_for_existing_aisles(db)
     aisles = db.execute(
         """
         SELECT l.aisle, l.max_section, l.max_shelf, l.max_position, l.config_json, l.enabled, l.modified_by, l.modified_at,
@@ -613,6 +614,59 @@ def layout_metrics(config):
     return str(max_section), str(max_shelf), str(max_position)
 
 
+def ensure_layout_rows_for_existing_aisles(db):
+    product_aisles = [
+        str(row["aisle"]).strip()
+        for row in db.execute(
+            "SELECT DISTINCT aisle FROM products WHERE TRIM(COALESCE(aisle, '')) <> ''"
+        ).fetchall()
+    ]
+    existing_rows = {
+        str(row["aisle"]): dict(row)
+        for row in db.execute(
+            "SELECT aisle, enabled, config_json, max_section, max_shelf, max_position FROM aisle_layouts"
+        ).fetchall()
+    }
+    changed = False
+
+    for aisle in product_aisles:
+        row = existing_rows.get(aisle)
+        if not row:
+            default_config = build_default_layout_config("1", "5", "8")
+            db.execute(
+                """
+                INSERT INTO aisle_layouts (aisle, max_section, max_shelf, max_position, config_json, enabled, modified_by, modified_at)
+                VALUES (?, '1', '5', '8', ?, 1, 'systeme', ?)
+                """,
+                (aisle, json.dumps(default_config), utc_now_iso()),
+            )
+            changed = True
+            continue
+
+        needs_enable = int(row.get("enabled") or 0) != 1
+        needs_config = not str(row.get("config_json") or "").strip()
+        if needs_enable or needs_config:
+            config = normalize_layout_config(
+                row.get("config_json"),
+                row.get("max_section"),
+                row.get("max_shelf"),
+                row.get("max_position"),
+            )
+            max_section, max_shelf, max_position = layout_metrics(config)
+            db.execute(
+                """
+                UPDATE aisle_layouts
+                SET enabled=1, config_json=?, max_section=?, max_shelf=?, max_position=?, modified_by='systeme', modified_at=?
+                WHERE aisle=?
+                """,
+                (json.dumps(config), max_section, max_shelf, max_position, utc_now_iso(), aisle),
+            )
+            changed = True
+
+    if changed:
+        db.commit()
+
+
 @app.route("/api/products", methods=["POST"])
 def add_product():
     username, error = require_editor()
@@ -771,6 +825,7 @@ def delete_product(product_id):
 @app.route("/api/aisles", methods=["GET"])
 def get_aisles():
     db = get_db()
+    ensure_layout_rows_for_existing_aisles(db)
     aisles = db.execute(
         """
         SELECT l.aisle, COUNT(p.id) as count
