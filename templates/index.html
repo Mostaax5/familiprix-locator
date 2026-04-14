@@ -321,6 +321,14 @@ let barcodeLibraryPromise = null;
 let cameraUsageMode = 'scan';
 let scanFrameTimer = null;
 let cameraTrack = null;
+let quaggaActive = false;
+let quaggaDetectedHandler = null;
+let quaggaProcessedHandler = null;
+let quaggaOcrTimer = null;
+let quaggaStartedAt = 0;
+let ocrBusy = false;
+let quaggaLibraryPromise = null;
+let ocrLibraryPromise = null;
 let allProductsCache = [];
 let mapLayouts = [];
 const STORAGE_KEYS = {
@@ -1439,77 +1447,57 @@ async function startCamera() {
   }
 
   try {
-    if ('BarcodeDetector' in window) {
-      scannerMode = 'native';
-      detector = new BarcodeDetector({formats:['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf']});
-      scannerStream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: {ideal: 'environment'},
-          width: {ideal: 1920},
-          height: {ideal: 1080},
-          aspectRatio: {ideal: 1.7777778}
-        },
-        audio: false
-      });
-      reader.style.display = 'none';
-      video.style.display = 'block';
-      video.srcObject = scannerStream;
-      await video.play();
-      cameraTrack = scannerStream.getVideoTracks()[0] || null;
-      await optimizeCameraTrack();
-      status.textContent = 'Recherche code...';
-      button.textContent = 'Fermer camera';
-      scanLoopRunning = true;
-      scanPaused = false;
-      resetCameraCandidate();
-      scanFrame();
+    await ensureQuaggaLoaded();
+    if (!('Quagga' in window)) {
+      status.textContent = 'Scanner non supporte';
+      showCameraHint('Le moteur de scan Quagga n est pas charge. Verifiez la connexion internet ou entrez le code manuellement.');
       return;
     }
 
-    await ensureBarcodeLibraryLoaded();
-    if ('Html5Qrcode' in window) {
-      scannerMode = 'html5';
-      resetCameraCandidate();
-      video.style.display = 'none';
-      reader.style.display = 'block';
-      html5Scanner = new Html5Qrcode(reader.id, html5ScannerConfig());
-      await html5Scanner.start(
-        {facingMode: 'environment'},
-        {fps: 24, qrbox: responsiveScanBox, aspectRatio: 1.7777778, disableFlip: true},
-        onDecodedCode,
-        () => {}
-      );
-      status.textContent = 'Recherche code...';
-      button.textContent = 'Fermer camera';
-      return;
-    }
-
-    status.textContent = 'Scanner non supporte';
-    showCameraHint('Le moteur de scan de secours n est pas charge. Verifiez la connexion internet ou entrez le code manuellement.');
+    scannerMode = 'quagga';
+    resetCameraCandidate();
+    video.style.display = 'none';
+    reader.style.display = 'block';
+    reader.innerHTML = '';
+    await startQuaggaScanner(reader, status, button);
   } catch (error) {
     status.textContent = 'Camera bloquee';
     showCameraHint(error.message || 'Impossible d ouvrir la camera. Sur telephone, utilisez une adresse HTTPS.');
   }
 }
 
-async function ensureBarcodeLibraryLoaded() {
-  if ('Html5Qrcode' in window) return true;
-  if (barcodeLibraryPromise) return barcodeLibraryPromise;
-
+async function ensureQuaggaLoaded() {
+  if ('Quagga' in window) return true;
+  if (quaggaLibraryPromise) return quaggaLibraryPromise;
   const sources = [
-    'https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js',
-    'https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js'
+    'https://cdn.jsdelivr.net/npm/@ericblade/quagga2/dist/quagga.min.js',
+    'https://unpkg.com/@ericblade/quagga2/dist/quagga.min.js'
   ];
-
-  barcodeLibraryPromise = (async () => {
+  quaggaLibraryPromise = (async () => {
     for (const src of sources) {
       const loaded = await injectScript(src);
-      if (loaded && 'Html5Qrcode' in window) return true;
+      if (loaded && 'Quagga' in window) return true;
     }
     return false;
   })();
+  return quaggaLibraryPromise;
+}
 
-  return barcodeLibraryPromise;
+async function ensureOcrLoaded() {
+  if ('Tesseract' in window) return true;
+  if (ocrLibraryPromise) return ocrLibraryPromise;
+  const sources = [
+    'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js',
+    'https://unpkg.com/tesseract.js@5/dist/tesseract.min.js'
+  ];
+  ocrLibraryPromise = (async () => {
+    for (const src of sources) {
+      const loaded = await injectScript(src);
+      if (loaded && 'Tesseract' in window) return true;
+    }
+    return false;
+  })();
+  return ocrLibraryPromise;
 }
 
 function injectScript(src) {
@@ -1569,29 +1557,147 @@ function drawProcessedCrop(video, crop) {
   return canvas;
 }
 
-async function detectCodesFromSource(source) {
-  if (!source || !detector) return [];
+function getQuaggaVideoElement(reader) {
+  return reader.querySelector('video');
+}
+
+function validateRetailBarcode(code) {
+  const digits = String(code || '').replace(/\D/g, '');
+  if (/^\d{8}$/.test(digits)) return checkEanChecksum(digits, 8);
+  if (/^\d{12}$/.test(digits)) return checkEanChecksum(digits, 12);
+  if (/^\d{13}$/.test(digits)) return checkEanChecksum(digits, 13);
+  if (/^\d{14}$/.test(digits)) return true;
+  return false;
+}
+
+function checkEanChecksum(code, length) {
+  if (code.length !== length) return false;
+  const digits = code.split('').map(Number);
+  const checkDigit = digits.pop();
+  const reversed = digits.reverse();
+  const sum = reversed.reduce((total, digit, index) => {
+    const weight = index % 2 === 0 ? 3 : 1;
+    return total + digit * weight;
+  }, 0);
+  return (10 - (sum % 10)) % 10 === checkDigit;
+}
+
+function extractBarcodeTextCandidates(text) {
+  const rawDigits = String(text || '').replace(/\D/g, ' ');
+  const chunks = rawDigits.split(/\s+/).filter(Boolean);
+  const candidates = new Set();
+  for (const chunk of chunks) {
+    for (const size of [14, 13, 12, 8]) {
+      if (chunk.length === size) candidates.add(chunk);
+      if (chunk.length > size) {
+        for (let start = 0; start <= chunk.length - size; start += 1) {
+          candidates.add(chunk.slice(start, start + size));
+        }
+      }
+    }
+  }
+  return Array.from(candidates).filter(validateRetailBarcode);
+}
+
+async function recognizeBarcodeDigitsFromVideo(reader) {
+  const video = getQuaggaVideoElement(reader);
+  if (!video || !video.videoWidth || !video.videoHeight) return null;
+  if (!(await ensureOcrLoaded()) || !window.Tesseract) return null;
+
+  const crops = [
+    {x: 0.08, y: 0.58, w: 0.84, h: 0.18, scale: 2.6},
+    {x: 0.12, y: 0.52, w: 0.76, h: 0.24, scale: 2.2}
+  ];
+
+  for (const crop of crops) {
+    const canvas = drawProcessedCrop(video, crop);
+    if (!canvas) continue;
+    const result = await window.Tesseract.recognize(canvas, 'eng', {
+      logger: () => {},
+      tessedit_char_whitelist: '0123456789'
+    });
+    const candidates = extractBarcodeTextCandidates(result?.data?.text || '');
+    if (candidates.length) return candidates[0];
+  }
+  return null;
+}
+
+async function maybeRunOcrFallback(reader, status) {
+  if (ocrBusy || scanPaused || !quaggaActive) return;
+  if (Date.now() - quaggaStartedAt < 1400) return;
+  ocrBusy = true;
   try {
-    const codes = await detector.detect(source);
-    return Array.isArray(codes) ? codes : [];
+    status.textContent = 'Lecture des chiffres...';
+    const candidate = await recognizeBarcodeDigitsFromVideo(reader);
+    if (candidate) {
+      await onDecodedCode(candidate);
+      return;
+    }
   } catch (error) {
-    return [];
+  } finally {
+    ocrBusy = false;
+  }
+  if (!scanPaused) {
+    status.textContent = 'Cadrez les barres et les chiffres';
   }
 }
 
-async function detectBarcodeCandidates(video) {
-  const variants = [
-    video,
-    drawProcessedCrop(video, {x: 0.06, y: 0.28, w: 0.88, h: 0.24, scale: 2.2}),
-    drawProcessedCrop(video, {x: 0.1, y: 0.34, w: 0.8, h: 0.18, scale: 2.8}),
-    drawProcessedCrop(video, {x: 0.18, y: 0.45, w: 0.64, h: 0.16, scale: 3.2})
-  ].filter(Boolean);
+async function startQuaggaScanner(reader, status, button) {
+  const config = {
+    inputStream: {
+      type: 'LiveStream',
+      target: reader,
+      constraints: {
+        facingMode: 'environment',
+        width: {ideal: 1920},
+        height: {ideal: 1080},
+        aspectRatio: {ideal: 1.7777778}
+      },
+      area: {
+        top: '28%',
+        right: '4%',
+        left: '4%',
+        bottom: '28%'
+      }
+    },
+    locator: {
+      patchSize: 'small',
+      halfSample: false
+    },
+    numOfWorkers: navigator.hardwareConcurrency ? Math.max(1, Math.min(4, navigator.hardwareConcurrency - 1)) : 2,
+    frequency: 25,
+    locate: true,
+    decoder: {
+      readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader', 'code_128_reader', 'code_39_reader', 'i2of5_reader'],
+      multiple: false
+    }
+  };
 
-  for (const variant of variants) {
-    const codes = await detectCodesFromSource(variant);
-    if (codes.length) return codes;
-  }
-  return [];
+  await new Promise((resolve, reject) => {
+    window.Quagga.init(config, err => err ? reject(err) : resolve());
+  });
+
+  quaggaDetectedHandler = result => {
+    const code = String(result?.codeResult?.code || '').trim();
+    if (!code || !validateRetailBarcode(code)) return;
+    onDecodedCode(code);
+  };
+  quaggaProcessedHandler = () => {
+    if (!scanPaused) {
+      status.textContent = 'Cadrez les barres et les chiffres';
+    }
+  };
+
+  window.Quagga.onDetected(quaggaDetectedHandler);
+  window.Quagga.onProcessed(quaggaProcessedHandler);
+  window.Quagga.start();
+  quaggaActive = true;
+  quaggaStartedAt = Date.now();
+  button.textContent = 'Fermer camera';
+  status.textContent = 'Cadrez les barres et les chiffres';
+  quaggaOcrTimer = window.setInterval(() => {
+    maybeRunOcrFallback(reader, status);
+  }, 1400);
 }
 
 async function stopCamera() {
@@ -1600,7 +1706,19 @@ async function stopCamera() {
   scanPaused = false;
   window.clearTimeout(scanFrameTimer);
   scanFrameTimer = null;
+  window.clearInterval(quaggaOcrTimer);
+  quaggaOcrTimer = null;
   resetCameraCandidate();
+  if (quaggaActive && 'Quagga' in window) {
+    try {
+      if (quaggaDetectedHandler) window.Quagga.offDetected(quaggaDetectedHandler);
+      if (quaggaProcessedHandler) window.Quagga.offProcessed(quaggaProcessedHandler);
+      window.Quagga.stop();
+    } catch (error) {}
+  }
+  quaggaActive = false;
+  quaggaDetectedHandler = null;
+  quaggaProcessedHandler = null;
   if (scannerStream) {
     scannerStream.getTracks().forEach(track => track.stop());
   }
@@ -1616,6 +1734,7 @@ async function stopCamera() {
   scannerMode = null;
   video.srcObject = null;
   video.style.display = 'block';
+  reader.innerHTML = '';
   reader.style.display = 'none';
   status.textContent = 'Camera arretee';
   button.textContent = 'Ouvrir camera';
@@ -1835,46 +1954,22 @@ function updateDeviceSupport() {
   const supportHint = document.getElementById('supportHint');
   const hasCamera = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
   const isSecure = window.isSecureContext || location.hostname === '127.0.0.1' || location.hostname === 'localhost';
-  const nativeScanner = 'BarcodeDetector' in window;
-  const fallbackScanner = 'Html5Qrcode' in window;
+  const quaggaReady = 'Quagga' in window;
+  const ocrReady = 'Tesseract' in window;
 
   cameraSupport.textContent = hasCamera && isSecure ? 'Disponible' : 'HTTPS requis';
   cameraSupport.style.background = hasCamera && isSecure ? '#ecfdf5' : '#fef2f2';
   cameraSupport.style.color = hasCamera && isSecure ? '#065f46' : '#991b1b';
 
-  scannerSupport.textContent = nativeScanner ? 'Natif' : (fallbackScanner ? 'Fallback' : 'Manuel');
-  scannerSupport.style.background = nativeScanner || fallbackScanner ? '#ecfdf5' : '#fef2f2';
-  scannerSupport.style.color = nativeScanner || fallbackScanner ? '#065f46' : '#991b1b';
+  scannerSupport.textContent = quaggaReady ? (ocrReady ? 'Quagga + OCR' : 'Quagga') : 'Chargement au scan';
+  scannerSupport.style.background = '#ecfdf5';
+  scannerSupport.style.color = '#065f46';
 
   if (!isSecure) {
     supportHint.textContent = 'Pour la camera sur telephone, utilisez une URL HTTPS. En HTTP local, la page peut ouvrir mais la camera peut etre bloquee.';
-  } else if (!nativeScanner && fallbackScanner) {
-    supportHint.textContent = 'Ce navigateur utilise le scanner de secours. C est normal sur certains telephones et tablettes.';
-  } else if (!nativeScanner && !fallbackScanner) {
-    supportHint.textContent = 'Le scan code-barres automatique n est pas disponible ici. Le champ manuel et les scanners clavier restent utilisables.';
   } else {
-    supportHint.textContent = 'Cet appareil peut utiliser le scan code-barres par camera.';
+    supportHint.textContent = 'La camera utilise Quagga pour les barres et essaie aussi de lire les chiffres du code quand les barres sont trop petites.';
   }
-}
-
-async function scanFrame() {
-  if (!scanLoopRunning || !detector) return;
-  const video = getCameraDom().video;
-  try {
-    if (scanPaused) {
-      scanFrameTimer = window.setTimeout(scanFrame, 90);
-      return;
-    }
-    const codes = await detectBarcodeCandidates(video);
-    if (codes.length) {
-      await onDecodedCode(codes[0].rawValue);
-    } else {
-      getCameraDom().status.textContent = 'Cadrez les barres et les chiffres';
-    }
-  } catch (error) {
-    getCameraDom().status.textContent = 'Lecture en cours';
-  }
-  scanFrameTimer = window.setTimeout(scanFrame, 90);
 }
 
 async function lookupScanFromInput(force=false, barcodeOverride='') {
