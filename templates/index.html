@@ -211,22 +211,6 @@
         <input type="number" id="scanPosition" min="1" value="1" placeholder="Ex: 4"/>
       </div>
     </div>
-    <div class="section-title" style="margin-top:14px">Structure automatique</div>
-    <div class="section-note">Ces limites disent au scanner quand passer a la tablette suivante, puis a la section suivante, puis au cote ou a l allee suivante.</div>
-    <div class="row3">
-      <div class="field">
-        <label class="label" for="maxSection">Sections par cote</label>
-        <input type="number" id="maxSection" min="1" value="1" placeholder="Ex: 3"/>
-      </div>
-      <div class="field">
-        <label class="label" for="maxPosition">Positions par tablette</label>
-        <input type="number" id="maxPosition" min="1" value="8" placeholder="Ex: 8"/>
-      </div>
-      <div class="field">
-        <label class="label" for="maxShelf">Tablettes par cote</label>
-        <input type="number" id="maxShelf" min="1" value="5" placeholder="Ex: 5"/>
-      </div>
-    </div>
     <button class="btn" onclick="saveCursor()">Utiliser cette position</button>
   </div>
 
@@ -513,6 +497,72 @@ function normalizeLayoutConfig(config, maxSection = 1, maxShelf = 5, maxPosition
 function getAisleLayoutConfig(aisle) {
   const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
   return normalizeLayoutConfig(layout?.config, layout?.max_section, layout?.max_shelf, layout?.max_position);
+}
+
+function inferLayoutFromProducts(products, aisle) {
+  const subset = (products || []).filter(product => String(product.aisle) === String(aisle));
+  if (!subset.length) {
+    return {
+      aisle: String(aisle),
+      config: defaultLayoutConfig(1, 5, 8),
+      max_section: '1',
+      max_shelf: '5',
+      max_position: '8',
+      enabled: 1,
+      product_count: 0,
+      modified_by: 'systeme',
+      modified_at: ''
+    };
+  }
+
+  const config = {sides: {Gauche: {sections: []}, Droite: {sections: []}}};
+  ['Gauche', 'Droite'].forEach(side => {
+    const sideProducts = subset.filter(product => String(product.side || 'Gauche') === side);
+    const maxSection = Math.max(1, ...sideProducts.map(product => Number(product.section || 1) || 1));
+    for (let sectionIndex = 1; sectionIndex <= maxSection; sectionIndex += 1) {
+      const sectionProducts = sideProducts.filter(product => (Number(product.section || 1) || 1) === sectionIndex);
+      const maxShelf = Math.max(1, ...sectionProducts.map(product => Number(product.shelf || 1) || 1));
+      const shelves = [];
+      for (let shelfIndex = 1; shelfIndex <= maxShelf; shelfIndex += 1) {
+        const shelfProducts = sectionProducts.filter(product => (Number(product.shelf || 1) || 1) === shelfIndex);
+        const maxPosition = Math.max(1, ...shelfProducts.map(product => Number(product.position || 1) || 1));
+        shelves.push(maxPosition);
+      }
+      config.sides[side].sections.push({shelves});
+    }
+  });
+  return {
+    aisle: String(aisle),
+    config,
+    max_section: String(Math.max(config.sides.Gauche.sections.length, config.sides.Droite.sections.length, 1)),
+    max_shelf: String(Math.max(
+      1,
+      ...config.sides.Gauche.sections.map(section => section.shelves.length),
+      ...config.sides.Droite.sections.map(section => section.shelves.length)
+    )),
+    max_position: String(Math.max(
+      1,
+      ...config.sides.Gauche.sections.flatMap(section => section.shelves),
+      ...config.sides.Droite.sections.flatMap(section => section.shelves)
+    )),
+    enabled: 1,
+    product_count: subset.length,
+    modified_by: 'systeme',
+    modified_at: ''
+  };
+}
+
+function mergeLayoutsWithProducts(layouts, products) {
+  const merged = Array.isArray(layouts) ? [...layouts] : [];
+  const known = new Set(merged.map(item => String(item.aisle)));
+  const productAisles = Array.from(new Set((products || []).map(product => String(product.aisle || '').trim()).filter(Boolean)));
+  productAisles.forEach(aisle => {
+    if (!known.has(aisle)) {
+      merged.push(inferLayoutFromProducts(products, aisle));
+      known.add(aisle);
+    }
+  });
+  return merged.sort((a, b) => Number(a.aisle) - Number(b.aisle) || String(a.aisle).localeCompare(String(b.aisle)));
 }
 
 function getSideStructure(aisle, side) {
@@ -887,7 +937,16 @@ async function apiGetEditors() {
 
 async function apiGetLayoutAisles() {
   const {data} = await apiFetch('/api/layout/aisles');
-  return Array.isArray(data) ? data : [];
+  let layouts = Array.isArray(data) ? data : [];
+  let products = [];
+  try {
+    const res = await fetch('/api/products');
+    if (res.ok) products = await res.json();
+  } catch (error) {}
+  if (!products.length) {
+    products = loadLocalProducts();
+  }
+  return mergeLayoutsWithProducts(layouts, products);
 }
 
 async function apiCreateLayoutAisle(payload) {
@@ -1018,9 +1077,6 @@ function updateCursorUi() {
   document.getElementById('scanSection').value = cursor.section;
   document.getElementById('scanShelf').value = cursor.shelf;
   document.getElementById('scanPosition').value = cursor.position;
-  document.getElementById('maxSection').value = cursor.maxSection;
-  document.getElementById('maxPosition').value = cursor.maxPosition;
-  document.getElementById('maxShelf').value = cursor.maxShelf;
   localStorage.setItem(STORAGE_KEYS.cursor, JSON.stringify(cursor));
 }
 
@@ -1110,9 +1166,6 @@ function saveCursor() {
   cursor.section = positiveInt('scanSection', cursor.section);
   cursor.shelf = positiveInt('scanShelf', cursor.shelf);
   cursor.position = positiveInt('scanPosition', cursor.position);
-  cursor.maxSection = positiveInt('maxSection', cursor.maxSection);
-  cursor.maxPosition = positiveInt('maxPosition', cursor.maxPosition);
-  cursor.maxShelf = positiveInt('maxShelf', cursor.maxShelf);
   updateCursorUi();
   document.getElementById('locationEditor').style.display = 'none';
 }
@@ -2278,6 +2331,7 @@ function finishConfirmed(message) {
 async function loadBrowse(keepAisle=false) {
   const div = document.getElementById('browseContent');
   allProductsCache = await apiGetProducts();
+  mapLayouts = await apiGetLayoutAisles();
   if (!browseAisle) {
     const aisles = await apiGetAisles();
     div.innerHTML = aisles.length
