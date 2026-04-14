@@ -909,6 +909,20 @@ async function apiUpdateLayoutAisle(aisle, payload) {
 }
 
 async function apiDeleteLayoutAisle(aisle) {
+  if (dataMode === 'hybrid') {
+    const remaining = loadLocalProducts().filter(product => String(product.aisle) !== String(aisle));
+    saveLocalProducts(remaining);
+    try {
+      const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}`, {
+        method: 'DELETE',
+        headers: getEditorHeaders()
+      });
+      return res.ok ? data : {success: false, error: data.error || 'Erreur de suppression d allee.'};
+    } catch (error) {
+      markPendingExport(`L allee ${aisle} a ete retiree seulement sur cet appareil pour le moment.`);
+      return {success: true, message: `Allee ${aisle} retiree sur cet appareil.`};
+    }
+  }
   const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}`, {
     method: 'DELETE',
     headers: getEditorHeaders()
@@ -1237,7 +1251,6 @@ function renderLayoutEditor() {
   const aisleConfig = normalizeLayoutConfig(aisleLayout?.config, aisleLayout?.max_section, aisleLayout?.max_shelf, aisleLayout?.max_position);
   const leftSections = aisleConfig.sides.Gauche.sections.length;
   const rightSections = aisleConfig.sides.Droite.sections.length;
-  let lastGroup = '';
   let html = `<button class="back" onclick="browseAisle=null; layoutProducts=[]; loadBrowse();">Retour aux allees</button>
     <div class="card">
       <div class="cursor">
@@ -1267,13 +1280,24 @@ function renderLayoutEditor() {
       <div id="layoutMsg"></div>
     </div>`;
 
-  sorted.forEach((p, index) => {
-    const group = `${p.side} - Section ${p.section || '1'} - Tablette ${p.shelf}`;
-    if (group !== lastGroup) {
-      html += `<div class="shelf-title">${esc(group)}</div>`;
-      lastGroup = group;
-    }
-    html += layoutRow(p, index, sorted.length);
+  ['Gauche', 'Droite'].forEach(side => {
+    const sections = aisleConfig.sides[side].sections || [];
+    html += `<div class="shelf-title">${esc(side)}</div>`;
+    sections.forEach((section, sectionIndex) => {
+      html += `<div class="card" style="margin-bottom:8px"><div class="section-title">Section ${sectionIndex + 1}</div>`;
+      (section.shelves || []).forEach((positionCount, shelfIndex) => {
+        const shelfProducts = sorted.filter(p =>
+          String(p.side) === side &&
+          Number(p.section || 1) === sectionIndex + 1 &&
+          Number(p.shelf) === shelfIndex + 1
+        );
+        html += `<div class="shelf-title" style="margin-top:8px">Tablette ${shelfIndex + 1} - ${positionCount} position${Number(positionCount) > 1 ? 's' : ''}</div>`;
+        html += shelfProducts.length
+          ? shelfProducts.map((p, index) => layoutRow(p, index, sorted.length)).join('')
+          : `<div class="small" style="padding:8px 0">Aucun produit dans cette tablette pour le moment.</div>`;
+      });
+      html += `</div>`;
+    });
   });
 
   div.innerHTML = html || '<div class="empty">Aucun produit.</div>';
@@ -2297,7 +2321,7 @@ function renderMapEditor() {
             <div class="tree-body">
               <div class="field" style="margin-top:8px">
                 <label class="label" for="sectionCount-${layout.aisle}-${side}">Nombre de sections sur le cote ${side}</label>
-                <input id="sectionCount-${layout.aisle}-${side}" type="number" min="1" value="${sections.length}" onchange="setSideSectionCount('${esc(layout.aisle)}','${side}', this.value)"/>
+                <input id="sectionCount-${layout.aisle}-${side}" type="number" min="1" value="${sections.length}" oninput="setSideSectionCount('${esc(layout.aisle)}','${side}', this.value)"/>
               </div>
               ${sections.map((section, sectionIndex) => `<details class="tree-node plan-section" open>
                 <summary>
@@ -2307,7 +2331,7 @@ function renderMapEditor() {
                 <div class="tree-body">
                   <div class="field">
                     <label class="label" for="shelfCount-${layout.aisle}-${side}-${sectionIndex}">Nombre de tablettes dans la section ${sectionIndex + 1}</label>
-                    <input id="shelfCount-${layout.aisle}-${side}-${sectionIndex}" type="number" min="1" value="${section.shelves.length}" onchange="setSectionShelfCount('${esc(layout.aisle)}','${side}', ${sectionIndex}, this.value)"/>
+                    <input id="shelfCount-${layout.aisle}-${side}-${sectionIndex}" type="number" min="1" value="${section.shelves.length}" oninput="setSectionShelfCount('${esc(layout.aisle)}','${side}', ${sectionIndex}, this.value)"/>
                   </div>
                   ${section.shelves.map((positions, shelfIndex) => `<details class="tree-node" open>
                     <summary>
@@ -2474,6 +2498,11 @@ async function removeAisleLayout(aisle) {
     ? (data.message || `Allee ${aisle} retiree.`)
     : ((data && data.error) || `Impossible de supprimer l allee ${aisle}.`);
   if (success) {
+    allProductsCache = allProductsCache.filter(item => String(item.aisle) !== String(aisle));
+    layoutProducts = layoutProducts.filter(item => String(item.aisle) !== String(aisle));
+    if (String(browseAisle) === String(aisle)) {
+      browseAisle = null;
+    }
     mapLayouts = mapLayouts.filter(item => String(item.aisle) !== String(aisle));
     renderMapEditor();
     await loadMapEditor();
