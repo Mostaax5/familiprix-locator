@@ -693,9 +693,11 @@ def delete_product(product_id):
         return error
     db = get_db()
     product = db.execute("SELECT name FROM products WHERE id=?", (product_id,)).fetchone()
+    if not product:
+        return jsonify({"error": "Produit non trouve."}), 404
     db.execute("DELETE FROM products WHERE id=?", (product_id,))
     db.commit()
-    return jsonify({"success": True, "message": f'Produit supprimé par {username}: {product["name"] if product else product_id}'})
+    return jsonify({"success": True, "message": f'Produit supprimé par {username}: {product["name"]}'})
 
 
 @app.route("/api/aisles", methods=["GET"])

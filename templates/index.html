@@ -2113,8 +2113,20 @@ async function deleteProduct(id) {
     if (target) target.innerHTML = `<div class="msg error">${esc(data.error || 'Suppression impossible.')}</div>`;
     return;
   }
-  doSearch();
-  if (browseAisle) loadBrowse();
+  await doSearch();
+  if (browseAisle) {
+    const deletedAisle = browseAisle;
+    await loadBrowse(true);
+    if (!layoutProducts.length) {
+      browseAisle = null;
+      await loadBrowse();
+      document.getElementById('browseContent').insertAdjacentHTML('afterbegin', `<div class="msg success">Le dernier produit de l allee ${esc(deletedAisle)} a ete supprime.</div>`);
+    } else {
+      showLayoutMsg(data.message || 'Produit supprime.', 'success');
+    }
+  } else {
+    document.getElementById('searchResults').insertAdjacentHTML('afterbegin', `<div class="msg success">${esc(data.message || 'Produit supprime.')}</div>`);
+  }
 }
 
 function switchTab(tab) {
