@@ -86,6 +86,13 @@
   .plan-section{border:1px solid #e6e8ec;border-radius:8px;padding:10px;background:white;margin-top:10px}
   .plan-section h5{font-size:13px;font-weight:800;margin-bottom:8px}
   .plan-shelf-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+  .tree-node{border:1px solid #e6e8ec;border-radius:8px;background:white;margin-top:10px;overflow:hidden}
+  .tree-node summary{list-style:none;cursor:pointer;padding:11px 12px;font-size:13px;font-weight:800;display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .tree-node summary::-webkit-details-marker{display:none}
+  .tree-node summary::before{content:'▸';color:#6b7280;font-size:12px}
+  .tree-node[open] > summary::before{content:'▾'}
+  .tree-body{padding:0 12px 12px}
+  .tree-meta{font-size:12px;color:#666;font-weight:600}
   .plan-meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
   .plan-meta .pill{background:#f3f4f6;color:#374151}
   .map-textarea{width:100%;min-height:120px;padding:12px;border:1px solid #d8dce2;border-radius:8px;font-size:15px;line-height:1.5;resize:vertical;background:white}
@@ -1226,6 +1233,10 @@ function layoutRow(p, index, total) {
 function renderLayoutEditor() {
   const div = document.getElementById('browseContent');
   const sorted = [...layoutProducts].sort(productSort);
+  const aisleLayout = mapLayouts.find(item => String(item.aisle) === String(browseAisle));
+  const aisleConfig = normalizeLayoutConfig(aisleLayout?.config, aisleLayout?.max_section, aisleLayout?.max_shelf, aisleLayout?.max_position);
+  const leftSections = aisleConfig.sides.Gauche.sections.length;
+  const rightSections = aisleConfig.sides.Droite.sections.length;
   let lastGroup = '';
   let html = `<button class="back" onclick="browseAisle=null; layoutProducts=[]; loadBrowse();">Retour aux allees</button>
     <div class="card">
@@ -1237,20 +1248,10 @@ function renderLayoutEditor() {
         <span class="pill">${sorted.length} produit${sorted.length !== 1 ? 's' : ''}</span>
       </div>
       <div class="section-title" style="margin-top:14px">Structure de l allee</div>
-      <div class="section-note">Utilise ces valeurs pour redistribuer les produits quand une tablette ou une section est pleine.</div>
-      <div class="row3">
-        <div class="field">
-          <label class="label" for="layoutMaxSection">Sections par cote</label>
-          <input id="layoutMaxSection" type="number" min="1" value="${cursor.maxSection}" placeholder="Ex: 3"/>
-        </div>
-        <div class="field">
-          <label class="label" for="layoutMaxPosition">Positions par tablette</label>
-          <input id="layoutMaxPosition" type="number" min="1" value="${cursor.maxPosition}" placeholder="Ex: 8"/>
-        </div>
-        <div class="field">
-          <label class="label" for="layoutMaxShelf">Tablettes par cote</label>
-          <input id="layoutMaxShelf" type="number" min="1" value="${cursor.maxShelf}" placeholder="Ex: 5"/>
-        </div>
+      <div class="section-note">Le recalcul utilise maintenant le vrai plan defini dans l onglet Plan. Donc chaque section peut avoir un nombre different de tablettes, et chaque tablette son propre nombre de positions.</div>
+      <div class="plan-meta">
+        <span class="pill">Gauche: ${leftSections} section${leftSections > 1 ? 's' : ''}</span>
+        <span class="pill">Droite: ${rightSections} section${rightSections > 1 ? 's' : ''}</span>
         <div class="field">
           <label class="label" for="layoutReflowMode">Mode de redistribution</label>
           <select id="layoutReflowMode">
@@ -1295,6 +1296,35 @@ function readLayoutProduct(id) {
 
 function currentLayoutFromFields() {
   return layoutProducts.map(p => ({...p, ...readLayoutProduct(p.id)}));
+}
+
+function getConfiguredLayoutForAisle(aisle) {
+  const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
+  return normalizeLayoutConfig(layout?.config, layout?.max_section, layout?.max_shelf, layout?.max_position);
+}
+
+function buildSlotsForAisle(aisle, sideFilter = null) {
+  const config = getConfiguredLayoutForAisle(aisle);
+  const slots = [];
+  ['Gauche', 'Droite'].forEach(side => {
+    if (sideFilter && side !== sideFilter) return;
+    const sections = config.sides[side].sections || [];
+    sections.forEach((section, sectionIndex) => {
+      const shelves = section.shelves || [];
+      shelves.forEach((positionCount, shelfIndex) => {
+        for (let position = 1; position <= Math.max(1, Number(positionCount) || 1); position += 1) {
+          slots.push({
+            aisle: String(aisle),
+            side,
+            section: String(sectionIndex + 1),
+            shelf: String(shelfIndex + 1),
+            position: String(position)
+          });
+        }
+      });
+    });
+  });
+  return slots;
 }
 
 async function putProduct(product) {
@@ -1386,67 +1416,47 @@ async function swapLayoutWithSelected(id) {
 
 async function reflowCurrentAisle() {
   if (!requireEditorSession('modifier le plan')) return;
-  const maxSection = positiveInt('layoutMaxSection', cursor.maxSection);
-  const maxPosition = positiveInt('layoutMaxPosition', cursor.maxPosition);
-  const maxShelf = positiveInt('layoutMaxShelf', cursor.maxShelf);
+  mapLayouts = await apiGetLayoutAisles();
   const mode = document.getElementById('layoutReflowMode').value;
   const products = currentLayoutFromFields().sort(productSort);
   const reflowed = [];
+  const currentAisleSlots = buildSlotsForAisle(browseAisle);
 
-  function assign(list, startAisle, startSide) {
-    let aisle = Number(startAisle);
-    let side = startSide;
-    let section = 1;
-    let shelf = 1;
-    let position = 1;
-    list.forEach(product => {
-      product.aisle = String(aisle);
-      product.side = side;
-      product.section = String(section);
-      product.shelf = String(shelf);
-      product.position = String(position);
+  function assign(list, sideFilter = null) {
+    const slots = buildSlotsForAisle(browseAisle, sideFilter);
+    if (list.length > slots.length) {
+      showLayoutMsg(`Impossible de redistribuer ${list.length} produit(s). Le plan de l allee ${browseAisle}${sideFilter ? ` cote ${sideFilter}` : ''} n a que ${slots.length} place(s).`, 'error');
+      return false;
+    }
+    list.forEach((product, index) => {
+      const slot = slots[index];
+      product.aisle = slot.aisle;
+      product.side = slot.side;
+      product.section = slot.section;
+      product.shelf = slot.shelf;
+      product.position = slot.position;
       reflowed.push(product);
-      position += 1;
-      if (position > maxPosition) {
-        position = 1;
-        shelf += 1;
-      }
-      if (shelf > maxShelf) {
-        shelf = 1;
-        section += 1;
-      }
-      if (section > maxSection) {
-        section = 1;
-        if (side === 'Gauche') {
-          side = 'Droite';
-        } else {
-          side = 'Gauche';
-          aisle += 1;
-        }
-      }
     });
+    return true;
   }
 
-  if (mode === 'side') {
-    ['Gauche', 'Droite'].forEach(side => {
-      const sideProducts = products.filter(p => p.side === side);
-      assign(sideProducts, browseAisle, side);
-    });
-  } else {
-    assign(products, browseAisle, 'Gauche');
-  }
+  const ok = mode === 'side'
+    ? ['Gauche', 'Droite'].every(side => assign(products.filter(p => p.side === side), side))
+    : assign(products, null);
+  if (!ok) return;
 
   const data = await apiBulkUpdateProducts(reflowed);
   if (!data.success) {
     showLayoutMsg(data.error || 'Recalcul impossible.', 'error');
     return;
   }
-  cursor.maxPosition = maxPosition;
-  cursor.maxShelf = maxShelf;
-  cursor.maxSection = maxSection;
+  const leftSections = getConfiguredLayoutForAisle(browseAisle).sides.Gauche.sections;
+  cursor.maxSection = leftSections.length || cursor.maxSection;
+  cursor.maxShelf = leftSections[0]?.shelves.length || cursor.maxShelf;
+  cursor.maxPosition = leftSections[0]?.shelves[0] || cursor.maxPosition;
   updateCursorUi();
   await loadBrowse(true);
-  showLayoutMsg('Positions recalculees.', 'success');
+  showLayoutMsg(`Positions recalculees selon le plan detaille de l allee ${browseAisle}. Capacite utilisee: ${reflowed.length}/${currentAisleSlots.length}.`, 'success');
 }
 
 function useAsScannerCursor(id) {
@@ -2275,30 +2285,46 @@ function renderMapEditor() {
           </div>
           <span class="pill">${layout.product_count || 0} produit${Number(layout.product_count || 0) > 1 ? 's' : ''}</span>
         </div>
-        <div class="section-note" style="margin-top:10px">Choisissez d abord le nombre de sections pour chaque cote. Ensuite, dans chaque section, choisissez le nombre de tablettes. Enfin, dans chaque tablette, indiquez le nombre de positions.</div>
+        <div class="section-note" style="margin-top:10px">Ouvrez l allee, puis le cote, puis la section, puis la tablette. Chaque tablette peut avoir son propre nombre de positions.</div>
         <div class="plan-sides">
         ${['Gauche','Droite'].map(side => {
           const sections = normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position).sides[side].sections;
-          return `<div class="plan-side">
-            <h4>${side}</h4>
-            <div class="field" style="margin-top:8px">
-              <label class="label" for="sectionCount-${layout.aisle}-${side}">Nombre de sections</label>
-              <input id="sectionCount-${layout.aisle}-${side}" type="number" min="1" value="${sections.length}" onchange="setSideSectionCount('${esc(layout.aisle)}','${side}', this.value)"/>
+          return `<details class="tree-node plan-side" open>
+            <summary>
+              <span>${side}</span>
+              <span class="tree-meta">${sections.length} section${sections.length > 1 ? 's' : ''}</span>
+            </summary>
+            <div class="tree-body">
+              <div class="field" style="margin-top:8px">
+                <label class="label" for="sectionCount-${layout.aisle}-${side}">Nombre de sections sur le cote ${side}</label>
+                <input id="sectionCount-${layout.aisle}-${side}" type="number" min="1" value="${sections.length}" onchange="setSideSectionCount('${esc(layout.aisle)}','${side}', this.value)"/>
+              </div>
+              ${sections.map((section, sectionIndex) => `<details class="tree-node plan-section" open>
+                <summary>
+                  <span>Section ${sectionIndex + 1}</span>
+                  <span class="tree-meta">${section.shelves.length} tablette${section.shelves.length > 1 ? 's' : ''}</span>
+                </summary>
+                <div class="tree-body">
+                  <div class="field">
+                    <label class="label" for="shelfCount-${layout.aisle}-${side}-${sectionIndex}">Nombre de tablettes dans la section ${sectionIndex + 1}</label>
+                    <input id="shelfCount-${layout.aisle}-${side}-${sectionIndex}" type="number" min="1" value="${section.shelves.length}" onchange="setSectionShelfCount('${esc(layout.aisle)}','${side}', ${sectionIndex}, this.value)"/>
+                  </div>
+                  ${section.shelves.map((positions, shelfIndex) => `<details class="tree-node" open>
+                    <summary>
+                      <span>Tablette ${shelfIndex + 1}</span>
+                      <span class="tree-meta">${positions} position${Number(positions) > 1 ? 's' : ''}</span>
+                    </summary>
+                    <div class="tree-body">
+                      <div class="field">
+                        <label class="label" for="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}">Nombre de positions dans la tablette ${shelfIndex + 1}</label>
+                        <input id="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}" type="number" min="1" value="${positions}" onchange="setShelfPositionCount('${esc(layout.aisle)}','${side}', ${sectionIndex}, ${shelfIndex}, this.value)"/>
+                      </div>
+                    </div>
+                  </details>`).join('')}
+                </div>
+              </details>`).join('')}
             </div>
-            ${sections.map((section, sectionIndex) => `<div class="plan-section">
-              <h5>Section ${sectionIndex + 1}</h5>
-              <div class="field">
-                <label class="label" for="shelfCount-${layout.aisle}-${side}-${sectionIndex}">Nombre de tablettes</label>
-                <input id="shelfCount-${layout.aisle}-${side}-${sectionIndex}" type="number" min="1" value="${section.shelves.length}" onchange="setSectionShelfCount('${esc(layout.aisle)}','${side}', ${sectionIndex}, this.value)"/>
-              </div>
-              <div class="plan-shelf-grid">
-                ${section.shelves.map((positions, shelfIndex) => `<div class="field">
-                  <label class="label" for="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}">Tablette ${shelfIndex + 1} - positions</label>
-                  <input id="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}" type="number" min="1" value="${positions}" onchange="setShelfPositionCount('${esc(layout.aisle)}','${side}', ${sectionIndex}, ${shelfIndex}, this.value)"/>
-                </div>`).join('')}
-              </div>
-            </div>`).join('')}
-          </div>`;
+          </details>`;
         }).join('')}
         </div>
         <div class="plan-meta">
