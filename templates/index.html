@@ -442,6 +442,48 @@ function viewedSideFromCanonical(facing, storedSide) {
   return storedSide;
 }
 
+function defaultLayoutConfig(maxSection = 1, maxShelf = 5, maxPosition = 8) {
+  const sectionCount = Math.max(1, Number(maxSection) || 1);
+  const shelfCount = Math.max(1, Number(maxShelf) || 1);
+  const positionCount = Math.max(1, Number(maxPosition) || 1);
+  const makeSections = () => Array.from({length: sectionCount}, () => ({
+    shelves: Array.from({length: shelfCount}, () => positionCount)
+  }));
+  return {
+    sides: {
+      Gauche: {sections: makeSections()},
+      Droite: {sections: makeSections()}
+    }
+  };
+}
+
+function normalizeLayoutConfig(config, maxSection = 1, maxShelf = 5, maxPosition = 8) {
+  const base = defaultLayoutConfig(maxSection, maxShelf, maxPosition);
+  const source = (config && typeof config === 'object') ? config : {};
+  const sourceSides = (source.sides && typeof source.sides === 'object') ? source.sides : {};
+  ['Gauche', 'Droite'].forEach(side => {
+    const sections = Array.isArray(sourceSides[side]?.sections) ? sourceSides[side].sections : [];
+    const normalizedSections = sections
+      .map(section => Array.isArray(section?.shelves) ? section.shelves.map(value => Math.max(1, Number(value) || 1)) : null)
+      .filter(Boolean)
+      .map(shelves => ({shelves}));
+    if (normalizedSections.length) {
+      base.sides[side].sections = normalizedSections;
+    }
+  });
+  return base;
+}
+
+function getAisleLayoutConfig(aisle) {
+  const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
+  return normalizeLayoutConfig(layout?.config, layout?.max_section, layout?.max_shelf, layout?.max_position);
+}
+
+function getSideStructure(aisle, side) {
+  const config = getAisleLayoutConfig(aisle);
+  return config.sides[side] || {sections:[{shelves:[cursor.maxPosition]}]};
+}
+
 async function apiFetch(url, options = {}) {
   const opts = {...options};
   opts.headers = {...(options.headers || {})};
@@ -1024,16 +1066,22 @@ function saveCursor() {
 }
 
 function advanceCursor() {
+  const sideStructure = getSideStructure(cursor.aisle, cursor.side);
+  const sections = sideStructure.sections || [{shelves:[cursor.maxPosition]}];
+  const currentSection = sections[Math.max(0, cursor.section - 1)] || sections[0];
+  const shelves = currentSection.shelves || [cursor.maxPosition];
+  const maxPositionsForShelf = Math.max(1, Number(shelves[Math.max(0, cursor.shelf - 1)] || cursor.maxPosition) || 1);
+
   cursor.position += 1;
-  if (cursor.position > cursor.maxPosition) {
+  if (cursor.position > maxPositionsForShelf) {
     cursor.position = 1;
     cursor.shelf += 1;
   }
-  if (cursor.shelf > cursor.maxShelf) {
+  if (cursor.shelf > shelves.length) {
     cursor.shelf = 1;
     cursor.section += 1;
   }
-  if (cursor.section > cursor.maxSection) {
+  if (cursor.section > sections.length) {
     cursor.section = 1;
     if (cursor.side === 'Gauche') {
       cursor.side = 'Droite';
@@ -2196,22 +2244,23 @@ function renderMapEditor() {
           </div>
           <span class="pill">${layout.product_count || 0} produit${Number(layout.product_count || 0) > 1 ? 's' : ''}</span>
         </div>
-        <div class="row2" style="margin-top:12px">
-          <div class="field">
-            <label class="label" for="mapSection-${layout.aisle}">Sections par cote</label>
-            <input id="mapSection-${layout.aisle}" type="number" min="1" value="${esc(layout.max_section || '1')}"/>
-          </div>
-          <div class="field">
-            <label class="label" for="mapShelf-${layout.aisle}">Tablettes par cote</label>
-            <input id="mapShelf-${layout.aisle}" type="number" min="1" value="${esc(layout.max_shelf)}"/>
-          </div>
-        </div>
-        <div class="row2" style="margin-top:8px">
-          <div class="field">
-            <label class="label" for="mapPosition-${layout.aisle}">Positions par tablette</label>
-            <input id="mapPosition-${layout.aisle}" type="number" min="1" value="${esc(layout.max_position)}"/>
-          </div>
-        </div>
+        ${['Gauche','Droite'].map(side => {
+          const sections = normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position).sides[side].sections;
+          return `<div class="card" style="margin-top:12px">
+            <div class="section-title">${side}</div>
+            <div class="section-note">Chaque section contient une liste de tablettes. Entrez le nombre de positions par tablette separe par des virgules.</div>
+            ${sections.map((section, index) => `
+              <div class="field" style="margin-top:8px">
+                <label class="label" for="mapConfig-${layout.aisle}-${side}-${index}">Section ${index + 1}</label>
+                <input id="mapConfig-${layout.aisle}-${side}-${index}" value="${esc(section.shelves.join(','))}" placeholder="Ex: 8,8,6"/>
+              </div>
+            `).join('')}
+            <div class="tool-row">
+              <button class="btn btn-outline btn-inline" onclick="addMapSection('${esc(layout.aisle)}','${side}')">Ajouter une section</button>
+              <button class="btn btn-outline btn-inline" onclick="removeMapSection('${esc(layout.aisle)}','${side}')">Retirer la derniere section</button>
+            </div>
+          </div>`;
+        }).join('')}
         ${layout.modified_by ? `<div class="barcode-text">Dernier changement: ${esc(layout.modified_by)}</div>` : ''}
         <div class="tool-row">
           <button class="btn btn-inline" onclick="saveAisleLayout('${esc(layout.aisle)}')">Sauver</button>
@@ -2228,6 +2277,53 @@ async function loadMapEditor() {
   renderMapEditor();
 }
 
+function getEditableLayout(aisle) {
+  const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
+  if (!layout) return null;
+  return normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position);
+}
+
+function parseShelfList(value) {
+  const numbers = String(value || '')
+    .split(',')
+    .map(item => Math.max(1, Number(item.trim()) || 0))
+    .filter(Boolean);
+  return numbers.length ? numbers : [8];
+}
+
+function readAisleLayoutConfig(aisle) {
+  const layout = getEditableLayout(aisle);
+  if (!layout) return null;
+  ['Gauche', 'Droite'].forEach(side => {
+    layout.sides[side].sections = layout.sides[side].sections.map((section, index) => ({
+      shelves: parseShelfList(document.getElementById(`mapConfig-${aisle}-${side}-${index}`)?.value || section.shelves.join(','))
+    }));
+  });
+  return layout;
+}
+
+function addMapSection(aisle, side) {
+  const layout = readAisleLayoutConfig(aisle) || getEditableLayout(aisle);
+  if (!layout) return;
+  layout.sides[side].sections.push({shelves:[8]});
+  const target = mapLayouts.find(item => String(item.aisle) === String(aisle));
+  target.config = layout;
+  renderMapEditor();
+}
+
+function removeMapSection(aisle, side) {
+  const layout = readAisleLayoutConfig(aisle) || getEditableLayout(aisle);
+  if (!layout) return;
+  if (layout.sides[side].sections.length <= 1) {
+    document.getElementById('addMsg').innerHTML = `<div class="msg error">Il faut garder au moins une section sur le cote ${esc(side)}.</div>`;
+    return;
+  }
+  layout.sides[side].sections.pop();
+  const target = mapLayouts.find(item => String(item.aisle) === String(aisle));
+  target.config = layout;
+  renderMapEditor();
+}
+
 async function createAisleLayout() {
   if (!requireEditorSession('modifier le plan du magasin')) return;
   const aisle = document.getElementById('mapAisle').value.trim();
@@ -2235,7 +2331,13 @@ async function createAisleLayout() {
   const max_shelf = document.getElementById('mapShelf').value.trim() || '5';
   const max_position = document.getElementById('mapPosition').value.trim() || '8';
   const msgDiv = document.getElementById('addMsg');
-  const data = await apiCreateLayoutAisle({aisle, max_section, max_shelf, max_position});
+  const data = await apiCreateLayoutAisle({
+    aisle,
+    max_section,
+    max_shelf,
+    max_position,
+    config: defaultLayoutConfig(max_section, max_shelf, max_position)
+  });
   msgDiv.className = data.success ? 'msg success' : 'msg error';
   msgDiv.textContent = data.success ? `Allee ${aisle} ajoutee.` : (data.error || 'Creation impossible.');
   if (data.success) {
@@ -2249,10 +2351,8 @@ async function createAisleLayout() {
 
 async function saveAisleLayout(aisle) {
   if (!requireEditorSession('modifier le plan du magasin')) return;
-  const max_section = document.getElementById(`mapSection-${aisle}`).value.trim() || '1';
-  const max_shelf = document.getElementById(`mapShelf-${aisle}`).value.trim() || '5';
-  const max_position = document.getElementById(`mapPosition-${aisle}`).value.trim() || '8';
-  const data = await apiUpdateLayoutAisle(aisle, {max_section, max_shelf, max_position, enabled: true});
+  const config = readAisleLayoutConfig(aisle);
+  const data = await apiUpdateLayoutAisle(aisle, {config, enabled: true});
   const msgDiv = document.getElementById('addMsg');
   msgDiv.className = data.success ? 'msg success' : 'msg error';
   msgDiv.textContent = data.success ? `Allee ${aisle} sauvee.` : (data.error || 'Sauvegarde impossible.');
@@ -2262,13 +2362,19 @@ async function saveAisleLayout(aisle) {
 function applyAisleLayoutToCursor(aisle) {
   const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
   cursor.aisle = Number(aisle) || cursor.aisle;
-  if (layout) {
-    cursor.maxSection = Number(layout.max_section) || cursor.maxSection;
-    cursor.maxShelf = Number(layout.max_shelf) || cursor.maxShelf;
-    cursor.maxPosition = Number(layout.max_position) || cursor.maxPosition;
+  const config = getEditableLayout(aisle);
+  if (layout && config) {
+    const leftSections = config.sides.Gauche.sections;
+    cursor.maxSection = leftSections.length || cursor.maxSection;
+    cursor.maxShelf = leftSections[0]?.shelves.length || cursor.maxShelf;
+    cursor.maxPosition = leftSections[0]?.shelves[0] || cursor.maxPosition;
+    cursor.side = 'Gauche';
+    cursor.section = 1;
+    cursor.shelf = 1;
+    cursor.position = 1;
   }
   updateCursorUi();
-  document.getElementById('addMsg').innerHTML = `<div class="msg success">Le scan utilisera maintenant l allee ${esc(aisle)} avec ${esc(layout?.max_section || cursor.maxSection)} section(s), ${esc(layout?.max_shelf || cursor.maxShelf)} tablette(s) et ${esc(layout?.max_position || cursor.maxPosition)} position(s).</div>`;
+  document.getElementById('addMsg').innerHTML = `<div class="msg success">Le scan utilisera maintenant l allee ${esc(aisle)} avec une structure detaillee par cote, section et tablette.</div>`;
 }
 
 async function removeAisleLayout(aisle) {

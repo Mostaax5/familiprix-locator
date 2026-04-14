@@ -45,6 +45,7 @@ def init_db():
             max_section  TEXT NOT NULL DEFAULT '1',
             max_shelf    TEXT NOT NULL DEFAULT '5',
             max_position TEXT NOT NULL DEFAULT '8',
+            config_json  TEXT NOT NULL DEFAULT '',
             enabled      INTEGER NOT NULL DEFAULT 1,
             modified_by  TEXT DEFAULT '',
             modified_at  TEXT DEFAULT ''
@@ -87,8 +88,8 @@ def init_db():
     aisle_count = db.execute("SELECT COUNT(*) FROM aisle_layouts").fetchone()[0]
     if aisle_count == 0:
         db.executemany(
-            "INSERT INTO aisle_layouts (aisle, max_section, max_shelf, max_position, modified_by) VALUES (?,?,?,?,?)",
-            [(str(index), "1", "5", "8", "systeme") for index in range(1, 9)],
+            "INSERT INTO aisle_layouts (aisle, max_section, max_shelf, max_position, config_json, modified_by) VALUES (?,?,?,?,?,?)",
+            [(str(index), "1", "5", "8", "", "systeme") for index in range(1, 9)],
         )
 
     layout_columns = {
@@ -96,6 +97,8 @@ def init_db():
     }
     if "max_section" not in layout_columns:
         db.execute("ALTER TABLE aisle_layouts ADD COLUMN max_section TEXT NOT NULL DEFAULT '1'")
+    if "config_json" not in layout_columns:
+        db.execute("ALTER TABLE aisle_layouts ADD COLUMN config_json TEXT NOT NULL DEFAULT ''")
 
     db.commit()
     print(f"Base de donnees prete : {DB_PATH}")

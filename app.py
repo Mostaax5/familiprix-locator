@@ -102,15 +102,21 @@ def get_layout_aisles():
     db = get_db()
     aisles = db.execute(
         """
-        SELECT l.aisle, l.max_section, l.max_shelf, l.max_position, l.enabled, l.modified_by, l.modified_at,
+        SELECT l.aisle, l.max_section, l.max_shelf, l.max_position, l.config_json, l.enabled, l.modified_by, l.modified_at,
                COUNT(p.id) AS product_count
         FROM aisle_layouts l
         LEFT JOIN products p ON p.aisle = l.aisle
-        GROUP BY l.aisle, l.max_section, l.max_shelf, l.max_position, l.enabled, l.modified_by, l.modified_at
+        GROUP BY l.aisle, l.max_section, l.max_shelf, l.max_position, l.config_json, l.enabled, l.modified_by, l.modified_at
         ORDER BY CAST(l.aisle AS INTEGER), l.aisle
         """
     ).fetchall()
-    return jsonify([dict(aisle) for aisle in aisles])
+    result = []
+    for aisle in aisles:
+        item = dict(aisle)
+        item["config"] = normalize_layout_config(item.get("config_json", ""), item.get("max_section"), item.get("max_shelf"), item.get("max_position"))
+        item.pop("config_json", None)
+        result.append(item)
+    return jsonify(result)
 
 
 @app.route("/api/layout/aisles", methods=["POST"])
@@ -120,9 +126,8 @@ def create_layout_aisle():
         return error
     data = request.get_json() or {}
     aisle = str(data.get("aisle", "")).strip()
-    max_section = str(data.get("max_section", "1")).strip() or "1"
-    max_shelf = str(data.get("max_shelf", "5")).strip() or "5"
-    max_position = str(data.get("max_position", "8")).strip() or "8"
+    config = normalize_layout_config(data.get("config"), data.get("max_section", "1"), data.get("max_shelf", "5"), data.get("max_position", "8"))
+    max_section, max_shelf, max_position = layout_metrics(config)
     if not aisle:
         return jsonify({"error": "Numero d allee requis."}), 400
     db = get_db()
@@ -131,10 +136,10 @@ def create_layout_aisle():
         return jsonify({"error": f"L allee {aisle} existe deja."}), 409
     db.execute(
         """
-        INSERT INTO aisle_layouts (aisle, max_section, max_shelf, max_position, enabled, modified_by, modified_at)
-        VALUES (?, ?, ?, ?, 1, ?, ?)
+        INSERT INTO aisle_layouts (aisle, max_section, max_shelf, max_position, config_json, enabled, modified_by, modified_at)
+        VALUES (?, ?, ?, ?, ?, 1, ?, ?)
         """,
-        (aisle, max_section, max_shelf, max_position, username, utc_now_iso()),
+        (aisle, max_section, max_shelf, max_position, json.dumps(config), username, utc_now_iso()),
     )
     db.commit()
     return jsonify({"success": True})
@@ -146,18 +151,17 @@ def update_layout_aisle(aisle):
     if error:
         return error
     data = request.get_json() or {}
-    max_section = str(data.get("max_section", "1")).strip() or "1"
-    max_shelf = str(data.get("max_shelf", "5")).strip() or "5"
-    max_position = str(data.get("max_position", "8")).strip() or "8"
+    config = normalize_layout_config(data.get("config"), data.get("max_section", "1"), data.get("max_shelf", "5"), data.get("max_position", "8"))
+    max_section, max_shelf, max_position = layout_metrics(config)
     enabled = 1 if data.get("enabled", True) else 0
     db = get_db()
     result = db.execute(
         """
         UPDATE aisle_layouts
-        SET max_section=?, max_shelf=?, max_position=?, enabled=?, modified_by=?, modified_at=?
+        SET max_section=?, max_shelf=?, max_position=?, config_json=?, enabled=?, modified_by=?, modified_at=?
         WHERE aisle=?
         """,
-        (max_section, max_shelf, max_position, enabled, username, utc_now_iso(), aisle),
+        (max_section, max_shelf, max_position, json.dumps(config), enabled, username, utc_now_iso(), aisle),
     )
     db.commit()
     if result.rowcount == 0:
@@ -543,6 +547,70 @@ def row_to_product(product):
     item["last_change_by"] = item.get("modified_by") or item.get("created_by") or ""
     item["last_change_at"] = item.get("modified_at") or item.get("created_at") or ""
     return item
+
+
+def build_default_layout_config(max_section, max_shelf, max_position):
+    section_count = max(1, int(str(max_section or "1")))
+    shelf_count = max(1, int(str(max_shelf or "1")))
+    position_count = max(1, int(str(max_position or "1")))
+    section_template = [{"shelves": [position_count for _ in range(shelf_count)]} for _ in range(section_count)]
+    return {
+        "sides": {
+            "Gauche": {"sections": json.loads(json.dumps(section_template))},
+            "Droite": {"sections": json.loads(json.dumps(section_template))},
+        }
+    }
+
+
+def normalize_layout_config(config_value, max_section="1", max_shelf="5", max_position="8"):
+    if isinstance(config_value, str):
+        try:
+            config = json.loads(config_value) if config_value.strip() else {}
+        except json.JSONDecodeError:
+            config = {}
+    else:
+        config = config_value or {}
+
+    config = config if isinstance(config, dict) else {}
+    sides = config.get("sides") if isinstance(config.get("sides"), dict) else {}
+    normalized_sides = {}
+
+    for side in ["Gauche", "Droite"]:
+        side_value = sides.get(side) if isinstance(sides.get(side), dict) else {}
+        sections = side_value.get("sections") if isinstance(side_value.get("sections"), list) else []
+        normalized_sections = []
+        for section in sections:
+            shelves = section.get("shelves") if isinstance(section, dict) else None
+            if not isinstance(shelves, list):
+                continue
+            cleaned_shelves = []
+            for shelf in shelves:
+                try:
+                    cleaned_shelves.append(max(1, int(str(shelf))))
+                except ValueError:
+                    continue
+            if cleaned_shelves:
+                normalized_sections.append({"shelves": cleaned_shelves})
+        if not normalized_sections:
+            default = build_default_layout_config(max_section, max_shelf, max_position)
+            normalized_sections = default["sides"][side]["sections"]
+        normalized_sides[side] = {"sections": normalized_sections}
+
+    return {"sides": normalized_sides}
+
+
+def layout_metrics(config):
+    sides = config.get("sides", {})
+    max_section = max(len((sides.get(side) or {}).get("sections", [])) for side in ["Gauche", "Droite"])
+    max_shelf = 1
+    max_position = 1
+    for side in ["Gauche", "Droite"]:
+        for section in (sides.get(side) or {}).get("sections", []):
+            shelves = section.get("shelves", [])
+            max_shelf = max(max_shelf, len(shelves))
+            if shelves:
+                max_position = max(max_position, max(shelves))
+    return str(max_section), str(max_shelf), str(max_position)
 
 
 @app.route("/api/products", methods=["POST"])
