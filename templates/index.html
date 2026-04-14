@@ -319,6 +319,8 @@ let lastAcceptedCameraAt = 0;
 let activeLookupBarcode = '';
 let barcodeLibraryPromise = null;
 let cameraUsageMode = 'scan';
+let scanFrameTimer = null;
+let cameraTrack = null;
 let allProductsCache = [];
 let mapLayouts = [];
 const STORAGE_KEYS = {
@@ -1441,13 +1443,20 @@ async function startCamera() {
       scannerMode = 'native';
       detector = new BarcodeDetector({formats:['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf']});
       scannerStream = await navigator.mediaDevices.getUserMedia({
-        video: {facingMode: {ideal: 'environment'}},
+        video: {
+          facingMode: {ideal: 'environment'},
+          width: {ideal: 1920},
+          height: {ideal: 1080},
+          aspectRatio: {ideal: 1.7777778}
+        },
         audio: false
       });
       reader.style.display = 'none';
       video.style.display = 'block';
       video.srcObject = scannerStream;
       await video.play();
+      cameraTrack = scannerStream.getVideoTracks()[0] || null;
+      await optimizeCameraTrack();
       status.textContent = 'Recherche code...';
       button.textContent = 'Fermer camera';
       scanLoopRunning = true;
@@ -1466,7 +1475,7 @@ async function startCamera() {
       html5Scanner = new Html5Qrcode(reader.id, html5ScannerConfig());
       await html5Scanner.start(
         {facingMode: 'environment'},
-        {fps: 18, qrbox: responsiveScanBox},
+        {fps: 24, qrbox: responsiveScanBox, aspectRatio: 1.7777778, disableFlip: true},
         onDecodedCode,
         () => {}
       );
@@ -1520,10 +1529,77 @@ function injectScript(src) {
   });
 }
 
+async function optimizeCameraTrack() {
+  if (!cameraTrack || typeof cameraTrack.getCapabilities !== 'function') return;
+  try {
+    const capabilities = cameraTrack.getCapabilities();
+    const advanced = [];
+    if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
+      advanced.push({focusMode: 'continuous'});
+    }
+    if (typeof capabilities.zoom?.max === 'number' && capabilities.zoom.max > 1) {
+      advanced.push({zoom: Math.min(capabilities.zoom.max, 2)});
+    }
+    if (advanced.length) {
+      await cameraTrack.applyConstraints({advanced});
+    }
+  } catch (error) {}
+}
+
+function makeScanCanvas(width, height) {
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(32, Math.floor(width));
+  canvas.height = Math.max(32, Math.floor(height));
+  return canvas;
+}
+
+function drawProcessedCrop(video, crop) {
+  const sourceWidth = video.videoWidth;
+  const sourceHeight = video.videoHeight;
+  if (!sourceWidth || !sourceHeight) return null;
+  const sx = Math.max(0, Math.floor(sourceWidth * crop.x));
+  const sy = Math.max(0, Math.floor(sourceHeight * crop.y));
+  const sw = Math.max(64, Math.floor(sourceWidth * crop.w));
+  const sh = Math.max(32, Math.floor(sourceHeight * crop.h));
+  const canvas = makeScanCanvas(sw * crop.scale, sh * crop.scale);
+  const ctx = canvas.getContext('2d', {willReadFrequently: true});
+  if (!ctx) return null;
+  ctx.filter = 'grayscale(1) contrast(1.65) brightness(1.12) saturate(0)';
+  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+async function detectCodesFromSource(source) {
+  if (!source || !detector) return [];
+  try {
+    const codes = await detector.detect(source);
+    return Array.isArray(codes) ? codes : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+async function detectBarcodeCandidates(video) {
+  const variants = [
+    video,
+    drawProcessedCrop(video, {x: 0.06, y: 0.28, w: 0.88, h: 0.24, scale: 2.2}),
+    drawProcessedCrop(video, {x: 0.1, y: 0.34, w: 0.8, h: 0.18, scale: 2.8}),
+    drawProcessedCrop(video, {x: 0.18, y: 0.45, w: 0.64, h: 0.16, scale: 3.2})
+  ].filter(Boolean);
+
+  for (const variant of variants) {
+    const codes = await detectCodesFromSource(variant);
+    if (codes.length) return codes;
+  }
+  return [];
+}
+
 async function stopCamera() {
   const {status, button, video, reader} = getCameraDom();
   scanLoopRunning = false;
   scanPaused = false;
+  window.clearTimeout(scanFrameTimer);
+  scanFrameTimer = null;
   resetCameraCandidate();
   if (scannerStream) {
     scannerStream.getTracks().forEach(track => track.stop());
@@ -1535,6 +1611,7 @@ async function stopCamera() {
     } catch (error) {}
   }
   scannerStream = null;
+  cameraTrack = null;
   html5Scanner = null;
   scannerMode = null;
   video.srcObject = null;
@@ -1561,8 +1638,8 @@ async function stopCamera() {
 function responsiveScanBox(viewfinderWidth, viewfinderHeight) {
   const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
   return {
-    width: Math.max(260, Math.floor(viewfinderWidth * 0.88)),
-    height: Math.max(96, Math.floor(minEdge * 0.22))
+    width: Math.max(280, Math.floor(viewfinderWidth * 0.92)),
+    height: Math.max(82, Math.floor(minEdge * 0.16))
   };
 }
 
@@ -1621,10 +1698,10 @@ function confirmStableCameraBarcode(barcode) {
   }
 
   window.clearTimeout(cameraCandidateTimer);
-  cameraCandidateTimer = window.setTimeout(resetCameraCandidate, 450);
+  cameraCandidateTimer = window.setTimeout(resetCameraCandidate, 250);
 
   if (cameraCandidateCount < 2) {
-    getCameraDom().status.textContent = 'Verification du code...';
+    getCameraDom().status.textContent = 'Verif rapide...';
     return false;
   }
 
@@ -1785,17 +1862,19 @@ async function scanFrame() {
   const video = getCameraDom().video;
   try {
     if (scanPaused) {
-      requestAnimationFrame(scanFrame);
+      scanFrameTimer = window.setTimeout(scanFrame, 90);
       return;
     }
-    const codes = await detector.detect(video);
+    const codes = await detectBarcodeCandidates(video);
     if (codes.length) {
       await onDecodedCode(codes[0].rawValue);
+    } else {
+      getCameraDom().status.textContent = 'Cadrez les barres et les chiffres';
     }
   } catch (error) {
     getCameraDom().status.textContent = 'Lecture en cours';
   }
-  requestAnimationFrame(scanFrame);
+  scanFrameTimer = window.setTimeout(scanFrame, 90);
 }
 
 async function lookupScanFromInput(force=false, barcodeOverride='') {
