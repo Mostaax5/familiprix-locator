@@ -1,4 +1,5 @@
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, render_template, request, jsonify, send_from_directory
 from database import init_db, get_db
 from datetime import datetime, timezone
@@ -71,8 +72,13 @@ def search_products():
     query = request.args.get("q", "").strip().lower()
     db = get_db()
     products = db.execute(
-        "SELECT * FROM products WHERE LOWER(name) LIKE ? OR LOWER(brand) LIKE ? OR barcode LIKE ?",
-        (f"%{query}%", f"%{query}%", f"%{query}%")
+        """
+        SELECT *
+        FROM products
+        WHERE LOWER(name) LIKE ? OR LOWER(brand) LIKE ? OR barcode LIKE ?
+        ORDER BY aisle, side, section, shelf, position, name
+        """,
+        (f"%{query}%", f"%{query}%", f"%{query}%"),
     ).fetchall()
     return jsonify([row_to_product(p) for p in products])
 
@@ -100,7 +106,6 @@ def get_editors():
 @app.route("/api/layout/aisles", methods=["GET"])
 def get_layout_aisles():
     db = get_db()
-    ensure_layout_rows_for_existing_aisles(db)
     aisles = db.execute(
         """
         SELECT l.aisle, l.max_section, l.max_shelf, l.max_position, l.config_json, l.enabled, l.modified_by, l.modified_at,
@@ -127,7 +132,7 @@ def create_layout_aisle():
         return error
     data = request.get_json() or {}
     aisle = str(data.get("aisle", "")).strip()
-    config = normalize_layout_config(data.get("config"), data.get("max_section", "1"), data.get("max_shelf", "5"), data.get("max_position", "8"))
+    config = normalize_layout_config(data.get("config"), data.get("max_section", "0"), data.get("max_shelf", "0"), data.get("max_position", "0"))
     max_section, max_shelf, max_position = layout_metrics(config)
     if not aisle:
         return jsonify({"error": "Numero d allee requis."}), 400
@@ -152,7 +157,7 @@ def update_layout_aisle(aisle):
     if error:
         return error
     data = request.get_json() or {}
-    config = normalize_layout_config(data.get("config"), data.get("max_section", "1"), data.get("max_shelf", "5"), data.get("max_position", "8"))
+    config = normalize_layout_config(data.get("config"), data.get("max_section", "0"), data.get("max_shelf", "0"), data.get("max_position", "0"))
     max_section, max_shelf, max_position = layout_metrics(config)
     enabled = 1 if data.get("enabled", True) else 0
     db = get_db()
@@ -164,10 +169,11 @@ def update_layout_aisle(aisle):
         """,
         (max_section, max_shelf, max_position, json.dumps(config), enabled, username, utc_now_iso(), aisle),
     )
+    removed_products = remove_products_outside_layout(db, aisle, config) if result.rowcount else 0
     db.commit()
     if result.rowcount == 0:
         return jsonify({"error": "Allee non trouvee."}), 404
-    return jsonify({"success": True})
+    return jsonify({"success": True, "removed_products": removed_products})
 
 
 @app.route("/api/layout/aisles/<aisle>", methods=["DELETE"])
@@ -191,20 +197,45 @@ def lookup_barcode(barcode):
     if not barcode:
         return jsonify({"found": False, "error": "Code-barres manquant"}), 400
 
+    pharmacy_tasks = []
     for source_name, source_base_url in PHARMACY_LOOKUP_SOURCES:
         if source_name == "Familiprix":
-            product = lookup_familiprix_product(barcode)
+            pharmacy_tasks.append(lambda current_barcode=barcode: lookup_familiprix_product(current_barcode))
         else:
-            product = lookup_generic_pharmacy_product(source_name, source_base_url, barcode)
-        if product:
-            return jsonify({"found": True, "product": product})
+            pharmacy_tasks.append(
+                lambda current_barcode=barcode, current_name=source_name, current_url=source_base_url:
+                lookup_generic_pharmacy_product(current_name, current_url, current_barcode)
+            )
+    product = first_lookup_result(pharmacy_tasks)
+    if product:
+        return jsonify({"found": True, "product": product})
 
-    for source_name, base_url in PRODUCT_LOOKUP_SOURCES:
-        product = lookup_open_facts_product(source_name, base_url, barcode)
-        if product:
-            return jsonify({"found": True, "product": product})
+    product = first_lookup_result([
+        lambda current_barcode=barcode, current_name=source_name, current_url=base_url:
+        lookup_open_facts_product(current_name, current_url, current_barcode)
+        for source_name, base_url in PRODUCT_LOOKUP_SOURCES
+    ])
+    if product:
+        return jsonify({"found": True, "product": product})
 
     return jsonify({"found": False, "error": "Aucun produit trouve en ligne"})
+
+
+def first_lookup_result(tasks, max_workers=4):
+    if not tasks:
+        return None
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(tasks))) as executor:
+        futures = [executor.submit(task) for task in tasks]
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+            except Exception:
+                result = None
+            if result:
+                for pending in futures:
+                    pending.cancel()
+                return result
+    return None
 
 
 def lookup_familiprix_product(barcode):
@@ -550,10 +581,17 @@ def row_to_product(product):
     return item
 
 
+def clamp_non_negative_int(value, fallback=0):
+    try:
+        return max(0, int(str(value)))
+    except (TypeError, ValueError):
+        return fallback
+
+
 def build_default_layout_config(max_section, max_shelf, max_position):
-    section_count = max(1, int(str(max_section or "1")))
-    shelf_count = max(1, int(str(max_shelf or "1")))
-    position_count = max(1, int(str(max_position or "1")))
+    section_count = clamp_non_negative_int(max_section)
+    shelf_count = clamp_non_negative_int(max_shelf)
+    position_count = clamp_non_negative_int(max_position)
     section_template = [{"shelves": [position_count for _ in range(shelf_count)]} for _ in range(section_count)]
     return {
         "sides": {
@@ -586,12 +624,8 @@ def normalize_layout_config(config_value, max_section="1", max_shelf="5", max_po
                 continue
             cleaned_shelves = []
             for shelf in shelves:
-                try:
-                    cleaned_shelves.append(max(1, int(str(shelf))))
-                except ValueError:
-                    continue
-            if cleaned_shelves:
-                normalized_sections.append({"shelves": cleaned_shelves})
+                cleaned_shelves.append(clamp_non_negative_int(shelf))
+            normalized_sections.append({"shelves": cleaned_shelves})
         if not normalized_sections:
             default = build_default_layout_config(max_section, max_shelf, max_position)
             normalized_sections = default["sides"][side]["sections"]
@@ -603,8 +637,8 @@ def normalize_layout_config(config_value, max_section="1", max_shelf="5", max_po
 def layout_metrics(config):
     sides = config.get("sides", {})
     max_section = max(len((sides.get(side) or {}).get("sections", [])) for side in ["Gauche", "Droite"])
-    max_shelf = 1
-    max_position = 1
+    max_shelf = 0
+    max_position = 0
     for side in ["Gauche", "Droite"]:
         for section in (sides.get(side) or {}).get("sections", []):
             shelves = section.get("shelves", [])
@@ -613,58 +647,50 @@ def layout_metrics(config):
                 max_position = max(max_position, max(shelves))
     return str(max_section), str(max_shelf), str(max_position)
 
+def get_layout_row(db, aisle):
+    return db.execute(
+        "SELECT aisle, config_json, max_section, max_shelf, max_position, enabled FROM aisle_layouts WHERE aisle=?",
+        (str(aisle).strip(),),
+    ).fetchone()
 
-def ensure_layout_rows_for_existing_aisles(db):
-    product_aisles = [
-        str(row["aisle"]).strip()
-        for row in db.execute(
-            "SELECT DISTINCT aisle FROM products WHERE TRIM(COALESCE(aisle, '')) <> ''"
-        ).fetchall()
-    ]
-    existing_rows = {
-        str(row["aisle"]): dict(row)
-        for row in db.execute(
-            "SELECT aisle, enabled, config_json, max_section, max_shelf, max_position FROM aisle_layouts"
-        ).fetchall()
-    }
-    changed = False
 
-    for aisle in product_aisles:
-        row = existing_rows.get(aisle)
-        if not row:
-            default_config = build_default_layout_config("1", "5", "8")
-            db.execute(
-                """
-                INSERT INTO aisle_layouts (aisle, max_section, max_shelf, max_position, config_json, enabled, modified_by, modified_at)
-                VALUES (?, '1', '5', '8', ?, 1, 'systeme', ?)
-                """,
-                (aisle, json.dumps(default_config), utc_now_iso()),
-            )
-            changed = True
-            continue
+def product_fits_layout(product, config):
+    side = str(product["side"]).strip()
+    section_index = clamp_non_negative_int(product.get("section", "0")) - 1
+    shelf_index = clamp_non_negative_int(product.get("shelf", "0")) - 1
+    position_value = clamp_non_negative_int(product.get("position", "0"))
+    sections = ((config.get("sides", {}) or {}).get(side, {}) or {}).get("sections", [])
+    if section_index < 0 or section_index >= len(sections):
+        return False
+    shelves = sections[section_index].get("shelves", [])
+    if shelf_index < 0 or shelf_index >= len(shelves):
+        return False
+    return 1 <= position_value <= clamp_non_negative_int(shelves[shelf_index])
 
-        needs_enable = int(row.get("enabled") or 0) != 1
-        needs_config = not str(row.get("config_json") or "").strip()
-        if needs_enable or needs_config:
-            config = normalize_layout_config(
-                row.get("config_json"),
-                row.get("max_section"),
-                row.get("max_shelf"),
-                row.get("max_position"),
-            )
-            max_section, max_shelf, max_position = layout_metrics(config)
-            db.execute(
-                """
-                UPDATE aisle_layouts
-                SET enabled=1, config_json=?, max_section=?, max_shelf=?, max_position=?, modified_by='systeme', modified_at=?
-                WHERE aisle=?
-                """,
-                (json.dumps(config), max_section, max_shelf, max_position, utc_now_iso(), aisle),
-            )
-            changed = True
 
-    if changed:
-        db.commit()
+def remove_products_outside_layout(db, aisle, config):
+    rows = db.execute(
+        "SELECT id, side, section, shelf, position FROM products WHERE aisle=?",
+        (str(aisle).strip(),),
+    ).fetchall()
+    removable_ids = [int(row["id"]) for row in rows if not product_fits_layout(row, config)]
+    if removable_ids:
+        placeholders = ",".join("?" for _ in removable_ids)
+        db.execute(f"DELETE FROM products WHERE id IN ({placeholders})", tuple(removable_ids))
+    return len(removable_ids)
+
+
+def validate_layout_slot(db, aisle, side, section, shelf, position):
+    row = get_layout_row(db, aisle)
+    if not row:
+        return False, f"L allee {aisle} n existe pas dans le plan."
+    config = normalize_layout_config(row["config_json"], row["max_section"], row["max_shelf"], row["max_position"])
+    if not product_fits_layout(
+        {"side": side, "section": section, "shelf": shelf, "position": position},
+        config,
+    ):
+        return False, "Cette position n existe pas dans le plan de l allee."
+    return True, ""
 
 
 @app.route("/api/products", methods=["POST"])
@@ -687,6 +713,9 @@ def add_product():
         return jsonify({"error": "Champs obligatoires manquants"}), 400
 
     db = get_db()
+    is_valid_slot, slot_error = validate_layout_slot(db, aisle, side, section, shelf, position)
+    if not is_valid_slot:
+        return jsonify({"error": slot_error}), 400
     occupied = find_product_at_position(db, aisle, side, section, shelf, position)
     if occupied:
         return jsonify({
@@ -717,6 +746,16 @@ def update_product(product_id):
         return error
     data = request.get_json()
     db = get_db()
+    is_valid_slot, slot_error = validate_layout_slot(
+        db,
+        str(data["aisle"]).strip(),
+        str(data["side"]).strip(),
+        str(data.get("section", "1")).strip() or "1",
+        str(data["shelf"]).strip(),
+        str(data["position"]).strip(),
+    )
+    if not is_valid_slot:
+        return jsonify({"error": slot_error}), 400
     occupied = find_product_at_position(
         db,
         str(data["aisle"]).strip(),
@@ -768,9 +807,12 @@ def bulk_update_products():
     required = ["id", "name", "aisle", "side", "section", "shelf", "position"]
     db = get_db()
     seen_positions = {}
+    incoming_ids = set()
+    normalized_products = []
     for product in products:
         if not all(str(product.get(field, "")).strip() for field in required):
             return jsonify({"error": "Produit incomplet dans la mise a jour"}), 400
+        product_id = int(product["id"])
         key = (
             str(product["aisle"]).strip(),
             str(product["side"]).strip(),
@@ -778,30 +820,66 @@ def bulk_update_products():
             str(product["shelf"]).strip(),
             str(product["position"]).strip(),
         )
-        if key in seen_positions and int(product["id"]) != seen_positions[key]:
+        if key in seen_positions and product_id != seen_positions[key]:
             return jsonify({"error": "Deux produits visent la meme position dans cette mise a jour"}), 409
-        seen_positions[key] = int(product["id"])
+        seen_positions[key] = product_id
+        incoming_ids.add(product_id)
+        is_valid_slot, slot_error = validate_layout_slot(db, key[0], key[1], key[2], key[3], key[4])
+        if not is_valid_slot:
+            return jsonify({"error": slot_error}), 400
+        normalized_products.append({
+            "id": product_id,
+            "name": str(product["name"]).strip(),
+            "brand": str(product.get("brand", "")).strip(),
+            "description": str(product.get("description", "")).strip(),
+            "barcode": str(product.get("barcode", "")).strip(),
+            "aisle": key[0],
+            "side": key[1],
+            "section": key[2],
+            "shelf": key[3],
+            "position": key[4],
+        })
 
-        occupied = find_product_at_position(db, key[0], key[1], key[2], key[3], key[4], exclude_id=int(product["id"]))
+    existing_rows = db.execute(
+        "SELECT id, name, barcode, aisle, side, section, shelf, position FROM products"
+    ).fetchall()
+    occupied_positions = {
+        (
+            str(row["aisle"]).strip(),
+            str(row["side"]).strip(),
+            str(row["section"]).strip() or "1",
+            str(row["shelf"]).strip(),
+            str(row["position"]).strip(),
+        ): row
+        for row in existing_rows
+        if int(row["id"]) not in incoming_ids
+    }
+
+    for product in normalized_products:
+        occupied = occupied_positions.get(
+            (product["aisle"], product["side"], product["section"], product["shelf"], product["position"])
+        )
         if occupied:
             return jsonify({
                 "error": f'Position deja occupee par "{occupied["name"]}" (code {occupied["barcode"] or "sans code"}).'
             }), 409
+
+    for product in normalized_products:
         db.execute(
             "UPDATE products SET name=?, brand=?, description=?, barcode=?, aisle=?, side=?, section=?, shelf=?, position=?, modified_by=?, modified_at=? WHERE id=?",
             (
-                str(product["name"]).strip(),
-                str(product.get("brand", "")).strip(),
-                str(product.get("description", "")).strip(),
-                str(product.get("barcode", "")).strip(),
-                str(product["aisle"]).strip(),
-                str(product["side"]).strip(),
-                str(product.get("section", "1")).strip() or "1",
-                str(product["shelf"]).strip(),
-                str(product["position"]).strip(),
+                product["name"],
+                product["brand"],
+                product["description"],
+                product["barcode"],
+                product["aisle"],
+                product["side"],
+                product["section"],
+                product["shelf"],
+                product["position"],
                 username,
                 utc_now_iso(),
-                int(product["id"]),
+                product["id"],
             )
         )
     db.commit()
@@ -825,7 +903,6 @@ def delete_product(product_id):
 @app.route("/api/aisles", methods=["GET"])
 def get_aisles():
     db = get_db()
-    ensure_layout_rows_for_existing_aisles(db)
     aisles = db.execute(
         """
         SELECT l.aisle, COUNT(p.id) as count

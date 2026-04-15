@@ -51,6 +51,9 @@ def init_db():
             modified_at  TEXT DEFAULT ''
         )
     """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_products_location ON products(aisle, side, section, shelf, position)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_products_name_brand ON products(name, brand)")
 
     existing_columns = {
         row["name"] for row in db.execute("PRAGMA table_info(products)").fetchall()
@@ -69,28 +72,6 @@ def init_db():
         db.execute("ALTER TABLE products ADD COLUMN created_by TEXT DEFAULT ''")
     if "created_at" not in existing_columns:
         db.execute("ALTER TABLE products ADD COLUMN created_at TEXT DEFAULT ''")
-
-    count = db.execute("SELECT COUNT(*) FROM products").fetchone()[0]
-    if count == 0:
-        sample = [
-            ("Advil Liqui-Gels 200mg", "", "", "0305730170109", "3", "Droite", "1", "2", "4", "systeme", "systeme"),
-            ("Tylenol Extra Fort 500mg", "", "", "0621038161908", "3", "Gauche", "1", "1", "2", "systeme", "systeme"),
-            ("Gaviscon menthe", "", "", "0305732278498", "5", "Droite", "1", "3", "1", "systeme", "systeme"),
-            ("Reactine 10mg", "", "", "0629014107239", "4", "Gauche", "1", "2", "3", "systeme", "systeme"),
-            ("Polysporin onguent", "", "", "0305730112101", "6", "Droite", "1", "1", "5", "systeme", "systeme"),
-            ("Pantene shampoing", "", "", "0080878015048", "8", "Gauche", "1", "3", "2", "systeme", "systeme"),
-        ]
-        db.executemany(
-            "INSERT INTO products (name, brand, description, barcode, aisle, side, section, shelf, position, created_by, modified_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            sample,
-        )
-
-    aisle_count = db.execute("SELECT COUNT(*) FROM aisle_layouts").fetchone()[0]
-    if aisle_count == 0:
-        db.executemany(
-            "INSERT INTO aisle_layouts (aisle, max_section, max_shelf, max_position, config_json, modified_by) VALUES (?,?,?,?,?,?)",
-            [(str(index), "1", "5", "8", "", "systeme") for index in range(1, 9)],
-        )
 
     layout_columns = {
         row["name"] for row in db.execute("PRAGMA table_info(aisle_layouts)").fetchall()
