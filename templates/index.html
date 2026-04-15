@@ -49,11 +49,6 @@
   .msg.error{background:#fef2f2;color:#991b1b}
   .msg.info{background:#eef4ff;color:#1a56db}
   .empty{text-align:center;padding:2rem;color:#777;font-size:14px}
-  .aisle-row{background:white;border-radius:8px;padding:12px 14px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;border:1px solid #e6e8ec;position:relative;z-index:1}
-  .aisle-row:active{background:#f9fafb}
-  .aisle-title{font-size:14px;font-weight:700}
-  .aisle-sub{font-size:12px;color:#777}
-  .back{background:none;border:none;color:#c8102e;font-size:13px;cursor:pointer;margin-bottom:12px;padding:0;font-weight:700}
   .section{display:none}
   .section.active{display:block}
   .delete-btn{float:right;background:none;border:none;color:#999;font-size:18px;cursor:pointer;padding:0 0 0 8px}
@@ -74,17 +69,9 @@
   .confirm-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
   .tool-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
   .tool-row .btn{width:auto;margin-top:0}
-  .shelf-title{font-size:13px;font-weight:800;margin:14px 0 8px;color:#2f343b}
-  .layout-card{background:white;border:1px solid #e6e8ec;border-radius:8px;padding:12px;margin-bottom:8px}
-  .layout-card .name{font-size:14px;font-weight:800;margin-bottom:8px}
-  .layout-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px}
-  .layout-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin-top:8px}
-  .plan-aisle{background:white;border:1px solid #e6e8ec;border-radius:8px;padding:14px;margin-bottom:12px}
   .plan-sides{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
   .plan-side{border:1px solid #e6e8ec;border-radius:8px;padding:12px;background:#fafbfc}
-  .plan-side h4{font-size:13px;font-weight:800;margin-bottom:6px}
   .plan-section{border:1px solid #e6e8ec;border-radius:8px;padding:10px;background:white;margin-top:10px}
-  .plan-section h5{font-size:13px;font-weight:800;margin-bottom:8px}
   .plan-shelf-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
   .tree-node{border:1px solid #e6e8ec;border-radius:8px;background:white;margin-top:10px;overflow:hidden}
   .tree-node summary{list-style:none;cursor:pointer;padding:11px 12px;font-size:13px;font-weight:800;display:flex;align-items:center;justify-content:space-between;gap:10px}
@@ -95,11 +82,7 @@
   .tree-meta{font-size:12px;color:#666;font-weight:600}
   .plan-meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
   .plan-meta .pill{background:#f3f4f6;color:#374151}
-  .map-textarea{width:100%;min-height:120px;padding:12px;border:1px solid #d8dce2;border-radius:8px;font-size:15px;line-height:1.5;resize:vertical;background:white}
   .plan-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-  .mini-btn{padding:9px 8px;border-radius:8px;border:1px solid #d8dce2;background:#fff;color:#2f343b;font-size:12px;font-weight:800;cursor:pointer}
-  .mini-btn.danger{color:#c8102e;border-color:#f1b8c2}
-  .mini-btn.primary{background:#c8102e;color:#fff;border-color:#c8102e}
   .device-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
   .scan-tools{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end}
   .btn-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
@@ -107,18 +90,17 @@
   .shell-top{display:flex;align-items:center;justify-content:space-between;gap:10px}
   .shell-title{font-size:13px;font-weight:800;color:#2f343b}
   .shell-copy{font-size:12px;color:#666;line-height:1.4;margin-top:6px}
-  .shell-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-  .shell-sync{margin-top:10px}
   .auth-grid{display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:10px;align-items:end}
   .inline-note{font-size:12px;color:#666;line-height:1.4;margin-top:8px}
-  .swap-row{display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:8px}
   .status-dot{display:inline-block;width:8px;height:8px;border-radius:999px;background:#16a34a;margin-right:6px}
   .status-dot.offline{background:#dc2626}
   .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-  @media (min-width:860px){.content{max-width:900px}.layout-grid{grid-template-columns:1fr 1fr 1fr 1fr}.layout-actions{grid-template-columns:repeat(5,1fr)}}
+  .slot-preview{display:grid;gap:6px;margin-top:10px}
+  .slot-chip{display:inline-flex;align-items:center;gap:6px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:999px;padding:6px 10px;font-size:12px;color:#334155;font-weight:700}
+  .slot-chip.active{background:#ecfdf5;border-color:#86efac;color:#166534}
+  @media (min-width:860px){.content{max-width:900px}}
   @media (max-width:520px){.row2,.row3,.confirm-grid,.device-grid,.scan-tools,.btn-row,.plan-sides,.plan-shelf-grid{grid-template-columns:1fr}.tabs{top:calc(66px + env(safe-area-inset-top))}.tab{font-size:11px}.content{padding:10px}.cursor{align-items:flex-start;flex-direction:column}.btn-inline{width:100%}.scanner-viewport{height:min(34vh,220px)}}
   @media (max-width:520px){.plan-sides{grid-template-columns:1fr}}
-  @media (max-width:420px){.layout-grid,.layout-actions{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -131,7 +113,6 @@
 <div class="tabs">
   <button class="tab active" onclick="switchTab('scan')">Scan</button>
   <button class="tab" onclick="switchTab('search')">Recherche</button>
-  <button class="tab" onclick="switchTab('browse')">Allees</button>
   <button class="tab" onclick="switchTab('add')">Plan</button>
 </div>
 
@@ -150,14 +131,7 @@
       <button class="btn btn-inline" onclick="saveEditorName()">Nommer cet appareil</button>
     </div>
     <div id="editorSessionInfo" class="inline-note">Aucun mot de passe pour l instant. Si vous entrez un nom, il sera garde sur cet appareil pour suivre qui a change quoi.</div>
-    <div class="shell-actions">
-      <button class="btn btn-outline btn-inline" onclick="enablePhoneMode()">Activer la copie locale synchronisee</button>
-      <button class="btn btn-outline btn-inline" onclick="exportLocalDatabase()">Exporter JSON</button>
-      <button class="btn btn-outline btn-inline" onclick="document.getElementById('importDbInput').click()">Importer JSON</button>
-      <button class="btn btn-outline btn-inline" id="restoreImportButton" style="display:none" onclick="restoreLastImportBackup()">Annuler dernier import</button>
-    </div>
-    <div id="syncNotice" class="msg info shell-sync" style="display:none"></div>
-    <input id="importDbInput" type="file" accept="application/json,.json" style="display:none" onchange="importLocalDatabase(event)"/>
+    <div id="backendStatusInfo" class="inline-note">Verification de la base partagee...</div>
   </div>
 </div>
 
@@ -167,51 +141,10 @@
       <div>
         <span class="small">Position actuelle</span>
         <strong id="cursorText">Allee 1 - Avant - Gauche - Section 1 - Tablette 1 - Pos. 1</strong>
+        <div class="inline-note">Le point de depart du scan se choisit maintenant dans l onglet Plan pour rester aligne avec la vraie structure.</div>
       </div>
-      <button class="btn btn-outline btn-inline" onclick="toggleLocationEditor()">Modifier</button>
+      <button class="btn btn-outline btn-inline" onclick="switchTab('add')">Configurer dans Plan</button>
     </div>
-  </div>
-
-  <div id="locationEditor" class="card" style="display:none">
-    <div class="section-title">Point de depart du scan</div>
-    <div class="section-note">Choisissez l endroit ou le prochain produit scanne sera place.</div>
-    <div class="row2">
-      <div class="field">
-        <label class="label" for="scanAisle">Allee</label>
-        <input type="number" id="scanAisle" min="1" value="1" placeholder="Ex: 3"/>
-      </div>
-      <div class="field">
-        <label class="label" for="scanFacing">Vue</label>
-        <select id="scanFacing">
-          <option value="Avant">Face avant</option>
-          <option value="Arriere">Face arriere</option>
-        </select>
-      </div>
-    </div>
-    <div class="row2">
-      <div class="field">
-        <label class="label" for="scanSide">Cote vue</label>
-        <select id="scanSide">
-          <option value="Gauche">Gauche</option>
-          <option value="Droite">Droite</option>
-        </select>
-      </div>
-      <div class="field">
-        <label class="label" for="scanSection">Section</label>
-        <input type="number" id="scanSection" min="1" value="1" placeholder="Ex: 2"/>
-      </div>
-    </div>
-    <div class="row2">
-      <div class="field">
-        <label class="label" for="scanShelf">Tablette</label>
-        <input type="number" id="scanShelf" min="1" value="1" placeholder="Ex: 2"/>
-      </div>
-      <div class="field">
-        <label class="label" for="scanPosition">Position</label>
-        <input type="number" id="scanPosition" min="1" value="1" placeholder="Ex: 4"/>
-      </div>
-    </div>
-    <button class="btn" onclick="saveCursor()">Utiliser cette position</button>
   </div>
 
   <div class="card scanner">
@@ -276,14 +209,59 @@
   <div id="searchResults"></div>
 </div>
 
-<div id="browse" class="section content">
-  <div id="browseContent"></div>
-</div>
-
 <div id="add" class="section content">
   <div class="card">
+    <div class="section-title">Point de depart du scan</div>
+    <div class="section-note">Choisissez ici le vrai point de depart du scan. Les choix sont limites aux positions qui existent deja dans le plan.</div>
+    <div class="row2">
+      <div class="field">
+        <label class="label" for="planScanAisle">Allee</label>
+        <select id="planScanAisle" onchange="updatePlanStartSelectors()"></select>
+      </div>
+      <div class="field">
+        <label class="label" for="planScanFacing">Vue</label>
+        <select id="planScanFacing">
+          <option value="Avant">Face avant</option>
+          <option value="Arriere">Face arriere</option>
+        </select>
+      </div>
+    </div>
+    <div class="row3">
+      <div class="field">
+        <label class="label" for="planScanSide">Cote</label>
+        <select id="planScanSide" onchange="updatePlanStartSelectors('side')"></select>
+      </div>
+      <div class="field">
+        <label class="label" for="planScanSection">Section</label>
+        <select id="planScanSection" onchange="updatePlanStartSelectors('section')"></select>
+      </div>
+      <div class="field">
+        <label class="label" for="planScanShelf">Tablette</label>
+        <select id="planScanShelf" onchange="updatePlanStartSelectors('shelf')"></select>
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label class="label" for="planScanPosition">Position</label>
+        <select id="planScanPosition"></select>
+      </div>
+      <div class="field">
+        <label class="label">&nbsp;</label>
+        <button class="btn" onclick="savePlanScanStart()">Utiliser ce point de depart</button>
+      </div>
+    </div>
+    <div id="planScanStartMsg"></div>
+  </div>
+
+  <div class="card">
+    <div class="section-title">Chemin de scan</div>
+    <div class="section-note">Le scan avance toujours sur cette liste: positions, puis tablettes, puis sections, puis cotes, puis allees.</div>
+    <div id="scanPathPreview"></div>
+  </div>
+
+  <div class="card">
     <div class="section-title">Plan du magasin</div>
-    <div class="section-note">Ici, on construit le plan du magasin. Une allee contient deux cotes. Chaque cote contient des sections. Chaque section contient des tablettes. Et chaque tablette a son propre nombre de positions.</div>
+    <div class="section-note">Le plan du magasin genere directement la liste des slots du scan. Le scanner n invente jamais de coordonnees.</div>
     <div class="row3">
       <div class="field">
         <label class="label" for="mapAisle">Nouvelle allee</label>
@@ -314,11 +292,9 @@
 </div>
 
 <script>
-let browseAisle = null;
 let scannerStream = null;
 let scanPaused = false;
 let currentScanProduct = null;
-let layoutProducts = [];
 let html5Scanner = null;
 let lastLookedUpBarcode = '';
 let hardwareScanBuffer = '';
@@ -349,18 +325,17 @@ const STORAGE_KEYS = {
   activeTab: 'familiprixActiveTab',
   scanDraft: 'familiprixScanDraft',
   addDraft: 'familiprixAddDraft',
-  products: 'familiprixProducts',
-  nextId: 'familiprixNextProductId',
-  forceLocal: 'familiprixForceLocal',
-  pendingExport: 'familiprixPendingExport',
-  lastImportBackup: 'familiprixLastImportBackup',
-  lastServerBackup: 'familiprixLastServerBackup',
-  editorSession: 'familiprixEditorSession',
-  mapDraft: 'familiprixMapDraft'
+  editorSession: 'familiprixEditorSession'
 };
 
-let dataMode = 'server';
-let localProducts = [];
+let backendInfo = {
+  backend: 'sqlite',
+  shared_sync: false,
+  label: 'SQLite locale',
+  needs_shared_database: true,
+  duplicate_slots: 0,
+  duplicate_barcodes: 0
+};
 
 const cursor = {
   aisle: 1,
@@ -380,10 +355,6 @@ function esc(value) {
 
 function isStandaloneApp() {
   return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
-}
-
-function prefersPhoneMode() {
-  return isStandaloneApp() || localStorage.getItem(STORAGE_KEYS.forceLocal) === '1';
 }
 
 function normalizeProduct(product) {
@@ -610,7 +581,7 @@ function confirmLayoutReduction(aisle, nextConfig, subjectLabel) {
 }
 
 async function apiFetch(url, options = {}) {
-  const opts = {...options};
+  const opts = {...options, cache: options.cache || 'no-store'};
   opts.headers = {...(options.headers || {})};
   const res = await fetch(url, opts);
   const contentType = res.headers.get('content-type') || '';
@@ -618,280 +589,35 @@ async function apiFetch(url, options = {}) {
   return {res, data};
 }
 
-function saveLocalProducts(products) {
-  localProducts = products.map(normalizeProduct);
-  localStorage.setItem(STORAGE_KEYS.products, JSON.stringify(localProducts));
-  const maxId = localProducts.reduce((highest, product) => Math.max(highest, Number(product.id) || 0), 0);
-  localStorage.setItem(STORAGE_KEYS.nextId, String(maxId + 1));
-}
-
-function loadLocalProducts() {
-  const raw = localStorage.getItem(STORAGE_KEYS.products);
-  if (!raw) {
-    localProducts = [];
-    return [];
-  }
-  try {
-    localProducts = JSON.parse(raw).map(normalizeProduct);
-  } catch (error) {
-    localProducts = [];
-  }
-  return [...localProducts];
-}
-
-function getNextLocalProductId() {
-  const next = parseInt(localStorage.getItem(STORAGE_KEYS.nextId) || '1', 10);
-  localStorage.setItem(STORAGE_KEYS.nextId, String(next + 1));
-  return next;
-}
-
-function hasPendingExport() {
-  return localStorage.getItem(STORAGE_KEYS.pendingExport) === '1';
-}
-
-function markPendingExport(reason='') {
-  localStorage.setItem(STORAGE_KEYS.pendingExport, '1');
-  updateSyncNotice(reason || 'Des changements sont gardes seulement sur cet appareil pour le moment.');
-}
-
-function clearPendingExport() {
-  localStorage.removeItem(STORAGE_KEYS.pendingExport);
-  updateSyncNotice();
-}
-
-function saveImportBackup(label='') {
-  localStorage.setItem(STORAGE_KEYS.lastImportBackup, JSON.stringify({
-    saved_at: new Date().toISOString(),
-    label,
-    products: loadLocalProducts()
-  }));
-  updateRestoreImportButton();
-}
-
-function updateRestoreImportButton() {
-  const button = document.getElementById('restoreImportButton');
-  if (!button) return;
-  button.style.display = localStorage.getItem(STORAGE_KEYS.lastImportBackup) ? 'inline-block' : 'none';
-}
-
-function restoreLastImportBackup() {
-  const raw = localStorage.getItem(STORAGE_KEYS.lastImportBackup);
-  if (!raw) return;
-  try {
-    const backup = JSON.parse(raw);
-    const products = Array.isArray(backup.products) ? backup.products : [];
-    saveLocalProducts(products);
-    localStorage.setItem(STORAGE_KEYS.forceLocal, '1');
-    dataMode = 'hybrid';
-    updateAppShellState();
-    updateSyncNotice('Version locale precedente restauree. Verifiez avant toute exportation vers la base partagee.');
-    if (browseAisle) loadBrowse(true);
-    doSearch();
-  } catch (error) {
-    document.getElementById('syncNotice').style.display = 'block';
-    document.getElementById('syncNotice').className = 'msg error shell-sync';
-    document.getElementById('syncNotice').textContent = 'Impossible de restaurer la sauvegarde precedente.';
-  }
-}
-
-function updateSyncNotice(message='') {
-  const notice = document.getElementById('syncNotice');
-  if (!notice) return;
-  const pending = hasPendingExport();
-  if (!pending && !message) {
-    notice.style.display = 'none';
-    notice.innerHTML = '';
-    return;
-  }
-  notice.style.display = 'block';
-  if (pending && navigator.onLine) {
-    notice.className = 'msg success shell-sync';
-    notice.innerHTML = `${esc(message || 'Les changements locaux peuvent maintenant etre exportes vers la base partagee.')} <div class="tool-row"><button class="btn btn-inline" onclick="syncLocalProductsToServer()">Exporter vers la base partagee</button></div>`;
-  } else if (pending) {
-    notice.className = 'msg info shell-sync';
-    notice.textContent = message || 'Cet appareil a des changements locaux non exportes. Ils restent ici jusqu au retour du reseau.';
-  } else {
-    notice.className = 'msg info shell-sync';
-    notice.textContent = message;
-  }
-}
-
-async function syncLocalProductsToServer() {
-  if (!navigator.onLine) {
-    updateSyncNotice('Le reseau n est pas disponible. Les changements restent gardes sur cet appareil.');
-    return;
-  }
-  const local = loadLocalProducts().sort(productSort);
-  try {
-    const currentServerRes = await fetch('/api/products');
-    const serverProducts = await currentServerRes.json();
-    localStorage.setItem(STORAGE_KEYS.lastServerBackup, JSON.stringify({
-      saved_at: new Date().toISOString(),
-      products: serverProducts
-    }));
-
-    const byId = new Map(serverProducts.map(product => [Number(product.id), product]));
-    const byBarcode = new Map(serverProducts.filter(product => product.barcode).map(product => [product.barcode, product]));
-    const syncedProducts = [];
-
-    for (const product of local) {
-      const serverMatch = byId.get(Number(product.id)) || (product.barcode ? byBarcode.get(product.barcode) : null);
-      if (serverMatch) {
-        const payload = {...serverMatch, ...product, id: serverMatch.id};
-        const res = await fetch(`/api/products/${serverMatch.id}`, {
-          method: 'PUT',
-          headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-          body: JSON.stringify(payload)
-        });
-        if (!res.ok) throw new Error('update failed');
-        syncedProducts.push(normalizeProduct(payload));
-      } else {
-        const res = await fetch('/api/products', {
-          method: 'POST',
-          headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-          body: JSON.stringify(product)
-        });
-        const data = await res.json();
-        if (!res.ok || !data.product) throw new Error(data.error || 'create failed');
-        syncedProducts.push(normalizeProduct(data.product));
-      }
-    }
-
-    saveLocalProducts(syncedProducts);
-    clearPendingExport();
-    updateSyncNotice('Les changements de cet appareil ont ete exportes vers la base partagee.');
-  } catch (error) {
-    markPendingExport('Export incomplet. Les donnees locales sont toujours gardees sur cet appareil.');
-  }
-}
-
-async function seedLocalProductsFromServer() {
-  if (localStorage.getItem(STORAGE_KEYS.products)) {
-    loadLocalProducts();
-    return;
-  }
-  try {
-    const res = await fetch('/api/products');
-    if (!res.ok) throw new Error('server unavailable');
-    const products = await res.json();
-    saveLocalProducts(products);
-  } catch (error) {
-    saveLocalProducts([]);
-  }
-}
-
-async function initializeDataMode() {
-  if (prefersPhoneMode()) {
-    dataMode = 'hybrid';
-    await seedLocalProductsFromServer();
-  } else {
-    dataMode = 'server';
-    loadLocalProducts();
-  }
-}
-
-function upsertLocalProduct(product) {
-  const normalized = normalizeProduct(product);
-  const products = loadLocalProducts();
-  const index = products.findIndex(item => Number(item.id) === Number(normalized.id));
-  if (index >= 0) {
-    products[index] = normalized;
-  } else {
-    products.push(normalized);
-  }
-  saveLocalProducts(products);
-}
-
-function localSearchProducts(query) {
-  const q = String(query || '').trim().toLowerCase();
-  return loadLocalProducts()
-    .filter(product =>
-      product.name.toLowerCase().includes(q) ||
-      product.brand.toLowerCase().includes(q) ||
-      product.barcode.toLowerCase().includes(q)
-    )
-    .sort(productSort);
-}
-
 async function apiGetProducts() {
-  if (dataMode === 'hybrid') {
-    try {
-      const res = await fetch('/api/products');
-      const products = await res.json();
-      saveLocalProducts(products);
-      return products;
-    } catch (error) {
-      return [...loadLocalProducts()].sort(productSort);
-    }
-  }
-  const res = await fetch('/api/products');
-  return res.json();
+  const {res, data} = await apiFetch('/api/products');
+  if (!res.ok) throw new Error('products-fetch');
+  return Array.isArray(data) ? data.map(normalizeProduct) : [];
 }
 
 async function apiSearchProducts(query) {
-  if (dataMode === 'hybrid') {
-    try {
-      const res = await fetch(`/api/products/search?q=${encodeURIComponent(query)}`);
-      const products = await res.json();
-      products.forEach(upsertLocalProduct);
-      return products.sort(productSort);
-    } catch (error) {
-      return localSearchProducts(query);
-    }
-  }
-  const res = await fetch(`/api/products/search?q=${encodeURIComponent(query)}`);
-  return res.json();
+  const trimmed = String(query || '').trim();
+  if (!trimmed) return [];
+  const {res, data} = await apiFetch(`/api/products/search?q=${encodeURIComponent(trimmed)}`);
+  if (!res.ok) throw new Error('search-fetch');
+  return Array.isArray(data) ? data.map(normalizeProduct) : [];
 }
 
 async function apiGetProductByBarcode(barcode) {
-  if (dataMode === 'hybrid') {
-    try {
-      const res = await fetch(`/api/products/barcode/${encodeURIComponent(barcode)}`);
-      if (!res.ok) throw new Error('not-found');
-      const product = await res.json();
-      upsertLocalProduct(product);
-      return product;
-    } catch (error) {
-      const product = loadLocalProducts().find(item => item.barcode === barcode);
-      if (!product) throw error;
-      return product;
-    }
+  const {res, data} = await apiFetch(`/api/products/barcode/${encodeURIComponent(barcode)}`);
+  if (!res.ok) {
+    const error = new Error(res.status === 404 ? 'not-found' : 'barcode-fetch');
+    error.status = res.status;
+    throw error;
   }
-  const res = await fetch(`/api/products/barcode/${encodeURIComponent(barcode)}`);
-  if (!res.ok) throw new Error('not-found');
-  return res.json();
+  return normalizeProduct(data);
 }
 
 async function apiAddProduct(payload) {
-  const headers = {'Content-Type':'application/json', ...getEditorHeaders()};
-  if (dataMode === 'hybrid') {
-    try {
-      const {res, data} = await apiFetch('/api/products', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload)
-      });
-      if (res.ok && data.product) upsertLocalProduct(data.product);
-      if (!res.ok) return {success: false, error: data.error || 'Erreur serveur pendant l ajout.'};
-      return res.ok ? data : {success: false, error: data.error || 'Erreur serveur pendant l ajout.'};
-    } catch (error) {
-      const product = normalizeProduct({...payload, id: getNextLocalProductId()});
-      product.last_change_by = loadEditorSession()?.username || '';
-      const products = loadLocalProducts();
-      products.push(product);
-      saveLocalProducts(products);
-      markPendingExport(`"${product.name}" a ete garde seulement sur cet appareil.`);
-      return {
-        success: true,
-        message: `"${product.name}" ajoute sur cet appareil. La synchro serveur reprendra plus tard.`,
-        product
-      };
-    }
-  }
   try {
     const {res, data} = await apiFetch('/api/products', {
       method: 'POST',
-      headers,
+      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
       body: JSON.stringify(payload)
     });
     return res.ok ? data : {success: false, error: data.error || 'Erreur serveur pendant l ajout.'};
@@ -901,76 +627,30 @@ async function apiAddProduct(payload) {
 }
 
 async function apiUpdateProduct(product) {
-  const headers = {'Content-Type':'application/json', ...getEditorHeaders()};
-  if (dataMode === 'hybrid') {
-    const session = loadEditorSession();
-    upsertLocalProduct({...product, last_change_by: session?.username || product.last_change_by || ''});
-    try {
-      const {res, data} = await apiFetch(`/api/products/${product.id}`, {
-        method: 'PUT',
-        headers,
-        body: JSON.stringify(product)
-      });
-      return res.ok ? data : {success: false, error: data.error || 'Erreur de sauvegarde.'};
-    } catch (error) {
-      markPendingExport(`Les changements de "${product.name}" sont gardes seulement sur cet appareil.`);
-      return {success: true, warning: 'Sauve sur cet appareil seulement pour le moment.'};
-    }
+  try {
+    const {res, data} = await apiFetch(`/api/products/${product.id}`, {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: JSON.stringify(product)
+    });
+    return res.ok ? data : {success: false, error: data.error || 'Erreur de sauvegarde.'};
+  } catch (error) {
+    return {success: false, error: 'Impossible de sauvegarder le produit pour le moment.'};
   }
-  const {res, data} = await apiFetch(`/api/products/${product.id}`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify(product)
-  });
-  return res.ok ? data : {success: false, error: data.error || 'Erreur de sauvegarde.'};
-}
-
-async function apiBulkUpdateProducts(products) {
-  const headers = {'Content-Type':'application/json', ...getEditorHeaders()};
-  if (dataMode === 'hybrid') {
-    const nextProducts = loadLocalProducts();
-    const byId = new Map(nextProducts.map(product => [Number(product.id), product]));
-    const session = loadEditorSession();
-    products.forEach(product => byId.set(Number(product.id), normalizeProduct({...product, last_change_by: session?.username || product.last_change_by || ''})));
-    saveLocalProducts(Array.from(byId.values()));
-    try {
-      const {res, data} = await apiFetch('/api/products/bulk', {
-        method: 'PUT',
-        headers,
-        body: JSON.stringify({products})
-      });
-      return res.ok ? data : {success: false, error: data.error || 'Erreur de structure.'};
-    } catch (error) {
-      markPendingExport('Des changements de structure sont gardes seulement sur cet appareil.');
-      return {success: true, updated: products.length};
-    }
-  }
-  const {res, data} = await apiFetch('/api/products/bulk', {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify({products})
-  });
-  return res.ok ? data : {success: false, error: data.error || 'Erreur de structure.'};
 }
 
 async function apiDeleteProduct(id) {
-  if (dataMode === 'hybrid') {
-    const products = loadLocalProducts().filter(product => Number(product.id) !== Number(id));
-    saveLocalProducts(products);
-    try {
-      const {res, data} = await apiFetch(`/api/products/${id}`, {method:'DELETE', headers: getEditorHeaders()});
-      return res.ok ? data : {success: false, error: data.error || 'Erreur de suppression.'};
-    } catch (error) {
-      markPendingExport('Une suppression est gardee seulement sur cet appareil.');
-      return {success: true};
-    }
+  try {
+    const {res, data} = await apiFetch(`/api/products/${id}`, {method:'DELETE', headers: getEditorHeaders()});
+    return res.ok ? data : {success: false, error: data.error || 'Erreur de suppression.'};
+  } catch (error) {
+    return {success: false, error: 'Impossible de supprimer le produit pour le moment.'};
   }
-  const {res, data} = await apiFetch(`/api/products/${id}`, {method:'DELETE', headers: getEditorHeaders()});
-  return res.ok ? data : {success: false, error: data.error || 'Erreur de suppression.'};
 }
 
-async function apiGetLayoutAisles(products = null) {
-  const {data} = await apiFetch('/api/layout/aisles');
+async function apiGetLayoutAisles() {
+  const {res, data} = await apiFetch('/api/layout/aisles');
+  if (!res.ok) throw new Error('layout-fetch');
   return Array.isArray(data) ? data : [];
 }
 
@@ -993,83 +673,30 @@ async function apiUpdateLayoutAisle(aisle, payload) {
 }
 
 async function apiDeleteLayoutAisle(aisle) {
-  if (dataMode === 'hybrid') {
-    const remaining = loadLocalProducts().filter(product => String(product.aisle) !== String(aisle));
-    saveLocalProducts(remaining);
-    try {
-      const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}`, {
-        method: 'DELETE',
-        headers: getEditorHeaders()
-      });
-      return res.ok ? data : {success: false, error: data.error || 'Erreur de suppression d allee.'};
-    } catch (error) {
-      markPendingExport(`L allee ${aisle} a ete retiree seulement sur cet appareil pour le moment.`);
-      return {success: true, message: `Allee ${aisle} retiree sur cet appareil.`};
-    }
+  try {
+    const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}`, {
+      method: 'DELETE',
+      headers: getEditorHeaders()
+    });
+    return res.ok ? data : {success: false, error: data.error || 'Erreur de suppression d allee.'};
+  } catch (error) {
+    return {success: false, error: 'Impossible de supprimer l allee pour le moment.'};
   }
-  const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}`, {
-    method: 'DELETE',
-    headers: getEditorHeaders()
-  });
-  return res.ok ? data : {success: false, error: data.error || 'Erreur de suppression d allee.'};
 }
 
 async function apiLookupOnline(barcode, signal) {
   try {
-    const res = await fetch(`/api/products/lookup/${encodeURIComponent(barcode)}`, {signal});
-    return res.json();
+    const {data} = await apiFetch(`/api/products/lookup/${encodeURIComponent(barcode)}`, {signal});
+    return data;
   } catch (error) {
     return {found: false};
   }
 }
 
-function enablePhoneMode() {
-  localStorage.setItem(STORAGE_KEYS.forceLocal, '1');
-  updateAppShellState();
-  window.location.reload();
-}
-
-function exportLocalDatabase() {
-  const products = loadLocalProducts();
-  const payload = {
-    exported_at: new Date().toISOString(),
-    source: 'familiprix-locator-pwa',
-    products
-  };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = `familiprix-backup-${new Date().toISOString().slice(0, 10)}.json`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-
-async function importLocalDatabase(event) {
-  const file = event.target.files && event.target.files[0];
-  if (!file) return;
-  try {
-    saveImportBackup(`Avant import ${file.name}`);
-    const text = await file.text();
-    const payload = JSON.parse(text);
-    const products = Array.isArray(payload) ? payload : payload.products;
-    if (!Array.isArray(products)) throw new Error('invalid');
-    saveLocalProducts(products);
-    localStorage.setItem(STORAGE_KEYS.forceLocal, '1');
-    dataMode = 'hybrid';
-    if (browseAisle) await loadBrowse(true);
-    await doSearch();
-    markPendingExport('Import termine. Verifiez la base locale avant toute exportation vers la base partagee.');
-    document.getElementById('scanResult').innerHTML = '<div class="msg success">Base locale importee sur cet appareil. Vous pouvez annuler ce dernier import si besoin.</div>';
-    updateAppShellState();
-    updateRestoreImportButton();
-  } catch (error) {
-    document.getElementById('scanResult').innerHTML = '<div class="msg error">Le fichier JSON est invalide.</div>';
-  } finally {
-    event.target.value = '';
-  }
+async function apiGetSystemInfo() {
+  const {res, data} = await apiFetch('/api/system/info');
+  if (!res.ok) throw new Error('system-info');
+  return data;
 }
 
 function cursorLabel() {
@@ -1078,12 +705,6 @@ function cursorLabel() {
 
 function updateCursorUi() {
   document.getElementById('cursorText').textContent = cursorLabel();
-  document.getElementById('scanAisle').value = cursor.aisle;
-  document.getElementById('scanFacing').value = cursor.facing;
-  document.getElementById('scanSide').value = viewedSideFromCanonical(cursor.facing, cursor.side);
-  document.getElementById('scanSection').value = cursor.section;
-  document.getElementById('scanShelf').value = cursor.shelf;
-  document.getElementById('scanPosition').value = cursor.position;
   localStorage.setItem(STORAGE_KEYS.cursor, JSON.stringify(cursor));
 }
 
@@ -1133,20 +754,37 @@ function loadAddDraft() {
   } catch (error) {}
 }
 
+function updateBackendStatusInfo() {
+  const target = document.getElementById('backendStatusInfo');
+  if (!target) return;
+  const messages = [];
+  if (backendInfo.shared_sync) {
+    messages.push('Base partagee active: PostgreSQL. Les appareils connectes lisent la meme base.');
+  } else {
+    messages.push('Base locale active: SQLite. Pour une vraie synchronisation entre appareils, connectez Render Postgres et reglez DATABASE_URL.');
+  }
+  if (Number(backendInfo.duplicate_slots || 0) > 0) {
+    messages.push(`Attention: ${backendInfo.duplicate_slots} position(s) contiennent deja plusieurs produits et doivent etre nettoyees.`);
+  }
+  if (Number(backendInfo.duplicate_barcodes || 0) > 0) {
+    messages.push(`Attention: ${backendInfo.duplicate_barcodes} code(s)-barres sont dupliques dans la base.`);
+  }
+  target.textContent = messages.join(' ');
+}
+
 function updateAppShellState() {
   const standalone = isStandaloneApp();
   const modeLabel = standalone ? 'Mode app' : 'Mode web';
-  document.getElementById('appModeLabel').textContent = dataMode === 'hybrid' ? `${modeLabel} - copie locale + base partagee` : `${modeLabel} - base serveur`;
-  document.getElementById('installHint').textContent = dataMode === 'hybrid'
-    ? 'Cet appareil garde une copie locale et continue a synchroniser la base partagee quand le reseau repond.'
-    : (standalone
-      ? 'L app garde votre position et vos formulaires meme si Safari se ferme.'
-      : 'Sur mobile: ouvrez le site puis ajoutez-le a l ecran d accueil pour un acces rapide.');
+  document.getElementById('appModeLabel').textContent = `${modeLabel} - ${backendInfo.label || 'Base serveur'}`;
+  document.getElementById('installHint').textContent = standalone
+    ? 'L app garde votre position et vos formulaires meme si Safari se ferme.'
+    : 'Sur mobile: ouvrez le site puis ajoutez-le a l ecran d accueil pour un acces rapide.';
   const session = loadEditorSession();
   document.getElementById('editorSessionInfo').textContent = session?.username && session.username !== 'appareil'
     ? `Cet appareil signe les changements avec le nom ${session.username}.`
     : 'Aucun mot de passe pour l instant. Si vous entrez un nom, il sera garde sur cet appareil pour suivre qui a change quoi.';
   document.getElementById('editorName').value = session?.username === 'appareil' ? '' : (session?.username || '');
+  updateBackendStatusInfo();
 }
 
 function updateNetworkStatus() {
@@ -1156,26 +794,126 @@ function updateNetworkStatus() {
     : '<span class="status-dot offline"></span>Hors ligne';
 }
 
-function toggleLocationEditor() {
-  const editor = document.getElementById('locationEditor');
-  editor.style.display = editor.style.display === 'none' ? 'block' : 'none';
+function setSelectOptions(elementId, values, selectedValue) {
+  const select = document.getElementById(elementId);
+  if (!select) return;
+  const items = Array.isArray(values) ? values : [];
+  if (!items.length) {
+    select.innerHTML = '<option value="">Aucune</option>';
+    select.value = '';
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  select.innerHTML = items.map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('');
+  const nextValue = items.includes(String(selectedValue)) ? String(selectedValue) : String(items[0]);
+  select.value = nextValue;
 }
 
-function positiveInt(id, fallback) {
-  const value = parseInt(document.getElementById(id).value, 10);
-  return Number.isFinite(value) && value > 0 ? value : fallback;
+function slotLabel(slot) {
+  return `A${slot.aisle} ${slot.side} S${slot.section} T${slot.shelf} P${slot.position}`;
 }
 
-function saveCursor() {
-  cursor.aisle = positiveInt('scanAisle', cursor.aisle);
-  cursor.facing = document.getElementById('scanFacing').value;
-  cursor.side = canonicalSide(cursor.facing, document.getElementById('scanSide').value);
-  cursor.section = positiveInt('scanSection', cursor.section);
-  cursor.shelf = positiveInt('scanShelf', cursor.shelf);
-  cursor.position = positiveInt('scanPosition', cursor.position);
-  normalizeCursorToLayout();
+function renderScanPathPreview() {
+  const div = document.getElementById('scanPathPreview');
+  if (!div) return;
+  const slots = getAllScanSlots();
+  if (!slots.length) {
+    div.innerHTML = '<div class="empty" style="padding:1rem 0">Aucun slot de scan pour le moment. Commencez par creer une allee dans le plan.</div>';
+    return;
+  }
+  const currentIndex = slots.findIndex(slot => (
+    Number(slot.aisle) === Number(cursor.aisle) &&
+    slot.side === cursor.side &&
+    Number(slot.section) === Number(cursor.section) &&
+    Number(slot.shelf) === Number(cursor.shelf) &&
+    Number(slot.position) === Number(cursor.position)
+  ));
+  const startIndex = currentIndex >= 0 ? currentIndex : 0;
+  const preview = Array.from({length: Math.min(12, slots.length)}, (_, offset) => slots[(startIndex + offset) % slots.length]);
+  div.innerHTML = `
+    <div class="small">Position actuelle: <strong>${esc(cursorLabel())}</strong></div>
+    <div class="small">Total de slots dans le plan: <strong>${slots.length}</strong></div>
+    <div class="slot-preview">${preview.map((slot, index) => `<span class="slot-chip ${index === 0 ? 'active' : ''}">${index === 0 ? 'Maintenant' : `Puis ${index}`} ${esc(slotLabel(slot))}</span>`).join('')}</div>
+  `;
+}
+
+function buildUniformSections(sectionCount, shelfCount, positionCount) {
+  return Array.from({length: Math.max(0, Number(sectionCount) || 0)}, () => ({
+    shelves: Array.from({length: Math.max(0, Number(shelfCount) || 0)}, () => Math.max(0, Number(positionCount) || 0))
+  }));
+}
+
+function applySideTemplate(aisle, side) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const sectionCount = document.getElementById(`sideTemplateSections-${aisle}-${side}`).value;
+  const shelfCount = document.getElementById(`sideTemplateShelves-${aisle}-${side}`).value;
+  const positionCount = document.getElementById(`sideTemplatePositions-${aisle}-${side}`).value;
+  const nextConfig = normalizeLayoutConfig({
+    sides: {
+      ...layout.config.sides,
+      [side]: {sections: buildUniformSections(sectionCount, shelfCount, positionCount)}
+    }
+  }, layout.max_section, layout.max_shelf, layout.max_position);
+  if (!confirmLayoutReduction(aisle, nextConfig, `Appliquer ce modele uniforme au cote ${side}`)) {
+    return;
+  }
+  layout.config = nextConfig;
+  renderMapEditor();
+  renderPlanStartEditor();
+  renderScanPathPreview();
+}
+
+function renderPlanStartEditor() {
+  const aisleOptions = mapLayouts
+    .map(layout => String(layout.aisle))
+    .sort((a, b) => Number(a) - Number(b) || a.localeCompare(b));
+  setSelectOptions('planScanAisle', aisleOptions, String(cursor.aisle));
+  document.getElementById('planScanFacing').value = cursor.facing || 'Avant';
+  updatePlanStartSelectors();
+  renderScanPathPreview();
+}
+
+function updatePlanStartSelectors(changedLevel = '') {
+  const aisle = document.getElementById('planScanAisle').value;
+  const config = getConfiguredLayoutForAisle(aisle);
+  const sides = ['Gauche', 'Droite'].filter(side => (config.sides[side]?.sections || []).length > 0);
+  setSelectOptions('planScanSide', sides, cursor.side);
+  const side = document.getElementById('planScanSide').value;
+  const sections = ((config.sides[side]?.sections) || []).map((_, index) => String(index + 1));
+  const sectionSelected = changedLevel === 'side' ? sections[0] : String(cursor.section);
+  setSelectOptions('planScanSection', sections, sectionSelected);
+  const sectionIndex = Math.max(0, Number(document.getElementById('planScanSection').value || '1') - 1);
+  const shelves = Array.from({length: config.sides[side]?.sections?.[sectionIndex]?.shelves?.length || 0}, (_, index) => String(index + 1));
+  const shelfSelected = changedLevel === 'side' || changedLevel === 'section' ? shelves[0] : String(cursor.shelf);
+  setSelectOptions('planScanShelf', shelves, shelfSelected);
+  const shelfIndex = Math.max(0, Number(document.getElementById('planScanShelf').value || '1') - 1);
+  const positionCount = Number(config.sides[side]?.sections?.[sectionIndex]?.shelves?.[shelfIndex] || 0);
+  const positions = Array.from({length: positionCount}, (_, index) => String(index + 1));
+  const positionSelected = changedLevel ? positions[0] : String(cursor.position);
+  setSelectOptions('planScanPosition', positions, positionSelected);
+}
+
+function savePlanScanStart() {
+  const aisle = document.getElementById('planScanAisle').value;
+  const side = document.getElementById('planScanSide').value;
+  const section = document.getElementById('planScanSection').value;
+  const shelf = document.getElementById('planScanShelf').value;
+  const position = document.getElementById('planScanPosition').value;
+  const facing = document.getElementById('planScanFacing').value;
+  const msg = document.getElementById('planScanStartMsg');
+  if (!aisle || !side || !section || !shelf || !position) {
+    msg.className = 'msg error';
+    msg.textContent = 'Le plan n offre encore aucune position valide pour le scan.';
+    return;
+  }
+  cursor.facing = facing;
+  setCursorFromSlot({aisle, side, section, shelf, position});
   updateCursorUi();
-  document.getElementById('locationEditor').style.display = 'none';
+  msg.className = 'msg success';
+  msg.textContent = `Le scan commencera maintenant a ${cursorLabel()}.`;
+  renderScanPathPreview();
 }
 
 function advanceCursor() {
@@ -1203,6 +941,7 @@ function advanceCursor() {
     }
   }
   updateCursorUi();
+  renderScanPathPreview();
 }
 
 function selectNumericField(input) {
@@ -1230,343 +969,9 @@ function productCard(p, showDelete=true) {
   </div>`;
 }
 
-function productSort(a, b) {
-  const sideOrder = {Gauche: 0, Droite: 1};
-  const byAisle = Number(a.aisle) - Number(b.aisle);
-  if (byAisle) return byAisle;
-  const bySide = (sideOrder[a.side] ?? 9) - (sideOrder[b.side] ?? 9);
-  if (bySide) return bySide;
-  const bySection = Number(a.section || 1) - Number(b.section || 1);
-  if (bySection) return bySection;
-  const byShelf = Number(a.shelf) - Number(b.shelf);
-  if (byShelf) return byShelf;
-  const byPosition = Number(a.position) - Number(b.position);
-  if (byPosition) return byPosition;
-  return a.name.localeCompare(b.name);
-}
-
-function getProductGroupKey(side, section, shelf) {
-  return `${side}|${section}|${shelf}`;
-}
-
-function loadSwapOptions(id) {
-  const select = document.getElementById(`layoutSwapTarget-${id}`);
-  if (!select || select.dataset.loaded === '1') return;
-  const options = [...allProductsCache]
-    .filter(item => Number(item.id) !== Number(id))
-    .sort(productSort)
-    .map(item => `<option value="${item.id}">Allee ${esc(item.aisle)} - ${esc(item.side)} - S${esc(item.section || '1')} - T${esc(item.shelf)} P${esc(item.position)} - ${esc(item.name)}</option>`)
-    .join('');
-  select.insertAdjacentHTML('beforeend', options);
-  select.dataset.loaded = '1';
-}
-
-function layoutRow(p, index, total) {
-  return `<div class="layout-card">
-    <div class="name">${esc(p.name)}</div>
-    <div class="barcode-text">Code: ${esc(p.barcode || 'aucun')} | ID ${p.id}</div>
-    ${p.last_change_by ? `<div class="barcode-text">Dernier changement: ${esc(p.last_change_by)}</div>` : ''}
-    <div class="section-title" style="margin-top:12px">Emplacement</div>
-    <div class="layout-grid">
-      <div class="field">
-        <label class="label" for="layoutAisle-${p.id}">Allee</label>
-        <input id="layoutAisle-${p.id}" type="number" min="1" value="${esc(p.aisle)}" placeholder="Ex: 3"/>
-      </div>
-      <div class="field">
-        <label class="label" for="layoutSide-${p.id}">Cote</label>
-        <select id="layoutSide-${p.id}">
-          <option value="Gauche" ${p.side === 'Gauche' ? 'selected' : ''}>Gauche</option>
-          <option value="Droite" ${p.side === 'Droite' ? 'selected' : ''}>Droite</option>
-        </select>
-      </div>
-      <div class="field">
-        <label class="label" for="layoutSection-${p.id}">Section</label>
-        <input id="layoutSection-${p.id}" type="number" min="1" value="${esc(p.section || '1')}" placeholder="Ex: 2"/>
-      </div>
-      <div class="field">
-        <label class="label" for="layoutShelf-${p.id}">Tablette</label>
-        <input id="layoutShelf-${p.id}" type="number" min="1" value="${esc(p.shelf)}" placeholder="Ex: 2"/>
-      </div>
-      <div class="field">
-        <label class="label" for="layoutPosition-${p.id}">Position</label>
-        <input id="layoutPosition-${p.id}" type="number" min="1" value="${esc(p.position)}" placeholder="Ex: 4"/>
-      </div>
-    </div>
-    <div class="section-title" style="margin-top:12px">Information du produit</div>
-    <div class="row2">
-      <div class="field">
-        <label class="label" for="layoutName-${p.id}">Nom</label>
-        <input id="layoutName-${p.id}" value="${esc(p.name)}" placeholder="Nom du produit"/>
-      </div>
-      <div class="field">
-        <label class="label" for="layoutBarcode-${p.id}">Code-barres</label>
-        <input id="layoutBarcode-${p.id}" value="${esc(p.barcode || '')}" placeholder="Code-barres"/>
-      </div>
-      <div class="field">
-        <label class="label" for="layoutBrand-${p.id}">Marque</label>
-        <input id="layoutBrand-${p.id}" value="${esc(p.brand || '')}" placeholder="Marque"/>
-      </div>
-      <div class="field">
-        <label class="label" for="layoutDescription-${p.id}">Description</label>
-        <input id="layoutDescription-${p.id}" value="${esc(p.description || '')}" placeholder="Description"/>
-      </div>
-    </div>
-    <div class="layout-actions">
-      <button class="mini-btn" onclick="swapLayoutProduct(${p.id}, -1)" ${index === 0 ? 'disabled' : ''}>Monter</button>
-      <button class="mini-btn" onclick="swapLayoutProduct(${p.id}, 1)" ${index === total - 1 ? 'disabled' : ''}>Descendre</button>
-      <button class="mini-btn primary" onclick="saveLayoutProduct(${p.id})">Sauver</button>
-      <button class="mini-btn" onclick="useAsScannerCursor(${p.id})">Scanner ici</button>
-      <button class="mini-btn danger" onclick="deleteProduct(${p.id})">Supprimer</button>
-    </div>
-    <div class="swap-row">
-      <select id="layoutSwapTarget-${p.id}" onfocus="loadSwapOptions(${p.id})">
-        <option value="">Echanger avec un autre produit</option>
-      </select>
-      <button class="mini-btn" onclick="swapLayoutWithSelected(${p.id})">Echanger</button>
-    </div>
-  </div>`;
-}
-
-function renderLayoutEditor() {
-  const div = document.getElementById('browseContent');
-  const sorted = [...layoutProducts].sort(productSort);
-  const aisleLayout = mapLayouts.find(item => String(item.aisle) === String(browseAisle));
-  const aisleConfig = normalizeLayoutConfig(aisleLayout?.config, aisleLayout?.max_section, aisleLayout?.max_shelf, aisleLayout?.max_position);
-  const leftSections = aisleConfig.sides.Gauche.sections.length;
-  const rightSections = aisleConfig.sides.Droite.sections.length;
-  const productsBySlotGroup = new Map();
-  sorted.forEach(product => {
-    const key = getProductGroupKey(product.side, Number(product.section || 1), Number(product.shelf || 1));
-    const group = productsBySlotGroup.get(key) || [];
-    group.push(product);
-    productsBySlotGroup.set(key, group);
-  });
-  let html = `<button class="back" onclick="browseAisle=null; layoutProducts=[]; loadBrowse();">Retour aux allees</button>
-    <div class="card">
-      <div class="cursor">
-        <div>
-          <span class="small">Edition de l allee</span>
-          <strong>Allee ${esc(browseAisle)}</strong>
-        </div>
-        <span class="pill">${sorted.length} produit${sorted.length !== 1 ? 's' : ''}</span>
-      </div>
-      <div class="section-title" style="margin-top:14px">Structure de l allee</div>
-      <div class="section-note">Le recalcul utilise maintenant le vrai plan defini dans l onglet Plan. Donc chaque section peut avoir un nombre different de tablettes, et chaque tablette son propre nombre de positions.</div>
-      <div class="plan-meta">
-        <span class="pill">Gauche: ${leftSections} section${leftSections > 1 ? 's' : ''}</span>
-        <span class="pill">Droite: ${rightSections} section${rightSections > 1 ? 's' : ''}</span>
-        <div class="field">
-          <label class="label" for="layoutReflowMode">Mode de redistribution</label>
-          <select id="layoutReflowMode">
-            <option value="aisle">Toute l allee</option>
-            <option value="side">Cote par cote</option>
-          </select>
-        </div>
-      </div>
-      <div class="tool-row">
-        <button class="btn btn-outline btn-inline" onclick="reflowCurrentAisle()">Recalculer les positions</button>
-        <button class="btn btn-inline" onclick="saveAllLayout()">Sauver tout</button>
-      </div>
-      <div id="layoutMsg"></div>
-    </div>`;
-
-  ['Gauche', 'Droite'].forEach(side => {
-    const sections = aisleConfig.sides[side].sections || [];
-    html += `<div class="shelf-title">${esc(side)}</div>`;
-    sections.forEach((section, sectionIndex) => {
-      html += `<div class="card" style="margin-bottom:8px"><div class="section-title">Section ${sectionIndex + 1}</div>`;
-      (section.shelves || []).forEach((positionCount, shelfIndex) => {
-        const shelfProducts = productsBySlotGroup.get(getProductGroupKey(side, sectionIndex + 1, shelfIndex + 1)) || [];
-        html += `<div class="shelf-title" style="margin-top:8px">Tablette ${shelfIndex + 1} - ${positionCount} position${Number(positionCount) > 1 ? 's' : ''}</div>`;
-        html += shelfProducts.length
-          ? shelfProducts.map((p, index) => layoutRow(p, index, sorted.length)).join('')
-          : `<div class="small" style="padding:8px 0">Aucun produit dans cette tablette pour le moment.</div>`;
-      });
-      html += `</div>`;
-    });
-  });
-
-  div.innerHTML = html || '<div class="empty">Aucun produit.</div>';
-}
-
-function readLayoutProduct(id) {
-  return {
-    id,
-    name: document.getElementById(`layoutName-${id}`).value.trim(),
-    brand: document.getElementById(`layoutBrand-${id}`).value.trim(),
-    description: document.getElementById(`layoutDescription-${id}`).value.trim(),
-    barcode: document.getElementById(`layoutBarcode-${id}`).value.trim(),
-    aisle: document.getElementById(`layoutAisle-${id}`).value.trim(),
-    side: document.getElementById(`layoutSide-${id}`).value,
-    section: document.getElementById(`layoutSection-${id}`).value.trim() || '1',
-    shelf: document.getElementById(`layoutShelf-${id}`).value.trim(),
-    position: document.getElementById(`layoutPosition-${id}`).value.trim()
-  };
-}
-
-function currentLayoutFromFields() {
-  return layoutProducts.map(p => ({...p, ...readLayoutProduct(p.id)}));
-}
-
 function getConfiguredLayoutForAisle(aisle) {
   const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
   return normalizeLayoutConfig(layout?.config, layout?.max_section, layout?.max_shelf, layout?.max_position);
-}
-
-function buildSlotsForAisle(aisle, sideFilter = null) {
-  const config = getConfiguredLayoutForAisle(aisle);
-  return buildSlotsFromConfig(aisle, config, sideFilter);
-}
-
-async function putProduct(product) {
-  return apiUpdateProduct(product);
-}
-
-async function saveLayoutProduct(id) {
-  if (!requireEditorSession('modifier les allees')) return;
-  const product = readLayoutProduct(id);
-  if (!product.name || !product.aisle || !product.shelf || !product.position) {
-    showLayoutMsg('Nom, allee, tablette et position sont requis.', 'error');
-    return;
-  }
-  const data = await putProduct(product);
-  if (!data.success) {
-    showLayoutMsg(data.error || 'Erreur pendant la sauvegarde.', 'error');
-    return;
-  }
-  await loadBrowse(true);
-  showLayoutMsg('Produit sauve.', 'success');
-}
-
-async function saveAllLayout() {
-  if (!requireEditorSession('modifier les allees')) return;
-  const products = currentLayoutFromFields();
-  const invalid = products.find(p => !p.name || !p.aisle || !p.shelf || !p.position);
-  if (invalid) {
-    showLayoutMsg('Un produit est incomplet.', 'error');
-    return;
-  }
-  const data = await apiBulkUpdateProducts(products);
-  await loadBrowse(true);
-  showLayoutMsg(data.success ? `${data.updated} produit(s) sauve(s).` : data.error, data.success ? 'success' : 'error');
-}
-
-async function swapLayoutProduct(id, direction) {
-  if (!requireEditorSession('echanger des produits')) return;
-  const sorted = currentLayoutFromFields().sort(productSort);
-  const index = sorted.findIndex(p => p.id === id);
-  const other = sorted[index + direction];
-  const product = sorted[index];
-  if (!product || !other) return;
-
-  const productSpot = {aisle: product.aisle, side: product.side, shelf: product.shelf, position: product.position};
-  product.aisle = other.aisle;
-  product.side = other.side;
-  product.shelf = other.shelf;
-  product.position = other.position;
-  other.aisle = productSpot.aisle;
-  other.side = productSpot.side;
-  other.shelf = productSpot.shelf;
-  other.position = productSpot.position;
-
-  const data = await apiBulkUpdateProducts([product, other]);
-  if (!data.success) {
-    showLayoutMsg(data.error || 'Echange impossible.', 'error');
-    return;
-  }
-  await loadBrowse(true);
-  showLayoutMsg('Produits echanges.', 'success');
-}
-
-async function swapLayoutWithSelected(id) {
-  if (!requireEditorSession('echanger des produits')) return;
-  const targetId = Number(document.getElementById(`layoutSwapTarget-${id}`).value);
-  if (!targetId) {
-    showLayoutMsg('Choisissez d abord le produit avec lequel echanger.', 'error');
-    return;
-  }
-  const current = {...allProductsCache.find(item => Number(item.id) === Number(id)), ...readLayoutProduct(id)};
-  const target = allProductsCache.find(item => Number(item.id) === targetId);
-  if (!current || !target) {
-    showLayoutMsg('Produit cible introuvable.', 'error');
-    return;
-  }
-  const currentSpot = {aisle: current.aisle, side: current.side, shelf: current.shelf, position: current.position};
-  const payload = [
-    {...current, aisle: target.aisle, side: target.side, shelf: target.shelf, position: target.position},
-    {...target, aisle: currentSpot.aisle, side: currentSpot.side, shelf: currentSpot.shelf, position: currentSpot.position}
-  ];
-  const data = await apiBulkUpdateProducts(payload);
-  if (!data.success) {
-    showLayoutMsg(data.error || 'Echange impossible.', 'error');
-    return;
-  }
-  await loadBrowse(true);
-  showLayoutMsg('Produits echanges entre allees.', 'success');
-}
-
-async function reflowCurrentAisle() {
-  if (!requireEditorSession('modifier le plan')) return;
-  mapLayouts = await apiGetLayoutAisles();
-  const mode = document.getElementById('layoutReflowMode').value;
-  const products = currentLayoutFromFields().sort(productSort);
-  const reflowed = [];
-  const currentAisleSlots = buildSlotsForAisle(browseAisle);
-
-  function assign(list, sideFilter = null) {
-    const slots = buildSlotsForAisle(browseAisle, sideFilter);
-    if (list.length > slots.length) {
-      showLayoutMsg(`Impossible de redistribuer ${list.length} produit(s). Le plan de l allee ${browseAisle}${sideFilter ? ` cote ${sideFilter}` : ''} n a que ${slots.length} place(s).`, 'error');
-      return false;
-    }
-    list.forEach((product, index) => {
-      const slot = slots[index];
-      product.aisle = slot.aisle;
-      product.side = slot.side;
-      product.section = slot.section;
-      product.shelf = slot.shelf;
-      product.position = slot.position;
-      reflowed.push(product);
-    });
-    return true;
-  }
-
-  const ok = mode === 'side'
-    ? ['Gauche', 'Droite'].every(side => assign(products.filter(p => p.side === side), side))
-    : assign(products, null);
-  if (!ok) return;
-
-  const data = await apiBulkUpdateProducts(reflowed);
-  if (!data.success) {
-    showLayoutMsg(data.error || 'Recalcul impossible.', 'error');
-    return;
-  }
-  const leftSections = getConfiguredLayoutForAisle(browseAisle).sides.Gauche.sections;
-  cursor.maxSection = leftSections.length || cursor.maxSection;
-  cursor.maxShelf = leftSections[0]?.shelves.length || cursor.maxShelf;
-  cursor.maxPosition = leftSections[0]?.shelves[0] || cursor.maxPosition;
-  updateCursorUi();
-  await loadBrowse(true);
-  showLayoutMsg(`Positions recalculees selon le plan detaille de l allee ${browseAisle}. Capacite utilisee: ${reflowed.length}/${currentAisleSlots.length}.`, 'success');
-}
-
-function useAsScannerCursor(id) {
-  const product = readLayoutProduct(id);
-  cursor.aisle = Number(product.aisle) || cursor.aisle;
-  cursor.side = product.side;
-  cursor.section = Number(product.section) || cursor.section;
-  cursor.shelf = Number(product.shelf) || cursor.shelf;
-  cursor.position = Number(product.position) || cursor.position;
-  updateCursorUi();
-  showLayoutMsg('Le scanner commencera a cet emplacement.', 'success');
-}
-
-function showLayoutMsg(message, type) {
-  const msg = document.getElementById('layoutMsg');
-  if (msg) {
-    msg.className = `msg ${type}`;
-    msg.textContent = message;
-  }
 }
 
 function getCameraDom() {
@@ -1606,10 +1011,19 @@ async function doSearchValue(q) {
       const product = await apiGetProductByBarcode(q);
       div.innerHTML = productCard(product, false);
       return;
-    } catch (error) {}
+    } catch (error) {
+      if (error.status && error.status !== 404) {
+        div.innerHTML = '<div class="msg error">Impossible de joindre la base pour le moment.</div>';
+        return;
+      }
+    }
   }
-  const data = await apiSearchProducts(q);
-  div.innerHTML = data.length ? data.map(p => productCard(p)).join('') : '<div class="empty">Aucun produit trouve.</div>';
+  try {
+    const data = await apiSearchProducts(q);
+    div.innerHTML = data.length ? data.map(p => productCard(p)).join('') : '<div class="empty">Aucun produit trouve.</div>';
+  } catch (error) {
+    div.innerHTML = '<div class="msg error">Impossible de rechercher pour le moment.</div>';
+  }
 }
 
 async function startSearchScan() {
@@ -1708,23 +1122,6 @@ function injectScript(src) {
     script.onerror = () => resolve(false);
     document.head.appendChild(script);
   });
-}
-
-async function optimizeCameraTrack() {
-  if (!cameraTrack || typeof cameraTrack.getCapabilities !== 'function') return;
-  try {
-    const capabilities = cameraTrack.getCapabilities();
-    const advanced = [];
-    if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
-      advanced.push({focusMode: 'continuous'});
-    }
-    if (typeof capabilities.zoom?.max === 'number' && capabilities.zoom.max > 1) {
-      advanced.push({zoom: Math.min(capabilities.zoom.max, 2)});
-    }
-    if (advanced.length) {
-      await cameraTrack.applyConstraints({advanced});
-    }
-  } catch (error) {}
 }
 
 function makeScanCanvas(width, height) {
@@ -2038,8 +1435,7 @@ function getActiveBarcodeInput() {
 
 function setScannedBarcode(barcode) {
   const input = getActiveBarcodeInput();
-  const currentValue = String(input.value || '');
-  const nextValue = `${currentValue}${barcode}`;
+  const nextValue = String(barcode || '').trim();
   try {
     input.focus({preventScroll: true});
   } catch (error) {
@@ -2189,6 +1585,10 @@ async function lookupScanFromInput(force=false, barcodeOverride='') {
       <button class="btn" onclick="confirmExistingLocation()">Confirmer ce nouvel emplacement</button>
     </div>`;
   } catch (error) {
+    if (error.status && error.status !== 404) {
+      div.innerHTML = '<div class="msg error">Impossible de verifier la base partagee pour le moment. Evitez d ajouter ce produit avant le retour du serveur.</div>';
+      return;
+    }
     showOnlineLookupForm(barcode);
   }
 }
@@ -2347,38 +1747,6 @@ function finishConfirmed(message) {
   }, 1200);
 }
 
-async function loadBrowse(keepAisle=false) {
-  const div = document.getElementById('browseContent');
-  allProductsCache = await apiGetProducts();
-  mapLayouts = await apiGetLayoutAisles(allProductsCache);
-  if (!browseAisle) {
-    const aisles = mapLayouts.map(layout => ({
-      aisle: layout.aisle,
-      count: Number(layout.product_count || 0)
-    }));
-    div.innerHTML = aisles.length
-      ? aisles.map(a => `<button type="button" class="aisle-row" data-aisle="${esc(a.aisle)}">
-          <div><div class="aisle-title">Allee ${esc(a.aisle)}</div><div class="aisle-sub">${a.count} produit${a.count>1?'s':''}</div></div>
-          <span style="color:#999">></span>
-        </button>`).join('')
-      : '<div class="empty">Aucune allee enregistree.</div>';
-    div.querySelectorAll('.aisle-row[data-aisle]').forEach(button => {
-      button.addEventListener('click', () => {
-        browseAisle = button.dataset.aisle;
-        loadBrowse();
-      });
-    });
-  } else {
-    layoutProducts = allProductsCache.filter(p => p.aisle === browseAisle);
-    if (!layoutProducts.length && !keepAisle) {
-      browseAisle = null;
-      await loadBrowse();
-      return;
-    }
-    renderLayoutEditor();
-  }
-}
-
 function renderMapEditor() {
   const msgDiv = document.getElementById('addMsg');
   const div = document.getElementById('mapContent');
@@ -2388,6 +1756,8 @@ function renderMapEditor() {
         <button class="btn btn-outline btn-inline" onclick="setAllPlanTrees(false)">Fermer tout</button>
       </div>` + mapLayouts.map(layout => {
         const config = normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position);
+        const aisleSlots = buildSlotsFromConfig(layout.aisle, config);
+        const slotCount = aisleSlots.length;
         return `<details class="tree-node plan-aisle-node" id="planAisle-${esc(layout.aisle)}">
         <summary>
           <span>Allee ${esc(layout.aisle)}</span>
@@ -2395,6 +1765,10 @@ function renderMapEditor() {
         </summary>
         <div class="tree-body">
         <div class="section-note" style="margin-top:4px">Ouvrez l allee, puis le cote, puis la section, puis la tablette. Chaque tablette peut avoir son propre nombre de positions.</div>
+        <div class="plan-meta">
+          <span class="pill">${slotCount} slot${slotCount > 1 ? 's' : ''}</span>
+          <span class="pill">Ordre: positions puis tablettes puis sections puis cotes</span>
+        </div>
         <div class="tool-row">
           <button class="btn btn-outline btn-inline" onclick="setPlanAisleTrees('${esc(layout.aisle)}', true)">Ouvrir cette allee</button>
           <button class="btn btn-outline btn-inline" onclick="setPlanAisleTrees('${esc(layout.aisle)}', false)">Fermer cette allee</button>
@@ -2402,12 +1776,28 @@ function renderMapEditor() {
         <div class="plan-sides">
         ${['Gauche','Droite'].map(side => {
           const sections = config.sides[side].sections;
+          const sideSlots = buildSlotsFromConfig(layout.aisle, config, side);
           return `<details class="tree-node plan-side">
             <summary>
               <span>${side}</span>
-              <span class="tree-meta">${sections.length} section${sections.length > 1 ? 's' : ''}</span>
+              <span class="tree-meta">${sections.length} section${sections.length > 1 ? 's' : ''} | ${sideSlots.length} slot${sideSlots.length > 1 ? 's' : ''}</span>
             </summary>
             <div class="tree-body">
+              <div class="row3">
+                <div class="field">
+                  <label class="label" for="sideTemplateSections-${layout.aisle}-${side}">Sections</label>
+                  <input id="sideTemplateSections-${layout.aisle}-${side}" type="number" min="0" value="${sections.length}"/>
+                </div>
+                <div class="field">
+                  <label class="label" for="sideTemplateShelves-${layout.aisle}-${side}">Tablettes par section</label>
+                  <input id="sideTemplateShelves-${layout.aisle}-${side}" type="number" min="0" value="${sections[0]?.shelves?.length ?? 0}"/>
+                </div>
+                <div class="field">
+                  <label class="label" for="sideTemplatePositions-${layout.aisle}-${side}">Positions par tablette</label>
+                  <input id="sideTemplatePositions-${layout.aisle}-${side}" type="number" min="0" value="${sections[0]?.shelves?.[0] ?? 0}"/>
+                </div>
+              </div>
+              <button class="btn btn-outline btn-inline" onclick="applySideTemplate('${esc(layout.aisle)}','${side}')">Appliquer ce modele au cote ${side}</button>
               <div class="field" style="margin-top:8px">
                 <label class="label" for="sectionCount-${layout.aisle}-${side}">Nombre de sections sur le cote ${side}</label>
                 <input id="sectionCount-${layout.aisle}-${side}" type="number" min="0" value="${sections.length}" onchange="setSideSectionCount('${esc(layout.aisle)}','${side}', this.value)"/>
@@ -2476,8 +1866,18 @@ function setPlanAisleTrees(aisle, open) {
 }
 
 async function loadMapEditor() {
-  mapLayouts = await apiGetLayoutAisles(allProductsCache.length ? allProductsCache : null);
+  const [productsResult, layoutsResult] = await Promise.allSettled([
+    apiGetProducts(),
+    apiGetLayoutAisles()
+  ]);
+  if (productsResult.status === 'fulfilled') {
+    allProductsCache = productsResult.value;
+  }
+  if (layoutsResult.status === 'fulfilled') {
+    mapLayouts = layoutsResult.value;
+  }
   renderMapEditor();
+  renderPlanStartEditor();
 }
 
 function getEditableLayout(aisle) {
@@ -2614,11 +2014,7 @@ async function saveAisleLayout(aisle) {
     ? `Allee ${aisle} sauvee.${Number(data.removed_products || 0) ? ` ${data.removed_products} produit(s) supprime(s) car hors structure.` : ''}`
     : (data.error || 'Sauvegarde impossible.');
   if (data.success) {
-    allProductsCache = await apiGetProducts();
     await loadMapEditor();
-    if (browseAisle && String(browseAisle) === String(aisle)) {
-      await loadBrowse(true);
-    }
   }
 }
 
@@ -2636,6 +2032,7 @@ function applyAisleLayoutToCursor(aisle) {
     }
   }
   updateCursorUi();
+  renderPlanStartEditor();
   document.getElementById('addMsg').innerHTML = `<div class="msg success">${buildSlotsFromConfig(aisle, config || defaultLayoutConfig()).length ? `Le scan utilisera maintenant l allee ${esc(aisle)}.` : `L allee ${esc(aisle)} n a aucune position de scan pour le moment.`}</div>`;
 }
 
@@ -2660,21 +2057,8 @@ async function removeAisleLayout(aisle) {
     ? (data.message || `Allee ${aisle} retiree.`)
     : ((data && data.error) || `Impossible de supprimer l allee ${aisle}.`);
   if (success) {
-    allProductsCache = allProductsCache.filter(item => String(item.aisle) !== String(aisle));
-    layoutProducts = layoutProducts.filter(item => String(item.aisle) !== String(aisle));
-    if (String(browseAisle) === String(aisle)) {
-      browseAisle = null;
-    }
-    mapLayouts = mapLayouts.filter(item => String(item.aisle) !== String(aisle));
-    renderMapEditor();
     await loadMapEditor();
   }
-}
-
-async function addProduct() {
-  const msgDiv = document.getElementById('addMsg');
-  msgDiv.className = 'msg info';
-  msgDiv.textContent = 'L onglet Plan sert maintenant a gerer les allees. Ajoutez les produits avec le scan, puis modifiez-les dans Allees.';
 }
 
 async function deleteProduct(id) {
@@ -2682,41 +2066,31 @@ async function deleteProduct(id) {
   if (!confirm('Supprimer ce produit ?')) return;
   const data = await apiDeleteProduct(id);
   if (!data.success) {
-    const target = browseAisle ? document.getElementById('layoutMsg') : document.getElementById('searchResults');
+    const target = document.getElementById('searchResults');
     if (target) target.innerHTML = `<div class="msg error">${esc(data.error || 'Suppression impossible.')}</div>`;
     return;
   }
   await doSearch();
-  if (browseAisle) {
-    const deletedAisle = browseAisle;
-    await loadBrowse(true);
-    if (!layoutProducts.length) {
-      browseAisle = null;
-      await loadBrowse();
-      document.getElementById('browseContent').insertAdjacentHTML('afterbegin', `<div class="msg success">Le dernier produit de l allee ${esc(deletedAisle)} a ete supprime.</div>`);
-    } else {
-      showLayoutMsg(data.message || 'Produit supprime.', 'success');
-    }
-  } else {
-    document.getElementById('searchResults').insertAdjacentHTML('afterbegin', `<div class="msg success">${esc(data.message || 'Produit supprime.')}</div>`);
-  }
+  await loadMapEditor();
+  document.getElementById('searchResults').insertAdjacentHTML('afterbegin', `<div class="msg success">${esc(data.message || 'Produit supprime.')}</div>`);
 }
 
 function switchTab(tab) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.getElementById(tab).classList.add('active');
-  const tabs = ['scan','search','browse','add'];
+  const tabs = ['scan','search','add'];
   document.querySelectorAll('.tab')[tabs.indexOf(tab)].classList.add('active');
   localStorage.setItem(STORAGE_KEYS.activeTab, tab);
-  if (tab === 'browse') loadBrowse();
   if (tab === 'add') loadMapEditor();
   if (tab === 'scan') window.setTimeout(focusScanInput, 50);
 }
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/service-worker.js').catch(() => {});
+    navigator.serviceWorker.register('/service-worker.js').then(registration => {
+      registration.update().catch(() => {});
+    }).catch(() => {});
     updateDeviceSupport();
     updateAppShellState();
     updateNetworkStatus();
@@ -2736,24 +2110,10 @@ document.getElementById('scanInput').addEventListener('input', persistScanDraft)
   document.getElementById(id).addEventListener('change', persistAddDraft);
 });
 window.addEventListener('online', updateNetworkStatus);
-window.addEventListener('online', () => {
-  updateNetworkStatus();
-  if (hasPendingExport()) {
-    updateSyncNotice('Le reseau est revenu. Voulez-vous exporter les donnees gardees sur cet appareil vers la base partagee ?');
-  }
-});
 window.addEventListener('offline', updateNetworkStatus);
-window.addEventListener('offline', () => {
-  updateNetworkStatus();
-  if (hasPendingExport()) {
-    updateSyncNotice('Le reseau est parti. Les changements restent gardes sur cet appareil.');
-  }
-});
 window.addEventListener('pageshow', () => {
   updateAppShellState();
   updateNetworkStatus();
-  updateRestoreImportButton();
-  if (hasPendingExport()) updateSyncNotice();
 });
 window.addEventListener('pagehide', () => {
   persistScanDraft();
@@ -2761,24 +2121,35 @@ window.addEventListener('pagehide', () => {
 });
 
 async function bootApp() {
-  await initializeDataMode();
-  try {
-    mapLayouts = await apiGetLayoutAisles();
-  } catch (error) {
+  const [systemResult, productsResult, layoutsResult] = await Promise.allSettled([
+    apiGetSystemInfo(),
+    apiGetProducts(),
+    apiGetLayoutAisles()
+  ]);
+  if (systemResult.status === 'fulfilled') {
+    backendInfo = {...backendInfo, ...systemResult.value};
+  }
+  if (productsResult.status === 'fulfilled') {
+    allProductsCache = productsResult.value;
+  } else {
+    allProductsCache = [];
+  }
+  if (layoutsResult.status === 'fulfilled') {
+    mapLayouts = layoutsResult.value;
+  } else {
     mapLayouts = [];
   }
   loadCursor();
   normalizeCursorToLayout();
   updateCursorUi();
+  renderPlanStartEditor();
   loadScanDraft();
   loadAddDraft();
   updateDeviceSupport();
   updateAppShellState();
   updateNetworkStatus();
-  updateRestoreImportButton();
-  if (hasPendingExport()) updateSyncNotice();
   const savedTab = localStorage.getItem(STORAGE_KEYS.activeTab);
-  if (savedTab && ['scan','search','browse','add'].includes(savedTab)) switchTab(savedTab);
+  if (savedTab && ['scan','search','add'].includes(savedTab)) switchTab(savedTab);
   focusScanInput();
 }
 

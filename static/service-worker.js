@@ -1,14 +1,12 @@
-const CACHE_NAME = 'familiprix-locator-v2';
-const API_CACHE = 'familiprix-api-v1';
-const APP_SHELL = [
+const CACHE_NAME = 'familiprix-locator-v3';
+const OFFLINE_CACHE = [
   '/',
   '/manifest.json',
-  '/service-worker.js',
   '/static/icon.svg'
 ];
 
 self.addEventListener('install', event => {
-  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)));
+  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(OFFLINE_CACHE)));
   self.skipWaiting();
 });
 
@@ -24,33 +22,37 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
   const url = new URL(event.request.url);
-
-  if (event.request.mode === 'navigate') {
-    event.respondWith(
-      fetch(event.request).catch(() => caches.match('/'))
-    );
-    return;
-  }
+  if (url.origin !== self.location.origin) return;
 
   if (url.pathname.startsWith('/api/')) {
-    event.respondWith(staleWhileRevalidate(event.request, API_CACHE));
+    event.respondWith(fetch(event.request, {cache: 'no-store'}));
     return;
   }
 
-  event.respondWith(
-    staleWhileRevalidate(event.request, CACHE_NAME)
-  );
+  event.respondWith(networkFirst(event.request));
 });
 
-async function staleWhileRevalidate(request, cacheName) {
-  const cache = await caches.open(cacheName);
-  const cached = await cache.match(request);
-  const networkPromise = fetch(request)
-    .then(response => {
-      if (response && response.ok) cache.put(request, response.clone());
-      return response;
-    })
-    .catch(() => cached);
+async function networkFirst(request) {
+  const cache = await caches.open(CACHE_NAME);
 
-  return cached || networkPromise;
+  try {
+    const response = await fetch(request, {cache: 'no-store'});
+    if (response && response.ok && shouldCache(request)) {
+      cache.put(request, response.clone());
+    }
+    return response;
+  } catch (error) {
+    const cached = await cache.match(request);
+    if (cached) return cached;
+    if (request.mode === 'navigate') {
+      const fallback = await cache.match('/');
+      if (fallback) return fallback;
+    }
+    throw error;
+  }
+}
+
+function shouldCache(request) {
+  const url = new URL(request.url);
+  return request.mode === 'navigate' || url.pathname === '/manifest.json' || url.pathname.startsWith('/static/');
 }
