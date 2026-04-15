@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+familiprix.db
+certs/
+start-local.ps1
+.env
+.venv/
