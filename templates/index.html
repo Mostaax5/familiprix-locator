@@ -395,6 +395,26 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+function sideDisplayLabel(side) {
+  return side === 'Gauche' ? 'Côté A' : side === 'Droite' ? 'Côté B' : String(side || '');
+}
+
+function startScanFromSection(aisle, side, sectionIndex) {
+  const config = getAisleLayoutConfig(aisle);
+  const slots = buildSlotsFromConfig(aisle, config, side);
+  const targetSlot = slots.find(slot => Number(slot.section) === sectionIndex + 1);
+  if (!targetSlot) {
+    document.getElementById('addMsg').innerHTML = '<div class="msg error">Aucune position dans cette section pour le moment.</div>';
+    return;
+  }
+  cursor.facing = 'Avant';
+  setCursorFromSlot(targetSlot);
+  updateCursorUi();
+  planStartDraft = getCursorSelection();
+  renderPlanStartEditor();
+  switchTab('scan');
+}
+
 function isStandaloneApp() {
   return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
 }
@@ -995,7 +1015,7 @@ function aiProviderLabel() {
 }
 
 function cursorLabel() {
-  return `Allee ${cursor.aisle} - ${facingLabel(cursor.facing)} - ${viewedSideFromCanonical(cursor.facing, cursor.side)} - Section ${cursor.section} - Tablette ${cursor.shelf} - Pos. ${cursor.position}`;
+  return `Allee ${cursor.aisle} - ${sideDisplayLabel(cursor.side)} - Section ${cursor.section} - Tablette ${cursor.shelf} - Pos. ${cursor.position}`;
 }
 
 function currentLookupAssistPayload() {
@@ -1218,7 +1238,7 @@ function setPlanSlotOptions(aisle, facing, selectedSlot) {
   select.disabled = false;
   select.innerHTML = slots.map(slot => {
     const value = slotValueKey(slot);
-    const label = `${viewedSideFromCanonical(facing, slot.side)} - Section ${slot.section} - Tablette ${slot.shelf} - Position ${slot.position}`;
+    const label = `${sideDisplayLabel(slot.side)} - Section ${slot.section} - Tablette ${slot.shelf} - Position ${slot.position}`;
     return `<option value="${esc(value)}">${esc(label)}</option>`;
   }).join('');
   const currentValue = slotValueKey(selectedSlot);
@@ -1244,8 +1264,8 @@ function applySelectedPlanSlot() {
   renderScanPathPreview();
 }
 
-function slotLabel(slot, facing='Avant') {
-  return `A${slot.aisle} ${viewedSideFromCanonical(facing, slot.side)} S${slot.section} T${slot.shelf} P${slot.position}`;
+function slotLabel(slot) {
+  return `A${slot.aisle} ${sideDisplayLabel(slot.side)} S${slot.section} T${slot.shelf} P${slot.position}`;
 }
 
 function renderScanPathPreview() {
@@ -1267,9 +1287,9 @@ function renderScanPathPreview() {
   const startIndex = currentIndex >= 0 ? currentIndex : 0;
   const preview = Array.from({length: Math.min(12, slots.length)}, (_, offset) => slots[(startIndex + offset) % slots.length]);
   div.innerHTML = `
-    <div class="small">${document.getElementById('add')?.classList.contains('active') ? 'Depart selectionne' : 'Position actuelle'}: <strong>${esc(`Allee ${previewSelection.aisle} - ${facingLabel(previewSelection.facing || 'Avant')} - ${viewedSideFromCanonical(previewSelection.facing || 'Avant', previewSelection.side)} - Section ${previewSelection.section} - Tablette ${previewSelection.shelf} - Pos. ${previewSelection.position}`)}</strong></div>
+    <div class="small">${document.getElementById('add')?.classList.contains('active') ? 'Depart selectionne' : 'Position actuelle'}: <strong>${esc(`Allee ${previewSelection.aisle} - ${sideDisplayLabel(previewSelection.side)} - Section ${previewSelection.section} - Tablette ${previewSelection.shelf} - Pos. ${previewSelection.position}`)}</strong></div>
     <div class="small">Total de slots dans le plan: <strong>${slots.length}</strong></div>
-    <div class="slot-preview">${preview.map((slot, index) => `<span class="slot-chip ${index === 0 ? 'active' : ''}">${index === 0 ? 'Maintenant' : `Puis ${index}`} ${esc(slotLabel(slot, previewSelection.facing || 'Avant'))}</span>`).join('')}</div>
+    <div class="slot-preview">${preview.map((slot, index) => `<span class="slot-chip ${index === 0 ? 'active' : ''}">${index === 0 ? 'Maintenant' : `Puis ${index}`} ${esc(slotLabel(slot))}</span>`).join('')}</div>
   `;
 }
 
@@ -1318,7 +1338,18 @@ function updatePlanStartSelectors(changedLevel = '') {
   const config = getConfiguredLayoutForAisle(aisle);
   const sides = ['Gauche', 'Droite'].filter(side => (config.sides[side]?.sections || []).length > 0);
   const sideSelected = changedLevel === 'aisle' ? sides[0] : draft.side;
-  setSelectOptions('planScanSide', sides, sideSelected);
+  {
+    const sideEl = document.getElementById('planScanSide');
+    if (!sides.length) {
+      sideEl.innerHTML = '<option value="">Aucun</option>';
+      sideEl.value = '';
+      sideEl.disabled = true;
+    } else {
+      sideEl.disabled = false;
+      sideEl.innerHTML = sides.map(s => `<option value="${esc(s)}">${esc(sideDisplayLabel(s))}</option>`).join('');
+      sideEl.value = sides.includes(sideSelected) ? sideSelected : sides[0];
+    }
+  }
   const side = document.getElementById('planScanSide').value;
   const sections = ((config.sides[side]?.sections) || []).map((_, index) => String(index + 1));
   const sectionSelected = ['aisle', 'side'].includes(changedLevel) ? sections[0] : draft.section;
@@ -1444,7 +1475,7 @@ function productCard(p, showDelete=true, showAiButton=true) {
     ${p.image_url ? `<img class="lookup-image" src="${esc(p.image_url)}" alt="Image produit" style="margin-bottom:10px">` : ''}
     <div class="name">${esc(p.name)}</div>
     ${p.brand ? `<div class="barcode-text">Marque: ${esc(p.brand)}</div>` : ''}
-    <div class="location">Allee ${esc(p.aisle)} - ${esc(p.side)} - Section ${esc(p.section || '1')} - Tablette ${esc(p.shelf)} - Pos. ${esc(p.position)}</div>
+    <div class="location">Allee ${esc(p.aisle)} - ${esc(sideDisplayLabel(p.side))} - Section ${esc(p.section || '1')} - Tablette ${esc(p.shelf)} - Pos. ${esc(p.position)}</div>
     <div class="barcode-text">${p.barcode ? 'Code: ' + esc(p.barcode) : ''}</div>
     ${p.source_url ? `<div class="barcode-text">Source image/fiche disponible</div>` : ''}
     ${p.last_change_by ? `<div class="barcode-text">Dernier changement: ${esc(p.last_change_by)}</div>` : ''}
@@ -2230,7 +2261,7 @@ async function lookupScanFromInput(force=false, barcodeOverride='') {
       ${currentScanProduct.image_url ? `<img class="lookup-image" src="${esc(currentScanProduct.image_url)}" alt="Image produit" style="margin-top:10px">` : ''}
       <div class="name" style="margin-top:10px">${esc(currentScanProduct.name)}</div>
       ${currentScanProduct.brand ? `<div class="barcode-text">Marque: ${esc(currentScanProduct.brand)}</div>` : ''}
-      <div class="barcode-text">Ancien: Allee ${esc(currentScanProduct.aisle)} - ${esc(currentScanProduct.side)} - Section ${esc(currentScanProduct.section || '1')} - Tablette ${esc(currentScanProduct.shelf)} - Pos. ${esc(currentScanProduct.position)}</div>
+      <div class="barcode-text">Ancien: Allee ${esc(currentScanProduct.aisle)} - ${esc(sideDisplayLabel(currentScanProduct.side))} - Section ${esc(currentScanProduct.section || '1')} - Tablette ${esc(currentScanProduct.shelf)} - Pos. ${esc(currentScanProduct.position)}</div>
       ${currentScanProduct.description ? `<div class="desc-text">${esc(currentScanProduct.description)}</div>` : ''}
       ${currentScanProduct.usage_notes ? `<div class="desc-text">${esc(currentScanProduct.usage_notes)}</div>` : ''}
       ${currentScanProduct.alternative_suggestions ? `<div class="barcode-text">Alternatives possibles: ${esc(currentScanProduct.alternative_suggestions)}</div>` : ''}
@@ -2487,9 +2518,10 @@ function renderMapEditor() {
           const sections = config.sides[side].sections;
           const sideSlots = buildSlotsFromConfig(layout.aisle, config, side);
           const sideNodeId = `planSide-${layout.aisle}-${side}`;
+          const sideLabel = sideDisplayLabel(side);
           return `<details class="tree-node plan-side" data-node-id="${sideNodeId}"${detailsOpenAttr(sideNodeId)}>
             <summary>
-              <span>${side}</span>
+              <span>${sideLabel}</span>
               <span class="tree-meta">${sections.length} section${sections.length > 1 ? 's' : ''} | ${sideSlots.length} slot${sideSlots.length > 1 ? 's' : ''}</span>
             </summary>
             <div class="tree-body">
@@ -2499,37 +2531,38 @@ function renderMapEditor() {
                   <input id="sideTemplateSections-${layout.aisle}-${side}" type="number" min="0" value="${sections.length}"/>
                 </div>
                 <div class="field">
-                  <label class="label" for="sideTemplateShelves-${layout.aisle}-${side}">Tablettes par section</label>
+                  <label class="label" for="sideTemplateShelves-${layout.aisle}-${side}">Tablettes / section</label>
                   <input id="sideTemplateShelves-${layout.aisle}-${side}" type="number" min="0" value="${sections[0]?.shelves?.length ?? 0}"/>
                 </div>
                 <div class="field">
-                  <label class="label" for="sideTemplatePositions-${layout.aisle}-${side}">Positions par tablette</label>
+                  <label class="label" for="sideTemplatePositions-${layout.aisle}-${side}">Positions / tablette</label>
                   <input id="sideTemplatePositions-${layout.aisle}-${side}" type="number" min="0" value="${sections[0]?.shelves?.[0] ?? 0}"/>
                 </div>
               </div>
-              <button class="btn btn-outline btn-inline" onclick="applySideTemplate('${esc(layout.aisle)}','${side}')">Appliquer ce modele au cote ${side}</button>
+              <button class="btn btn-outline btn-inline" onclick="applySideTemplate('${esc(layout.aisle)}','${side}')">Appliquer modele uniforme a ${sideLabel}</button>
               <div class="field" style="margin-top:8px">
-                <label class="label" for="sectionCount-${layout.aisle}-${side}">Nombre de sections sur le cote ${side}</label>
+                <label class="label" for="sectionCount-${layout.aisle}-${side}">Nombre de sections — ${sideLabel}</label>
                 <input id="sectionCount-${layout.aisle}-${side}" type="number" min="0" value="${sections.length}" onchange="setSideSectionCount('${esc(layout.aisle)}','${side}', this.value)"/>
               </div>
-              ${sections.length ? '' : `<div class="small" style="padding:8px 0">Aucune section sur ce cote pour le moment.</div>`}
+              ${sections.length ? '' : `<div class="small" style="padding:8px 0">Aucune section sur ${sideLabel} pour le moment.</div>`}
               ${sections.map((section, sectionIndex) => {
                 const sectionNodeId = `planSection-${layout.aisle}-${side}-${sectionIndex}`;
                 return `<details class="tree-node plan-section" data-node-id="${sectionNodeId}"${detailsOpenAttr(sectionNodeId)}>
                 <summary>
                   <span>Section ${sectionIndex + 1}</span>
                   <span class="tree-meta">${section.shelves.length} tablette${section.shelves.length > 1 ? 's' : ''}</span>
+                  <button class="btn btn-outline btn-inline" style="padding:3px 8px;font-size:11px;margin:0;flex-shrink:0" onclick="event.stopPropagation();startScanFromSection('${esc(layout.aisle)}','${side}',${sectionIndex})">▶ Scan ici</button>
                 </summary>
                 <div class="tree-body">
                   <div class="field">
-                    <label class="label" for="shelfCount-${layout.aisle}-${side}-${sectionIndex}">Nombre de tablettes dans la section ${sectionIndex + 1}</label>
+                    <label class="label" for="shelfCount-${layout.aisle}-${side}-${sectionIndex}">Nombre de tablettes — Section ${sectionIndex + 1}</label>
                     <input id="shelfCount-${layout.aisle}-${side}-${sectionIndex}" type="number" min="0" value="${section.shelves.length}" onchange="setSectionShelfCount('${esc(layout.aisle)}','${side}', ${sectionIndex}, this.value)"/>
                   </div>
                   ${section.shelves.length ? '' : `<div class="small" style="padding:8px 0">Aucune tablette dans cette section pour le moment.</div>`}
                   <div class="plan-shelf-grid">
                     ${section.shelves.map((positions, shelfIndex) => `<div class="plan-shelf-card">
                       <div class="field">
-                        <label class="label" for="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}">Tablette ${shelfIndex + 1} - positions</label>
+                        <label class="label" for="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}">Tablette ${shelfIndex + 1} — positions</label>
                         <input id="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}" type="number" min="0" value="${positions}" onchange="setShelfPositionCount('${esc(layout.aisle)}','${side}', ${sectionIndex}, ${shelfIndex}, this.value)"/>
                       </div>
                     </div>`).join('')}
@@ -2542,7 +2575,7 @@ function renderMapEditor() {
         }).join('')}
         </div>
         <div class="plan-meta">
-          <span class="pill">Gauche et droite peuvent etre differents</span>
+          <span class="pill">Côté A et Côté B sont independants</span>
           <span class="pill">Chaque section peut avoir un nombre different de tablettes</span>
           <span class="pill">Chaque tablette peut avoir son propre nombre de positions</span>
         </div>
