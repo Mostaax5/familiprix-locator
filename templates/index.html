@@ -1941,7 +1941,7 @@ async function startQuaggaScanner(reader, status, button) {
     frequency: 8,
     locate: true,
     decoder: {
-      readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader', 'code_128_reader', 'code_39_reader', 'i2of5_reader'],
+      readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader', 'code_128_reader'],
       multiple: false
     }
   };
@@ -1966,7 +1966,10 @@ async function startQuaggaScanner(reader, status, button) {
   window.Quagga.start();
   quaggaActive = true;
   quaggaStartedAt = Date.now();
-  button.textContent = 'Fermer camera';
+  button.textContent = '■ Arreter camera';
+  button.style.background = '#c8102e';
+  button.style.color = 'white';
+  button.style.borderColor = '#c8102e';
   status.textContent = 'Cadrez les barres et les chiffres';
   quaggaOcrTimer = window.setInterval(() => {
     maybeRunOcrFallback(reader, status);
@@ -2009,18 +2012,25 @@ async function stopCamera() {
   reader.style.display = 'none';
   status.textContent = 'Camera arretee';
   button.textContent = 'Ouvrir camera';
+  button.style.background = '';
+  button.style.color = '';
+  button.style.borderColor = '';
   if (cameraUsageMode === 'search') {
     document.getElementById('cameraPreview').srcObject = null;
     document.getElementById('cameraPreview').style.display = 'block';
     document.getElementById('html5Reader').style.display = 'none';
     document.getElementById('scannerStatus').textContent = 'Camera arretee';
-    document.getElementById('cameraButton').textContent = 'Ouvrir camera';
+    const cb = document.getElementById('cameraButton');
+    cb.textContent = 'Ouvrir camera';
+    cb.style.background = ''; cb.style.color = ''; cb.style.borderColor = '';
   } else {
     document.getElementById('searchCameraPreview').srcObject = null;
     document.getElementById('searchCameraPreview').style.display = 'block';
     document.getElementById('searchHtml5Reader').style.display = 'none';
     document.getElementById('searchScannerStatus').textContent = 'Camera arretee';
-    document.getElementById('searchCameraButton').textContent = 'Ouvrir camera';
+    const scb = document.getElementById('searchCameraButton');
+    scb.textContent = 'Ouvrir camera';
+    scb.style.background = ''; scb.style.color = ''; scb.style.borderColor = '';
   }
   cameraUsageMode = 'scan';
 }
@@ -2048,19 +2058,49 @@ function html5ScannerConfig() {
   };
 }
 
+function playBeep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.value = 1400;
+    osc.type = 'sine';
+    gain.gain.setValueAtTime(0.35, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.13);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.13);
+  } catch (e) {}
+}
+
+function flashScannerSuccess() {
+  const {reader} = getCameraDom();
+  reader.style.outline = '5px solid #16a34a';
+  reader.style.outlineOffset = '-5px';
+  window.setTimeout(() => {
+    reader.style.outline = '';
+    reader.style.outlineOffset = '';
+  }, 500);
+}
+
 async function onDecodedCode(decodedText) {
   const rawValue = String(decodedText || '').trim();
   if (!rawValue || scanPaused) return;
   if (!confirmStableCameraBarcode(rawValue)) return;
   scanPaused = true;
+  playBeep();
+  flashScannerSuccess();
   setScannedBarcode(rawValue);
-  getCameraDom().status.textContent = 'Code detecte';
+  getCameraDom().status.textContent = '✓ Code lu!';
   if (cameraUsageMode === 'search') {
     await stopCamera();
     await doSearchValue(rawValue);
     document.getElementById('searchResults').insertAdjacentHTML('afterbegin', `<div class="msg success">Code-barres scanne: ${esc(rawValue)}</div>`);
     return;
   }
+  // Auto-stop camera after detection so the form is clear and phone stops heating
+  window.setTimeout(() => { if (quaggaActive) stopCamera(); }, 700);
   await lookupScanFromInput(true, rawValue);
 }
 
@@ -2976,7 +3016,9 @@ async function bootApp() {
   if (!savedTab || savedTab === 'scan') focusScanInput();
 }
 
-bootApp();
+bootApp().then(() => {
+  window.setTimeout(() => ensureQuaggaLoaded(), 1500);
+});
 </script>
 </body>
 </html>

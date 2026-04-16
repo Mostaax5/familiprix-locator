@@ -251,29 +251,36 @@ def lookup_barcode(barcode):
         return jsonify({"found": False, "error": "Code-barres manquant"}), 400
 
     barcode_candidates = build_barcode_candidates(barcode)
+
+    # Phase 1: fast JSON APIs run in parallel — most reliable
+    json_tasks = []
+    for candidate in barcode_candidates:
+        json_tasks.append(lambda bc=candidate: lookup_upcitemdb(bc))
+    for candidate in barcode_candidates:
+        for source_name, base_url in PRODUCT_LOOKUP_SOURCES:
+            json_tasks.append(
+                lambda bc=candidate, sn=source_name, su=base_url:
+                lookup_open_facts_product(sn, su, bc)
+            )
+    product = first_lookup_result(json_tasks, max_workers=8)
+    if product:
+        return jsonify({"found": True, "product": product})
+
+    # Phase 2: pharmacy website scrapers as fallback
     pharmacy_tasks = []
     for candidate in barcode_candidates:
         for source_name, source_base_url in PHARMACY_LOOKUP_SOURCES:
             if source_name == "Familiprix":
                 pharmacy_tasks.append(
-                    lambda current_barcode=candidate, current_candidates=barcode_candidates:
-                    lookup_familiprix_product(current_barcode, current_candidates)
+                    lambda bc=candidate, bcs=barcode_candidates:
+                    lookup_familiprix_product(bc, bcs)
                 )
             else:
                 pharmacy_tasks.append(
-                    lambda current_barcode=candidate, current_name=source_name, current_url=source_base_url, current_candidates=barcode_candidates:
-                    lookup_generic_pharmacy_product(current_name, current_url, current_barcode, current_candidates)
+                    lambda bc=candidate, sn=source_name, su=source_base_url, bcs=barcode_candidates:
+                    lookup_generic_pharmacy_product(sn, su, bc, bcs)
                 )
-    product = first_lookup_result(pharmacy_tasks)
-    if product:
-        return jsonify({"found": True, "product": product})
-
-    product = first_lookup_result([
-        lambda current_barcode=candidate, current_name=source_name, current_url=base_url:
-        lookup_open_facts_product(current_name, current_url, current_barcode)
-        for candidate in barcode_candidates
-        for source_name, base_url in PRODUCT_LOOKUP_SOURCES
-    ])
+    product = first_lookup_result(pharmacy_tasks, max_workers=4)
     if product:
         return jsonify({"found": True, "product": product})
 
@@ -783,6 +790,44 @@ def first_present(product, keys):
         if value:
             return value
     return ""
+
+
+def lookup_upcitemdb(barcode):
+    digits = normalized_digits(barcode)
+    if not digits:
+        return None
+    request_obj = Request(
+        f"https://api.upcitemdb.com/prod/trial/lookup?upc={digits}",
+        headers={
+            "User-Agent": "FamiliprixLocator/0.1",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urlopen(request_obj, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+        return None
+    items = payload.get("items") or []
+    if not items:
+        return None
+    item = items[0]
+    name = str(item.get("title", "")).strip()
+    brand = str(item.get("brand", "")).strip()
+    description = str(item.get("description", "")).strip()
+    images = item.get("images") or []
+    image_url = str(images[0]).strip() if images else ""
+    if not name:
+        return None
+    return {
+        "name": name,
+        "brand": brand,
+        "description": description,
+        "barcode": digits,
+        "source": "UPC Item DB",
+        "source_url": f"https://www.upcitemdb.com/upc/{digits}",
+        "image_url": image_url,
+    }
 
 
 def product_search_text(product):
