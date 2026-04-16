@@ -187,7 +187,7 @@
 <div id="search" class="section content">
   <div class="card">
     <div class="section-title">Recherche rapide</div>
-    <div class="section-note">Scannez un code-barres avec la camera pour trouver directement le produit.</div>
+    <div class="section-note">Scannez un code-barres avec la camera pour trouver directement le produit. Vous pouvez aussi chercher par nom, marque, mots-clés clients ou les 4 derniers chiffres du code.</div>
     <div class="card scanner" style="margin-top:10px;margin-bottom:0">
       <div class="scanner-viewport">
         <video id="searchCameraPreview" playsinline muted></video>
@@ -202,7 +202,7 @@
   <div class="scan-tools">
     <div class="field">
       <label class="label" for="searchInput">Recherche</label>
-      <input type="text" id="searchInput" placeholder="Nom du produit ou code-barres..." oninput="scheduleSearch()"/>
+      <input type="text" id="searchInput" placeholder="Nom, code-barres ou 4 derniers chiffres..." oninput="scheduleSearch()"/>
     </div>
     <button class="btn btn-outline btn-inline" onclick="clearSearchInput()">Effacer</button>
   </div>
@@ -212,7 +212,7 @@
 <div id="add" class="section content">
   <div class="card">
     <div class="section-title">Point de depart du scan</div>
-    <div class="section-note">Choisissez ici le vrai point de depart du scan. Les choix sont limites aux positions qui existent deja dans le plan.</div>
+    <div class="section-note">Choisissez ici le vrai point de depart du scan. La vue sert seulement a savoir de quel bout de l allee vous la regardez, pour inverser gauche et droite correctement.</div>
     <div class="row2">
       <div class="field">
         <label class="label" for="planScanAisle">Allee</label>
@@ -221,8 +221,8 @@
       <div class="field">
         <label class="label" for="planScanFacing">Vue</label>
         <select id="planScanFacing">
-          <option value="Avant">Face avant</option>
-          <option value="Arriere">Face arriere</option>
+          <option value="Avant">Depuis le debut de l allee</option>
+          <option value="Arriere">Depuis l autre bout de l allee</option>
         </select>
       </div>
     </div>
@@ -295,6 +295,8 @@
 let scannerStream = null;
 let scanPaused = false;
 let currentScanProduct = null;
+let pendingLookupProduct = null;
+let pendingLookupAssist = null;
 let html5Scanner = null;
 let lastLookedUpBarcode = '';
 let hardwareScanBuffer = '';
@@ -333,6 +335,9 @@ let backendInfo = {
   shared_sync: false,
   label: 'SQLite locale',
   needs_shared_database: true,
+  ai_enabled: false,
+  ai_provider: '',
+  ai_provider_label: '',
   duplicate_slots: 0,
   duplicate_barcodes: 0
 };
@@ -363,6 +368,11 @@ function normalizeProduct(product) {
     name: String(product.name || '').trim(),
     brand: String(product.brand || '').trim(),
     description: String(product.description || '').trim(),
+    image_url: String(product.image_url || '').trim(),
+    source_url: String(product.source_url || '').trim(),
+    search_terms: String(product.search_terms || '').trim(),
+    usage_notes: String(product.usage_notes || '').trim(),
+    alternative_suggestions: String(product.alternative_suggestions || '').trim(),
     barcode: String(product.barcode || '').trim(),
     aisle: String(product.aisle || '').trim(),
     side: String(product.side || 'Gauche').trim() || 'Gauche',
@@ -376,6 +386,16 @@ function normalizeProduct(product) {
     last_change_by: String(product.last_change_by || product.modified_by || product.created_by || '').trim(),
     last_change_at: String(product.last_change_at || product.modified_at || product.created_at || '').trim()
   };
+}
+
+function upsertCachedProduct(product) {
+  const normalized = normalizeProduct(product);
+  const index = allProductsCache.findIndex(item => Number(item.id) === Number(normalized.id));
+  if (index >= 0) {
+    allProductsCache[index] = normalized;
+  } else {
+    allProductsCache.push(normalized);
+  }
 }
 
 function loadEditorSession() {
@@ -693,14 +713,63 @@ async function apiLookupOnline(barcode, signal) {
   }
 }
 
+async function apiGenerateProductAssist(payload) {
+  try {
+    const {res, data} = await apiFetch('/api/products/assist', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: JSON.stringify(payload)
+    });
+    return res.ok ? data : {success: false, error: data.error || 'Aide client indisponible pour le moment.'};
+  } catch (error) {
+    return {success: false, error: 'Aide client indisponible pour le moment.'};
+  }
+}
+
 async function apiGetSystemInfo() {
   const {res, data} = await apiFetch('/api/system/info');
   if (!res.ok) throw new Error('system-info');
   return data;
 }
 
+function facingLabel(value) {
+  return value === 'Arriere' ? 'depuis l autre bout' : 'depuis le debut';
+}
+
+function aiProviderLabel() {
+  return backendInfo.ai_provider_label || 'IA';
+}
+
 function cursorLabel() {
-  return `Allee ${cursor.aisle} - ${cursor.facing} - ${viewedSideFromCanonical(cursor.facing, cursor.side)} - Section ${cursor.section} - Tablette ${cursor.shelf} - Pos. ${cursor.position}`;
+  return `Allee ${cursor.aisle} - ${facingLabel(cursor.facing)} - ${viewedSideFromCanonical(cursor.facing, cursor.side)} - Section ${cursor.section} - Tablette ${cursor.shelf} - Pos. ${cursor.position}`;
+}
+
+function currentLookupAssistPayload() {
+  return {
+    name: document.getElementById('scanProductName')?.value.trim() || '',
+    brand: document.getElementById('scanProductBrand')?.value.trim() || '',
+    description: document.getElementById('scanProductDescription')?.value.trim() || '',
+    barcode: document.getElementById('scanInput')?.value.trim() || ''
+  };
+}
+
+function renderLookupAssistPreview() {
+  const preview = document.getElementById('lookupAssistPreview');
+  const status = document.getElementById('lookupAssistStatus');
+  if (!preview || !status) return;
+  if (!pendingLookupAssist) {
+    preview.innerHTML = '';
+    status.textContent = backendInfo.ai_enabled
+      ? `Optionnel: genere des mots-cles clients, une explication simple et des alternatives via ${aiProviderLabel()}.`
+      : 'IA non configuree sur le serveur pour le moment. Ajoutez GEMINI_API_KEY sur Render.';
+    return;
+  }
+  status.textContent = 'Aide client generee. Elle sera sauvegardee avec ce produit.';
+  preview.innerHTML = `
+    ${pendingLookupAssist.search_terms ? `<div class="barcode-text">Mots-clés clients: ${esc(pendingLookupAssist.search_terms)}</div>` : ''}
+    ${pendingLookupAssist.usage_notes ? `<div class="desc-text">${esc(pendingLookupAssist.usage_notes)}</div>` : ''}
+    ${pendingLookupAssist.alternative_suggestions ? `<div class="barcode-text">Alternatives possibles: ${esc(pendingLookupAssist.alternative_suggestions)}</div>` : ''}
+  `;
 }
 
 function updateCursorUi() {
@@ -763,6 +832,9 @@ function updateBackendStatusInfo() {
   } else {
     messages.push('Base locale active: SQLite. Pour une vraie synchronisation entre appareils, connectez Render Postgres et reglez DATABASE_URL.');
   }
+  messages.push(backendInfo.ai_enabled
+    ? `Aide client IA active via ${aiProviderLabel()}.`
+    : 'Aide client IA inactive tant que GEMINI_API_KEY n est pas configuree.');
   if (Number(backendInfo.duplicate_slots || 0) > 0) {
     messages.push(`Attention: ${backendInfo.duplicate_slots} position(s) contiennent deja plusieurs produits et doivent etre nettoyees.`);
   }
@@ -960,13 +1032,48 @@ function selectNumericField(input) {
 function productCard(p, showDelete=true) {
   return `<div class="card">
     ${showDelete ? `<button class="delete-btn" onclick="deleteProduct(${p.id})" title="Supprimer">x</button>` : ''}
+    ${p.image_url ? `<img class="lookup-image" src="${esc(p.image_url)}" alt="Image produit" style="margin-bottom:10px">` : ''}
     <div class="name">${esc(p.name)}</div>
     ${p.brand ? `<div class="barcode-text">Marque: ${esc(p.brand)}</div>` : ''}
     <div class="location">Allee ${esc(p.aisle)} - ${esc(p.side)} - Section ${esc(p.section || '1')} - Tablette ${esc(p.shelf)} - Pos. ${esc(p.position)}</div>
     <div class="barcode-text">${p.barcode ? 'Code: ' + esc(p.barcode) : ''}</div>
+    ${p.source_url ? `<div class="barcode-text">Source image/fiche disponible</div>` : ''}
     ${p.last_change_by ? `<div class="barcode-text">Dernier changement: ${esc(p.last_change_by)}</div>` : ''}
     ${p.description ? `<div class="desc-text">${esc(p.description)}</div>` : ''}
+    ${p.usage_notes ? `<div class="desc-text">${esc(p.usage_notes)}</div>` : ''}
+    ${p.search_terms ? `<div class="barcode-text">Mots-clés clients: ${esc(p.search_terms)}</div>` : ''}
+    ${p.alternative_suggestions ? `<div class="barcode-text">Alternatives possibles: ${esc(p.alternative_suggestions)}</div>` : ''}
+    ${p.id && backendInfo.ai_enabled ? `<div class="tool-row"><button class="btn btn-outline btn-inline" onclick="enrichStoredProductWithAi(${p.id})">Generer aide client (IA)</button></div>` : ''}
   </div>`;
+}
+
+async function enrichStoredProductWithAi(productId) {
+  const product = allProductsCache.find(item => Number(item.id) === Number(productId)) || normalizeProduct((await apiGetProducts()).find(item => Number(item.id) === Number(productId)) || {});
+  if (!product.id) return;
+  const searchDiv = document.getElementById('searchResults');
+  searchDiv.insertAdjacentHTML('afterbegin', '<div class="msg info">Generation de l aide client...</div>');
+  const assistResult = await apiGenerateProductAssist(product);
+  if (!assistResult.success || !assistResult.assist) {
+    await doSearch();
+    searchDiv.insertAdjacentHTML('afterbegin', `<div class="msg error">${esc(assistResult.error || 'Aide client indisponible.')}</div>`);
+    return;
+  }
+  const nextProduct = {
+    ...product,
+    description: product.description || assistResult.assist.usage_notes || '',
+    search_terms: assistResult.assist.search_terms || product.search_terms || '',
+    usage_notes: assistResult.assist.usage_notes || product.usage_notes || '',
+    alternative_suggestions: assistResult.assist.alternative_suggestions || product.alternative_suggestions || ''
+  };
+  const saveResult = await apiUpdateProduct(nextProduct);
+  if (!saveResult.success) {
+    await doSearch();
+    searchDiv.insertAdjacentHTML('afterbegin', `<div class="msg error">${esc(saveResult.error || 'Sauvegarde impossible.')}</div>`);
+    return;
+  }
+  allProductsCache = await apiGetProducts();
+  await doSearch();
+  searchDiv.insertAdjacentHTML('afterbegin', '<div class="msg success">Aide client ajoutee au produit.</div>');
 }
 
 function getConfiguredLayoutForAisle(aisle) {
@@ -1577,10 +1684,13 @@ async function lookupScanFromInput(force=false, barcodeOverride='') {
     currentScanProduct = await apiGetProductByBarcode(barcode);
     div.innerHTML = `<div class="card">
       <div class="pill">Produit existant</div>
+      ${currentScanProduct.image_url ? `<img class="lookup-image" src="${esc(currentScanProduct.image_url)}" alt="Image produit" style="margin-top:10px">` : ''}
       <div class="name" style="margin-top:10px">${esc(currentScanProduct.name)}</div>
       ${currentScanProduct.brand ? `<div class="barcode-text">Marque: ${esc(currentScanProduct.brand)}</div>` : ''}
       <div class="barcode-text">Ancien: Allee ${esc(currentScanProduct.aisle)} - ${esc(currentScanProduct.side)} - Section ${esc(currentScanProduct.section || '1')} - Tablette ${esc(currentScanProduct.shelf)} - Pos. ${esc(currentScanProduct.position)}</div>
       ${currentScanProduct.description ? `<div class="desc-text">${esc(currentScanProduct.description)}</div>` : ''}
+      ${currentScanProduct.usage_notes ? `<div class="desc-text">${esc(currentScanProduct.usage_notes)}</div>` : ''}
+      ${currentScanProduct.alternative_suggestions ? `<div class="barcode-text">Alternatives possibles: ${esc(currentScanProduct.alternative_suggestions)}</div>` : ''}
       <div class="msg info">Nouveau: ${esc(cursorLabel())}</div>
       <button class="btn" onclick="confirmExistingLocation()">Confirmer ce nouvel emplacement</button>
     </div>`;
@@ -1596,6 +1706,8 @@ async function lookupScanFromInput(force=false, barcodeOverride='') {
 function showOnlineLookupForm(barcode) {
   const div = document.getElementById('scanResult');
   currentScanProduct = null;
+  pendingLookupProduct = null;
+  pendingLookupAssist = null;
   div.innerHTML = `<div class="card">
     <div class="pill">Nouveau produit</div>
     <div id="lookupStatus" class="msg info">Code-barres enregistre pour cette position. Recherche du produit en ligne...</div>
@@ -1617,12 +1729,18 @@ function showOnlineLookupForm(barcode) {
       <input type="text" id="scanProductDescription" value="" placeholder="Description"/>
     </div>
     <div id="lookupSource" class="barcode-text"></div>
+    <div class="tool-row">
+      <button class="btn btn-outline btn-inline" onclick="generateLookupAssist()">Generer aide client (IA)</button>
+      <span id="lookupAssistStatus" class="small"></span>
+    </div>
+    <div id="lookupAssistPreview"></div>
     <div class="msg info">Emplacement: ${esc(cursorLabel())}</div>
     <div class="btn-row">
       <button class="btn" onclick="confirmNewProduct()">Enregistrer ce code-barres a cette position</button>
       <button class="btn btn-outline" onclick="confirmUnknownProduct()">Ajouter comme produit a identifier</button>
     </div>
   </div>`;
+  renderLookupAssistPreview();
   hydrateOnlineLookup(barcode);
 }
 
@@ -1641,6 +1759,7 @@ async function hydrateOnlineLookup(barcode) {
   if (!status) return;
 
   if (lookupProduct) {
+    pendingLookupProduct = lookupProduct;
     if (!document.getElementById('scanProductName').value.trim()) document.getElementById('scanProductName').value = lookupProduct.name || '';
     if (!document.getElementById('scanProductBrand').value.trim()) document.getElementById('scanProductBrand').value = lookupProduct.brand || '';
     if (!document.getElementById('scanProductDescription').value.trim()) document.getElementById('scanProductDescription').value = lookupProduct.description || '';
@@ -1651,9 +1770,32 @@ async function hydrateOnlineLookup(barcode) {
       document.getElementById('lookupImageWrap').innerHTML = `<img class="lookup-image" src="${esc(lookupProduct.image_url)}" alt="Image produit">`;
     }
   } else {
+    pendingLookupProduct = null;
     status.className = 'msg error';
     status.textContent = 'Produit non trouve en ligne. Ajoutez-le comme produit a identifier et continuez le scan.';
   }
+}
+
+async function generateLookupAssist() {
+  const status = document.getElementById('lookupAssistStatus');
+  const payload = currentLookupAssistPayload();
+  if (!payload.name && !payload.description) {
+    if (status) status.textContent = 'Entrez au moins un nom ou une description avant de lancer l aide client.';
+    return;
+  }
+  if (status) status.textContent = 'Generation en cours...';
+  const result = await apiGenerateProductAssist(payload);
+  if (!result.success || !result.assist) {
+    pendingLookupAssist = null;
+    renderLookupAssistPreview();
+    if (status) status.textContent = result.error || 'Aide client indisponible.';
+    return;
+  }
+  pendingLookupAssist = result.assist;
+  if (!document.getElementById('scanProductDescription').value.trim() && pendingLookupAssist.usage_notes) {
+    document.getElementById('scanProductDescription').value = pendingLookupAssist.usage_notes;
+  }
+  renderLookupAssistPreview();
 }
 
 async function confirmExistingLocation() {
@@ -1663,6 +1805,11 @@ async function confirmExistingLocation() {
     name: currentScanProduct.name,
     brand: currentScanProduct.brand || '',
     description: currentScanProduct.description || '',
+    image_url: currentScanProduct.image_url || '',
+    source_url: currentScanProduct.source_url || '',
+    search_terms: currentScanProduct.search_terms || '',
+    usage_notes: currentScanProduct.usage_notes || '',
+    alternative_suggestions: currentScanProduct.alternative_suggestions || '',
     barcode: currentScanProduct.barcode || '',
     aisle: String(cursor.aisle),
     side: cursor.side,
@@ -1675,6 +1822,7 @@ async function confirmExistingLocation() {
     document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Deplacement impossible.')}</div>`;
     return;
   }
+  if (data.product) upsertCachedProduct(data.product);
   finishConfirmed(`"${currentScanProduct.name}" place a ${cursorLabel()}.`);
 }
 
@@ -1692,6 +1840,11 @@ async function confirmNewProduct() {
     name,
     brand,
     description,
+    image_url: pendingLookupProduct?.image_url || '',
+    source_url: pendingLookupProduct?.source_url || '',
+    search_terms: pendingLookupAssist?.search_terms || '',
+    usage_notes: pendingLookupAssist?.usage_notes || '',
+    alternative_suggestions: pendingLookupAssist?.alternative_suggestions || '',
     barcode,
     aisle: String(cursor.aisle),
     side: cursor.side,
@@ -1700,6 +1853,7 @@ async function confirmNewProduct() {
     position: String(cursor.position)
   });
   if (data.success) {
+    if (data.product) upsertCachedProduct(data.product);
     finishConfirmed(`"${name}" ajoute a ${cursorLabel()}.`);
   } else {
     document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur pendant l ajout.')}</div>`;
@@ -1714,7 +1868,12 @@ async function confirmUnknownProduct() {
   const data = await apiAddProduct({
     name: placeholderName,
     brand: '',
-    description: 'A identifier',
+    description: pendingLookupAssist?.usage_notes || 'A identifier',
+    image_url: pendingLookupProduct?.image_url || '',
+    source_url: pendingLookupProduct?.source_url || '',
+    search_terms: pendingLookupAssist?.search_terms || '',
+    usage_notes: pendingLookupAssist?.usage_notes || '',
+    alternative_suggestions: pendingLookupAssist?.alternative_suggestions || '',
     barcode,
     aisle: String(cursor.aisle),
     side: cursor.side,
@@ -1723,6 +1882,7 @@ async function confirmUnknownProduct() {
     position: String(cursor.position)
   });
   if (data.success) {
+    if (data.product) upsertCachedProduct(data.product);
     finishConfirmed(`"${placeholderName}" ajoute a ${cursorLabel()}.`);
   } else {
     document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur pendant l ajout.')}</div>`;
@@ -1737,6 +1897,8 @@ function finishConfirmed(message) {
   lastLookedUpBarcode = '';
   activeLookupBarcode = '';
   currentScanProduct = null;
+  pendingLookupProduct = null;
+  pendingLookupAssist = null;
   document.getElementById('scanResult').innerHTML = `<div class="msg success">${esc(message)} Prochaine position: ${esc(cursorLabel())}</div>`;
   getCameraDom().status.textContent = `Confirme: ${oldLocation}`;
   window.setTimeout(() => {

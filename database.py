@@ -131,6 +131,11 @@ def init_postgres_db(db):
             name        TEXT    NOT NULL,
             brand       TEXT    DEFAULT '',
             description TEXT    DEFAULT '',
+            image_url   TEXT    DEFAULT '',
+            source_url  TEXT    DEFAULT '',
+            search_terms TEXT   DEFAULT '',
+            usage_notes TEXT    DEFAULT '',
+            alternative_suggestions TEXT DEFAULT '',
             barcode     TEXT    DEFAULT '',
             aisle       TEXT    NOT NULL,
             side        TEXT    NOT NULL,
@@ -171,6 +176,11 @@ def init_postgres_db(db):
 
     db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS brand TEXT DEFAULT ''")
     db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS description TEXT DEFAULT ''")
+    db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT DEFAULT ''")
+    db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS source_url TEXT DEFAULT ''")
+    db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS search_terms TEXT DEFAULT ''")
+    db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS usage_notes TEXT DEFAULT ''")
+    db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS alternative_suggestions TEXT DEFAULT ''")
     db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS section TEXT NOT NULL DEFAULT '1'")
     db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS modified_by TEXT DEFAULT ''")
     db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS modified_at TEXT DEFAULT ''")
@@ -188,6 +198,11 @@ def init_sqlite_db(db):
             name        TEXT    NOT NULL,
             brand       TEXT    DEFAULT '',
             description TEXT    DEFAULT '',
+            image_url   TEXT    DEFAULT '',
+            source_url  TEXT    DEFAULT '',
+            search_terms TEXT   DEFAULT '',
+            usage_notes TEXT    DEFAULT '',
+            alternative_suggestions TEXT DEFAULT '',
             barcode     TEXT    DEFAULT '',
             aisle       TEXT    NOT NULL,
             side        TEXT    NOT NULL,
@@ -233,6 +248,16 @@ def init_sqlite_db(db):
         db.execute("ALTER TABLE products ADD COLUMN brand TEXT DEFAULT ''")
     if "description" not in existing_columns:
         db.execute("ALTER TABLE products ADD COLUMN description TEXT DEFAULT ''")
+    if "image_url" not in existing_columns:
+        db.execute("ALTER TABLE products ADD COLUMN image_url TEXT DEFAULT ''")
+    if "source_url" not in existing_columns:
+        db.execute("ALTER TABLE products ADD COLUMN source_url TEXT DEFAULT ''")
+    if "search_terms" not in existing_columns:
+        db.execute("ALTER TABLE products ADD COLUMN search_terms TEXT DEFAULT ''")
+    if "usage_notes" not in existing_columns:
+        db.execute("ALTER TABLE products ADD COLUMN usage_notes TEXT DEFAULT ''")
+    if "alternative_suggestions" not in existing_columns:
+        db.execute("ALTER TABLE products ADD COLUMN alternative_suggestions TEXT DEFAULT ''")
     if "section" not in existing_columns:
         db.execute("ALTER TABLE products ADD COLUMN section TEXT NOT NULL DEFAULT '1'")
     if "modified_by" not in existing_columns:

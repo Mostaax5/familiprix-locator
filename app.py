@@ -46,6 +46,12 @@ LOOKUP_FIELDS = [
     "url",
     "image_front_url",
 ]
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
+GEMINI_BASE_URL = os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini").strip() or "gpt-5.4-mini"
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 
 # ── Pages ──────────────────────────────────────────────────────────────────
 
@@ -72,6 +78,7 @@ def teardown_database(_error):
 @app.route("/api/system/info", methods=["GET"])
 def get_system_info():
     db = get_db()
+    ai_provider = configured_ai_provider()
     duplicate_slots = db.execute(
         """
         SELECT COUNT(*) AS count
@@ -97,6 +104,9 @@ def get_system_info():
     ).fetchone()
     return jsonify({
         **get_backend_summary(),
+        "ai_enabled": bool(ai_provider["name"]),
+        "ai_provider": ai_provider["name"],
+        "ai_provider_label": ai_provider["label"],
         "duplicate_slots": int(first_column(duplicate_slots) or 0),
         "duplicate_barcodes": int(first_column(duplicate_barcodes) or 0),
     })
@@ -114,31 +124,30 @@ def get_products():
 
 @app.route("/api/products/search", methods=["GET"])
 def search_products():
-    query = request.args.get("q", "").strip().lower()
+    query = request.args.get("q", "").strip()
     if not query:
         return jsonify([])
     db = get_db()
-    products = db.execute(
-        """
-        SELECT *
-        FROM products
-        WHERE LOWER(name) LIKE ? OR LOWER(brand) LIKE ? OR barcode LIKE ?
-        """,
-        (f"%{query}%", f"%{query}%", f"%{query}%"),
-    ).fetchall()
-    items = [row_to_product(p) for p in products]
-    items.sort(key=location_sort_key)
+    products = [row_to_product(p) for p in db.execute("SELECT * FROM products").fetchall()]
+    ranked = []
+    for product in products:
+        score = product_search_score(product, query)
+        if score > 0:
+            ranked.append((score, product))
+    ranked.sort(key=lambda item: (-item[0], location_sort_key(item[1])))
+    items = [product for _, product in ranked]
     return jsonify(items)
 
 
 @app.route("/api/products/barcode/<barcode>", methods=["GET"])
 def get_by_barcode(barcode):
     db = get_db()
-    product = db.execute(
-        "SELECT * FROM products WHERE barcode = ? ORDER BY id LIMIT 1", (barcode,)
-    ).fetchone()
-    if product:
-        return jsonify(row_to_product(product))
+    for candidate in build_barcode_candidates(barcode):
+        product = db.execute(
+            "SELECT * FROM products WHERE barcode = ? ORDER BY id LIMIT 1", (candidate,)
+        ).fetchone()
+        if product:
+            return jsonify(row_to_product(product))
     return jsonify({"error": "Produit non trouvé"}), 404
 
 
@@ -238,28 +247,83 @@ def lookup_barcode(barcode):
     if not barcode:
         return jsonify({"found": False, "error": "Code-barres manquant"}), 400
 
+    barcode_candidates = build_barcode_candidates(barcode)
     pharmacy_tasks = []
-    for source_name, source_base_url in PHARMACY_LOOKUP_SOURCES:
-        if source_name == "Familiprix":
-            pharmacy_tasks.append(lambda current_barcode=barcode: lookup_familiprix_product(current_barcode))
-        else:
-            pharmacy_tasks.append(
-                lambda current_barcode=barcode, current_name=source_name, current_url=source_base_url:
-                lookup_generic_pharmacy_product(current_name, current_url, current_barcode)
-            )
+    for candidate in barcode_candidates:
+        for source_name, source_base_url in PHARMACY_LOOKUP_SOURCES:
+            if source_name == "Familiprix":
+                pharmacy_tasks.append(
+                    lambda current_barcode=candidate, current_candidates=barcode_candidates:
+                    lookup_familiprix_product(current_barcode, current_candidates)
+                )
+            else:
+                pharmacy_tasks.append(
+                    lambda current_barcode=candidate, current_name=source_name, current_url=source_base_url, current_candidates=barcode_candidates:
+                    lookup_generic_pharmacy_product(current_name, current_url, current_barcode, current_candidates)
+                )
     product = first_lookup_result(pharmacy_tasks)
     if product:
         return jsonify({"found": True, "product": product})
 
     product = first_lookup_result([
-        lambda current_barcode=barcode, current_name=source_name, current_url=base_url:
+        lambda current_barcode=candidate, current_name=source_name, current_url=base_url:
         lookup_open_facts_product(current_name, current_url, current_barcode)
+        for candidate in barcode_candidates
         for source_name, base_url in PRODUCT_LOOKUP_SOURCES
     ])
     if product:
         return jsonify({"found": True, "product": product})
 
     return jsonify({"found": False, "error": "Aucun produit trouve en ligne"})
+
+
+@app.route("/api/products/assist", methods=["POST"])
+def assist_product():
+    data = request.get_json() or {}
+    name = str(data.get("name", "")).strip()
+    brand = str(data.get("brand", "")).strip()
+    description = str(data.get("description", "")).strip()
+    barcode = str(data.get("barcode", "")).strip()
+    if not name and not description:
+        return jsonify({"success": False, "error": "Nom ou description requis."}), 400
+    if not configured_ai_provider()["name"]:
+        return jsonify({"success": False, "error": "GEMINI_API_KEY n est pas configure sur le serveur."}), 503
+    assist = generate_product_assist_payload(name, brand, description, barcode)
+    if not assist:
+        return jsonify({"success": False, "error": "Impossible de generer l aide client pour le moment."}), 502
+    return jsonify({"success": True, "assist": assist})
+
+
+def normalized_digits(value):
+    return re.sub(r"\D", "", str(value or ""))
+
+
+def build_barcode_candidates(barcode):
+    raw = str(barcode or "").strip()
+    digits = normalized_digits(raw)
+    candidates = []
+    seen = set()
+
+    def add(value):
+        cleaned = str(value or "").strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            candidates.append(cleaned)
+
+    add(raw)
+    add(digits)
+    if len(digits) == 13 and digits.startswith("0"):
+        add(digits[1:])
+    if len(digits) == 12:
+        add(f"0{digits}")
+    if len(digits) == 14 and digits.startswith("00"):
+        add(digits[2:])
+    stripped = digits.lstrip("0")
+    if stripped and stripped != digits:
+        add(stripped)
+        if len(stripped) == 12:
+            add(f"0{stripped}")
+    return candidates
 
 
 def first_lookup_result(tasks, max_workers=4):
@@ -279,17 +343,19 @@ def first_lookup_result(tasks, max_workers=4):
     return None
 
 
-def lookup_familiprix_product(barcode):
+def lookup_familiprix_product(barcode, barcode_candidates=None):
+    barcode_candidates = barcode_candidates or build_barcode_candidates(barcode)
     search_urls = [
         f"https://magasiner.familiprix.com/fr/search?text={barcode}",
         f"https://magasiner.familiprix.com/fr/search?q={barcode}",
+        f"https://magasiner.familiprix.com/fr/recherche?q={barcode}",
     ]
     for url in search_urls:
         html, final_url = fetch_text(url)
         if not html:
             continue
 
-        product_url = find_familiprix_product_url(html, final_url, barcode)
+        product_url = find_familiprix_product_url(html, final_url, barcode_candidates)
         if not product_url:
             continue
 
@@ -297,7 +363,7 @@ def lookup_familiprix_product(barcode):
         if not product_html:
             product_html, product_final_url = html, final_url
 
-        product = parse_familiprix_product_page(product_html, product_final_url, barcode)
+        product = parse_familiprix_product_page(product_html, product_final_url, barcode, barcode_candidates)
         if product:
             return product
 
@@ -321,15 +387,15 @@ def fetch_text(url):
         return None, None
 
 
-def find_familiprix_product_url(html, final_url, barcode):
-    if "/p/" in final_url and barcode in html:
+def find_familiprix_product_url(html, final_url, barcode_candidates):
+    if "/p/" in final_url and page_mentions_barcode(html, barcode_candidates):
         return final_url
 
     product_links = re.findall(r'href="([^"]+/p/[0-9]{6,}[^"]*)"', html)
     for link in product_links:
         absolute = normalize_familiprix_url(link)
         product_html, product_url = fetch_text(absolute)
-        if product_html and barcode in product_html:
+        if product_html and page_mentions_barcode(product_html, barcode_candidates):
             return product_url or absolute
 
     return None
@@ -343,25 +409,28 @@ def normalize_familiprix_url(url):
     return f"https://magasiner.familiprix.com/{url}"
 
 
-def lookup_generic_pharmacy_product(source_name, base_url, barcode):
+def lookup_generic_pharmacy_product(source_name, base_url, barcode, barcode_candidates=None):
+    barcode_candidates = barcode_candidates or build_barcode_candidates(barcode)
     search_urls = [
         f"{base_url}/search?text={barcode}",
         f"{base_url}/search?q={barcode}",
         f"{base_url}/recherche?q={barcode}",
+        f"{base_url}/recherche?text={barcode}",
         f"{base_url}/fr/search?text={barcode}",
         f"{base_url}/fr/search?q={barcode}",
+        f"{base_url}/fr/recherche?q={barcode}",
     ]
     for url in search_urls:
         html, final_url = fetch_text(url)
         if not html:
             continue
 
-        if barcode in html and looks_like_product_page(final_url):
-            product = parse_generic_pharmacy_product_page(source_name, html, final_url, barcode)
+        if page_mentions_barcode(html, barcode_candidates) and looks_like_product_page(final_url):
+            product = parse_generic_pharmacy_product_page(source_name, html, final_url, barcode, barcode_candidates)
             if product:
                 return product
 
-        product_url = find_generic_product_url(html, base_url, barcode)
+        product_url = find_generic_product_url(html, base_url, barcode_candidates)
         if not product_url:
             continue
 
@@ -369,7 +438,7 @@ def lookup_generic_pharmacy_product(source_name, base_url, barcode):
         if not product_html:
             continue
 
-        product = parse_generic_pharmacy_product_page(source_name, product_html, product_final_url, barcode)
+        product = parse_generic_pharmacy_product_page(source_name, product_html, product_final_url, barcode, barcode_candidates)
         if product:
             return product
 
@@ -381,14 +450,14 @@ def looks_like_product_page(url):
     return any(token in url for token in ["/p/", "/product", "/products/", "/shop/", "/item/"])
 
 
-def find_generic_product_url(html, base_url, barcode):
+def find_generic_product_url(html, base_url, barcode_candidates):
     hrefs = re.findall(r'href="([^"]+)"', html)
     for href in hrefs:
         absolute = normalize_url(base_url, href)
         if not looks_like_product_page(absolute):
             continue
         product_html, product_url = fetch_text(absolute)
-        if product_html and barcode in product_html:
+        if product_html and page_mentions_barcode(product_html, barcode_candidates):
             return product_url or absolute
     return None
 
@@ -401,23 +470,24 @@ def normalize_url(base_url, url):
     return f"{base_url}/{url}"
 
 
-def parse_generic_pharmacy_product_page(source_name, html, url, barcode):
-    if barcode not in html:
+def parse_generic_pharmacy_product_page(source_name, html, url, barcode, barcode_candidates=None):
+    barcode_candidates = barcode_candidates or build_barcode_candidates(barcode)
+    if not page_mentions_barcode(html, barcode_candidates):
         return None
 
-    title = clean_html_text(first_regex(html, [
+    structured = extract_structured_product_data(html, barcode_candidates)
+    title = sanitize_title(structured.get("name") or clean_html_text(first_regex(html, [
         r"<h1[^>]*>(.*?)</h1>",
         r'<meta property="og:title" content="([^"]+)"',
         r"<title>(.*?)</title>",
-    ]))
-    title = sanitize_title(title, source_name)
+    ])), source_name)
 
-    description = clean_html_text(first_regex(html, [
+    description = structured.get("description") or clean_html_text(first_regex(html, [
         r'<meta name="description" content="([^"]+)"',
         r'<meta property="og:description" content="([^"]+)"',
     ]))
-    image_url = first_regex(html, [r'<meta property="og:image" content="([^"]+)"'])
-    brand = infer_brand_from_title(title)
+    image_url = structured.get("image_url") or first_regex(html, [r'<meta property="og:image" content="([^"]+)"'])
+    brand = structured.get("brand") or infer_brand_from_title(title)
 
     if not title:
         return None
@@ -433,24 +503,26 @@ def parse_generic_pharmacy_product_page(source_name, html, url, barcode):
     }
 
 
-def parse_familiprix_product_page(html, url, barcode):
-    if barcode not in html:
+def parse_familiprix_product_page(html, url, barcode, barcode_candidates=None):
+    barcode_candidates = barcode_candidates or build_barcode_candidates(barcode)
+    if not page_mentions_barcode(html, barcode_candidates):
         return None
 
-    title = first_regex(html, [
+    structured = extract_structured_product_data(html, barcode_candidates)
+    title = structured.get("name") or first_regex(html, [
         r"<h1[^>]*>(.*?)</h1>",
         r'<meta property="og:title" content="([^"]+)"',
         r"<title>(.*?)</title>",
     ])
     title = sanitize_title(clean_html_text(title), "Familiprix")
 
-    description = clean_html_text(first_regex(html, [
+    description = structured.get("description") or clean_html_text(first_regex(html, [
         r'<meta name="description" content="([^"]+)"',
         r'<meta property="og:description" content="([^"]+)"',
     ]))
-    image_url = first_regex(html, [r'<meta property="og:image" content="([^"]+)"'])
+    image_url = structured.get("image_url") or first_regex(html, [r'<meta property="og:image" content="([^"]+)"'])
 
-    brand = infer_brand_from_title(title)
+    brand = structured.get("brand") or infer_brand_from_title(title)
 
     if not title:
         return None
@@ -500,6 +572,97 @@ def sanitize_title(title, source_name):
     for suffix in suffixes:
         title = title.replace(suffix, "").strip()
     return title
+
+
+def page_mentions_barcode(html, barcode_candidates):
+    digits_only_html = normalized_digits(html)
+    for candidate in barcode_candidates or []:
+        cleaned = normalized_digits(candidate)
+        if not cleaned:
+            continue
+        if candidate in (html or "") or cleaned in digits_only_html:
+            return True
+    return False
+
+
+def extract_structured_product_data(html, barcode_candidates=None):
+    products = []
+    for block in re.findall(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html or "", flags=re.IGNORECASE | re.DOTALL):
+        try:
+            payload = json.loads(block.strip())
+        except json.JSONDecodeError:
+            continue
+        collect_structured_products(payload, products)
+
+    for product in products:
+        if barcode_candidates and not structured_product_matches_barcode(product, barcode_candidates):
+            continue
+        name = str(product.get("name", "")).strip()
+        brand = extract_structured_brand(product.get("brand"))
+        description = clean_html_text(str(product.get("description", "")).strip())
+        image_url = extract_structured_image(product.get("image"))
+        if name or brand or description or image_url:
+            return {
+                "name": name,
+                "brand": brand,
+                "description": description,
+                "image_url": image_url,
+            }
+    return {}
+
+
+def collect_structured_products(value, bucket):
+    if isinstance(value, dict):
+        product_type = value.get("@type")
+        types = product_type if isinstance(product_type, list) else [product_type]
+        if any(str(item).lower() == "product" for item in types if item):
+            bucket.append(value)
+        for nested in value.values():
+            if isinstance(nested, (dict, list)):
+                collect_structured_products(nested, bucket)
+    elif isinstance(value, list):
+        for item in value:
+            collect_structured_products(item, bucket)
+
+
+def structured_product_matches_barcode(product, barcode_candidates):
+    product_codes = []
+    for key in ["gtin", "gtin8", "gtin12", "gtin13", "gtin14", "upc"]:
+        cleaned = normalized_digits(product.get(key, ""))
+        if cleaned:
+            product_codes.append(cleaned)
+    if not product_codes:
+        return False
+    expanded_codes = set()
+    for code in product_codes:
+        expanded_codes.update(build_barcode_candidates(code))
+    for candidate in barcode_candidates or []:
+        cleaned_candidate = str(candidate).strip()
+        if cleaned_candidate and cleaned_candidate in expanded_codes:
+            return True
+    return False
+
+
+def extract_structured_brand(value):
+    if isinstance(value, dict):
+        return str(value.get("name", "")).strip()
+    if isinstance(value, list):
+        for item in value:
+            result = extract_structured_brand(item)
+            if result:
+                return result
+        return ""
+    return str(value or "").strip()
+
+
+def extract_structured_image(value):
+    if isinstance(value, list):
+        for item in value:
+            result = extract_structured_image(item)
+            if result:
+                return result
+        return ""
+    return str(value or "").strip()
 
 
 def infer_brand_from_title(title):
@@ -553,6 +716,253 @@ def first_present(product, keys):
         value = str(product.get(key, "")).strip()
         if value:
             return value
+    return ""
+
+
+def product_search_text(product):
+    return " ".join([
+        str(product.get("name", "")),
+        str(product.get("brand", "")),
+        str(product.get("description", "")),
+        str(product.get("search_terms", "")),
+        str(product.get("usage_notes", "")),
+        str(product.get("alternative_suggestions", "")),
+    ]).strip().lower()
+
+
+def product_search_score(product, query):
+    lowered_query = str(query or "").strip().lower()
+    if not lowered_query:
+        return 0
+
+    digits_query = normalized_digits(query)
+    barcode = normalized_digits(product.get("barcode", ""))
+    name = str(product.get("name", "")).lower()
+    brand = str(product.get("brand", "")).lower()
+    description = str(product.get("description", "")).lower()
+    search_terms = str(product.get("search_terms", "")).lower()
+    usage_notes = str(product.get("usage_notes", "")).lower()
+    alternatives = str(product.get("alternative_suggestions", "")).lower()
+    haystack = product_search_text(product)
+    score = 0
+
+    if digits_query and barcode:
+        if barcode == digits_query:
+            score += 1200
+        elif len(digits_query) >= 4 and barcode.endswith(digits_query):
+            score += 900
+        elif digits_query in barcode:
+            score += 500
+
+    if lowered_query == name:
+        score += 800
+    elif name.startswith(lowered_query):
+        score += 650
+    elif lowered_query in name:
+        score += 450
+
+    if brand.startswith(lowered_query):
+        score += 280
+    elif lowered_query in brand:
+        score += 180
+
+    if lowered_query in description:
+        score += 150
+    if lowered_query in search_terms:
+        score += 240
+    if lowered_query in usage_notes:
+        score += 170
+    if lowered_query in alternatives:
+        score += 120
+
+    tokens = [token for token in re.split(r"\s+", lowered_query) if len(token) >= 2]
+    if tokens and all(token in haystack for token in tokens):
+        score += 100 + (10 * len(tokens))
+
+    return score
+
+
+def configured_ai_provider():
+    if GEMINI_API_KEY:
+        return {"name": "gemini", "label": "Gemini", "model": GEMINI_MODEL}
+    if OPENAI_API_KEY:
+        return {"name": "openai", "label": "OpenAI", "model": OPENAI_MODEL}
+    return {"name": "", "label": "", "model": ""}
+
+
+def generate_product_assist_payload(name, brand, description, barcode):
+    provider = configured_ai_provider()
+    if provider["name"] == "gemini":
+        return generate_product_assist_payload_gemini(name, brand, description, barcode)
+    if provider["name"] == "openai":
+        return generate_product_assist_payload_openai(name, brand, description, barcode)
+    return None
+
+
+def generate_product_assist_payload_gemini(name, brand, description, barcode):
+    prompt = {
+        "name": name,
+        "brand": brand,
+        "description": description,
+        "barcode": barcode,
+    }
+    payload = {
+        "contents": [{
+            "parts": [{
+                "text": (
+                    "Tu aides les employes d une pharmacie Familiprix au Quebec. "
+                    "Retourne uniquement un JSON en francais avec des mots cles que les clients utilisent, "
+                    "une courte explication utile pour guider un client, et quelques alternatives possibles. "
+                    "Sois concis, concret, prudent sur le plan medical et ne donne pas de diagnostic.\n\n"
+                    f"Produit:\n{json.dumps(prompt, ensure_ascii=False)}"
+                )
+            }]
+        }],
+        "generationConfig": {
+            "temperature": 0.2,
+            "responseMimeType": "application/json",
+            "responseJsonSchema": {
+                "type": "OBJECT",
+                "properties": {
+                    "search_terms": {
+                        "type": "ARRAY",
+                        "items": {"type": "STRING"},
+                        "maxItems": 12,
+                    },
+                    "usage_notes": {"type": "STRING"},
+                    "alternative_suggestions": {
+                        "type": "ARRAY",
+                        "items": {"type": "STRING"},
+                        "maxItems": 6,
+                    },
+                },
+                "required": ["search_terms", "usage_notes", "alternative_suggestions"],
+                "propertyOrdering": ["search_terms", "usage_notes", "alternative_suggestions"],
+            },
+        },
+    }
+    request_obj = Request(
+        f"{GEMINI_BASE_URL}/models/{GEMINI_MODEL}:generateContent?{urlencode({'key': GEMINI_API_KEY})}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request_obj, timeout=12) as response:
+            raw_response = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+        return None
+
+    raw_text = extract_gemini_output_text(raw_response)
+    if not raw_text:
+        return None
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return None
+    return normalize_assist_payload(parsed)
+
+
+def generate_product_assist_payload_openai(name, brand, description, barcode):
+    prompt = {
+        "name": name,
+        "brand": brand,
+        "description": description,
+        "barcode": barcode,
+    }
+    payload = {
+        "model": OPENAI_MODEL,
+        "reasoning": {"effort": "low"},
+        "instructions": (
+            "Tu aides les employes d une pharmacie Familiprix au Quebec. "
+            "Retourne un JSON en francais avec des mots cles que les clients utilisent, "
+            "une courte explication utile pour guider un client, et quelques alternatives possibles. "
+            "Sois concis, concret, prudent sur le plan medical et ne donne pas de diagnostic."
+        ),
+        "input": json.dumps(prompt, ensure_ascii=False),
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "product_assist",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "search_terms": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 12,
+                        },
+                        "usage_notes": {"type": "string"},
+                        "alternative_suggestions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 6,
+                        },
+                    },
+                    "required": ["search_terms", "usage_notes", "alternative_suggestions"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+    }
+    request_obj = Request(
+        f"{OPENAI_BASE_URL}/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request_obj, timeout=12) as response:
+            raw_response = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+        return None
+
+    raw_text = extract_openai_output_text(raw_response)
+    if not raw_text:
+        return None
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return None
+
+    return normalize_assist_payload(parsed)
+
+
+def normalize_assist_payload(parsed):
+    search_terms = [str(item).strip() for item in parsed.get("search_terms", []) if str(item).strip()]
+    alternative_suggestions = [str(item).strip() for item in parsed.get("alternative_suggestions", []) if str(item).strip()]
+    usage_notes = str(parsed.get("usage_notes", "")).strip()
+    return {
+        "search_terms": ", ".join(dict.fromkeys(search_terms)),
+        "usage_notes": usage_notes,
+        "alternative_suggestions": ", ".join(dict.fromkeys(alternative_suggestions)),
+    }
+
+
+def extract_gemini_output_text(payload):
+    for candidate in payload.get("candidates", []):
+        content = candidate.get("content", {})
+        for part in content.get("parts", []):
+            text = str(part.get("text", "")).strip()
+            if text:
+                return text
+    return ""
+
+
+def extract_openai_output_text(payload):
+    output_text = str(payload.get("output_text", "")).strip()
+    if output_text:
+        return output_text
+    for item in payload.get("output", []):
+        for content in item.get("content", []):
+            if content.get("type") in {"output_text", "text"}:
+                text = str(content.get("text", "")).strip()
+                if text:
+                    return text
     return ""
 
 
@@ -765,13 +1175,17 @@ def validate_layout_slot(db, aisle, side, section, shelf, position):
 def find_product_by_barcode(db, barcode, exclude_id=None):
     if not str(barcode or "").strip():
         return None
-    query = "SELECT id, name, aisle, side, section, shelf, position FROM products WHERE barcode=?"
-    params = [str(barcode).strip()]
-    if exclude_id is not None:
-        query += " AND id<>?"
-        params.append(int(exclude_id))
-    query += " ORDER BY id LIMIT 1"
-    return db.execute(query, tuple(params)).fetchone()
+    for candidate in build_barcode_candidates(barcode):
+        query = "SELECT id, name, aisle, side, section, shelf, position FROM products WHERE barcode=?"
+        params = [candidate]
+        if exclude_id is not None:
+            query += " AND id<>?"
+            params.append(int(exclude_id))
+        query += " ORDER BY id LIMIT 1"
+        row = db.execute(query, tuple(params)).fetchone()
+        if row:
+            return row
+    return None
 
 
 def integrity_conflict_message(exc):
@@ -790,6 +1204,11 @@ def add_product():
     name     = data.get("name", "").strip()
     brand    = data.get("brand", "").strip()
     description = data.get("description", "").strip()
+    image_url = data.get("image_url", "").strip()
+    source_url = data.get("source_url", "").strip()
+    search_terms = data.get("search_terms", "").strip()
+    usage_notes = data.get("usage_notes", "").strip()
+    alternative_suggestions = data.get("alternative_suggestions", "").strip()
     barcode  = data.get("barcode", "").strip()
     aisle    = data.get("aisle", "").strip()
     side     = data.get("side", "").strip()
@@ -818,10 +1237,29 @@ def add_product():
     try:
         cursor = db.execute(
             """
-            INSERT INTO products (name, brand, description, barcode, aisle, side, section, shelf, position, created_by, created_at, modified_by, modified_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO products (name, brand, description, image_url, source_url, search_terms, usage_notes, alternative_suggestions, barcode, aisle, side, section, shelf, position, created_by, created_at, modified_by, modified_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (name, brand, description, barcode, aisle, side, section, shelf, position, username, utc_now_iso(), username, utc_now_iso())
+            (
+                name,
+                brand,
+                description,
+                image_url,
+                source_url,
+                search_terms,
+                usage_notes,
+                alternative_suggestions,
+                barcode,
+                aisle,
+                side,
+                section,
+                shelf,
+                position,
+                username,
+                utc_now_iso(),
+                username,
+                utc_now_iso(),
+            )
         )
     except DatabaseIntegrityError as exc:
         return jsonify({"error": integrity_conflict_message(exc)}), 409
@@ -842,6 +1280,9 @@ def update_product(product_id):
         return error
     data = request.get_json()
     db = get_db()
+    existing = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
+    if not existing:
+        return jsonify({"error": "Produit non trouve"}), 404
     is_valid_slot, slot_error = validate_layout_slot(
         db,
         str(data["aisle"]).strip(),
@@ -873,12 +1314,17 @@ def update_product(product_id):
 
     try:
         result = db.execute(
-            "UPDATE products SET name=?, brand=?, description=?, barcode=?, aisle=?, side=?, section=?, shelf=?, position=?, modified_by=?, modified_at=? WHERE id=?",
+            "UPDATE products SET name=?, brand=?, description=?, image_url=?, source_url=?, search_terms=?, usage_notes=?, alternative_suggestions=?, barcode=?, aisle=?, side=?, section=?, shelf=?, position=?, modified_by=?, modified_at=? WHERE id=?",
             (
                 data["name"],
-                data.get("brand", ""),
-                data.get("description", ""),
-                data.get("barcode", ""),
+                data.get("brand", existing["brand"]),
+                data.get("description", existing["description"]),
+                data.get("image_url", existing["image_url"]),
+                data.get("source_url", existing["source_url"]),
+                data.get("search_terms", existing["search_terms"]),
+                data.get("usage_notes", existing["usage_notes"]),
+                data.get("alternative_suggestions", existing["alternative_suggestions"]),
+                data.get("barcode", existing["barcode"]),
                 data["aisle"],
                 data["side"],
                 data.get("section", "1"),
@@ -892,9 +1338,8 @@ def update_product(product_id):
     except DatabaseIntegrityError as exc:
         return jsonify({"error": integrity_conflict_message(exc)}), 409
     db.commit()
-    if result.rowcount == 0:
-        return jsonify({"error": "Produit non trouve"}), 404
-    return jsonify({"success": True})
+    product = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
+    return jsonify({"success": True, "product": row_to_product(product)})
 
 
 @app.route("/api/products/<int:product_id>", methods=["DELETE"])
