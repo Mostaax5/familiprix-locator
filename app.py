@@ -321,9 +321,6 @@ def client_help():
         products = [row_to_product(p) for p in db.execute("SELECT * FROM products").fetchall()]
         matched_products = [product_context_for_client_help(item) for item in rank_products_for_query(products, question, limit=6)]
 
-    if not matched_products:
-        return jsonify({"success": False, "error": "Aucun produit correspondant a expliquer pour le moment."}), 404
-
     advice = generate_client_help_payload(question, matched_products)
     if not advice:
         return jsonify({"success": False, "error": "Impossible de generer la reponse client pour le moment."}), 502
@@ -964,16 +961,20 @@ def generate_client_help_payload_gemini(question, products):
             "parts": [{
                 "text": (
                     "Tu aides un employe de pharmacie Familiprix au Quebec a repondre a un client. "
-                    "Base-toi uniquement sur les produits fournis. "
+                    "Si des produits sont disponibles dans le contexte, base-toi sur eux pour orienter le client. "
+                    "Si aucun produit n est fourni ou que la liste est vide, donne un conseil general utile "
+                    "en pharmacie (categories de produits a suggerer, questions a poser au client, signes d alerte). "
                     "Ne pose pas de diagnostic. "
                     "Dis clairement quand il faut orienter le client vers le pharmacien: "
                     "grossesse, bebe ou jeune enfant, interaction medicamenteuse possible, symptomes graves, "
                     "douleur importante, difficulte respiratoire, fievre elevee, duree inhabituelle ou doute. "
+                    "Dans recommended_product_names, mets les noms de produits specifiques si disponibles, "
+                    "sinon des categories ou types de produits a chercher en magasin. "
                     "Retourne uniquement un JSON en francais avec exactement les cles "
                     "summary (texte), recommended_product_names (tableau), follow_up_questions (tableau), "
                     "safety_flags (tableau), pharmacist_referral (booleen) et pharmacist_reason (texte).\n\n"
                     f"Question client:\n{question}\n\n"
-                    f"Produits disponibles:\n{json.dumps(products, ensure_ascii=False)}"
+                    f"Produits disponibles en magasin:\n{json.dumps(products, ensure_ascii=False) if products else '[]'}"
                 )
             }]
         }],
@@ -1009,11 +1010,15 @@ def generate_client_help_payload_openai(question, products):
         "reasoning": {"effort": "low"},
         "instructions": (
             "Tu aides un employe de pharmacie Familiprix au Quebec a repondre a un client. "
-            "Base-toi uniquement sur les produits fournis. "
+            "Si des produits sont disponibles dans le contexte, base-toi sur eux pour orienter le client. "
+            "Si aucun produit n est fourni ou que la liste est vide, donne un conseil general utile "
+            "en pharmacie (categories de produits a suggerer, questions a poser au client, signes d alerte). "
             "Ne pose pas de diagnostic. "
             "Dis clairement quand il faut orienter le client vers le pharmacien: "
             "grossesse, bebe ou jeune enfant, interaction medicamenteuse possible, symptomes graves, "
             "douleur importante, difficulte respiratoire, fievre elevee, duree inhabituelle ou doute. "
+            "Dans recommended_product_names, mets les noms de produits specifiques si disponibles, "
+            "sinon des categories ou types de produits a chercher en magasin. "
             "Retourne uniquement un JSON en francais."
         ),
         "input": json.dumps({"question": question, "products": products}, ensure_ascii=False),

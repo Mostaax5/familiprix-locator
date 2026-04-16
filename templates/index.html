@@ -1662,8 +1662,8 @@ function runClientSearch(showEmptyMessage=true) {
   renderClientMatches(currentClientMatches, question);
   if (status) {
     status.textContent = currentClientMatches.length
-      ? `${currentClientMatches.length} produit(s) proposes a partir de la base du magasin.`
-      : 'Aucun produit correspondant. Essayez un autre mot-clé ou utilisez un code-barres.';
+      ? `${currentClientMatches.length} produit(s) en stock. Cliquez "Reponse client (IA)" pour obtenir des conseils.`
+      : 'Aucun produit en stock pour cette demande. L IA peut quand meme repondre avec des conseils generaux.';
   }
   return currentClientMatches;
 }
@@ -1676,17 +1676,16 @@ async function generateClientHelp() {
     if (status) status.textContent = 'Ecrivez d abord la question du client.';
     return;
   }
-  if (!matches.length) {
-    if (status) status.textContent = 'Aucun produit correspondant a envoyer a l IA pour le moment.';
-    renderClientAdvice(null);
-    return;
-  }
   if (!backendInfo.ai_enabled) {
     if (status) status.textContent = 'IA inactive. Ajoutez GEMINI_API_KEY sur Render pour la reponse client guidee.';
     renderClientAdvice(null);
     return;
   }
-  if (status) status.textContent = `Generation de la reponse via ${aiProviderLabel()}...`;
+  if (status) {
+    status.textContent = matches.length
+      ? `Generation de la reponse via ${aiProviderLabel()} (${matches.length} produit(s) en stock)...`
+      : `Aucun produit en stock pour cette demande. L IA va repondre avec des conseils generaux...`;
+  }
   const result = await apiGenerateClientHelp({
     question,
     products: matches.slice(0, 6).map(sanitizeProductForClientAi)
@@ -1697,7 +1696,7 @@ async function generateClientHelp() {
     return;
   }
   renderClientAdvice(result.advice);
-  if (status) status.textContent = `Reponse client generee via ${aiProviderLabel()}. Verifiez avant de conseiller.`;
+  if (status) status.textContent = `Reponse generee via ${aiProviderLabel()}. Verifiez avant de conseiller.`;
 }
 
 function toggleScanPause() {
