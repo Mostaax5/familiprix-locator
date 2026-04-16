@@ -58,7 +58,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
 GEMINI_BASE_URL = os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini").strip() or "gpt-5.4-mini"
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 
 # ── Pages ──────────────────────────────────────────────────────────────────
@@ -1599,4 +1599,5 @@ if __name__ == "__main__":
     init_db()
     ssl_context = resolve_ssl_context()
     # host="0.0.0.0" lets phones and Zebra devices on the same network connect to this server
-    app.run(debug=True, host="0.0.0.0", port=5000, ssl_context=ssl_context)
+    debug_mode = os.environ.get("FLASK_DEBUG", "").strip().lower() in {"1", "true", "yes"}
+    app.run(debug=debug_mode, host="0.0.0.0", port=5000, ssl_context=ssl_context)

@@ -99,6 +99,8 @@
   .slot-preview{display:grid;gap:6px;margin-top:10px}
   .slot-chip{display:inline-flex;align-items:center;gap:6px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:999px;padding:6px 10px;font-size:12px;color:#334155;font-weight:700}
   .slot-chip.active{background:#ecfdf5;border-color:#86efac;color:#166534}
+  .pill.warning{background:#fff7ed;color:#9a3412}
+  .plan-shelf-card{border:1px solid #e6e8ec;border-radius:8px;background:#fff;padding:10px}
   .advice-card{background:#f8fafc;border:1px solid #dbe4ee;border-radius:8px;padding:12px;margin-top:10px}
   .advice-list{display:grid;gap:6px;margin-top:10px}
   .advice-item{font-size:12px;color:#334155;line-height:1.45;padding:8px 10px;border-radius:8px;background:white;border:1px solid #e2e8f0}
@@ -235,7 +237,7 @@
 <div id="add" class="section content">
   <div class="card">
     <div class="section-title">Point de depart du scan</div>
-    <div class="section-note">Choisissez ici le vrai point de depart du scan. La vue sert seulement a savoir de quel bout de l allee vous la regardez, pour inverser gauche et droite correctement.</div>
+    <div class="section-note">Choisissez ici le vrai point de depart du scan. La vue sert seulement a savoir de quel bout de l allee vous la regardez, pour inverser gauche et droite correctement. Le menu "Slot exact" permet de choisir directement n importe quelle position valide.</div>
     <div class="row2">
       <div class="field">
         <label class="label" for="planScanAisle">Allee</label>
@@ -243,7 +245,7 @@
       </div>
       <div class="field">
         <label class="label" for="planScanFacing">Vue</label>
-        <select id="planScanFacing">
+        <select id="planScanFacing" onchange="updatePlanStartSelectors('facing')">
           <option value="Avant">Depuis le debut de l allee</option>
           <option value="Arriere">Depuis l autre bout de l allee</option>
         </select>
@@ -272,6 +274,10 @@
         <label class="label">&nbsp;</label>
         <button class="btn" onclick="savePlanScanStart()">Utiliser ce point de depart</button>
       </div>
+    </div>
+    <div class="field">
+      <label class="label" for="planScanSlot">Slot exact</label>
+      <select id="planScanSlot" onchange="applySelectedPlanSlot()"></select>
     </div>
     <div id="planScanStartMsg"></div>
   </div>
@@ -349,6 +355,9 @@ let clientSearchTimer = null;
 let currentClientMatches = [];
 let lastProductsRefreshAt = 0;
 let lastLayoutsRefreshAt = 0;
+let dirtyLayoutAisles = new Set();
+let openPlanNodes = new Set();
+let planStartDraft = null;
 const STORAGE_KEYS = {
   cursor: 'familiprixCursor',
   activeTab: 'familiprixActiveTab',
@@ -617,6 +626,21 @@ function buildLayoutWithSideCounts(leftSections = 0, rightSections = 0, shelfCou
   };
 }
 
+function getLayoutMetrics(config) {
+  const sides = config?.sides || {};
+  const leftSections = Array.isArray(sides.Gauche?.sections) ? sides.Gauche.sections : [];
+  const rightSections = Array.isArray(sides.Droite?.sections) ? sides.Droite.sections : [];
+  const allSections = [...leftSections, ...rightSections];
+  const maxSection = Math.max(leftSections.length, rightSections.length, 0);
+  const maxShelf = Math.max(0, ...allSections.map(section => Array.isArray(section?.shelves) ? section.shelves.length : 0));
+  const maxPosition = Math.max(0, ...allSections.flatMap(section => Array.isArray(section?.shelves) ? section.shelves : [0]));
+  return {
+    max_section: String(maxSection),
+    max_shelf: String(maxShelf),
+    max_position: String(maxPosition)
+  };
+}
+
 function normalizeLayoutConfig(config, maxSection = 0, maxShelf = 0, maxPosition = 0) {
   const base = defaultLayoutConfig(maxSection, maxShelf, maxPosition);
   const source = (config && typeof config === 'object') ? config : {};
@@ -630,6 +654,41 @@ function normalizeLayoutConfig(config, maxSection = 0, maxShelf = 0, maxPosition
     base.sides[side].sections = normalizedSections;
   });
   return base;
+}
+
+function countProductsInAisle(aisle) {
+  return allProductsCache.filter(product => String(product.aisle) === String(aisle)).length;
+}
+
+function sortMapLayouts() {
+  mapLayouts.sort((a, b) => (Number(a.aisle) || 0) - (Number(b.aisle) || 0) || String(a.aisle).localeCompare(String(b.aisle)));
+}
+
+function syncLayoutRecord(layout) {
+  if (!layout) return null;
+  layout.config = normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position);
+  const metrics = getLayoutMetrics(layout.config);
+  layout.max_section = metrics.max_section;
+  layout.max_shelf = metrics.max_shelf;
+  layout.max_position = metrics.max_position;
+  layout.product_count = countProductsInAisle(layout.aisle);
+  return layout;
+}
+
+function nowIsoWithoutMs() {
+  return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+function markLayoutDirty(aisle) {
+  dirtyLayoutAisles.add(String(aisle));
+}
+
+function clearLayoutDirty(aisle) {
+  dirtyLayoutAisles.delete(String(aisle));
+}
+
+function hasDirtyLayouts() {
+  return dirtyLayoutAisles.size > 0;
 }
 
 function getAisleLayoutConfig(aisle) {
@@ -902,17 +961,26 @@ async function refreshProductsCache(force=false) {
   }
   try {
     allProductsCache = await apiGetProducts();
+    mapLayouts.forEach(layout => syncLayoutRecord(layout));
     lastProductsRefreshAt = Date.now();
   } catch (error) {}
   return allProductsCache;
 }
 
 async function refreshLayoutsCache(force=false) {
+  if (!force && hasDirtyLayouts()) {
+    return mapLayouts;
+  }
   if (!force && mapLayouts.length && (Date.now() - lastLayoutsRefreshAt) < 30000) {
     return mapLayouts;
   }
   try {
     mapLayouts = await apiGetLayoutAisles();
+    mapLayouts = mapLayouts.map(layout => syncLayoutRecord({
+      ...layout,
+      config: normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position)
+    }));
+    sortMapLayouts();
     lastLayoutsRefreshAt = Date.now();
   } catch (error) {}
   return mapLayouts;
@@ -966,7 +1034,11 @@ function updateCursorUi() {
 function loadCursor() {
   const saved = localStorage.getItem(STORAGE_KEYS.cursor);
   if (saved) {
-    Object.assign(cursor, JSON.parse(saved));
+    try {
+      Object.assign(cursor, JSON.parse(saved));
+    } catch (error) {
+      localStorage.removeItem(STORAGE_KEYS.cursor);
+    }
   }
   updateCursorUi();
 }
@@ -1083,8 +1155,97 @@ function setSelectOptions(elementId, values, selectedValue) {
   select.value = nextValue;
 }
 
-function slotLabel(slot) {
-  return `A${slot.aisle} ${slot.side} S${slot.section} T${slot.shelf} P${slot.position}`;
+function getCursorSelection() {
+  return {
+    aisle: String(cursor.aisle),
+    facing: String(cursor.facing || 'Avant'),
+    side: String(cursor.side || 'Gauche'),
+    section: String(cursor.section || 1),
+    shelf: String(cursor.shelf || 1),
+    position: String(cursor.position || 1)
+  };
+}
+
+function getPlanStartDraft() {
+  return planStartDraft ? {...planStartDraft} : getCursorSelection();
+}
+
+function readPlanStartSelectionFromDom() {
+  const aisleEl = document.getElementById('planScanAisle');
+  const sideEl = document.getElementById('planScanSide');
+  const sectionEl = document.getElementById('planScanSection');
+  const shelfEl = document.getElementById('planScanShelf');
+  const positionEl = document.getElementById('planScanPosition');
+  const facingEl = document.getElementById('planScanFacing');
+  if (!aisleEl || !sideEl || !sectionEl || !shelfEl || !positionEl || !facingEl) {
+    return getPlanStartDraft();
+  }
+  return {
+    aisle: String(aisleEl.value || ''),
+    facing: String(facingEl.value || 'Avant'),
+    side: String(sideEl.value || ''),
+    section: String(sectionEl.value || ''),
+    shelf: String(shelfEl.value || ''),
+    position: String(positionEl.value || '')
+  };
+}
+
+function getPlanPreviewSelection() {
+  if (document.getElementById('add')?.classList.contains('active')) {
+    const draft = readPlanStartSelectionFromDom();
+    if (draft.aisle && draft.side && draft.section && draft.shelf && draft.position) {
+      return draft;
+    }
+  }
+  return getCursorSelection();
+}
+
+function slotValueKey(slot) {
+  return [slot.side, slot.section, slot.shelf, slot.position].join('|');
+}
+
+function setPlanSlotOptions(aisle, facing, selectedSlot) {
+  const select = document.getElementById('planScanSlot');
+  if (!select) return;
+  const config = getConfiguredLayoutForAisle(aisle);
+  const slots = buildSlotsFromConfig(aisle, config);
+  if (!slots.length) {
+    select.innerHTML = '<option value="">Aucun slot</option>';
+    select.value = '';
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  select.innerHTML = slots.map(slot => {
+    const value = slotValueKey(slot);
+    const label = `${viewedSideFromCanonical(facing, slot.side)} - Section ${slot.section} - Tablette ${slot.shelf} - Position ${slot.position}`;
+    return `<option value="${esc(value)}">${esc(label)}</option>`;
+  }).join('');
+  const currentValue = slotValueKey(selectedSlot);
+  const availableValues = slots.map(slotValueKey);
+  select.value = availableValues.includes(currentValue) ? currentValue : availableValues[0];
+}
+
+function applySelectedPlanSlot() {
+  const rawValue = document.getElementById('planScanSlot')?.value || '';
+  const [side, section, shelf, position] = rawValue.split('|');
+  if (!side || !section || !shelf || !position) return;
+  document.getElementById('planScanSide').value = side;
+  document.getElementById('planScanSection').value = section;
+  document.getElementById('planScanShelf').value = shelf;
+  document.getElementById('planScanPosition').value = position;
+  planStartDraft = {
+    ...readPlanStartSelectionFromDom(),
+    side,
+    section,
+    shelf,
+    position
+  };
+  renderScanPathPreview();
+}
+
+function slotLabel(slot, facing='Avant') {
+  return `A${slot.aisle} ${viewedSideFromCanonical(facing, slot.side)} S${slot.section} T${slot.shelf} P${slot.position}`;
 }
 
 function renderScanPathPreview() {
@@ -1095,19 +1256,20 @@ function renderScanPathPreview() {
     div.innerHTML = '<div class="empty" style="padding:1rem 0">Aucun slot de scan pour le moment. Commencez par creer une allee dans le plan.</div>';
     return;
   }
+  const previewSelection = getPlanPreviewSelection();
   const currentIndex = slots.findIndex(slot => (
-    Number(slot.aisle) === Number(cursor.aisle) &&
-    slot.side === cursor.side &&
-    Number(slot.section) === Number(cursor.section) &&
-    Number(slot.shelf) === Number(cursor.shelf) &&
-    Number(slot.position) === Number(cursor.position)
+    Number(slot.aisle) === Number(previewSelection.aisle) &&
+    slot.side === previewSelection.side &&
+    Number(slot.section) === Number(previewSelection.section) &&
+    Number(slot.shelf) === Number(previewSelection.shelf) &&
+    Number(slot.position) === Number(previewSelection.position)
   ));
   const startIndex = currentIndex >= 0 ? currentIndex : 0;
   const preview = Array.from({length: Math.min(12, slots.length)}, (_, offset) => slots[(startIndex + offset) % slots.length]);
   div.innerHTML = `
-    <div class="small">Position actuelle: <strong>${esc(cursorLabel())}</strong></div>
+    <div class="small">${document.getElementById('add')?.classList.contains('active') ? 'Depart selectionne' : 'Position actuelle'}: <strong>${esc(`Allee ${previewSelection.aisle} - ${facingLabel(previewSelection.facing || 'Avant')} - ${viewedSideFromCanonical(previewSelection.facing || 'Avant', previewSelection.side)} - Section ${previewSelection.section} - Tablette ${previewSelection.shelf} - Pos. ${previewSelection.position}`)}</strong></div>
     <div class="small">Total de slots dans le plan: <strong>${slots.length}</strong></div>
-    <div class="slot-preview">${preview.map((slot, index) => `<span class="slot-chip ${index === 0 ? 'active' : ''}">${index === 0 ? 'Maintenant' : `Puis ${index}`} ${esc(slotLabel(slot))}</span>`).join('')}</div>
+    <div class="slot-preview">${preview.map((slot, index) => `<span class="slot-chip ${index === 0 ? 'active' : ''}">${index === 0 ? 'Maintenant' : `Puis ${index}`} ${esc(slotLabel(slot, previewSelection.facing || 'Avant'))}</span>`).join('')}</div>
   `;
 }
 
@@ -1133,48 +1295,57 @@ function applySideTemplate(aisle, side) {
     return;
   }
   layout.config = nextConfig;
-  renderMapEditor();
-  renderPlanStartEditor();
-  renderScanPathPreview();
+  syncLayoutRecord(layout);
+  markLayoutDirty(aisle);
+  refreshPlanUi();
 }
 
 function renderPlanStartEditor() {
+  const draft = getPlanStartDraft();
   const aisleOptions = mapLayouts
     .map(layout => String(layout.aisle))
     .sort((a, b) => Number(a) - Number(b) || a.localeCompare(b));
-  setSelectOptions('planScanAisle', aisleOptions, String(cursor.aisle));
-  document.getElementById('planScanFacing').value = cursor.facing || 'Avant';
+  setSelectOptions('planScanAisle', aisleOptions, draft.aisle);
+  document.getElementById('planScanFacing').value = draft.facing || 'Avant';
   updatePlanStartSelectors();
   renderScanPathPreview();
 }
 
 function updatePlanStartSelectors(changedLevel = '') {
+  const currentDraft = readPlanStartSelectionFromDom();
+  const draft = {...getPlanStartDraft(), ...currentDraft};
   const aisle = document.getElementById('planScanAisle').value;
   const config = getConfiguredLayoutForAisle(aisle);
   const sides = ['Gauche', 'Droite'].filter(side => (config.sides[side]?.sections || []).length > 0);
-  setSelectOptions('planScanSide', sides, cursor.side);
+  const sideSelected = changedLevel === 'aisle' ? sides[0] : draft.side;
+  setSelectOptions('planScanSide', sides, sideSelected);
   const side = document.getElementById('planScanSide').value;
   const sections = ((config.sides[side]?.sections) || []).map((_, index) => String(index + 1));
-  const sectionSelected = changedLevel === 'side' ? sections[0] : String(cursor.section);
+  const sectionSelected = ['aisle', 'side'].includes(changedLevel) ? sections[0] : draft.section;
   setSelectOptions('planScanSection', sections, sectionSelected);
   const sectionIndex = Math.max(0, Number(document.getElementById('planScanSection').value || '1') - 1);
   const shelves = Array.from({length: config.sides[side]?.sections?.[sectionIndex]?.shelves?.length || 0}, (_, index) => String(index + 1));
-  const shelfSelected = changedLevel === 'side' || changedLevel === 'section' ? shelves[0] : String(cursor.shelf);
+  const shelfSelected = ['aisle', 'side', 'section'].includes(changedLevel) ? shelves[0] : draft.shelf;
   setSelectOptions('planScanShelf', shelves, shelfSelected);
   const shelfIndex = Math.max(0, Number(document.getElementById('planScanShelf').value || '1') - 1);
   const positionCount = Number(config.sides[side]?.sections?.[sectionIndex]?.shelves?.[shelfIndex] || 0);
   const positions = Array.from({length: positionCount}, (_, index) => String(index + 1));
-  const positionSelected = changedLevel ? positions[0] : String(cursor.position);
+  const positionSelected = ['aisle', 'side', 'section', 'shelf'].includes(changedLevel) ? positions[0] : draft.position;
   setSelectOptions('planScanPosition', positions, positionSelected);
+  planStartDraft = {
+    aisle: document.getElementById('planScanAisle').value,
+    facing: document.getElementById('planScanFacing').value || 'Avant',
+    side: document.getElementById('planScanSide').value,
+    section: document.getElementById('planScanSection').value,
+    shelf: document.getElementById('planScanShelf').value,
+    position: document.getElementById('planScanPosition').value
+  };
+  setPlanSlotOptions(planStartDraft.aisle, planStartDraft.facing, planStartDraft);
+  renderScanPathPreview();
 }
 
 function savePlanScanStart() {
-  const aisle = document.getElementById('planScanAisle').value;
-  const side = document.getElementById('planScanSide').value;
-  const section = document.getElementById('planScanSection').value;
-  const shelf = document.getElementById('planScanShelf').value;
-  const position = document.getElementById('planScanPosition').value;
-  const facing = document.getElementById('planScanFacing').value;
+  const {aisle, side, section, shelf, position, facing} = readPlanStartSelectionFromDom();
   const msg = document.getElementById('planScanStartMsg');
   if (!aisle || !side || !section || !shelf || !position) {
     msg.className = 'msg error';
@@ -1183,10 +1354,35 @@ function savePlanScanStart() {
   }
   cursor.facing = facing;
   setCursorFromSlot({aisle, side, section, shelf, position});
+  planStartDraft = getCursorSelection();
   updateCursorUi();
   msg.className = 'msg success';
   msg.textContent = `Le scan commencera maintenant a ${cursorLabel()}.`;
   renderScanPathPreview();
+}
+
+function slotExistsInCurrentPlan(selection) {
+  return getAllScanSlots().some(slot => (
+    String(slot.aisle) === String(selection.aisle) &&
+    String(slot.side) === String(selection.side) &&
+    String(slot.section) === String(selection.section) &&
+    String(slot.shelf) === String(selection.shelf) &&
+    String(slot.position) === String(selection.position)
+  ));
+}
+
+function ensureCursorStillValid() {
+  if (hasDirtyLayouts()) return;
+  if (!slotExistsInCurrentPlan(getCursorSelection())) {
+    normalizeCursorToLayout();
+    updateCursorUi();
+  }
+}
+
+function refreshPlanUi() {
+  ensureCursorStillValid();
+  renderMapEditor();
+  renderPlanStartEditor();
 }
 
 function advanceCursor() {
@@ -1215,6 +1411,18 @@ function advanceCursor() {
   }
   updateCursorUi();
   renderScanPathPreview();
+}
+
+function captureOpenPlanNodesFromDom() {
+  openPlanNodes = new Set(
+    Array.from(document.querySelectorAll('#mapContent details[data-node-id][open]'))
+      .map(node => node.dataset.nodeId)
+      .filter(Boolean)
+  );
+}
+
+function detailsOpenAttr(nodeId) {
+  return openPlanNodes.has(nodeId) ? ' open' : '';
 }
 
 function selectNumericField(input) {
@@ -1461,7 +1669,7 @@ async function generateClientHelp() {
 }
 
 async function startSearchScan() {
-  if (scannerStream || html5Scanner) {
+  if (scannerStream || html5Scanner || quaggaActive) {
     await stopCamera();
   }
   cameraUsageMode = 'search';
@@ -1470,7 +1678,7 @@ async function startSearchScan() {
 }
 
 async function toggleCamera() {
-  if (scannerStream || html5Scanner) {
+  if (scannerStream || html5Scanner || quaggaActive) {
     await stopCamera();
     return;
   }
@@ -1637,8 +1845,7 @@ async function recognizeBarcodeDigitsFromVideo(reader) {
   if (!(await ensureOcrLoaded()) || !window.Tesseract) return null;
 
   const crops = [
-    {x: 0.08, y: 0.58, w: 0.84, h: 0.18, scale: 2.6},
-    {x: 0.12, y: 0.52, w: 0.76, h: 0.24, scale: 2.2}
+    {x: 0.08, y: 0.55, w: 0.84, h: 0.22, scale: 2.2}
   ];
 
   for (const crop of crops) {
@@ -1656,7 +1863,7 @@ async function recognizeBarcodeDigitsFromVideo(reader) {
 
 async function maybeRunOcrFallback(reader, status) {
   if (ocrBusy || scanPaused || !quaggaActive) return;
-  if (Date.now() - quaggaStartedAt < 2400) return;
+  if (Date.now() - quaggaStartedAt < 6000) return;
   if (cameraUsageMode === 'search') return;
   ocrBusy = true;
   try {
@@ -1697,10 +1904,10 @@ async function startQuaggaScanner(reader, status, button) {
     },
     locator: {
       patchSize: 'small',
-      halfSample: false
+      halfSample: true
     },
-    numOfWorkers: navigator.hardwareConcurrency ? Math.max(1, Math.min(2, navigator.hardwareConcurrency - 1)) : 1,
-    frequency: 12,
+    numOfWorkers: 1,
+    frequency: 8,
     locate: true,
     decoder: {
       readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader', 'code_128_reader', 'code_39_reader', 'i2of5_reader'],
@@ -1732,7 +1939,7 @@ async function startQuaggaScanner(reader, status, button) {
   status.textContent = 'Cadrez les barres et les chiffres';
   quaggaOcrTimer = window.setInterval(() => {
     maybeRunOcrFallback(reader, status);
-  }, 2400);
+  }, 6000);
 }
 
 async function stopCamera() {
@@ -2246,6 +2453,7 @@ function finishConfirmed(message) {
 }
 
 function renderMapEditor() {
+  captureOpenPlanNodesFromDom();
   const msgDiv = document.getElementById('addMsg');
   const div = document.getElementById('mapContent');
   div.innerHTML = mapLayouts.length
@@ -2253,19 +2461,22 @@ function renderMapEditor() {
         <button class="btn btn-outline btn-inline" onclick="setAllPlanTrees(true)">Ouvrir tout</button>
         <button class="btn btn-outline btn-inline" onclick="setAllPlanTrees(false)">Fermer tout</button>
       </div>` + mapLayouts.map(layout => {
+        syncLayoutRecord(layout);
         const config = normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position);
         const aisleSlots = buildSlotsFromConfig(layout.aisle, config);
         const slotCount = aisleSlots.length;
-        return `<details class="tree-node plan-aisle-node" id="planAisle-${esc(layout.aisle)}">
+        const aisleNodeId = `planAisle-${layout.aisle}`;
+        return `<details class="tree-node plan-aisle-node" id="${aisleNodeId}" data-node-id="${aisleNodeId}"${detailsOpenAttr(aisleNodeId)}>
         <summary>
           <span>Allee ${esc(layout.aisle)}</span>
           <span class="tree-meta">${layout.product_count || 0} produit${Number(layout.product_count || 0) > 1 ? 's' : ''}</span>
         </summary>
         <div class="tree-body">
-        <div class="section-note" style="margin-top:4px">Ouvrez l allee, puis le cote, puis la section, puis la tablette. Chaque tablette peut avoir son propre nombre de positions.</div>
+        <div class="section-note" style="margin-top:4px">La map est editee ici: chaque cote, chaque section et chaque tablette peuvent etre differents. Les modifications restent en brouillon jusqu a Sauver.</div>
         <div class="plan-meta">
           <span class="pill">${slotCount} slot${slotCount > 1 ? 's' : ''}</span>
           <span class="pill">Ordre: positions puis tablettes puis sections puis cotes</span>
+          ${dirtyLayoutAisles.has(String(layout.aisle)) ? '<span class="pill warning">Modifications non sauvegardees</span>' : ''}
         </div>
         <div class="tool-row">
           <button class="btn btn-outline btn-inline" onclick="setPlanAisleTrees('${esc(layout.aisle)}', true)">Ouvrir cette allee</button>
@@ -2275,7 +2486,8 @@ function renderMapEditor() {
         ${['Gauche','Droite'].map(side => {
           const sections = config.sides[side].sections;
           const sideSlots = buildSlotsFromConfig(layout.aisle, config, side);
-          return `<details class="tree-node plan-side">
+          const sideNodeId = `planSide-${layout.aisle}-${side}`;
+          return `<details class="tree-node plan-side" data-node-id="${sideNodeId}"${detailsOpenAttr(sideNodeId)}>
             <summary>
               <span>${side}</span>
               <span class="tree-meta">${sections.length} section${sections.length > 1 ? 's' : ''} | ${sideSlots.length} slot${sideSlots.length > 1 ? 's' : ''}</span>
@@ -2301,7 +2513,9 @@ function renderMapEditor() {
                 <input id="sectionCount-${layout.aisle}-${side}" type="number" min="0" value="${sections.length}" onchange="setSideSectionCount('${esc(layout.aisle)}','${side}', this.value)"/>
               </div>
               ${sections.length ? '' : `<div class="small" style="padding:8px 0">Aucune section sur ce cote pour le moment.</div>`}
-              ${sections.map((section, sectionIndex) => `<details class="tree-node plan-section">
+              ${sections.map((section, sectionIndex) => {
+                const sectionNodeId = `planSection-${layout.aisle}-${side}-${sectionIndex}`;
+                return `<details class="tree-node plan-section" data-node-id="${sectionNodeId}"${detailsOpenAttr(sectionNodeId)}>
                 <summary>
                   <span>Section ${sectionIndex + 1}</span>
                   <span class="tree-meta">${section.shelves.length} tablette${section.shelves.length > 1 ? 's' : ''}</span>
@@ -2312,20 +2526,17 @@ function renderMapEditor() {
                     <input id="shelfCount-${layout.aisle}-${side}-${sectionIndex}" type="number" min="0" value="${section.shelves.length}" onchange="setSectionShelfCount('${esc(layout.aisle)}','${side}', ${sectionIndex}, this.value)"/>
                   </div>
                   ${section.shelves.length ? '' : `<div class="small" style="padding:8px 0">Aucune tablette dans cette section pour le moment.</div>`}
-                  ${section.shelves.map((positions, shelfIndex) => `<details class="tree-node">
-                    <summary>
-                      <span>Tablette ${shelfIndex + 1}</span>
-                      <span class="tree-meta">${positions} position${Number(positions) > 1 ? 's' : ''}</span>
-                    </summary>
-                    <div class="tree-body">
+                  <div class="plan-shelf-grid">
+                    ${section.shelves.map((positions, shelfIndex) => `<div class="plan-shelf-card">
                       <div class="field">
-                        <label class="label" for="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}">Nombre de positions dans la tablette ${shelfIndex + 1}</label>
+                        <label class="label" for="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}">Tablette ${shelfIndex + 1} - positions</label>
                         <input id="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}" type="number" min="0" value="${positions}" onchange="setShelfPositionCount('${esc(layout.aisle)}','${side}', ${sectionIndex}, ${shelfIndex}, this.value)"/>
                       </div>
-                    </div>
-                  </details>`).join('')}
+                    </div>`).join('')}
+                  </div>
                 </div>
-              </details>`).join('')}
+              </details>`;
+              }).join('')}
             </div>
           </details>`;
         }).join('')}
@@ -2352,6 +2563,7 @@ function setAllPlanTrees(open) {
   document.querySelectorAll('#mapContent details.tree-node').forEach(node => {
     node.open = open;
   });
+  captureOpenPlanNodesFromDom();
 }
 
 function setPlanAisleTrees(aisle, open) {
@@ -2361,15 +2573,15 @@ function setPlanAisleTrees(aisle, open) {
   root.querySelectorAll('details.tree-node').forEach(node => {
     node.open = open;
   });
+  captureOpenPlanNodesFromDom();
 }
 
-async function loadMapEditor() {
+async function loadMapEditor(forceServer=false) {
   await Promise.allSettled([
-    refreshProductsCache(true),
-    refreshLayoutsCache(true)
+    refreshProductsCache(forceServer),
+    refreshLayoutsCache(forceServer)
   ]);
-  renderMapEditor();
-  renderPlanStartEditor();
+  refreshPlanUi();
 }
 
 function getEditableLayout(aisle) {
@@ -2408,12 +2620,14 @@ function setSideSectionCount(aisle, side, rawValue) {
     }
   }, layout.max_section, layout.max_shelf, layout.max_position);
   if (count < currentCount && !confirmLayoutReduction(aisle, nextConfig, `Reduire le nombre de sections du cote ${side} a ${count}`)) {
-    renderMapEditor();
+    refreshPlanUi();
     return;
   }
   while (sections.length < count) sections.push({shelves: fallbackShelves.slice()});
   sections.length = count;
-  renderMapEditor();
+  syncLayoutRecord(layout);
+  markLayoutDirty(aisle);
+  refreshPlanUi();
 }
 
 function setSectionShelfCount(aisle, side, sectionIndex, rawValue) {
@@ -2436,12 +2650,14 @@ function setSectionShelfCount(aisle, side, sectionIndex, rawValue) {
     }
   }, layout.max_section, layout.max_shelf, layout.max_position);
   if (count < currentCount && !confirmLayoutReduction(aisle, nextConfig, `Reduire le nombre de tablettes de la section ${sectionIndex + 1} a ${count}`)) {
-    renderMapEditor();
+    refreshPlanUi();
     return;
   }
   while (shelves.length < count) shelves.push(fallbackValue);
   shelves.length = count;
-  renderMapEditor();
+  syncLayoutRecord(layout);
+  markLayoutDirty(aisle);
+  refreshPlanUi();
 }
 
 function setShelfPositionCount(aisle, side, sectionIndex, shelfIndex, rawValue) {
@@ -2462,10 +2678,13 @@ function setShelfPositionCount(aisle, side, sectionIndex, shelfIndex, rawValue) 
     }
   }, layout.max_section, layout.max_shelf, layout.max_position);
   if (nextValue < currentValue && !confirmLayoutReduction(aisle, nextConfig, `Reduire le nombre de positions de la tablette ${shelfIndex + 1} a ${nextValue}`)) {
-    renderMapEditor();
+    refreshPlanUi();
     return;
   }
   section.shelves[shelfIndex] = nextValue;
+  syncLayoutRecord(layout);
+  markLayoutDirty(aisle);
+  refreshPlanUi();
 }
 
 async function createAisleLayout() {
@@ -2487,17 +2706,37 @@ async function createAisleLayout() {
   msgDiv.className = data.success ? 'msg success' : 'msg error';
   msgDiv.textContent = data.success ? `Allee ${aisle} ajoutee.` : (data.error || 'Creation impossible.');
   if (data.success) {
+    const config = normalizeLayoutConfig(buildLayoutWithSideCounts(leftSections, rightSections, max_shelf, max_position), max_section, max_shelf, max_position);
+    mapLayouts.push(syncLayoutRecord({
+      aisle: String(aisle),
+      config,
+      enabled: true,
+      modified_by: loadEditorSession().username || '',
+      modified_at: nowIsoWithoutMs(),
+      product_count: 0,
+      ...getLayoutMetrics(config)
+    }));
+    sortMapLayouts();
+    lastLayoutsRefreshAt = Date.now();
+    clearLayoutDirty(aisle);
+    openPlanNodes.add(`planAisle-${aisle}`);
+    openPlanNodes.add(`planSide-${aisle}-Gauche`);
+    openPlanNodes.add(`planSide-${aisle}-Droite`);
+    planStartDraft = {...getPlanStartDraft(), aisle: String(aisle)};
     document.getElementById('mapAisle').value = '';
     document.getElementById('mapLeftSections').value = '0';
     document.getElementById('mapRightSections').value = '0';
     document.getElementById('mapInitialShelves').value = '0';
     document.getElementById('mapInitialPositions').value = '0';
-    await loadMapEditor();
+    refreshPlanUi();
   }
 }
 
 async function saveAisleLayout(aisle) {
   if (!requireEditorSession('modifier le plan du magasin')) return;
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  syncLayoutRecord(layout);
   const config = readAisleLayoutConfig(aisle);
   const data = await apiUpdateLayoutAisle(aisle, {config, enabled: true});
   const msgDiv = document.getElementById('addMsg');
@@ -2506,7 +2745,13 @@ async function saveAisleLayout(aisle) {
     ? `Allee ${aisle} sauvee.${Number(data.removed_products || 0) ? ` ${data.removed_products} produit(s) supprime(s) car hors structure.` : ''}`
     : (data.error || 'Sauvegarde impossible.');
   if (data.success) {
-    await loadMapEditor();
+    clearLayoutDirty(aisle);
+    await refreshProductsCache(true);
+    layout.modified_by = loadEditorSession().username || layout.modified_by || '';
+    layout.modified_at = nowIsoWithoutMs();
+    syncLayoutRecord(layout);
+    lastLayoutsRefreshAt = Date.now();
+    refreshPlanUi();
   }
 }
 
@@ -2524,6 +2769,7 @@ function applyAisleLayoutToCursor(aisle) {
     }
   }
   updateCursorUi();
+  planStartDraft = getCursorSelection();
   renderPlanStartEditor();
   document.getElementById('addMsg').innerHTML = `<div class="msg success">${buildSlotsFromConfig(aisle, config || defaultLayoutConfig()).length ? `Le scan utilisera maintenant l allee ${esc(aisle)}.` : `L allee ${esc(aisle)} n a aucune position de scan pour le moment.`}</div>`;
 }
@@ -2549,7 +2795,12 @@ async function removeAisleLayout(aisle) {
     ? (data.message || `Allee ${aisle} retiree.`)
     : ((data && data.error) || `Impossible de supprimer l allee ${aisle}.`);
   if (success) {
-    await loadMapEditor();
+    mapLayouts = mapLayouts.filter(item => String(item.aisle) !== String(aisle));
+    clearLayoutDirty(aisle);
+    await refreshProductsCache(true);
+    lastLayoutsRefreshAt = Date.now();
+    planStartDraft = getCursorSelection();
+    refreshPlanUi();
   }
 }
 
@@ -2618,6 +2869,14 @@ document.addEventListener('focusin', event => {
     selectNumericField(event.target);
   }
 });
+document.getElementById('mapContent').addEventListener('toggle', event => {
+  const node = event.target;
+  if (!(node instanceof HTMLDetailsElement)) return;
+  const nodeId = node.dataset.nodeId;
+  if (!nodeId) return;
+  if (node.open) openPlanNodes.add(nodeId);
+  else openPlanNodes.delete(nodeId);
+}, true);
 document.getElementById('scanInput').addEventListener('input', persistScanDraft);
 document.getElementById('clientQuestion').addEventListener('input', persistClientDraft);
 ['mapAisle','mapLeftSections','mapRightSections','mapInitialShelves','mapInitialPositions'].forEach(id => {
@@ -2658,7 +2917,12 @@ async function bootApp() {
     allProductsCache = [];
   }
   if (layoutsResult.status === 'fulfilled') {
-    mapLayouts = layoutsResult.value;
+    mapLayouts = layoutsResult.value.map(layout => syncLayoutRecord({
+      ...layout,
+      config: normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position)
+    }));
+    sortMapLayouts();
+    dirtyLayoutAisles = new Set();
     lastLayoutsRefreshAt = Date.now();
   } else {
     mapLayouts = [];
