@@ -49,6 +49,7 @@
   .msg.success{background:#ecfdf5;color:#065f46}
   .msg.error{background:#fef2f2;color:#991b1b}
   .msg.info{background:#eef4ff;color:#1a56db}
+  .msg.warning{background:#fffbeb;color:#92400e;border:1px solid #fcd34d}
   .empty{text-align:center;padding:2rem;color:#777;font-size:14px}
   .section{display:none}
   .section.active{display:block}
@@ -1628,16 +1629,20 @@ function renderClientMatches(matches, question) {
   `;
 }
 
-function renderClientAdvice(advice) {
+function renderClientAdvice(advice, hasStoreProducts) {
   const target = document.getElementById('clientAdvice');
   if (!target) return;
   if (!advice) {
     target.innerHTML = '';
     return;
   }
+  const generalNotice = !hasStoreProducts
+    ? `<div class="msg warning" style="margin-bottom:10px;font-weight:600;">⚠ Aucun produit du magasin n a ete trouve pour cette demande. Cette reponse est basee sur des connaissances generales en pharmacie — verifiez l inventaire avant de conseiller.</div>`
+    : '';
   target.innerHTML = `
     <div class="advice-card">
       <div class="section-title">Reponse client</div>
+      ${generalNotice}
       ${advice.summary ? `<div class="desc-text">${esc(advice.summary)}</div>` : ''}
       ${advice.recommended_product_names?.length ? `<div class="advice-list">${advice.recommended_product_names.map(item => `<div class="advice-item">Produit a expliquer: ${esc(item)}</div>`).join('')}</div>` : ''}
       ${advice.follow_up_questions?.length ? `<div class="advice-list">${advice.follow_up_questions.map(item => `<div class="advice-item">Question a poser: ${esc(item)}</div>`).join('')}</div>` : ''}
@@ -1695,7 +1700,7 @@ async function generateClientHelp() {
     if (status) status.textContent = result.error || 'Reponse client indisponible.';
     return;
   }
-  renderClientAdvice(result.advice);
+  renderClientAdvice(result.advice, matches.length > 0);
   if (status) status.textContent = `Reponse generee via ${aiProviderLabel()}. Verifiez avant de conseiller.`;
 }
 
