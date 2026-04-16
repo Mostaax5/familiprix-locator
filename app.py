@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 import json
 import re
+import unicodedata
 
 app = Flask(__name__)
 init_db()
@@ -46,6 +47,13 @@ LOOKUP_FIELDS = [
     "url",
     "image_front_url",
 ]
+SEARCH_STOPWORDS = {
+    "a", "an", "and", "au", "aux", "avec", "ce", "ces", "cette", "client", "comme",
+    "dans", "de", "des", "du", "en", "et", "for", "how", "i", "il", "ils", "je",
+    "la", "le", "les", "mais", "mon", "my", "of", "on", "or", "ou", "par", "pas",
+    "pour", "que", "qui", "sans", "si", "son", "sur", "the", "to", "un", "une",
+    "with", "without", "y",
+}
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
 GEMINI_BASE_URL = os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
@@ -127,15 +135,10 @@ def search_products():
     query = request.args.get("q", "").strip()
     if not query:
         return jsonify([])
+    limit = min(max(clamp_non_negative_int(request.args.get("limit", "60"), 60), 1), 120)
     db = get_db()
     products = [row_to_product(p) for p in db.execute("SELECT * FROM products").fetchall()]
-    ranked = []
-    for product in products:
-        score = product_search_score(product, query)
-        if score > 0:
-            ranked.append((score, product))
-    ranked.sort(key=lambda item: (-item[0], location_sort_key(item[1])))
-    items = [product for _, product in ranked]
+    items = rank_products_for_query(products, query, limit=limit)
     return jsonify(items)
 
 
@@ -232,7 +235,7 @@ def delete_layout_aisle(aisle):
     if error:
         return error
     db = get_db()
-    removed_products = db.execute("SELECT COUNT(*) FROM products WHERE aisle=?", (aisle,)).fetchone()[0]
+    removed_products = first_column(db.execute("SELECT COUNT(*) FROM products WHERE aisle=?", (aisle,)).fetchone()) or 0
     db.execute("DELETE FROM products WHERE aisle=?", (aisle,))
     result = db.execute("DELETE FROM aisle_layouts WHERE aisle=?", (aisle,))
     db.commit()
@@ -294,8 +297,71 @@ def assist_product():
     return jsonify({"success": True, "assist": assist})
 
 
+@app.route("/api/client/help", methods=["POST"])
+def client_help():
+    data = request.get_json() or {}
+    question = str(data.get("question", "")).strip()
+    if not question:
+        return jsonify({"success": False, "error": "Question client requise."}), 400
+    if not configured_ai_provider()["name"]:
+        return jsonify({"success": False, "error": "GEMINI_API_KEY n est pas configure sur le serveur."}), 503
+
+    raw_products = data.get("products")
+    if isinstance(raw_products, list):
+        matched_products = [product_context_for_client_help(item) for item in raw_products[:6] if isinstance(item, dict)]
+    else:
+        db = get_db()
+        products = [row_to_product(p) for p in db.execute("SELECT * FROM products").fetchall()]
+        matched_products = [product_context_for_client_help(item) for item in rank_products_for_query(products, question, limit=6)]
+
+    if not matched_products:
+        return jsonify({"success": False, "error": "Aucun produit correspondant a expliquer pour le moment."}), 404
+
+    advice = generate_client_help_payload(question, matched_products)
+    if not advice:
+        return jsonify({"success": False, "error": "Impossible de generer la reponse client pour le moment."}), 502
+    return jsonify({"success": True, "advice": advice})
+
+
 def normalized_digits(value):
     return re.sub(r"\D", "", str(value or ""))
+
+
+def normalize_search_text(value):
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join(character for character in text if not unicodedata.combining(character))
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def tokenize_search_query(query):
+    return [
+        token
+        for token in normalize_search_text(query).split()
+        if len(token) >= 2 and token not in SEARCH_STOPWORDS
+    ]
+
+
+def query_search_variants(query):
+    variants = []
+    seen = set()
+
+    def add(value):
+        cleaned = str(value or "").strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            variants.append(cleaned)
+
+    normalized = normalize_search_text(query)
+    digits = normalized_digits(query)
+    tokens = tokenize_search_query(query)
+    add(normalized)
+    if tokens:
+        add(" ".join(tokens))
+        for token in tokens:
+            add(token)
+    if digits and len(digits) >= 4:
+        add(digits)
+    return variants
 
 
 def build_barcode_candidates(barcode):
@@ -720,29 +786,29 @@ def first_present(product, keys):
 
 
 def product_search_text(product):
-    return " ".join([
+    return normalize_search_text(" ".join([
         str(product.get("name", "")),
         str(product.get("brand", "")),
         str(product.get("description", "")),
         str(product.get("search_terms", "")),
         str(product.get("usage_notes", "")),
         str(product.get("alternative_suggestions", "")),
-    ]).strip().lower()
+    ]))
 
 
 def product_search_score(product, query):
-    lowered_query = str(query or "").strip().lower()
-    if not lowered_query:
+    lowered_query = normalize_search_text(query)
+    digits_query = normalized_digits(query)
+    if not lowered_query and not digits_query:
         return 0
 
-    digits_query = normalized_digits(query)
     barcode = normalized_digits(product.get("barcode", ""))
-    name = str(product.get("name", "")).lower()
-    brand = str(product.get("brand", "")).lower()
-    description = str(product.get("description", "")).lower()
-    search_terms = str(product.get("search_terms", "")).lower()
-    usage_notes = str(product.get("usage_notes", "")).lower()
-    alternatives = str(product.get("alternative_suggestions", "")).lower()
+    name = normalize_search_text(product.get("name", ""))
+    brand = normalize_search_text(product.get("brand", ""))
+    description = normalize_search_text(product.get("description", ""))
+    search_terms = normalize_search_text(product.get("search_terms", ""))
+    usage_notes = normalize_search_text(product.get("usage_notes", ""))
+    alternatives = normalize_search_text(product.get("alternative_suggestions", ""))
     haystack = product_search_text(product)
     score = 0
 
@@ -775,11 +841,31 @@ def product_search_score(product, query):
     if lowered_query in alternatives:
         score += 120
 
-    tokens = [token for token in re.split(r"\s+", lowered_query) if len(token) >= 2]
-    if tokens and all(token in haystack for token in tokens):
-        score += 100 + (10 * len(tokens))
+    unique_tokens = list(dict.fromkeys(tokenize_search_query(query)))
+    if unique_tokens:
+        matched_tokens = sum(1 for token in unique_tokens if token in haystack)
+        if matched_tokens == len(unique_tokens):
+            score += 100 + (20 * matched_tokens)
+        elif matched_tokens:
+            score += 25 * matched_tokens
 
     return score
+
+
+def rank_products_for_query(products, query, limit=60):
+    variants = query_search_variants(query)
+    if not variants:
+        return []
+    ranked = []
+    for product in products:
+        best_score = 0
+        for variant in variants:
+            best_score = max(best_score, product_search_score(product, variant))
+        if best_score > 0:
+            ranked.append((best_score, product))
+    ranked.sort(key=lambda item: (-item[0], location_sort_key(item[1])))
+    items = [product for _, product in ranked]
+    return items[:limit] if limit else items
 
 
 def configured_ai_provider():
@@ -799,6 +885,157 @@ def generate_product_assist_payload(name, brand, description, barcode):
     return None
 
 
+def product_context_for_client_help(product):
+    return {
+        "name": str(product.get("name", "")).strip(),
+        "brand": str(product.get("brand", "")).strip(),
+        "description": str(product.get("description", "")).strip(),
+        "usage_notes": str(product.get("usage_notes", "")).strip(),
+        "search_terms": str(product.get("search_terms", "")).strip(),
+        "alternative_suggestions": str(product.get("alternative_suggestions", "")).strip(),
+        "barcode": str(product.get("barcode", "")).strip(),
+        "location": (
+            f"Allee {str(product.get('aisle', '')).strip()} - "
+            f"{str(product.get('side', '')).strip()} - "
+            f"Section {str(product.get('section', '')).strip()} - "
+            f"Tablette {str(product.get('shelf', '')).strip()} - "
+            f"Position {str(product.get('position', '')).strip()}"
+        ).strip(),
+    }
+
+
+def generate_client_help_payload(question, products):
+    provider = configured_ai_provider()
+    if provider["name"] == "gemini":
+        return generate_client_help_payload_gemini(question, products)
+    if provider["name"] == "openai":
+        return generate_client_help_payload_openai(question, products)
+    return None
+
+
+def generate_client_help_payload_gemini(question, products):
+    payload = {
+        "contents": [{
+            "parts": [{
+                "text": (
+                    "Tu aides un employe de pharmacie Familiprix au Quebec a repondre a un client. "
+                    "Base-toi uniquement sur les produits fournis. "
+                    "Ne pose pas de diagnostic. "
+                    "Dis clairement quand il faut orienter le client vers le pharmacien: "
+                    "grossesse, bebe ou jeune enfant, interaction medicamenteuse possible, symptomes graves, "
+                    "douleur importante, difficulte respiratoire, fievre elevee, duree inhabituelle ou doute. "
+                    "Retourne uniquement un JSON en francais avec exactement les cles "
+                    "summary (texte), recommended_product_names (tableau), follow_up_questions (tableau), "
+                    "safety_flags (tableau), pharmacist_referral (booleen) et pharmacist_reason (texte).\n\n"
+                    f"Question client:\n{question}\n\n"
+                    f"Produits disponibles:\n{json.dumps(products, ensure_ascii=False)}"
+                )
+            }]
+        }],
+        "generationConfig": {
+            "temperature": 0.2,
+            "responseMimeType": "application/json",
+        },
+    }
+    request_obj = Request(
+        f"{GEMINI_BASE_URL}/models/{GEMINI_MODEL}:generateContent?{urlencode({'key': GEMINI_API_KEY})}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request_obj, timeout=14) as response:
+            raw_response = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+        return None
+    raw_text = extract_gemini_output_text(raw_response)
+    if not raw_text:
+        return None
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return None
+    return normalize_client_help_payload(parsed)
+
+
+def generate_client_help_payload_openai(question, products):
+    payload = {
+        "model": OPENAI_MODEL,
+        "reasoning": {"effort": "low"},
+        "instructions": (
+            "Tu aides un employe de pharmacie Familiprix au Quebec a repondre a un client. "
+            "Base-toi uniquement sur les produits fournis. "
+            "Ne pose pas de diagnostic. "
+            "Dis clairement quand il faut orienter le client vers le pharmacien: "
+            "grossesse, bebe ou jeune enfant, interaction medicamenteuse possible, symptomes graves, "
+            "douleur importante, difficulte respiratoire, fievre elevee, duree inhabituelle ou doute. "
+            "Retourne uniquement un JSON en francais."
+        ),
+        "input": json.dumps({"question": question, "products": products}, ensure_ascii=False),
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "client_help",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {"type": "string"},
+                        "recommended_product_names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 4,
+                        },
+                        "follow_up_questions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 4,
+                        },
+                        "safety_flags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 4,
+                        },
+                        "pharmacist_referral": {"type": "boolean"},
+                        "pharmacist_reason": {"type": "string"},
+                    },
+                    "required": [
+                        "summary",
+                        "recommended_product_names",
+                        "follow_up_questions",
+                        "safety_flags",
+                        "pharmacist_referral",
+                        "pharmacist_reason",
+                    ],
+                    "additionalProperties": False,
+                },
+            }
+        },
+    }
+    request_obj = Request(
+        f"{OPENAI_BASE_URL}/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request_obj, timeout=14) as response:
+            raw_response = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+        return None
+    raw_text = extract_openai_output_text(raw_response)
+    if not raw_text:
+        return None
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return None
+    return normalize_client_help_payload(parsed)
+
+
 def generate_product_assist_payload_gemini(name, brand, description, barcode):
     prompt = {
         "name": name,
@@ -811,8 +1048,11 @@ def generate_product_assist_payload_gemini(name, brand, description, barcode):
             "parts": [{
                 "text": (
                     "Tu aides les employes d une pharmacie Familiprix au Quebec. "
-                    "Retourne uniquement un JSON en francais avec des mots cles que les clients utilisent, "
-                    "une courte explication utile pour guider un client, et quelques alternatives possibles. "
+                    "Retourne uniquement un JSON en francais avec exactement les cles "
+                    "search_terms (tableau), usage_notes (texte) et alternative_suggestions (tableau). "
+                    "Les mots cles doivent etre des mots que les clients utilisent, "
+                    "usage_notes doit etre une courte explication utile pour guider un client, "
+                    "et alternative_suggestions doit contenir quelques alternatives possibles. "
                     "Sois concis, concret, prudent sur le plan medical et ne donne pas de diagnostic.\n\n"
                     f"Produit:\n{json.dumps(prompt, ensure_ascii=False)}"
                 )
@@ -821,24 +1061,6 @@ def generate_product_assist_payload_gemini(name, brand, description, barcode):
         "generationConfig": {
             "temperature": 0.2,
             "responseMimeType": "application/json",
-            "responseJsonSchema": {
-                "type": "OBJECT",
-                "properties": {
-                    "search_terms": {
-                        "type": "ARRAY",
-                        "items": {"type": "STRING"},
-                        "maxItems": 12,
-                    },
-                    "usage_notes": {"type": "STRING"},
-                    "alternative_suggestions": {
-                        "type": "ARRAY",
-                        "items": {"type": "STRING"},
-                        "maxItems": 6,
-                    },
-                },
-                "required": ["search_terms", "usage_notes", "alternative_suggestions"],
-                "propertyOrdering": ["search_terms", "usage_notes", "alternative_suggestions"],
-            },
         },
     }
     request_obj = Request(
@@ -940,6 +1162,20 @@ def normalize_assist_payload(parsed):
         "search_terms": ", ".join(dict.fromkeys(search_terms)),
         "usage_notes": usage_notes,
         "alternative_suggestions": ", ".join(dict.fromkeys(alternative_suggestions)),
+    }
+
+
+def normalize_client_help_payload(parsed):
+    recommended = [str(item).strip() for item in parsed.get("recommended_product_names", []) if str(item).strip()]
+    follow_up = [str(item).strip() for item in parsed.get("follow_up_questions", []) if str(item).strip()]
+    safety_flags = [str(item).strip() for item in parsed.get("safety_flags", []) if str(item).strip()]
+    return {
+        "summary": str(parsed.get("summary", "")).strip(),
+        "recommended_product_names": list(dict.fromkeys(recommended)),
+        "follow_up_questions": list(dict.fromkeys(follow_up)),
+        "safety_flags": list(dict.fromkeys(safety_flags)),
+        "pharmacist_referral": bool(parsed.get("pharmacist_referral", False)),
+        "pharmacist_reason": str(parsed.get("pharmacist_reason", "")).strip(),
     }
 
 

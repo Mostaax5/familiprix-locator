@@ -23,8 +23,9 @@
   .tab.active{color:#c8102e;border-bottom-color:#c8102e;font-weight:700}
   .content{padding:14px;max-width:720px;margin:0 auto}
   .app-shell{padding:10px 14px 0;max-width:720px;margin:0 auto}
-  input,select{width:100%;padding:12px;border:1px solid #d8dce2;border-radius:8px;font-size:16px;background:white;margin-bottom:2px}
-  input:focus,select:focus{outline:none;border-color:#c8102e;box-shadow:0 0 0 2px rgba(200,16,46,.12)}
+  input,select,textarea{width:100%;padding:12px;border:1px solid #d8dce2;border-radius:8px;font-size:16px;background:white;margin-bottom:2px}
+  textarea{resize:vertical;min-height:112px;font-family:inherit}
+  input:focus,select:focus,textarea:focus{outline:none;border-color:#c8102e;box-shadow:0 0 0 2px rgba(200,16,46,.12)}
   .card{background:white;border-radius:8px;padding:14px;margin-bottom:10px;border:1px solid #e6e8ec}
   .card .name{font-size:15px;font-weight:700;margin-bottom:6px}
   .location{display:inline-flex;align-items:center;gap:5px;background:#eef4ff;color:#1a56db;border-radius:6px;padding:4px 10px;font-size:12px;font-weight:600;margin-bottom:6px}
@@ -98,6 +99,9 @@
   .slot-preview{display:grid;gap:6px;margin-top:10px}
   .slot-chip{display:inline-flex;align-items:center;gap:6px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:999px;padding:6px 10px;font-size:12px;color:#334155;font-weight:700}
   .slot-chip.active{background:#ecfdf5;border-color:#86efac;color:#166534}
+  .advice-card{background:#f8fafc;border:1px solid #dbe4ee;border-radius:8px;padding:12px;margin-top:10px}
+  .advice-list{display:grid;gap:6px;margin-top:10px}
+  .advice-item{font-size:12px;color:#334155;line-height:1.45;padding:8px 10px;border-radius:8px;background:white;border:1px solid #e2e8f0}
   @media (min-width:860px){.content{max-width:900px}}
   @media (max-width:520px){.row2,.row3,.confirm-grid,.device-grid,.scan-tools,.btn-row,.plan-sides,.plan-shelf-grid{grid-template-columns:1fr}.tabs{top:calc(66px + env(safe-area-inset-top))}.tab{font-size:11px}.content{padding:10px}.cursor{align-items:flex-start;flex-direction:column}.btn-inline{width:100%}.scanner-viewport{height:min(34vh,220px)}}
   @media (max-width:520px){.plan-sides{grid-template-columns:1fr}}
@@ -113,6 +117,7 @@
 <div class="tabs">
   <button class="tab active" onclick="switchTab('scan')">Scan</button>
   <button class="tab" onclick="switchTab('search')">Recherche</button>
+  <button class="tab" onclick="switchTab('client')">Client</button>
   <button class="tab" onclick="switchTab('add')">Plan</button>
 </div>
 
@@ -207,6 +212,24 @@
     <button class="btn btn-outline btn-inline" onclick="clearSearchInput()">Effacer</button>
   </div>
   <div id="searchResults"></div>
+</div>
+
+<div id="client" class="section content">
+  <div class="card">
+    <div class="section-title">Questions client</div>
+    <div class="section-note">Ecrivez la demande du client. Le systeme cherche d abord avec vos regles et la base du magasin. Ensuite, l IA aide seulement a expliquer, comparer et dire quand il faut passer au pharmacien.</div>
+    <div class="field">
+      <label class="label" for="clientQuestion">Question ou mots-clés</label>
+      <textarea id="clientQuestion" placeholder="Ex: quelque chose pour la gorge irritee, la toux seche ou le nez bouche" oninput="scheduleClientSearch()"></textarea>
+    </div>
+    <div class="tool-row">
+      <button class="btn btn-inline" onclick="runClientSearch()">Trouver produits</button>
+      <button class="btn btn-outline btn-inline" onclick="generateClientHelp()">Reponse client (IA)</button>
+    </div>
+    <div id="clientHelpStatus" class="inline-note">Commencez par ecrire la question du client. Les produits proposes viennent d abord de la base du magasin.</div>
+  </div>
+  <div id="clientAdvice"></div>
+  <div id="clientMatches"></div>
 </div>
 
 <div id="add" class="section content">
@@ -322,11 +345,16 @@ let ocrLibraryPromise = null;
 let allProductsCache = [];
 let mapLayouts = [];
 let searchTimer = null;
+let clientSearchTimer = null;
+let currentClientMatches = [];
+let lastProductsRefreshAt = 0;
+let lastLayoutsRefreshAt = 0;
 const STORAGE_KEYS = {
   cursor: 'familiprixCursor',
   activeTab: 'familiprixActiveTab',
   scanDraft: 'familiprixScanDraft',
   addDraft: 'familiprixAddDraft',
+  clientDraft: 'familiprixClientDraft',
   editorSession: 'familiprixEditorSession'
 };
 
@@ -396,6 +424,129 @@ function upsertCachedProduct(product) {
   } else {
     allProductsCache.push(normalized);
   }
+  lastProductsRefreshAt = Date.now();
+}
+
+function removeCachedProduct(productId) {
+  allProductsCache = allProductsCache.filter(item => Number(item.id) !== Number(productId));
+  lastProductsRefreshAt = Date.now();
+}
+
+function normalizedDigits(value) {
+  return String(value || '').replace(/\D/g, '');
+}
+
+function normalizeSearchText(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+const SEARCH_STOPWORDS = new Set([
+  'a','an','and','au','aux','avec','ce','ces','cette','client','comme',
+  'dans','de','des','du','en','et','for','how','i','il','ils','je',
+  'la','le','les','mais','mon','my','of','on','or','ou','par','pas',
+  'pour','que','qui','sans','si','son','sur','the','to','un','une',
+  'with','without','y'
+]);
+
+function tokenizeSearchQuery(query) {
+  return normalizeSearchText(query)
+    .split(/\s+/)
+    .filter(token => token.length >= 2 && !SEARCH_STOPWORDS.has(token));
+}
+
+function querySearchVariants(query) {
+  const variants = [];
+  const seen = new Set();
+  const add = value => {
+    const cleaned = String(value || '').trim();
+    if (!cleaned || seen.has(cleaned)) return;
+    seen.add(cleaned);
+    variants.push(cleaned);
+  };
+  const normalized = normalizeSearchText(query);
+  const digits = normalizedDigits(query);
+  const tokens = tokenizeSearchQuery(query);
+  add(normalized);
+  if (tokens.length) {
+    add(tokens.join(' '));
+    tokens.forEach(add);
+  }
+  if (digits.length >= 4) add(digits);
+  return variants;
+}
+
+function productSearchText(product) {
+  return normalizeSearchText([
+    product.name,
+    product.brand,
+    product.description,
+    product.search_terms,
+    product.usage_notes,
+    product.alternative_suggestions
+  ].join(' '));
+}
+
+function scoreProductForQuery(product, query) {
+  const loweredQuery = normalizeSearchText(query);
+  const digitsQuery = normalizedDigits(query);
+  if (!loweredQuery && !digitsQuery) return 0;
+
+  const barcode = normalizedDigits(product.barcode);
+  const name = normalizeSearchText(product.name);
+  const brand = normalizeSearchText(product.brand);
+  const description = normalizeSearchText(product.description);
+  const searchTerms = normalizeSearchText(product.search_terms);
+  const usageNotes = normalizeSearchText(product.usage_notes);
+  const alternatives = normalizeSearchText(product.alternative_suggestions);
+  const haystack = productSearchText(product);
+  let score = 0;
+
+  if (digitsQuery && barcode) {
+    if (barcode === digitsQuery) score += 1200;
+    else if (digitsQuery.length >= 4 && barcode.endsWith(digitsQuery)) score += 900;
+    else if (barcode.includes(digitsQuery)) score += 500;
+  }
+
+  if (loweredQuery === name) score += 800;
+  else if (name.startsWith(loweredQuery)) score += 650;
+  else if (loweredQuery && name.includes(loweredQuery)) score += 450;
+
+  if (loweredQuery === brand) score += 300;
+  else if (loweredQuery && brand.includes(loweredQuery)) score += 180;
+
+  if (loweredQuery && description.includes(loweredQuery)) score += 150;
+  if (loweredQuery && searchTerms.includes(loweredQuery)) score += 240;
+  if (loweredQuery && usageNotes.includes(loweredQuery)) score += 170;
+  if (loweredQuery && alternatives.includes(loweredQuery)) score += 120;
+
+  const uniqueTokens = [...new Set(tokenizeSearchQuery(query))];
+  if (uniqueTokens.length) {
+    const matchedTokens = uniqueTokens.filter(token => haystack.includes(token)).length;
+    if (matchedTokens === uniqueTokens.length) score += 100 + (20 * matchedTokens);
+    else if (matchedTokens > 0) score += 25 * matchedTokens;
+  }
+
+  return score;
+}
+
+function searchProductsFromCache(query, limit=40) {
+  const variants = querySearchVariants(query);
+  if (!variants.length) return [];
+  const ranked = [];
+  for (const product of allProductsCache) {
+    let bestScore = 0;
+    for (const variant of variants) {
+      bestScore = Math.max(bestScore, scoreProductForQuery(product, variant));
+    }
+    if (bestScore > 0) ranked.push({score: bestScore, product});
+  }
+  ranked.sort((a, b) => (b.score - a.score) || String(a.product.name || '').localeCompare(String(b.product.name || '')));
+  return ranked.slice(0, limit).map(item => item.product);
 }
 
 function loadEditorSession() {
@@ -618,7 +769,7 @@ async function apiGetProducts() {
 async function apiSearchProducts(query) {
   const trimmed = String(query || '').trim();
   if (!trimmed) return [];
-  const {res, data} = await apiFetch(`/api/products/search?q=${encodeURIComponent(trimmed)}`);
+  const {res, data} = await apiFetch(`/api/products/search?q=${encodeURIComponent(trimmed)}&limit=40`);
   if (!res.ok) throw new Error('search-fetch');
   return Array.isArray(data) ? data.map(normalizeProduct) : [];
 }
@@ -726,10 +877,45 @@ async function apiGenerateProductAssist(payload) {
   }
 }
 
+async function apiGenerateClientHelp(payload) {
+  try {
+    const {res, data} = await apiFetch('/api/client/help', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: JSON.stringify(payload)
+    });
+    return res.ok ? data : {success: false, error: data.error || 'Reponse client indisponible pour le moment.'};
+  } catch (error) {
+    return {success: false, error: 'Reponse client indisponible pour le moment.'};
+  }
+}
+
 async function apiGetSystemInfo() {
   const {res, data} = await apiFetch('/api/system/info');
   if (!res.ok) throw new Error('system-info');
   return data;
+}
+
+async function refreshProductsCache(force=false) {
+  if (!force && allProductsCache.length && (Date.now() - lastProductsRefreshAt) < 30000) {
+    return allProductsCache;
+  }
+  try {
+    allProductsCache = await apiGetProducts();
+    lastProductsRefreshAt = Date.now();
+  } catch (error) {}
+  return allProductsCache;
+}
+
+async function refreshLayoutsCache(force=false) {
+  if (!force && mapLayouts.length && (Date.now() - lastLayoutsRefreshAt) < 30000) {
+    return mapLayouts;
+  }
+  try {
+    mapLayouts = await apiGetLayoutAisles();
+    lastLayoutsRefreshAt = Date.now();
+  } catch (error) {}
+  return mapLayouts;
 }
 
 function facingLabel(value) {
@@ -820,6 +1006,21 @@ function loadAddDraft() {
     document.getElementById('mapRightSections').value = draft.rightSections ?? '0';
     document.getElementById('mapInitialShelves').value = draft.initialShelves ?? '0';
     document.getElementById('mapInitialPositions').value = draft.initialPositions ?? '0';
+  } catch (error) {}
+}
+
+function persistClientDraft() {
+  localStorage.setItem(STORAGE_KEYS.clientDraft, JSON.stringify({
+    question: document.getElementById('clientQuestion')?.value.trim() || ''
+  }));
+}
+
+function loadClientDraft() {
+  const saved = localStorage.getItem(STORAGE_KEYS.clientDraft);
+  if (!saved) return;
+  try {
+    const draft = JSON.parse(saved);
+    document.getElementById('clientQuestion').value = draft.question || '';
   } catch (error) {}
 }
 
@@ -1029,7 +1230,7 @@ function selectNumericField(input) {
   });
 }
 
-function productCard(p, showDelete=true) {
+function productCard(p, showDelete=true, showAiButton=true) {
   return `<div class="card">
     ${showDelete ? `<button class="delete-btn" onclick="deleteProduct(${p.id})" title="Supprimer">x</button>` : ''}
     ${p.image_url ? `<img class="lookup-image" src="${esc(p.image_url)}" alt="Image produit" style="margin-bottom:10px">` : ''}
@@ -1043,12 +1244,13 @@ function productCard(p, showDelete=true) {
     ${p.usage_notes ? `<div class="desc-text">${esc(p.usage_notes)}</div>` : ''}
     ${p.search_terms ? `<div class="barcode-text">Mots-clés clients: ${esc(p.search_terms)}</div>` : ''}
     ${p.alternative_suggestions ? `<div class="barcode-text">Alternatives possibles: ${esc(p.alternative_suggestions)}</div>` : ''}
-    ${p.id && backendInfo.ai_enabled ? `<div class="tool-row"><button class="btn btn-outline btn-inline" onclick="enrichStoredProductWithAi(${p.id})">Generer aide client (IA)</button></div>` : ''}
+    ${showAiButton && p.id && backendInfo.ai_enabled ? `<div class="tool-row"><button class="btn btn-outline btn-inline" onclick="enrichStoredProductWithAi(${p.id})">Generer aide client (IA)</button></div>` : ''}
   </div>`;
 }
 
 async function enrichStoredProductWithAi(productId) {
-  const product = allProductsCache.find(item => Number(item.id) === Number(productId)) || normalizeProduct((await apiGetProducts()).find(item => Number(item.id) === Number(productId)) || {});
+  const cachedProducts = allProductsCache.length ? allProductsCache : await refreshProductsCache(true);
+  const product = cachedProducts.find(item => Number(item.id) === Number(productId)) || {};
   if (!product.id) return;
   const searchDiv = document.getElementById('searchResults');
   searchDiv.insertAdjacentHTML('afterbegin', '<div class="msg info">Generation de l aide client...</div>');
@@ -1071,7 +1273,7 @@ async function enrichStoredProductWithAi(productId) {
     searchDiv.insertAdjacentHTML('afterbegin', `<div class="msg error">${esc(saveResult.error || 'Sauvegarde impossible.')}</div>`);
     return;
   }
-  allProductsCache = await apiGetProducts();
+  await refreshProductsCache(true);
   await doSearch();
   searchDiv.insertAdjacentHTML('afterbegin', '<div class="msg success">Aide client ajoutee au produit.</div>');
 }
@@ -1125,12 +1327,137 @@ async function doSearchValue(q) {
       }
     }
   }
+  const cached = searchProductsFromCache(q, 40);
+  if (cached.length || allProductsCache.length) {
+    div.innerHTML = cached.length ? cached.map(p => productCard(p)).join('') : '<div class="empty">Aucun produit trouve.</div>';
+    return;
+  }
   try {
     const data = await apiSearchProducts(q);
     div.innerHTML = data.length ? data.map(p => productCard(p)).join('') : '<div class="empty">Aucun produit trouve.</div>';
   } catch (error) {
     div.innerHTML = '<div class="msg error">Impossible de rechercher pour le moment.</div>';
   }
+}
+
+function scheduleClientSearch() {
+  window.clearTimeout(clientSearchTimer);
+  clientSearchTimer = window.setTimeout(() => {
+    runClientSearch(false);
+  }, 220);
+}
+
+function getClientQuestion() {
+  return document.getElementById('clientQuestion')?.value.trim() || '';
+}
+
+function sanitizeProductForClientAi(product) {
+  return {
+    name: product.name || '',
+    brand: product.brand || '',
+    description: product.description || '',
+    usage_notes: product.usage_notes || '',
+    search_terms: product.search_terms || '',
+    alternative_suggestions: product.alternative_suggestions || '',
+    barcode: product.barcode || '',
+    aisle: product.aisle || '',
+    side: product.side || '',
+    section: product.section || '',
+    shelf: product.shelf || '',
+    position: product.position || ''
+  };
+}
+
+function renderClientMatches(matches, question) {
+  const target = document.getElementById('clientMatches');
+  if (!target) return;
+  if (!question) {
+    target.innerHTML = '';
+    return;
+  }
+  if (!matches.length) {
+    target.innerHTML = '<div class="empty">Aucun produit correspondant pour le moment.</div>';
+    return;
+  }
+  target.innerHTML = `
+    <div class="card">
+      <div class="section-title">Produits proposes</div>
+      <div class="section-note">Resultats trouves avec la base du magasin. L IA ne remplace pas cette liste.</div>
+      ${matches.map(product => productCard(product, false, false)).join('')}
+    </div>
+  `;
+}
+
+function renderClientAdvice(advice) {
+  const target = document.getElementById('clientAdvice');
+  if (!target) return;
+  if (!advice) {
+    target.innerHTML = '';
+    return;
+  }
+  target.innerHTML = `
+    <div class="advice-card">
+      <div class="section-title">Reponse client</div>
+      ${advice.summary ? `<div class="desc-text">${esc(advice.summary)}</div>` : ''}
+      ${advice.recommended_product_names?.length ? `<div class="advice-list">${advice.recommended_product_names.map(item => `<div class="advice-item">Produit a expliquer: ${esc(item)}</div>`).join('')}</div>` : ''}
+      ${advice.follow_up_questions?.length ? `<div class="advice-list">${advice.follow_up_questions.map(item => `<div class="advice-item">Question a poser: ${esc(item)}</div>`).join('')}</div>` : ''}
+      ${advice.safety_flags?.length ? `<div class="advice-list">${advice.safety_flags.map(item => `<div class="advice-item">Point de vigilance: ${esc(item)}</div>`).join('')}</div>` : ''}
+      ${advice.pharmacist_referral ? `<div class="msg error">Orienter vers le pharmacien. ${esc(advice.pharmacist_reason || '')}</div>` : ''}
+      ${!advice.pharmacist_referral && advice.pharmacist_reason ? `<div class="msg info">${esc(advice.pharmacist_reason)}</div>` : ''}
+    </div>
+  `;
+}
+
+function runClientSearch(showEmptyMessage=true) {
+  const question = getClientQuestion();
+  const status = document.getElementById('clientHelpStatus');
+  renderClientAdvice(null);
+  if (!question) {
+    currentClientMatches = [];
+    renderClientMatches([], '');
+    if (status && showEmptyMessage) status.textContent = 'Ecrivez la question du client pour voir les produits proposes.';
+    return [];
+  }
+  currentClientMatches = searchProductsFromCache(question, 8);
+  renderClientMatches(currentClientMatches, question);
+  if (status) {
+    status.textContent = currentClientMatches.length
+      ? `${currentClientMatches.length} produit(s) proposes a partir de la base du magasin.`
+      : 'Aucun produit correspondant. Essayez un autre mot-clé ou utilisez un code-barres.';
+  }
+  return currentClientMatches;
+}
+
+async function generateClientHelp() {
+  const question = getClientQuestion();
+  const status = document.getElementById('clientHelpStatus');
+  const matches = runClientSearch(false);
+  if (!question) {
+    if (status) status.textContent = 'Ecrivez d abord la question du client.';
+    return;
+  }
+  if (!matches.length) {
+    if (status) status.textContent = 'Aucun produit correspondant a envoyer a l IA pour le moment.';
+    renderClientAdvice(null);
+    return;
+  }
+  if (!backendInfo.ai_enabled) {
+    if (status) status.textContent = 'IA inactive. Ajoutez GEMINI_API_KEY sur Render pour la reponse client guidee.';
+    renderClientAdvice(null);
+    return;
+  }
+  if (status) status.textContent = `Generation de la reponse via ${aiProviderLabel()}...`;
+  const result = await apiGenerateClientHelp({
+    question,
+    products: matches.slice(0, 6).map(sanitizeProductForClientAi)
+  });
+  if (!result.success || !result.advice) {
+    renderClientAdvice(null);
+    if (status) status.textContent = result.error || 'Reponse client indisponible.';
+    return;
+  }
+  renderClientAdvice(result.advice);
+  if (status) status.textContent = `Reponse client generee via ${aiProviderLabel()}. Verifiez avant de conseiller.`;
 }
 
 async function startSearchScan() {
@@ -1218,14 +1545,22 @@ function injectScript(src) {
   return new Promise(resolve => {
     const existing = document.querySelector(`script[data-src="${src}"]`);
     if (existing) {
-      resolve('Html5Qrcode' in window);
+      if (existing.dataset.loaded === '1') {
+        resolve(true);
+        return;
+      }
+      existing.addEventListener('load', () => resolve(true), {once: true});
+      existing.addEventListener('error', () => resolve(false), {once: true});
       return;
     }
     const script = document.createElement('script');
     script.src = src;
     script.async = true;
     script.dataset.src = src;
-    script.onload = () => resolve(true);
+    script.onload = () => {
+      script.dataset.loaded = '1';
+      resolve(true);
+    };
     script.onerror = () => resolve(false);
     document.head.appendChild(script);
   });
@@ -1321,7 +1656,8 @@ async function recognizeBarcodeDigitsFromVideo(reader) {
 
 async function maybeRunOcrFallback(reader, status) {
   if (ocrBusy || scanPaused || !quaggaActive) return;
-  if (Date.now() - quaggaStartedAt < 1400) return;
+  if (Date.now() - quaggaStartedAt < 2400) return;
+  if (cameraUsageMode === 'search') return;
   ocrBusy = true;
   try {
     status.textContent = 'Lecture des chiffres...';
@@ -1348,8 +1684,8 @@ async function startQuaggaScanner(reader, status, button) {
       target: reader,
       constraints: {
         facingMode: 'environment',
-        width: {ideal: 1920},
-        height: {ideal: 1080},
+        width: {ideal: 1280},
+        height: {ideal: 720},
         aspectRatio: {ideal: 1.7777778}
       },
       area: {
@@ -1363,8 +1699,8 @@ async function startQuaggaScanner(reader, status, button) {
       patchSize: 'small',
       halfSample: false
     },
-    numOfWorkers: navigator.hardwareConcurrency ? Math.max(1, Math.min(4, navigator.hardwareConcurrency - 1)) : 2,
-    frequency: 25,
+    numOfWorkers: navigator.hardwareConcurrency ? Math.max(1, Math.min(2, navigator.hardwareConcurrency - 1)) : 1,
+    frequency: 12,
     locate: true,
     decoder: {
       readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader', 'code_128_reader', 'code_39_reader', 'i2of5_reader'],
@@ -1396,7 +1732,7 @@ async function startQuaggaScanner(reader, status, button) {
   status.textContent = 'Cadrez les barres et les chiffres';
   quaggaOcrTimer = window.setInterval(() => {
     maybeRunOcrFallback(reader, status);
-  }, 1400);
+  }, 2400);
 }
 
 async function stopCamera() {
@@ -2028,16 +2364,10 @@ function setPlanAisleTrees(aisle, open) {
 }
 
 async function loadMapEditor() {
-  const [productsResult, layoutsResult] = await Promise.allSettled([
-    apiGetProducts(),
-    apiGetLayoutAisles()
+  await Promise.allSettled([
+    refreshProductsCache(true),
+    refreshLayoutsCache(true)
   ]);
-  if (productsResult.status === 'fulfilled') {
-    allProductsCache = productsResult.value;
-  }
-  if (layoutsResult.status === 'fulfilled') {
-    mapLayouts = layoutsResult.value;
-  }
   renderMapEditor();
   renderPlanStartEditor();
 }
@@ -2232,20 +2562,42 @@ async function deleteProduct(id) {
     if (target) target.innerHTML = `<div class="msg error">${esc(data.error || 'Suppression impossible.')}</div>`;
     return;
   }
+  removeCachedProduct(id);
   await doSearch();
   await loadMapEditor();
   document.getElementById('searchResults').insertAdjacentHTML('afterbegin', `<div class="msg success">${esc(data.message || 'Produit supprime.')}</div>`);
 }
 
-function switchTab(tab) {
+async function switchTab(tab) {
+  if (scannerStream || html5Scanner) {
+    await stopCamera();
+  }
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.getElementById(tab).classList.add('active');
-  const tabs = ['scan','search','add'];
+  const tabs = ['scan','search','client','add'];
   document.querySelectorAll('.tab')[tabs.indexOf(tab)].classList.add('active');
   localStorage.setItem(STORAGE_KEYS.activeTab, tab);
   if (tab === 'add') loadMapEditor();
+  if (tab === 'search') {
+    if (document.getElementById('searchInput')?.value.trim()) doSearch();
+    refreshProductsCache().then(() => {
+      if (document.getElementById('search').classList.contains('active') && document.getElementById('searchInput')?.value.trim()) {
+        doSearch();
+      }
+    });
+  }
+  if (tab === 'client') {
+    runClientSearch(false);
+    refreshProductsCache().then(() => {
+      if (document.getElementById('client').classList.contains('active')) {
+        runClientSearch(false);
+      }
+    });
+  }
   if (tab === 'scan') window.setTimeout(focusScanInput, 50);
+  if (tab === 'client') window.setTimeout(() => document.getElementById('clientQuestion')?.focus(), 50);
+  if (tab === 'search') window.setTimeout(() => document.getElementById('searchInput')?.focus(), 50);
 }
 
 if ('serviceWorker' in navigator) {
@@ -2267,12 +2619,18 @@ document.addEventListener('focusin', event => {
   }
 });
 document.getElementById('scanInput').addEventListener('input', persistScanDraft);
+document.getElementById('clientQuestion').addEventListener('input', persistClientDraft);
 ['mapAisle','mapLeftSections','mapRightSections','mapInitialShelves','mapInitialPositions'].forEach(id => {
   document.getElementById(id).addEventListener('input', persistAddDraft);
   document.getElementById(id).addEventListener('change', persistAddDraft);
 });
 window.addEventListener('online', updateNetworkStatus);
 window.addEventListener('offline', updateNetworkStatus);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && (scannerStream || html5Scanner)) {
+    stopCamera();
+  }
+});
 window.addEventListener('pageshow', () => {
   updateAppShellState();
   updateNetworkStatus();
@@ -2280,6 +2638,8 @@ window.addEventListener('pageshow', () => {
 window.addEventListener('pagehide', () => {
   persistScanDraft();
   persistAddDraft();
+  persistClientDraft();
+  if (scannerStream || html5Scanner) stopCamera();
 });
 
 async function bootApp() {
@@ -2293,11 +2653,13 @@ async function bootApp() {
   }
   if (productsResult.status === 'fulfilled') {
     allProductsCache = productsResult.value;
+    lastProductsRefreshAt = Date.now();
   } else {
     allProductsCache = [];
   }
   if (layoutsResult.status === 'fulfilled') {
     mapLayouts = layoutsResult.value;
+    lastLayoutsRefreshAt = Date.now();
   } else {
     mapLayouts = [];
   }
@@ -2307,12 +2669,14 @@ async function bootApp() {
   renderPlanStartEditor();
   loadScanDraft();
   loadAddDraft();
+  loadClientDraft();
   updateDeviceSupport();
   updateAppShellState();
   updateNetworkStatus();
   const savedTab = localStorage.getItem(STORAGE_KEYS.activeTab);
-  if (savedTab && ['scan','search','add'].includes(savedTab)) switchTab(savedTab);
-  focusScanInput();
+  if (savedTab && ['scan','search','client','add'].includes(savedTab)) switchTab(savedTab);
+  runClientSearch(false);
+  if (!savedTab || savedTab === 'scan') focusScanInput();
 }
 
 bootApp();
