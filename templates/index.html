@@ -161,6 +161,7 @@
     </div>
     <div class="scanner-bar">
       <span id="scannerStatus" class="pill">Camera arretee</span>
+      <button class="btn btn-inline" id="pauseScanButton" onclick="toggleScanPause()" style="display:none">⏸ Pause</button>
       <button class="btn btn-inline secondary" onclick="toggleCamera()" id="cameraButton">Ouvrir camera</button>
     </div>
   </div>
@@ -1699,6 +1700,21 @@ async function generateClientHelp() {
   if (status) status.textContent = `Reponse client generee via ${aiProviderLabel()}. Verifiez avant de conseiller.`;
 }
 
+function toggleScanPause() {
+  const btn = document.getElementById('pauseScanButton');
+  const status = document.getElementById('scannerStatus');
+  if (scanPaused) {
+    scanPaused = false;
+    resetCameraCandidate();
+    if (btn) { btn.textContent = '⏸ Pause'; btn.style.background = ''; btn.style.color = ''; btn.style.borderColor = ''; }
+    if (quaggaActive) status.textContent = 'Cadrez les barres et les chiffres';
+  } else {
+    scanPaused = true;
+    if (btn) { btn.textContent = '▶ Reprendre'; btn.style.background = '#16a34a'; btn.style.color = 'white'; btn.style.borderColor = '#16a34a'; }
+    status.textContent = '⏸ En pause';
+  }
+}
+
 async function startSearchScan() {
   if (scannerStream || html5Scanner || quaggaActive) {
     await stopCamera();
@@ -1970,6 +1986,10 @@ async function startQuaggaScanner(reader, status, button) {
   button.style.background = '#c8102e';
   button.style.color = 'white';
   button.style.borderColor = '#c8102e';
+  if (cameraUsageMode === 'scan') {
+    const pb = document.getElementById('pauseScanButton');
+    if (pb) { pb.style.display = ''; pb.textContent = '⏸ Pause'; pb.style.background = ''; pb.style.color = ''; pb.style.borderColor = ''; }
+  }
   status.textContent = 'Cadrez les barres et les chiffres';
   quaggaOcrTimer = window.setInterval(() => {
     maybeRunOcrFallback(reader, status);
@@ -2015,6 +2035,8 @@ async function stopCamera() {
   button.style.background = '';
   button.style.color = '';
   button.style.borderColor = '';
+  const pb = document.getElementById('pauseScanButton');
+  if (pb) { pb.style.display = 'none'; pb.textContent = '⏸ Pause'; pb.style.background = ''; pb.style.color = ''; pb.style.borderColor = ''; }
   if (cameraUsageMode === 'search') {
     document.getElementById('cameraPreview').srcObject = null;
     document.getElementById('cameraPreview').style.display = 'block';
@@ -2099,8 +2121,6 @@ async function onDecodedCode(decodedText) {
     document.getElementById('searchResults').insertAdjacentHTML('afterbegin', `<div class="msg success">Code-barres scanne: ${esc(rawValue)}</div>`);
     return;
   }
-  // Auto-stop camera after detection so the form is clear and phone stops heating
-  window.setTimeout(() => { if (quaggaActive) stopCamera(); }, 700);
   await lookupScanFromInput(true, rawValue);
 }
 
@@ -2518,7 +2538,9 @@ function finishConfirmed(message) {
   window.setTimeout(() => {
     scanPaused = false;
     resetCameraCandidate();
-    if (scannerStream || html5Scanner) getCameraDom().status.textContent = 'Recherche code...';
+    const pb = document.getElementById('pauseScanButton');
+    if (pb) { pb.textContent = '⏸ Pause'; pb.style.background = ''; pb.style.color = ''; pb.style.borderColor = ''; }
+    if (quaggaActive) getCameraDom().status.textContent = 'Cadrez les barres et les chiffres';
     focusScanInput();
   }, 1200);
 }
