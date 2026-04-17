@@ -1,6 +1,6 @@
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, render_template, request, jsonify, send_from_directory, Response
 from database import (
     DatabaseIntegrityError,
     close_db,
@@ -118,6 +118,121 @@ def get_system_info():
         "ai_provider_label": ai_provider["label"],
         "duplicate_slots": int(first_column(duplicate_slots) or 0),
         "duplicate_barcodes": int(first_column(duplicate_barcodes) or 0),
+    })
+
+
+# ── API: Export / Import ───────────────────────────────────────────────────
+
+@app.route("/api/export", methods=["GET"])
+def export_database():
+    db = get_db()
+    products = [dict(p) for p in db.execute("SELECT * FROM products ORDER BY aisle, side, section, shelf, position").fetchall()]
+    layouts = [dict(r) for r in db.execute("SELECT * FROM aisle_layouts ORDER BY aisle").fetchall()]
+    payload = {
+        "export_version": 1,
+        "exported_at": utc_now_iso(),
+        "products": products,
+        "aisle_layouts": layouts,
+    }
+    data = json.dumps(payload, ensure_ascii=False, indent=2)
+    filename = f"familiprix-backup-{utc_now_iso()[:10]}.json"
+    return Response(
+        data,
+        mimetype="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.route("/api/import", methods=["POST"])
+def import_database():
+    username, error = require_editor()
+    if error:
+        return error
+    payload = request.get_json(silent=True) or {}
+    if payload.get("export_version") != 1:
+        return jsonify({"success": False, "error": "Format de fichier non reconnu."}), 400
+
+    db = get_db()
+    imported_layouts = 0
+    imported_products = 0
+    skipped_products = 0
+
+    for layout in (payload.get("aisle_layouts") or []):
+        aisle = str(layout.get("aisle", "")).strip()
+        if not aisle:
+            continue
+        db.execute(
+            """
+            INSERT INTO aisle_layouts (aisle, max_section, max_shelf, max_position, config_json, enabled, modified_by, modified_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(aisle) DO UPDATE SET
+                max_section=excluded.max_section, max_shelf=excluded.max_shelf,
+                max_position=excluded.max_position, config_json=excluded.config_json,
+                enabled=excluded.enabled, modified_by=excluded.modified_by, modified_at=excluded.modified_at
+            """,
+            (
+                aisle,
+                str(layout.get("max_section", "1")),
+                str(layout.get("max_shelf", "5")),
+                str(layout.get("max_position", "8")),
+                str(layout.get("config_json", "")),
+                int(layout.get("enabled", 1)),
+                username,
+                utc_now_iso(),
+            ),
+        )
+        imported_layouts += 1
+
+    for product in (payload.get("products") or []):
+        name = str(product.get("name", "")).strip()
+        aisle = str(product.get("aisle", "")).strip()
+        side = str(product.get("side", "")).strip()
+        section = str(product.get("section", "1")).strip() or "1"
+        shelf = str(product.get("shelf", "")).strip()
+        position = str(product.get("position", "")).strip()
+        if not all([name, aisle, side, shelf, position]):
+            skipped_products += 1
+            continue
+        try:
+            db.execute(
+                """
+                INSERT INTO products
+                    (name, brand, description, image_url, source_url, search_terms, usage_notes,
+                     alternative_suggestions, barcode, aisle, side, section, shelf, position,
+                     created_by, created_at, modified_by, modified_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(aisle, side, section, shelf, position) DO UPDATE SET
+                    name=excluded.name, brand=excluded.brand, description=excluded.description,
+                    image_url=excluded.image_url, source_url=excluded.source_url,
+                    search_terms=excluded.search_terms, usage_notes=excluded.usage_notes,
+                    alternative_suggestions=excluded.alternative_suggestions,
+                    barcode=excluded.barcode, modified_by=excluded.modified_by, modified_at=excluded.modified_at
+                """,
+                (
+                    name,
+                    str(product.get("brand", "")),
+                    str(product.get("description", "")),
+                    str(product.get("image_url", "")),
+                    str(product.get("source_url", "")),
+                    str(product.get("search_terms", "")),
+                    str(product.get("usage_notes", "")),
+                    str(product.get("alternative_suggestions", "")),
+                    str(product.get("barcode", "")),
+                    aisle, side, section, shelf, position,
+                    username, str(product.get("created_at", "") or utc_now_iso()),
+                    username, utc_now_iso(),
+                ),
+            )
+            imported_products += 1
+        except DatabaseIntegrityError:
+            skipped_products += 1
+
+    db.commit()
+    return jsonify({
+        "success": True,
+        "imported_layouts": imported_layouts,
+        "imported_products": imported_products,
+        "skipped_products": skipped_products,
     })
 
 

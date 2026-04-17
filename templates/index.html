@@ -296,6 +296,19 @@
   </div>
 
   <div class="card">
+    <div class="section-title">Sauvegarde de la base</div>
+    <div class="section-note">Telechargez une copie complete du magasin (produits + plan) pour la partager ou la garder. Importez un fichier de sauvegarde pour restaurer ou fusionner les donnees.</div>
+    <div class="tool-row">
+      <button class="btn btn-inline" onclick="exportDatabase()">⬇ Telecharger la base</button>
+      <label class="btn btn-outline btn-inline" style="cursor:pointer">
+        ⬆ Importer une sauvegarde
+        <input type="file" accept=".json,application/json" style="display:none" onchange="importDatabase(this)"/>
+      </label>
+    </div>
+    <div id="exportImportMsg"></div>
+  </div>
+
+  <div class="card">
     <div class="section-title">Plan du magasin</div>
     <div class="section-note">Le plan du magasin genere directement la liste des slots du scan. Le scanner n invente jamais de coordonnees.</div>
     <div class="row3">
@@ -978,6 +991,55 @@ async function apiGenerateClientHelp(payload) {
     return res.ok ? data : {success: false, error: data.error || 'Reponse client indisponible pour le moment.'};
   } catch (error) {
     return {success: false, error: 'Reponse client indisponible pour le moment.'};
+  }
+}
+
+function exportDatabase() {
+  const msg = document.getElementById('exportImportMsg');
+  if (msg) { msg.className = 'msg info'; msg.textContent = 'Preparation du fichier...'; }
+  const a = document.createElement('a');
+  a.href = '/api/export';
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  if (msg) window.setTimeout(() => { msg.className = 'msg success'; msg.textContent = 'Fichier telecharge. Partagez-le via WhatsApp ou gardez-le comme sauvegarde.'; }, 800);
+}
+
+async function importDatabase(input) {
+  const msg = document.getElementById('exportImportMsg');
+  const file = input.files[0];
+  input.value = '';
+  if (!file) return;
+  if (msg) { msg.className = 'msg info'; msg.textContent = 'Lecture du fichier...'; }
+  let payload;
+  try {
+    payload = JSON.parse(await file.text());
+  } catch (e) {
+    if (msg) { msg.className = 'msg error'; msg.textContent = 'Fichier invalide. Utilisez uniquement un fichier exporte par cette application.'; }
+    return;
+  }
+  if (payload.export_version !== 1) {
+    if (msg) { msg.className = 'msg error'; msg.textContent = 'Format non reconnu. Fichier incompatible.'; }
+    return;
+  }
+  const products = (payload.products || []).length;
+  const layouts = (payload.aisle_layouts || []).length;
+  if (!confirm(`Importer ${products} produit(s) et ${layouts} allee(s) dans la base? Les positions existantes seront mises a jour.`)) return;
+  if (msg) { msg.className = 'msg info'; msg.textContent = 'Import en cours...'; }
+  try {
+    const {res, data} = await apiFetch('/api/import', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', ...getEditorHeaders()},
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok || !data.success) throw new Error(data.error || 'Import echoue');
+    if (msg) { msg.className = 'msg success'; msg.textContent = `Import termine: ${data.imported_products} produit(s) et ${data.imported_layouts} allee(s) importes. ${data.skipped_products ? data.skipped_products + ' ignore(s).' : ''}`; }
+    await refreshProductsCache(true);
+    await refreshLayouts();
+    renderMapEditor();
+  } catch (e) {
+    if (msg) { msg.className = 'msg error'; msg.textContent = e.message || 'Erreur lors de l import.'; }
   }
 }
 
