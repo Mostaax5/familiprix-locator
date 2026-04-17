@@ -2374,7 +2374,7 @@ function showOnlineLookupForm(barcode) {
   pendingLookupAssist = null;
   div.innerHTML = `<div class="card">
     <div class="pill">Nouveau produit</div>
-    <div id="lookupStatus" class="msg info">Code-barres enregistre pour cette position. Recherche du produit en ligne...</div>
+    <div id="lookupStatus" class="msg info">Recherche dans UPC Item DB, EAN Search, Open Food/Beauty/Drug/Products Facts, Barcode Lookup, Go UPC et sites pharmacies...</div>
     <div style="display:flex;gap:10px;align-items:flex-start;margin-top:10px">
       <div id="lookupImageWrap"></div>
       <div style="flex:1">
@@ -2385,6 +2385,10 @@ function showOnlineLookupForm(barcode) {
         <div class="field">
           <label class="label" for="scanProductBrand">Marque</label>
           <input type="text" id="scanProductBrand" value="" placeholder="Marque"/>
+          <div class="tool-row" style="margin-top:4px;gap:4px">
+            <button class="btn btn-outline btn-inline" style="font-size:11px;padding:2px 8px;border-color:#c8102e;color:#c8102e" onclick="document.getElementById('scanProductBrand').value='Biomedic'">★ Biomedic</button>
+            <button class="btn btn-outline btn-inline" style="font-size:11px;padding:2px 8px;border-color:#c8102e;color:#c8102e" onclick="document.getElementById('scanProductBrand').value='Essentiel'">★ Essentiel</button>
+          </div>
         </div>
       </div>
     </div>
@@ -2410,7 +2414,7 @@ function showOnlineLookupForm(barcode) {
 
 async function hydrateOnlineLookup(barcode) {
   const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), 4000);
+  const timeoutId = window.setTimeout(() => controller.abort(), 14000);
   let lookupProduct = null;
   try {
     const lookupData = await apiLookupOnline(barcode, controller.signal);
@@ -2436,7 +2440,7 @@ async function hydrateOnlineLookup(barcode) {
   } else {
     pendingLookupProduct = null;
     status.className = 'msg error';
-    status.textContent = 'Produit non trouve en ligne. Ajoutez-le comme produit a identifier et continuez le scan.';
+    status.textContent = 'Introuvable dans toutes les bases (UPC Item DB, Open Facts, EAN Search, Barcode Lookup, Go UPC, sites pharmacies). Remplissez manuellement — marque maison? Utilisez les boutons Biomedic / Essentiel.';
   }
 }
 

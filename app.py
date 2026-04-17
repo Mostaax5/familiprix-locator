@@ -30,6 +30,7 @@ PRODUCT_LOOKUP_SOURCES = [
     ("Open Products Facts", "https://world.openproductsfacts.org"),
     ("Open Beauty Facts", "https://world.openbeautyfacts.org"),
     ("Open Food Facts", "https://world.openfoodfacts.org"),
+    ("Open Drug Facts", "https://world.opendrugfacts.org"),
 ]
 
 DEFAULT_CERT_PATH = os.path.join(os.path.dirname(__file__), "certs", "localhost.pem")
@@ -252,21 +253,31 @@ def lookup_barcode(barcode):
 
     barcode_candidates = build_barcode_candidates(barcode)
 
-    # Phase 1: fast JSON APIs run in parallel — most reliable
+    # Phase 1: fast JSON APIs in parallel — most reliable
     json_tasks = []
     for candidate in barcode_candidates:
         json_tasks.append(lambda bc=candidate: lookup_upcitemdb(bc))
+        json_tasks.append(lambda bc=candidate: lookup_ean_search(bc))
     for candidate in barcode_candidates:
         for source_name, base_url in PRODUCT_LOOKUP_SOURCES:
             json_tasks.append(
                 lambda bc=candidate, sn=source_name, su=base_url:
                 lookup_open_facts_product(sn, su, bc)
             )
-    product = first_lookup_result(json_tasks, max_workers=8)
+    product = first_lookup_result(json_tasks, max_workers=12)
     if product:
         return jsonify({"found": True, "product": product})
 
-    # Phase 2: pharmacy website scrapers as fallback
+    # Phase 2: scraper-based barcode databases
+    scraper_tasks = []
+    for candidate in barcode_candidates:
+        scraper_tasks.append(lambda bc=candidate: lookup_barcodelookup(bc))
+        scraper_tasks.append(lambda bc=candidate: lookup_go_upc(bc))
+    product = first_lookup_result(scraper_tasks, max_workers=4)
+    if product:
+        return jsonify({"found": True, "product": product})
+
+    # Phase 3: pharmacy website scrapers
     pharmacy_tasks = []
     for candidate in barcode_candidates:
         for source_name, source_base_url in PHARMACY_LOOKUP_SOURCES:
@@ -545,8 +556,9 @@ def parse_generic_pharmacy_product_page(source_name, html, url, barcode, barcode
     if not page_mentions_barcode(html, barcode_candidates):
         return None
 
+    embedded = extract_embedded_json_product(html, barcode_candidates)
     structured = extract_structured_product_data(html, barcode_candidates)
-    title = sanitize_title(structured.get("name") or clean_html_text(first_regex(html, [
+    title = sanitize_title(embedded.get("name") or structured.get("name") or clean_html_text(first_regex(html, [
         r"<h1[^>]*>(.*?)</h1>",
         r'<meta property="og:title" content="([^"]+)"',
         r"<title>(.*?)</title>",
@@ -578,8 +590,9 @@ def parse_familiprix_product_page(html, url, barcode, barcode_candidates=None):
     if not page_mentions_barcode(html, barcode_candidates):
         return None
 
+    embedded = extract_embedded_json_product(html, barcode_candidates)
     structured = extract_structured_product_data(html, barcode_candidates)
-    title = structured.get("name") or first_regex(html, [
+    title = embedded.get("name") or structured.get("name") or first_regex(html, [
         r"<h1[^>]*>(.*?)</h1>",
         r'<meta property="og:title" content="([^"]+)"',
         r"<title>(.*?)</title>",
@@ -825,6 +838,171 @@ def lookup_upcitemdb(barcode):
         "source_url": f"https://www.upcitemdb.com/upc/{digits}",
         "image_url": image_url,
     }
+
+
+def lookup_ean_search(barcode):
+    digits = normalized_digits(barcode)
+    if not digits:
+        return None
+    request_obj = Request(
+        f"https://api.ean-search.org/api?op=barcode-lookup&ean={digits}&lang=1&format=json",
+        headers={"User-Agent": "FamiliprixLocator/0.1", "Accept": "application/json"},
+    )
+    try:
+        with urlopen(request_obj, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+        return None
+    items = payload if isinstance(payload, list) else []
+    if not items:
+        return None
+    item = items[0]
+    name = str(item.get("name", "")).strip()
+    if not name or name.lower() in {"unknown", "n/a", ""}:
+        return None
+    return {
+        "name": name,
+        "brand": infer_brand_from_title(name),
+        "description": "",
+        "barcode": digits,
+        "source": "EAN Search",
+        "source_url": f"https://www.ean-search.org/perl/ean-search.pl?q={digits}",
+        "image_url": "",
+    }
+
+
+def lookup_barcodelookup(barcode):
+    digits = normalized_digits(barcode)
+    if not digits:
+        return None
+    url = f"https://www.barcodelookup.com/{digits}"
+    request_obj = Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+        "Accept-Language": "fr-CA,fr;q=0.9,en;q=0.6",
+    })
+    try:
+        with urlopen(request_obj, timeout=8) as response:
+            html = response.read().decode("utf-8", errors="ignore")
+    except (HTTPError, URLError, TimeoutError):
+        return None
+    candidates = build_barcode_candidates(barcode)
+    structured = extract_structured_product_data(html, candidates)
+    name = structured.get("name") or clean_html_text(first_regex(html, [
+        r'<h4[^>]*class="[^"]*product-name[^"]*"[^>]*>(.*?)</h4>',
+        r'<h1[^>]*>(.*?)</h1>',
+        r'<meta property="og:title" content="([^"]+)"',
+    ]))
+    if not name or len(name) < 3 or "not found" in name.lower():
+        return None
+    brand = structured.get("brand") or clean_html_text(first_regex(html, [
+        r'<span[^>]*class="[^"]*brand[^"]*"[^>]*>(.*?)</span>',
+        r'<p[^>]*class="[^"]*brand[^"]*"[^>]*>(.*?)</p>',
+    ]))
+    description = structured.get("description") or clean_html_text(first_regex(html, [
+        r'<meta name="description" content="([^"]+)"',
+        r'<meta property="og:description" content="([^"]+)"',
+    ]))
+    image_url = structured.get("image_url") or first_regex(html, [r'<meta property="og:image" content="([^"]+)"'])
+    return {
+        "name": name.strip(),
+        "brand": brand or infer_brand_from_title(name),
+        "description": description,
+        "barcode": digits,
+        "source": "Barcode Lookup",
+        "source_url": url,
+        "image_url": image_url or "",
+    }
+
+
+def lookup_go_upc(barcode):
+    digits = normalized_digits(barcode)
+    if not digits:
+        return None
+    url = f"https://go-upc.com/barcode/{digits}"
+    request_obj = Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+        "Accept": "text/html,*/*",
+        "Accept-Language": "fr-CA,fr;q=0.9,en;q=0.6",
+    })
+    try:
+        with urlopen(request_obj, timeout=8) as response:
+            html = response.read().decode("utf-8", errors="ignore")
+    except (HTTPError, URLError, TimeoutError):
+        return None
+    candidates = build_barcode_candidates(barcode)
+    structured = extract_structured_product_data(html, candidates)
+    name = structured.get("name") or clean_html_text(first_regex(html, [
+        r'<h1[^>]*class="[^"]*product-name[^"]*"[^>]*>(.*?)</h1>',
+        r'<h1[^>]*>(.*?)</h1>',
+        r'<meta property="og:title" content="([^"]+)"',
+    ]))
+    if not name or len(name) < 3 or "not found" in name.lower() or name.lower().startswith("barcode"):
+        return None
+    brand = structured.get("brand") or clean_html_text(first_regex(html, [
+        r'class="[^"]*brand[^"]*"[^>]*>\s*(.*?)\s*</\w+>',
+    ]))
+    description = structured.get("description") or clean_html_text(first_regex(html, [
+        r'<meta name="description" content="([^"]+)"',
+        r'<meta property="og:description" content="([^"]+)"',
+    ]))
+    image_url = structured.get("image_url") or first_regex(html, [r'<meta property="og:image" content="([^"]+)"'])
+    return {
+        "name": name.strip(),
+        "brand": brand or infer_brand_from_title(name),
+        "description": description,
+        "barcode": digits,
+        "source": "Go UPC",
+        "source_url": url,
+        "image_url": image_url or "",
+    }
+
+
+def extract_embedded_json_product(html, barcode_candidates):
+    for pattern in [
+        r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+        r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\});\s*(?:</script>|window\.)',
+    ]:
+        match = re.search(pattern, html, flags=re.DOTALL | re.IGNORECASE)
+        if not match:
+            continue
+        try:
+            data = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        result = _find_product_node(data, barcode_candidates, 0)
+        if result:
+            return result
+    return {}
+
+
+def _find_product_node(obj, barcode_candidates, depth):
+    if depth > 10:
+        return {}
+    if isinstance(obj, dict):
+        name = str(obj.get("name") or obj.get("title") or obj.get("productName") or "").strip()
+        if name and len(name) > 3:
+            obj_text = json.dumps(obj)
+            for candidate in (barcode_candidates or []):
+                cd = normalized_digits(candidate)
+                if cd and cd in normalized_digits(obj_text):
+                    raw_brand = obj.get("brand") or obj.get("brandName") or ""
+                    brand = str(raw_brand.get("name", "") if isinstance(raw_brand, dict) else raw_brand).strip()
+                    description = clean_html_text(str(obj.get("description") or obj.get("shortDescription") or ""))
+                    image = str(obj.get("image") or obj.get("imageUrl") or obj.get("thumbnail") or "").strip()
+                    return {"name": name, "brand": brand, "description": description, "image_url": image}
+        for value in obj.values():
+            if isinstance(value, (dict, list)):
+                result = _find_product_node(value, barcode_candidates, depth + 1)
+                if result:
+                    return result
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, (dict, list)):
+                result = _find_product_node(item, barcode_candidates, depth + 1)
+                if result:
+                    return result
+    return {}
 
 
 def product_search_text(product):
