@@ -326,11 +326,11 @@ def client_help():
 
     raw_products = data.get("products")
     if isinstance(raw_products, list):
-        matched_products = [product_context_for_client_help(item) for item in raw_products[:6] if isinstance(item, dict)]
+        matched_products = [product_context_for_client_help(item) for item in raw_products[:20] if isinstance(item, dict)]
     else:
         db = get_db()
         products = [row_to_product(p) for p in db.execute("SELECT * FROM products").fetchall()]
-        matched_products = [product_context_for_client_help(item) for item in rank_products_for_query(products, question, limit=6)]
+        matched_products = [product_context_for_client_help(item) for item in rank_products_for_query(products, question, limit=20)]
 
     advice = generate_client_help_payload(question, matched_products)
     if not advice:
@@ -1139,21 +1139,17 @@ def generate_client_help_payload_gemini(question, products):
             "parts": [{
                 "text": (
                     "Tu aides un employe de pharmacie Familiprix au Quebec a repondre a un client. "
-                    "Donne toujours le meilleur conseil possible sans compromis. "
-                    "Si des produits sont disponibles dans le contexte, base-toi sur eux pour orienter le client. "
-                    "Si des produits de marque maison Familiprix figurent dans la liste "
-                    "(Biomedic = medicaments generiques et soins de sante; Essentiel = soins personnels et articles menagers), "
-                    "mentionne-les dans ta reponse en precisant qu il s agit d une marque maison Familiprix, "
-                    "mais sans les imposer si un autre produit est clairement mieux adapte au besoin du client. "
-                    "Si aucun produit n est fourni, donne un conseil general utile en pharmacie "
-                    "(categories de produits a suggerer, questions a poser au client, signes d alerte) "
-                    "et indique si les gammes Biomedic ou Essentiel de Familiprix pourraient correspondre. "
+                    "Donne toujours le meilleur conseil possible. "
+                    "Base-toi UNIQUEMENT sur les produits fournis dans la liste. "
+                    "Ne propose jamais un produit qui n est pas dans la liste fournie. "
+                    "Si un produit de la liste est de marque Biomedic ou Essentiel (marques maison Familiprix), "
+                    "precise-le dans ta reponse. "
+                    "Si la liste est vide, donne un conseil general en pharmacie sans nommer de produits specifiques. "
                     "Ne pose pas de diagnostic. "
                     "Dis clairement quand il faut orienter le client vers le pharmacien: "
-                    "grossesse, bebe ou jeune enfant, interaction medicamenteuse possible, symptomes graves, "
-                    "douleur importante, difficulte respiratoire, fievre elevee, duree inhabituelle ou doute. "
-                    "Dans recommended_product_names, inclus tous les produits pertinents du magasin, "
-                    "sinon des types de produits a chercher. "
+                    "grossesse, bebe, interaction medicamenteuse, symptomes graves, douleur importante, "
+                    "difficulte respiratoire, fievre elevee, duree inhabituelle ou doute medical. "
+                    "Dans recommended_product_names, mets UNIQUEMENT les noms de produits presents dans la liste fournie. "
                     "Retourne uniquement un JSON en francais avec exactement les cles "
                     "summary (texte), recommended_product_names (tableau), follow_up_questions (tableau), "
                     "safety_flags (tableau), pharmacist_referral (booleen) et pharmacist_reason (texte).\n\n"
@@ -1194,21 +1190,17 @@ def generate_client_help_payload_openai(question, products):
         "reasoning": {"effort": "low"},
         "instructions": (
             "Tu aides un employe de pharmacie Familiprix au Quebec a repondre a un client. "
-            "Donne toujours le meilleur conseil possible sans compromis. "
-            "Si des produits sont disponibles dans le contexte, base-toi sur eux pour orienter le client. "
-            "Si des produits de marque maison Familiprix figurent dans la liste "
-            "(Biomedic = medicaments generiques et soins de sante; Essentiel = soins personnels et articles menagers), "
-            "mentionne-les dans ta reponse en precisant qu il s agit d une marque maison Familiprix, "
-            "mais sans les imposer si un autre produit est clairement mieux adapte au besoin du client. "
-            "Si aucun produit n est fourni, donne un conseil general utile en pharmacie "
-            "(categories de produits a suggerer, questions a poser au client, signes d alerte) "
-            "et indique si les gammes Biomedic ou Essentiel de Familiprix pourraient correspondre. "
+            "Donne toujours le meilleur conseil possible. "
+            "Base-toi UNIQUEMENT sur les produits fournis dans la liste. "
+            "Ne propose jamais un produit qui n est pas dans la liste fournie. "
+            "Si un produit de la liste est de marque Biomedic ou Essentiel (marques maison Familiprix), "
+            "precise-le dans ta reponse. "
+            "Si la liste est vide, donne un conseil general en pharmacie sans nommer de produits specifiques. "
             "Ne pose pas de diagnostic. "
             "Dis clairement quand il faut orienter le client vers le pharmacien: "
-            "grossesse, bebe ou jeune enfant, interaction medicamenteuse possible, symptomes graves, "
-            "douleur importante, difficulte respiratoire, fievre elevee, duree inhabituelle ou doute. "
-            "Dans recommended_product_names, inclus tous les produits pertinents du magasin, "
-            "sinon des types de produits a chercher. "
+            "grossesse, bebe, interaction medicamenteuse, symptomes graves, douleur importante, "
+            "difficulte respiratoire, fievre elevee, duree inhabituelle ou doute medical. "
+            "Dans recommended_product_names, mets UNIQUEMENT les noms de produits presents dans la liste fournie. "
             "Retourne uniquement un JSON en francais."
         ),
         "input": json.dumps({"question": question, "products": products}, ensure_ascii=False),

@@ -1674,7 +1674,7 @@ function runClientSearch(showEmptyMessage=true) {
     if (status && showEmptyMessage) status.textContent = 'Ecrivez la question du client pour voir les produits proposes.';
     return [];
   }
-  currentClientMatches = searchProductsFromCache(question, 8);
+  currentClientMatches = searchProductsFromCache(question, 20);
   renderClientMatches(currentClientMatches, question);
   if (status) {
     status.textContent = currentClientMatches.length
@@ -1704,7 +1704,7 @@ async function generateClientHelp() {
   }
   const result = await apiGenerateClientHelp({
     question,
-    products: matches.slice(0, 6).map(sanitizeProductForClientAi)
+    products: matches.slice(0, 20).map(sanitizeProductForClientAi)
   });
   if (!result.success || !result.advice) {
     renderClientAdvice(null);
