@@ -299,7 +299,7 @@
     <div class="section-title">Sauvegarde de la base</div>
     <div class="section-note">Telechargez une copie complete du magasin (produits + plan) pour la partager ou la garder. Importez un fichier de sauvegarde pour restaurer ou fusionner les donnees.</div>
     <div class="tool-row">
-      <button class="btn btn-inline" onclick="exportDatabase()">⬇ Telecharger la base</button>
+      <button class="btn btn-inline" onclick="exportDatabase()">↗ Partager / Sauvegarder la base</button>
       <label class="btn btn-outline btn-inline" style="cursor:pointer">
         ⬆ Importer une sauvegarde
         <input type="file" accept=".json,application/json" style="display:none" onchange="importDatabase(this)"/>
@@ -994,16 +994,32 @@ async function apiGenerateClientHelp(payload) {
   }
 }
 
-function exportDatabase() {
+async function exportDatabase() {
   const msg = document.getElementById('exportImportMsg');
   if (msg) { msg.className = 'msg info'; msg.textContent = 'Preparation du fichier...'; }
-  const a = document.createElement('a');
-  a.href = '/api/export';
-  a.download = '';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  if (msg) window.setTimeout(() => { msg.className = 'msg success'; msg.textContent = 'Fichier telecharge. Partagez-le via WhatsApp ou gardez-le comme sauvegarde.'; }, 800);
+  try {
+    const res = await fetch('/api/export');
+    if (!res.ok) throw new Error('Erreur serveur');
+    const blob = await res.blob();
+    const filename = `familiprix-backup-${new Date().toISOString().slice(0,10)}.json`;
+    const file = new File([blob], filename, {type: 'application/json'});
+    if (navigator.canShare && navigator.canShare({files: [file]})) {
+      await navigator.share({files: [file], title: 'Sauvegarde Familiprix', text: 'Base de donnees Familiprix Localisateur'});
+      if (msg) { msg.className = 'msg success'; msg.textContent = 'Fichier partage avec succes.'; }
+    } else {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      if (msg) { msg.className = 'msg success'; msg.textContent = 'Fichier telecharge. Partagez-le via WhatsApp.'; }
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError' && msg) { msg.className = 'msg error'; msg.textContent = 'Impossible de partager le fichier.'; }
+  }
 }
 
 async function importDatabase(input) {
