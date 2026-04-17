@@ -305,6 +305,10 @@
         <input type="file" accept=".json,application/json" style="display:none" onchange="importDatabase(this)"/>
       </label>
     </div>
+    <div class="tool-row" style="margin-top:8px">
+      <button class="btn btn-outline btn-inline" style="border-color:#991b1b;color:#991b1b" onclick="resetDatabase(false)">🗑 Vider les produits</button>
+      <button class="btn btn-outline btn-inline" style="border-color:#991b1b;color:#991b1b" onclick="resetDatabase(true)">🗑 Tout effacer (produits + plan)</button>
+    </div>
     <div id="exportImportMsg"></div>
   </div>
 
@@ -1056,6 +1060,30 @@ async function importDatabase(input) {
     renderMapEditor();
   } catch (e) {
     if (msg) { msg.className = 'msg error'; msg.textContent = e.message || 'Erreur lors de l import.'; }
+  }
+}
+
+async function resetDatabase(wipeLayouts) {
+  const msg = document.getElementById('exportImportMsg');
+  const what = wipeLayouts ? 'TOUS les produits ET le plan du magasin' : 'tous les produits';
+  if (!confirm(`Effacer ${what}? Cette action est irreversible. Faites une sauvegarde d abord si necessaire.`)) return;
+  if (!confirm('Confirmation finale: effacer definitivement?')) return;
+  if (msg) { msg.className = 'msg info'; msg.textContent = 'Suppression en cours...'; }
+  try {
+    const {res, data} = await apiFetch('/api/reset', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', ...getEditorHeaders()},
+      body: JSON.stringify({wipe_layouts: wipeLayouts})
+    });
+    if (!res.ok || !data.success) throw new Error(data.error || 'Erreur');
+    if (msg) {
+      msg.className = 'msg success';
+      msg.textContent = `Base nettoyee: ${data.deleted_products} produit(s) supprime(s)${wipeLayouts ? `, ${data.deleted_layouts} allee(s) supprimee(s)` : ''}.`;
+    }
+    await refreshProductsCache(true);
+    if (wipeLayouts) { await refreshLayouts(); renderMapEditor(); }
+  } catch (e) {
+    if (msg) { msg.className = 'msg error'; msg.textContent = e.message || 'Erreur lors de la suppression.'; }
   }
 }
 

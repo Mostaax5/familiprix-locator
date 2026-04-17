@@ -236,6 +236,30 @@ def import_database():
     })
 
 
+# ── API: Reset ─────────────────────────────────────────────────────────────
+
+@app.route("/api/reset", methods=["POST"])
+def reset_database():
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json() or {}
+    wipe_layouts = bool(data.get("wipe_layouts", False))
+    db = get_db()
+    product_count = first_column(db.execute("SELECT COUNT(*) FROM products").fetchone()) or 0
+    db.execute("DELETE FROM products")
+    layout_count = 0
+    if wipe_layouts:
+        layout_count = first_column(db.execute("SELECT COUNT(*) FROM aisle_layouts").fetchone()) or 0
+        db.execute("DELETE FROM aisle_layouts")
+    db.commit()
+    return jsonify({
+        "success": True,
+        "deleted_products": int(product_count),
+        "deleted_layouts": int(layout_count),
+    })
+
+
 # ── API: Products ──────────────────────────────────────────────────────────
 
 @app.route("/api/products", methods=["GET"])
