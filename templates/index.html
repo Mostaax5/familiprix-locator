@@ -102,6 +102,13 @@
   .slot-chip.active{background:#ecfdf5;border-color:#86efac;color:#166534}
   .pill.warning{background:#fff7ed;color:#9a3412}
   .plan-shelf-card{border:1px solid #e6e8ec;border-radius:8px;background:#fff;padding:10px}
+  .plan-product-list{margin-top:8px;border-top:1px solid #e6e8ec;padding-top:6px}
+  .plan-product-item{display:flex;gap:8px;align-items:baseline;padding:3px 0;font-size:12px;border-bottom:1px dashed #f0f0f0}
+  .plan-product-item:last-child{border-bottom:none}
+  .plan-pos-badge{min-width:20px;font-weight:700;color:#6b7280;font-size:11px;flex-shrink:0}
+  .plan-product-name{flex:1;color:#111827;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .plan-product-brand{color:#6b7280;font-size:11px;white-space:nowrap;flex-shrink:0}
+  .plan-slot-empty{color:#d1d5db;font-style:italic;font-size:11px}
   .advice-card{background:#f8fafc;border:1px solid #dbe4ee;border-radius:8px;padding:12px;margin-top:10px}
   .advice-list{display:grid;gap:6px;margin-top:10px}
   .advice-item{font-size:12px;color:#334155;line-height:1.45;padding:8px 10px;border-radius:8px;background:white;border:1px solid #e2e8f0}
@@ -2704,6 +2711,48 @@ function finishConfirmed(message, brand) {
   }, 1200);
 }
 
+function renderShelfProductList(aisle, side, section, shelf, positions) {
+  const products = allProductsCache.filter(p =>
+    String(p.aisle) === String(aisle) &&
+    p.side === side &&
+    String(p.section) === String(section) &&
+    String(p.shelf) === String(shelf)
+  ).sort((a, b) => Number(a.position) - Number(b.position));
+  const filled = products.length;
+  const total = Number(positions) || 0;
+  if (!total && !filled) return '';
+  const byPos = {};
+  products.forEach(p => { byPos[Number(p.position)] = p; });
+  let html = `<div class="plan-product-list">`;
+  html += `<div style="font-size:11px;color:#6b7280;margin-bottom:4px;font-weight:600">${filled}/${total} position${total !== 1 ? 's' : ''} occupée${filled !== 1 ? 's' : ''}</div>`;
+  for (let pos = 1; pos <= total; pos++) {
+    const p = byPos[pos];
+    if (p) {
+      html += `<div class="plan-product-item">
+        <span class="plan-pos-badge">${pos}</span>
+        <span class="plan-product-name" title="${esc(p.name)}">${esc(p.name)}</span>
+        ${p.brand ? `<span class="plan-product-brand">${esc(p.brand)}</span>` : ''}
+        <span class="plan-product-brand" style="color:#9ca3af;font-family:monospace">${p.barcode ? esc(p.barcode) : '—'}</span>
+      </div>`;
+    } else {
+      html += `<div class="plan-product-item">
+        <span class="plan-pos-badge">${pos}</span>
+        <span class="plan-slot-empty">vide</span>
+      </div>`;
+    }
+  }
+  products.filter(p => Number(p.position) < 1 || Number(p.position) > total).forEach(p => {
+    html += `<div class="plan-product-item" style="color:#c8102e">
+      <span class="plan-pos-badge">${esc(String(p.position))}</span>
+      <span class="plan-product-name">${esc(p.name)}</span>
+      <span class="plan-product-brand" style="font-family:monospace">${p.barcode ? esc(p.barcode) : '—'}</span>
+      <span class="plan-product-brand">hors limite</span>
+    </div>`;
+  });
+  html += `</div>`;
+  return html;
+}
+
 function renderMapEditor() {
   captureOpenPlanNodesFromDom();
   const msgDiv = document.getElementById('addMsg');
@@ -2773,10 +2822,14 @@ function renderMapEditor() {
                   String(p.aisle) === String(layout.aisle) && p.side === side &&
                   String(p.section) === String(sectionIndex + 1) && isHomeBrand(p.brand)
                 );
+                const sectionProducts = allProductsCache.filter(p =>
+                  String(p.aisle) === String(layout.aisle) && p.side === side &&
+                  String(p.section) === String(sectionIndex + 1)
+                );
                 return `<details class="tree-node plan-section" data-node-id="${sectionNodeId}"${detailsOpenAttr(sectionNodeId)}>
                 <summary>
                   <span>Section ${sectionIndex + 1}</span>
-                  <span class="tree-meta">${section.shelves.length} tablette${section.shelves.length > 1 ? 's' : ''}${sectionHomeBrands.length ? ` · <span style="color:#c8102e;font-weight:700">★ ${sectionHomeBrands.length} maison</span>` : ''}</span>
+                  <span class="tree-meta">${section.shelves.length} tablette${section.shelves.length > 1 ? 's' : ''} · ${sectionProducts.length} produit${sectionProducts.length !== 1 ? 's' : ''}${sectionHomeBrands.length ? ` · <span style="color:#c8102e;font-weight:700">★ ${sectionHomeBrands.length} maison</span>` : ''}</span>
                   <button class="btn btn-outline btn-inline" style="padding:3px 8px;font-size:11px;margin:0;flex-shrink:0" onclick="event.stopPropagation();startScanFromSection('${esc(layout.aisle)}','${side}',${sectionIndex})">▶ Scan ici</button>
                 </summary>
                 <div class="tree-body">
@@ -2791,6 +2844,7 @@ function renderMapEditor() {
                         <label class="label" for="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}">Tablette ${shelfIndex + 1} — positions</label>
                         <input id="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}" type="number" min="0" value="${positions}" onchange="setShelfPositionCount('${esc(layout.aisle)}','${side}', ${sectionIndex}, ${shelfIndex}, this.value)"/>
                       </div>
+                      ${renderShelfProductList(layout.aisle, side, sectionIndex + 1, shelfIndex + 1, positions)}
                     </div>`).join('')}
                   </div>
                 </div>
