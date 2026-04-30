@@ -20,11 +20,11 @@ app = Flask(__name__)
 init_db()
 
 PHARMACY_LOOKUP_SOURCES = [
-    ("Familiprix", None),
     ("Jean Coutu", "https://www.jeancoutu.com"),
     ("Brunet", "https://www.brunet.ca"),
     ("Pharmaprix", "https://www.pharmaprix.ca"),
 ]
+FAMILIPRIX_BASE_URL = "https://magasiner.familiprix.com"
 
 PRODUCT_LOOKUP_SOURCES = [
     ("Open Products Facts", "https://world.openproductsfacts.org"),
@@ -407,7 +407,16 @@ def lookup_barcode(barcode):
     if product:
         return jsonify({"found": True, "product": product})
 
-    # Phase 2: scraper-based barcode databases
+    # Phase 2: Familiprix first — our own store, checked before generic barcode sites
+    familiprix_tasks = [
+        lambda bc=candidate, bcs=barcode_candidates: lookup_familiprix_product(bc, bcs)
+        for candidate in barcode_candidates
+    ]
+    product = first_lookup_result(familiprix_tasks, max_workers=len(familiprix_tasks))
+    if product:
+        return jsonify({"found": True, "product": product})
+
+    # Phase 3: generic scraper-based barcode databases
     scraper_tasks = []
     for candidate in barcode_candidates:
         scraper_tasks.append(lambda bc=candidate: lookup_barcodelookup(bc))
@@ -416,20 +425,14 @@ def lookup_barcode(barcode):
     if product:
         return jsonify({"found": True, "product": product})
 
-    # Phase 3: pharmacy website scrapers
+    # Phase 4: other pharmacy website scrapers
     pharmacy_tasks = []
     for candidate in barcode_candidates:
         for source_name, source_base_url in PHARMACY_LOOKUP_SOURCES:
-            if source_name == "Familiprix":
-                pharmacy_tasks.append(
-                    lambda bc=candidate, bcs=barcode_candidates:
-                    lookup_familiprix_product(bc, bcs)
-                )
-            else:
-                pharmacy_tasks.append(
-                    lambda bc=candidate, sn=source_name, su=source_base_url, bcs=barcode_candidates:
-                    lookup_generic_pharmacy_product(sn, su, bc, bcs)
-                )
+            pharmacy_tasks.append(
+                lambda bc=candidate, sn=source_name, su=source_base_url, bcs=barcode_candidates:
+                lookup_generic_pharmacy_product(sn, su, bc, bcs)
+            )
     product = first_lookup_result(pharmacy_tasks, max_workers=4)
     if product:
         return jsonify({"found": True, "product": product})

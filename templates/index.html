@@ -2004,6 +2004,20 @@ function extractBarcodeTextCandidates(text) {
       }
     }
   }
+  // Also try all digits joined — barcode digit rows are often printed with a space between each digit
+  const allDigits = chunks.join('');
+  if (allDigits.length >= 8) {
+    for (const size of [13, 12, 8]) {
+      if (allDigits.length === size) {
+        candidates.add(allDigits);
+      } else if (allDigits.length > size) {
+        // Prefer the rightmost match to avoid an internal code on the left
+        for (let start = allDigits.length - size; start >= 0; start -= 1) {
+          candidates.add(allDigits.slice(start, start + size));
+        }
+      }
+    }
+  }
   return Array.from(candidates).filter(validateRetailBarcode);
 }
 
@@ -2013,7 +2027,8 @@ async function recognizeBarcodeDigitsFromVideo(reader) {
   if (!(await ensureOcrLoaded()) || !window.Tesseract) return null;
 
   const crops = [
-    {x: 0.08, y: 0.55, w: 0.84, h: 0.22, scale: 2.2}
+    {x: 0.20, y: 0.55, w: 0.72, h: 0.22, scale: 2.5},
+    {x: 0.05, y: 0.50, w: 0.90, h: 0.28, scale: 2.0}
   ];
 
   for (const crop of crops) {
@@ -2031,7 +2046,7 @@ async function recognizeBarcodeDigitsFromVideo(reader) {
 
 async function maybeRunOcrFallback(reader, status) {
   if (ocrBusy || scanPaused || !quaggaActive) return;
-  if (Date.now() - quaggaStartedAt < 6000) return;
+  if (Date.now() - quaggaStartedAt < 3000) return;
   if (cameraUsageMode === 'search') return;
   ocrBusy = true;
   try {
@@ -2059,23 +2074,23 @@ async function startQuaggaScanner(reader, status, button) {
       target: reader,
       constraints: {
         facingMode: 'environment',
-        width: {ideal: 1280},
-        height: {ideal: 720},
-        aspectRatio: {ideal: 1.7777778}
+        width: {min: 1280, ideal: 1920},
+        height: {min: 720, ideal: 1080},
+        advanced: [{focusMode: 'continuous'}]
       },
       area: {
-        top: '28%',
+        top: '25%',
         right: '4%',
         left: '4%',
-        bottom: '28%'
+        bottom: '25%'
       }
     },
     locator: {
-      patchSize: 'small',
-      halfSample: true
+      patchSize: 'x-small',
+      halfSample: false
     },
-    numOfWorkers: 1,
-    frequency: 8,
+    numOfWorkers: 2,
+    frequency: 12,
     locate: true,
     decoder: {
       readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader', 'code_128_reader'],
@@ -2114,7 +2129,7 @@ async function startQuaggaScanner(reader, status, button) {
   status.textContent = 'Cadrez les barres et les chiffres';
   quaggaOcrTimer = window.setInterval(() => {
     maybeRunOcrFallback(reader, status);
-  }, 6000);
+  }, 4000);
 }
 
 async function stopCamera() {
