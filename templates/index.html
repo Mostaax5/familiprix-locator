@@ -2331,7 +2331,9 @@ function setScannedBarcode(barcode) {
 }
 
 function clearScanInput() {
-  document.getElementById('scanInput').value = '';
+  const input = document.getElementById('scanInput');
+  input.value = '';
+  input.blur();
   currentScanProduct = null;
   lastLookedUpBarcode = '';
   activeLookupBarcode = '';
@@ -2339,7 +2341,6 @@ function clearScanInput() {
   resetCameraCandidate();
   persistScanDraft();
   if (scannerStream || html5Scanner) getCameraDom().status.textContent = 'Recherche code...';
-  focusScanInput();
 }
 
 function clearSearchInput() {
