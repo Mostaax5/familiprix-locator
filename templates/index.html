@@ -170,6 +170,34 @@
   .advice-list{display:grid;gap:6px;margin-top:10px}
   .advice-item{font-size:12px;color:#334155;line-height:1.5;padding:9px 12px;border-radius:10px;background:white;border:1px solid #e4e6ea}
 
+  /* ── Product card enhanced ── */
+  .home-badge{display:inline-flex;align-items:center;gap:5px;background:linear-gradient(135deg,#c8102e 0%,#a50d25 100%);color:white;font-size:11px;font-weight:700;padding:4px 10px;border-radius:6px;margin-bottom:10px;letter-spacing:.03em;box-shadow:0 1px 3px rgba(200,16,46,.3)}
+  .product-layout{display:flex;gap:14px;align-items:flex-start}
+  .product-thumb{width:82px;height:82px;object-fit:contain;border:1px solid #e4e6ea;border-radius:10px;background:#fafbfc;flex-shrink:0}
+  .product-info{flex:1;min-width:0}
+  .product-brand{font-size:12px;color:#6b7280;font-weight:600;margin-top:3px}
+  .product-footer{margin-top:12px;padding-top:12px;border-top:1px solid #f0f2f5;display:flex;flex-direction:column;gap:6px}
+  .meta-row{display:flex;gap:8px;font-size:12px;color:#4b5563;line-height:1.45}
+  .meta-label{font-weight:700;color:#9ca3af;min-width:72px;flex-shrink:0}
+  .location{display:flex;flex-wrap:wrap;align-items:center;gap:3px 6px;background:#eff6ff;color:#1d4ed8;border-radius:8px;padding:7px 12px;font-size:12px;font-weight:700;margin:8px 0 4px;border:1px solid #bfdbfe}
+  .loc-sep{color:#93c5fd;font-weight:400}
+  .delete-btn{float:right;background:none;border:none;color:#d1d5db;font-size:13px;font-weight:700;cursor:pointer;padding:0 0 2px 10px;transition:color .15s;line-height:1}
+  .delete-btn:hover{color:#c8102e}
+
+  /* ── Scan line animation ── */
+  @keyframes scanline{0%,100%{top:26%}50%{top:68%}}
+  .scan-line{position:absolute;left:8%;right:8%;height:2px;background:linear-gradient(90deg,transparent,rgba(200,16,46,.9) 30%,#ff1a3c 50%,rgba(200,16,46,.9) 70%,transparent);z-index:3;pointer-events:none;animation:scanline 2.2s ease-in-out infinite;box-shadow:0 0 10px rgba(200,16,46,.5),0 0 3px rgba(200,16,46,.8)}
+
+  /* ── Advice card sections ── */
+  .advice-summary{font-size:14px;color:#111827;line-height:1.65;margin-top:8px}
+  .advice-section{margin-top:14px}
+  .advice-label{font-size:10px;font-weight:700;text-transform:uppercase;color:#9ca3af;letter-spacing:.08em;margin-bottom:6px;display:block}
+  .advice-item-product{background:#eff6ff !important;border-color:#bfdbfe !important;color:#1d4ed8 !important;font-weight:600}
+  .advice-item-flag{background:#fffbeb !important;border-color:#fcd34d !important;color:#92400e !important}
+
+  /* ── Position badge ── */
+  .position-badge{display:flex;align-items:center;gap:8px;background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:9px 12px;font-size:13px;font-weight:700;color:#166534;margin-top:10px}
+
   /* ── Responsive ── */
   @media (min-width:860px){.content{max-width:900px}}
   @media (max-width:520px){.row2,.row3,.confirm-grid,.device-grid,.scan-tools,.btn-row{grid-template-columns:1fr}.tabs{top:calc(66px + env(safe-area-inset-top))}.tab{font-size:11px}.content{padding:12px}.cursor{align-items:flex-start;flex-direction:column}.btn-inline{width:100%}.scanner-viewport{height:min(36vh,230px)}}
@@ -224,6 +252,7 @@
     <div class="scanner-viewport">
       <video id="cameraPreview" playsinline muted></video>
       <div id="html5Reader"></div>
+      <div class="scan-line"></div>
     </div>
     <div class="scanner-bar">
       <span id="scannerStatus" class="pill">Camera arretee</span>
@@ -266,6 +295,7 @@
       <div class="scanner-viewport">
         <video id="searchCameraPreview" playsinline muted></video>
         <div id="searchHtml5Reader"></div>
+        <div class="scan-line"></div>
       </div>
       <div class="scanner-bar">
         <span id="searchScannerStatus" class="pill">Camera arretee</span>
@@ -1653,21 +1683,35 @@ function selectNumericField(input) {
 }
 
 function productCard(p, showDelete=true, showAiButton=true) {
+  const locationParts = [
+    `Allée ${esc(p.aisle)}`,
+    esc(sideDisplayLabel(p.side)),
+    `Section ${esc(p.section || '1')}`,
+    `Tablette ${esc(p.shelf)}`,
+    `Pos. ${esc(p.position)}`
+  ];
   return `<div class="card">
-    ${showDelete ? `<button class="delete-btn" onclick="deleteProduct(${p.id})" title="Supprimer">x</button>` : ''}
-    ${p.image_url ? `<img class="lookup-image" src="${esc(p.image_url)}" alt="Image produit" style="margin-bottom:10px">` : ''}
-    ${isHomeBrand(p.brand) ? `<div style="display:inline-block;background:#c8102e;color:#fff;font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px;margin-bottom:6px">★ Marque maison Familiprix</div>` : ''}
-    <div class="name">${esc(p.name)}</div>
-    ${p.brand ? `<div class="barcode-text">Marque: ${esc(p.brand)}</div>` : ''}
-    <div class="location">Allee ${esc(p.aisle)} - ${esc(sideDisplayLabel(p.side))} - Section ${esc(p.section || '1')} - Tablette ${esc(p.shelf)} - Pos. ${esc(p.position)}</div>
-    <div class="barcode-text">${p.barcode ? 'Code: ' + esc(p.barcode) : ''}</div>
-    ${p.source_url ? `<div class="barcode-text">Source image/fiche disponible</div>` : ''}
-    ${p.last_change_by ? `<div class="barcode-text">Dernier changement: ${esc(p.last_change_by)}</div>` : ''}
-    ${p.description ? `<div class="desc-text">${esc(p.description)}</div>` : ''}
-    ${p.usage_notes ? `<div class="desc-text">${esc(p.usage_notes)}</div>` : ''}
-    ${p.search_terms ? `<div class="barcode-text">Mots-clés clients: ${esc(p.search_terms)}</div>` : ''}
-    ${p.alternative_suggestions ? `<div class="barcode-text">Alternatives possibles: ${esc(p.alternative_suggestions)}</div>` : ''}
-    ${showAiButton && p.id && backendInfo.ai_enabled ? `<div class="tool-row"><button class="btn btn-outline btn-inline" onclick="enrichStoredProductWithAi(${p.id})">Generer aide client (IA)</button></div>` : ''}
+    ${showDelete ? `<button class="delete-btn" onclick="deleteProduct(${p.id})" title="Supprimer">✕</button>` : ''}
+    ${isHomeBrand(p.brand) ? `<div class="home-badge">★ Marque maison Familiprix</div>` : ''}
+    <div class="product-layout">
+      ${p.image_url ? `<img class="product-thumb" src="${esc(p.image_url)}" alt="Image produit">` : ''}
+      <div class="product-info">
+        <div class="name">${esc(p.name)}</div>
+        ${p.brand ? `<div class="product-brand">${esc(p.brand)}</div>` : ''}
+        <div class="location">
+          ${locationParts.join('<span class="loc-sep"> · </span>')}
+        </div>
+      </div>
+    </div>
+    <div class="product-footer">
+      ${p.barcode ? `<div class="meta-row"><span class="meta-label">Code-barres</span><span class="barcode-text">${esc(p.barcode)}</span></div>` : ''}
+      ${p.last_change_by ? `<div class="meta-row"><span class="meta-label">Modifié par</span><span>${esc(p.last_change_by)}</span></div>` : ''}
+      ${p.description ? `<div class="desc-text">${esc(p.description)}</div>` : ''}
+      ${p.usage_notes ? `<div class="desc-text">${esc(p.usage_notes)}</div>` : ''}
+      ${p.search_terms ? `<div class="meta-row"><span class="meta-label">Mots-clés</span><span class="small">${esc(p.search_terms)}</span></div>` : ''}
+      ${p.alternative_suggestions ? `<div class="meta-row"><span class="meta-label">Alternatives</span><span class="small">${esc(p.alternative_suggestions)}</span></div>` : ''}
+      ${showAiButton && p.id && backendInfo.ai_enabled ? `<div class="tool-row"><button class="btn btn-outline btn-inline" onclick="enrichStoredProductWithAi(${p.id})">Generer aide client (IA)</button></div>` : ''}
+    </div>
   </div>`;
 }
 
@@ -1825,12 +1869,24 @@ function renderClientAdvice(advice, hasStoreProducts) {
     <div class="advice-card">
       <div class="section-title">Reponse client</div>
       ${generalNotice}
-      ${advice.summary ? `<div class="desc-text">${esc(advice.summary)}</div>` : ''}
-      ${advice.recommended_product_names?.length ? `<div class="advice-list">${advice.recommended_product_names.map(item => `<div class="advice-item">Produit a expliquer: ${esc(item)}</div>`).join('')}</div>` : ''}
-      ${advice.follow_up_questions?.length ? `<div class="advice-list">${advice.follow_up_questions.map(item => `<div class="advice-item">Question a poser: ${esc(item)}</div>`).join('')}</div>` : ''}
-      ${advice.safety_flags?.length ? `<div class="advice-list">${advice.safety_flags.map(item => `<div class="advice-item">Point de vigilance: ${esc(item)}</div>`).join('')}</div>` : ''}
-      ${advice.pharmacist_referral ? `<div class="msg error">Orienter vers le pharmacien. ${esc(advice.pharmacist_reason || '')}</div>` : ''}
-      ${!advice.pharmacist_referral && advice.pharmacist_reason ? `<div class="msg info">${esc(advice.pharmacist_reason)}</div>` : ''}
+      ${advice.summary ? `<div class="advice-summary">${esc(advice.summary)}</div>` : ''}
+      ${advice.recommended_product_names?.length ? `
+        <div class="advice-section">
+          <span class="advice-label">Produits a expliquer</span>
+          <div class="advice-list">${advice.recommended_product_names.map(item => `<div class="advice-item advice-item-product">${esc(item)}</div>`).join('')}</div>
+        </div>` : ''}
+      ${advice.follow_up_questions?.length ? `
+        <div class="advice-section">
+          <span class="advice-label">Questions a poser</span>
+          <div class="advice-list">${advice.follow_up_questions.map(item => `<div class="advice-item">${esc(item)}</div>`).join('')}</div>
+        </div>` : ''}
+      ${advice.safety_flags?.length ? `
+        <div class="advice-section">
+          <span class="advice-label">Points de vigilance</span>
+          <div class="advice-list">${advice.safety_flags.map(item => `<div class="advice-item advice-item-flag">${esc(item)}</div>`).join('')}</div>
+        </div>` : ''}
+      ${advice.pharmacist_referral ? `<div class="msg error" style="margin-top:12px">Orienter vers le pharmacien. ${esc(advice.pharmacist_reason || '')}</div>` : ''}
+      ${!advice.pharmacist_referral && advice.pharmacist_reason ? `<div class="msg info" style="margin-top:12px">${esc(advice.pharmacist_reason)}</div>` : ''}
     </div>
   `;
 }
