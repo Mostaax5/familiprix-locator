@@ -256,6 +256,8 @@
     <div class="scanner-bar">
       <span id="scannerStatus" class="pill">Camera arretee</span>
       <button class="btn btn-inline" id="pauseScanButton" onclick="toggleScanPause()" style="display:none">⏸ Pause</button>
+      <button class="btn btn-outline btn-inline" id="torchButton" onclick="toggleTorch()" style="display:none" title="Lampe de poche">💡</button>
+      <input type="range" id="zoomSlider" min="1" max="5" step="0.5" value="1" style="display:none;width:64px;accent-color:#c8102e" title="Zoom" oninput="applyZoom(this.value)">
       <button class="btn btn-inline secondary" onclick="toggleCamera()" id="cameraButton">Ouvrir camera</button>
     </div>
   </div>
@@ -297,6 +299,8 @@
       </div>
       <div class="scanner-bar">
         <span id="searchScannerStatus" class="pill">Camera arretee</span>
+        <button class="btn btn-outline btn-inline" id="searchTorchButton" onclick="toggleTorch()" style="display:none" title="Lampe de poche">💡</button>
+        <input type="range" id="searchZoomSlider" min="1" max="5" step="0.5" value="1" style="display:none;width:64px;accent-color:#c8102e" title="Zoom" oninput="applyZoom(this.value)">
         <button class="btn btn-inline secondary" onclick="startSearchScan()" id="searchCameraButton">Ouvrir camera</button>
       </div>
     </div>
@@ -406,6 +410,16 @@
   </div>
 
   <div class="card">
+    <div class="section-title">Sauvegarde GitHub Gist</div>
+    <div id="gistStatusMsg" class="section-note">Verification...</div>
+    <div class="tool-row" id="gistActions" style="display:none">
+      <button class="btn btn-inline" onclick="gistBackupNow()">☁ Sauvegarder sur GitHub maintenant</button>
+      <button class="btn btn-outline btn-inline" onclick="gistRestoreNow()">↓ Restaurer depuis GitHub</button>
+    </div>
+    <div id="gistMsg"></div>
+  </div>
+
+  <div class="card">
     <div class="section-title">Plan du magasin</div>
     <div class="section-note">Le plan du magasin genere directement la liste des slots du scan. Le scanner n invente jamais de coordonnees.</div>
     <div class="row3">
@@ -465,6 +479,10 @@ let quaggaStartedAt = 0;
 let ocrBusy = false;
 let quaggaLibraryPromise = null;
 let ocrLibraryPromise = null;
+let nativeScanActive = false;
+let nativeScanFrame = null;
+let torchEnabled = false;
+let zxingLibraryPromise = null;
 let allProductsCache = [];
 let mapLayouts = [];
 let searchTimer = null;
@@ -1116,6 +1134,55 @@ async function exportDatabase() {
     }
   } catch (e) {
     if (e.name !== 'AbortError' && msg) { msg.className = 'msg error'; msg.textContent = 'Impossible de partager le fichier.'; }
+  }
+}
+
+async function loadGistStatus() {
+  const statusEl = document.getElementById('gistStatusMsg');
+  const actionsEl = document.getElementById('gistActions');
+  try {
+    const {res, data} = await apiFetch('/api/gist/status');
+    if (!res.ok) throw new Error();
+    if (data.configured) {
+      statusEl.textContent = 'Sauvegarde automatique GitHub active. Chaque produit scanne est sauvegarde automatiquement.';
+      if (actionsEl) actionsEl.style.display = '';
+    } else if (data.has_token && !data.has_gist_id) {
+      statusEl.innerHTML = 'GITHUB_TOKEN configure. Scannez un premier produit pour creer le gist, puis ajoutez <strong>GITHUB_GIST_ID</strong> dans les variables Render.';
+      if (actionsEl) actionsEl.style.display = '';
+    } else {
+      statusEl.innerHTML = 'Sauvegarde GitHub non configuree. Ajoutez <strong>GITHUB_TOKEN</strong> et <strong>GITHUB_GIST_ID</strong> dans les variables d\'environnement Render pour activer la sauvegarde automatique.';
+      if (actionsEl) actionsEl.style.display = 'none';
+    }
+  } catch (e) {
+    statusEl.textContent = 'Impossible de verifier le statut GitHub.';
+  }
+}
+
+async function gistBackupNow() {
+  const msg = document.getElementById('gistMsg');
+  if (msg) { msg.className = 'msg info'; msg.textContent = 'Sauvegarde en cours...'; }
+  try {
+    const {res, data} = await apiFetch('/api/gist/backup', {method: 'POST', headers: getEditorHeaders()});
+    if (!res.ok || !data.success) throw new Error(data.error || 'Echec');
+    if (msg) { msg.className = 'msg success'; msg.textContent = `Sauvegarde reussie sur GitHub Gist.`; }
+  } catch (e) {
+    if (msg) { msg.className = 'msg error'; msg.textContent = e.message || 'Erreur lors de la sauvegarde GitHub.'; }
+  }
+}
+
+async function gistRestoreNow() {
+  const msg = document.getElementById('gistMsg');
+  if (!confirm('Restaurer les donnees depuis GitHub Gist? Les produits existants seront conserves (fusion).')) return;
+  if (msg) { msg.className = 'msg info'; msg.textContent = 'Restauration en cours...'; }
+  try {
+    const {res, data} = await apiFetch('/api/gist/restore', {method: 'POST', headers: getEditorHeaders()});
+    if (!res.ok || !data.success) throw new Error(data.error || 'Echec');
+    if (msg) { msg.className = 'msg success'; msg.textContent = `Restauration terminee: ${data.imported_products} produit(s) et ${data.imported_layouts} allee(s) importes.`; }
+    await refreshProductsCache(true);
+    await refreshLayouts();
+    renderMapEditor();
+  } catch (e) {
+    if (msg) { msg.className = 'msg error'; msg.textContent = e.message || 'Erreur lors de la restauration GitHub.'; }
   }
 }
 
@@ -1983,6 +2050,17 @@ async function startCamera() {
     return;
   }
 
+  resetCameraCandidate();
+
+  if ('BarcodeDetector' in window) {
+    try {
+      await startNativeScan(video, status, button, reader);
+      return;
+    } catch (err) {
+      // fall through to Quagga
+    }
+  }
+
   try {
     await ensureQuaggaLoaded();
     if (!('Quagga' in window)) {
@@ -1990,8 +2068,6 @@ async function startCamera() {
       showCameraHint('Le moteur de scan Quagga n est pas charge. Verifiez la connexion internet ou entrez le code manuellement.');
       return;
     }
-
-    resetCameraCandidate();
     video.style.display = 'none';
     reader.style.display = 'block';
     reader.innerHTML = '';
@@ -2000,6 +2076,114 @@ async function startCamera() {
     status.textContent = 'Camera bloquee';
     showCameraHint(error.message || 'Impossible d ouvrir la camera. Sur telephone, utilisez une adresse HTTPS.');
   }
+}
+
+async function startNativeScan(video, status, button, reader) {
+  const supported = await BarcodeDetector.getSupportedFormats();
+  const want = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf'];
+  const formats = want.filter(f => supported.includes(f));
+  const detector = new BarcodeDetector({formats: formats.length ? formats : ['ean_13', 'upc_a']});
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: 'environment',
+      width: {ideal: 1920, min: 640},
+      height: {ideal: 1080, min: 480},
+      advanced: [{focusMode: 'continuous'}]
+    }
+  });
+  scannerStream = stream;
+  cameraTrack = stream.getVideoTracks()[0];
+  video.srcObject = stream;
+  video.style.display = 'block';
+  if (reader) { reader.style.display = 'none'; reader.innerHTML = ''; }
+  await video.play().catch(() => {});
+
+  showCameraExtras();
+
+  button.textContent = '■ Arreter camera';
+  button.style.background = '#c8102e';
+  button.style.color = 'white';
+  button.style.borderColor = '#c8102e';
+  if (cameraUsageMode === 'scan') {
+    const pb = document.getElementById('pauseScanButton');
+    if (pb) { pb.style.display = ''; pb.textContent = '⏸ Pause'; pb.style.background = ''; pb.style.color = ''; pb.style.borderColor = ''; }
+  }
+  status.textContent = 'Cadrez le code-barres';
+
+  nativeScanActive = true;
+  const loop = async () => {
+    if (!nativeScanActive) return;
+    if (!scanPaused && video.readyState >= 2) {
+      try {
+        const barcodes = await detector.detect(video);
+        for (const bc of barcodes) {
+          if (validateRetailBarcode(bc.rawValue)) {
+            await onDecodedCode(bc.rawValue);
+          }
+        }
+      } catch (_) {}
+    }
+    nativeScanFrame = requestAnimationFrame(loop);
+  };
+  nativeScanFrame = requestAnimationFrame(loop);
+}
+
+function showCameraExtras() {
+  torchEnabled = false;
+  const ids = cameraUsageMode === 'scan'
+    ? ['torchButton', 'zoomSlider']
+    : ['searchTorchButton', 'searchZoomSlider'];
+  const caps = cameraTrack ? cameraTrack.getCapabilities() : {};
+
+  const torchEl = document.getElementById(ids[0]);
+  if (torchEl) {
+    torchEl.style.display = caps.torch ? '' : 'none';
+    torchEl.textContent = '💡';
+    torchEl.style.background = '';
+    torchEl.style.color = '';
+  }
+  const zoomEl = document.getElementById(ids[1]);
+  if (zoomEl && caps.zoom) {
+    zoomEl.min = caps.zoom.min ?? 1;
+    zoomEl.max = caps.zoom.max ?? 5;
+    zoomEl.step = caps.zoom.step ?? 0.5;
+    zoomEl.value = caps.zoom.min ?? 1;
+    zoomEl.style.display = '';
+  } else if (zoomEl) {
+    zoomEl.style.display = 'none';
+  }
+}
+
+function hideCameraExtras() {
+  ['torchButton', 'zoomSlider', 'searchTorchButton', 'searchZoomSlider'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  });
+  torchEnabled = false;
+}
+
+async function toggleTorch() {
+  if (!cameraTrack) return;
+  torchEnabled = !torchEnabled;
+  try {
+    await cameraTrack.applyConstraints({advanced: [{torch: torchEnabled}]});
+  } catch (_) { torchEnabled = !torchEnabled; }
+  const ids = cameraUsageMode === 'scan' ? ['torchButton'] : ['searchTorchButton'];
+  ids.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.style.background = torchEnabled ? '#f59e0b' : '';
+      el.style.color = torchEnabled ? '#fff' : '';
+    }
+  });
+}
+
+async function applyZoom(val) {
+  if (!cameraTrack) return;
+  try {
+    await cameraTrack.applyConstraints({advanced: [{zoom: parseFloat(val)}]});
+  } catch (_) {}
 }
 
 async function ensureQuaggaLoaded() {
@@ -2079,7 +2263,7 @@ function drawProcessedCrop(video, crop) {
   const canvas = makeScanCanvas(sw * crop.scale, sh * crop.scale);
   const ctx = canvas.getContext('2d', {willReadFrequently: true});
   if (!ctx) return null;
-  ctx.filter = 'grayscale(1) contrast(1.65) brightness(1.12) saturate(0)';
+  ctx.filter = 'grayscale(1) contrast(2.2) brightness(1.18) saturate(0) sharpen(1)';
   ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
   return canvas;
 }
@@ -2165,7 +2349,7 @@ async function recognizeBarcodeDigitsFromVideo(reader) {
 
 async function maybeRunOcrFallback(reader, status) {
   if (ocrBusy || scanPaused || !quaggaActive) return;
-  if (Date.now() - quaggaStartedAt < 3000) return;
+  if (Date.now() - quaggaStartedAt < 2000) return;
   if (cameraUsageMode === 'search') return;
   ocrBusy = true;
   try {
@@ -2198,21 +2382,21 @@ async function startQuaggaScanner(reader, status, button) {
         advanced: [{focusMode: 'continuous'}]
       },
       area: {
-        top: '25%',
-        right: '4%',
-        left: '4%',
-        bottom: '25%'
+        top: '20%',
+        right: '2%',
+        left: '2%',
+        bottom: '20%'
       }
     },
     locator: {
       patchSize: 'x-small',
       halfSample: false
     },
-    numOfWorkers: 2,
-    frequency: 12,
+    numOfWorkers: navigator.hardwareConcurrency >= 4 ? 4 : 2,
+    frequency: 15,
     locate: true,
     decoder: {
-      readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader', 'code_128_reader'],
+      readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader', 'code_128_reader', 'code_39_reader', 'i2of5_reader'],
       multiple: false
     }
   };
@@ -2220,6 +2404,16 @@ async function startQuaggaScanner(reader, status, button) {
   await new Promise((resolve, reject) => {
     window.Quagga.init(config, err => err ? reject(err) : resolve());
   });
+
+  // Grab the track Quagga opened so torch/zoom work
+  const quaggaVideo = reader.querySelector('video');
+  if (quaggaVideo && quaggaVideo.srcObject) {
+    const tracks = quaggaVideo.srcObject.getVideoTracks();
+    if (tracks.length) {
+      cameraTrack = tracks[0];
+      showCameraExtras();
+    }
+  }
 
   quaggaDetectedHandler = result => {
     const code = String(result?.codeResult?.code || '').trim();
@@ -2248,7 +2442,7 @@ async function startQuaggaScanner(reader, status, button) {
   status.textContent = 'Cadrez les barres et les chiffres';
   quaggaOcrTimer = window.setInterval(() => {
     maybeRunOcrFallback(reader, status);
-  }, 4000);
+  }, 3000);
 }
 
 async function stopCamera() {
@@ -2259,6 +2453,11 @@ async function stopCamera() {
   window.clearInterval(quaggaOcrTimer);
   quaggaOcrTimer = null;
   resetCameraCandidate();
+  if (nativeScanActive) {
+    nativeScanActive = false;
+    if (nativeScanFrame !== null) { cancelAnimationFrame(nativeScanFrame); nativeScanFrame = null; }
+  }
+  hideCameraExtras();
   if (quaggaActive && 'Quagga' in window) {
     try {
       if (quaggaDetectedHandler) window.Quagga.offDetected(quaggaDetectedHandler);
@@ -2674,7 +2873,7 @@ async function hydrateOnlineLookup(barcode) {
     if (!document.getElementById('scanProductDescription').value.trim()) document.getElementById('scanProductDescription').value = lookupProduct.description || '';
     status.className = 'msg success';
     status.textContent = `Trouve dans ${lookupProduct.source}. Verifiez avant de confirmer.`;
-    document.getElementById('lookupSource').textContent = lookupProduct.source_url ? `Source: ${lookupProduct.source_url}` : '';
+    document.getElementById('lookupSource').innerHTML = lookupProduct.source_url ? `Source: <a href="${esc(lookupProduct.source_url)}" target="_blank" rel="noopener noreferrer">${esc(lookupProduct.source_url)}</a>` : '';
     if (lookupProduct.image_url) {
       document.getElementById('lookupImageWrap').innerHTML = `<img class="lookup-image" src="${esc(lookupProduct.image_url)}" alt="Image produit">`;
     }
@@ -3299,6 +3498,7 @@ if ('serviceWorker' in navigator) {
     updateAppShellState();
     updateNetworkStatus();
     focusScanInput();
+    loadGistStatus();
   });
 }
 
