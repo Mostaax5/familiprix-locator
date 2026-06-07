@@ -482,6 +482,8 @@ let ocrLibraryPromise = null;
 let nativeScanActive = false;
 let nativeScanFrame = null;
 let torchEnabled = false;
+let zxingActive = false;
+let zxingFrame = null;
 let zxingLibraryPromise = null;
 let allProductsCache = [];
 let mapLayouts = [];
@@ -2057,6 +2059,16 @@ async function startCamera() {
       await startNativeScan(video, status, button, reader);
       return;
     } catch (err) {
+      // fall through to ZXing
+    }
+  }
+
+  const zxingLoaded = await ensureZXingLoaded();
+  if (zxingLoaded) {
+    try {
+      await startZXingScan(video, status, button, reader);
+      return;
+    } catch (err) {
       // fall through to Quagga
     }
   }
@@ -2218,6 +2230,94 @@ async function ensureOcrLoaded() {
     return false;
   })();
   return ocrLibraryPromise;
+}
+
+async function ensureZXingLoaded() {
+  if (window.ZXing) return true;
+  if (zxingLibraryPromise) return zxingLibraryPromise;
+  const sources = [
+    'https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js',
+    'https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js'
+  ];
+  zxingLibraryPromise = (async () => {
+    for (const src of sources) {
+      const loaded = await injectScript(src);
+      if (loaded && window.ZXing) return true;
+    }
+    return false;
+  })();
+  return zxingLibraryPromise;
+}
+
+async function startZXingScan(video, status, button, reader) {
+  const hints = new Map();
+  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+    ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
+    ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.UPC_E,
+    ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.CODE_39,
+    ZXing.BarcodeFormat.ITF,
+  ]);
+  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+  const zxingReader = new ZXing.BrowserMultiFormatReader(hints);
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: 'environment',
+      width: {ideal: 1920, min: 640},
+      height: {ideal: 1080, min: 480},
+      advanced: [{focusMode: 'continuous'}]
+    }
+  });
+  scannerStream = stream;
+  cameraTrack = stream.getVideoTracks()[0];
+  video.srcObject = stream;
+  video.style.display = 'block';
+  if (reader) { reader.style.display = 'none'; reader.innerHTML = ''; }
+  await video.play().catch(() => {});
+  showCameraExtras();
+
+  button.textContent = '■ Arreter camera';
+  button.style.background = '#c8102e';
+  button.style.color = 'white';
+  button.style.borderColor = '#c8102e';
+  if (cameraUsageMode === 'scan') {
+    const pb = document.getElementById('pauseScanButton');
+    if (pb) { pb.style.display = ''; pb.textContent = '⏸ Pause'; pb.style.background = ''; pb.style.color = ''; pb.style.borderColor = ''; }
+  }
+  status.textContent = 'Cadrez le code-barres';
+
+  const scanCanvas = document.createElement('canvas');
+  zxingActive = true;
+
+  const loop = () => {
+    if (!zxingActive) return;
+    if (!scanPaused && video.readyState >= 2 && video.videoWidth) {
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      const cropX = Math.floor(vw * 0.05);
+      const cropY = Math.floor(vh * 0.20);
+      const cropW = Math.floor(vw * 0.90);
+      const cropH = Math.floor(vh * 0.60);
+      scanCanvas.width = cropW;
+      scanCanvas.height = cropH;
+      const ctx = scanCanvas.getContext('2d', {willReadFrequently: true});
+      ctx.filter = 'grayscale(1) contrast(2) brightness(1.1)';
+      ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+      try {
+        const result = zxingReader.decodeFromCanvas(scanCanvas);
+        if (result) {
+          const code = result.getText();
+          if (validateRetailBarcode(code)) {
+            onDecodedCode(code);
+            zxingFrame = requestAnimationFrame(loop);
+            return;
+          }
+        }
+      } catch (_) {}
+    }
+    zxingFrame = requestAnimationFrame(loop);
+  };
+  zxingFrame = requestAnimationFrame(loop);
 }
 
 function injectScript(src) {
@@ -2456,6 +2556,10 @@ async function stopCamera() {
   if (nativeScanActive) {
     nativeScanActive = false;
     if (nativeScanFrame !== null) { cancelAnimationFrame(nativeScanFrame); nativeScanFrame = null; }
+  }
+  if (zxingActive) {
+    zxingActive = false;
+    if (zxingFrame !== null) { cancelAnimationFrame(zxingFrame); zxingFrame = null; }
   }
   hideCameraExtras();
   if (quaggaActive && 'Quagga' in window) {
