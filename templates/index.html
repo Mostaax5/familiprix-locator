@@ -2124,6 +2124,7 @@ async function startNativeScan(video, status, button, reader) {
   status.textContent = 'Cadrez le code-barres';
 
   nativeScanActive = true;
+  updateDeviceSupport();
   const loop = async () => {
     if (!nativeScanActive) return;
     if (!scanPaused && video.readyState >= 2) {
@@ -2287,35 +2288,39 @@ async function startZXingScan(video, status, button, reader) {
   status.textContent = 'Cadrez le code-barres';
 
   const scanCanvas = document.createElement('canvas');
+  const ctx = scanCanvas.getContext('2d', {willReadFrequently: true});
+  const ZXING_INTERVAL = 120;
+  const MAX_SCAN_DIM = 640;
+  let lastZxingScan = 0;
   zxingActive = true;
+  updateDeviceSupport();
 
-  const loop = () => {
+  const loop = (ts) => {
     if (!zxingActive) return;
-    if (!scanPaused && video.readyState >= 2 && video.videoWidth) {
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      const cropX = Math.floor(vw * 0.05);
-      const cropY = Math.floor(vh * 0.20);
-      const cropW = Math.floor(vw * 0.90);
-      const cropH = Math.floor(vh * 0.60);
-      scanCanvas.width = cropW;
-      scanCanvas.height = cropH;
-      const ctx = scanCanvas.getContext('2d', {willReadFrequently: true});
-      ctx.filter = 'grayscale(1) contrast(2) brightness(1.1)';
-      ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-      try {
-        const result = zxingReader.decodeFromCanvas(scanCanvas);
-        if (result) {
-          const code = result.getText();
-          if (validateRetailBarcode(code)) {
-            onDecodedCode(code);
-            zxingFrame = requestAnimationFrame(loop);
-            return;
-          }
-        }
-      } catch (_) {}
-    }
     zxingFrame = requestAnimationFrame(loop);
+    if (scanPaused || video.readyState < 2 || !video.videoWidth) return;
+    if (ts - lastZxingScan < ZXING_INTERVAL) return;
+    lastZxingScan = ts;
+
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    const cropX = Math.floor(vw * 0.05);
+    const cropY = Math.floor(vh * 0.20);
+    const cropW = Math.floor(vw * 0.90);
+    const cropH = Math.floor(vh * 0.60);
+    const scale = Math.min(1, MAX_SCAN_DIM / cropW);
+    const outW = Math.max(1, Math.floor(cropW * scale));
+    const outH = Math.max(1, Math.floor(cropH * scale));
+    scanCanvas.width = outW;
+    scanCanvas.height = outH;
+    ctx.filter = 'grayscale(1) contrast(1.8)';
+    ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, outW, outH);
+    try {
+      const result = zxingReader.decodeFromCanvas(scanCanvas);
+      if (result && validateRetailBarcode(result.getText())) {
+        onDecodedCode(result.getText());
+      }
+    } catch (_) {}
   };
   zxingFrame = requestAnimationFrame(loop);
 }
@@ -2531,6 +2536,7 @@ async function startQuaggaScanner(reader, status, button) {
   window.Quagga.start();
   quaggaActive = true;
   quaggaStartedAt = Date.now();
+  updateDeviceSupport();
   button.textContent = '■ Arreter camera';
   button.style.background = '#c8102e';
   button.style.color = 'white';
@@ -2859,21 +2865,37 @@ function updateDeviceSupport() {
   const supportHint = document.getElementById('supportHint');
   const hasCamera = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
   const isSecure = window.isSecureContext || location.hostname === '127.0.0.1' || location.hostname === 'localhost';
-  const quaggaReady = 'Quagga' in window;
-  const ocrReady = 'Tesseract' in window;
+  const hasNative = 'BarcodeDetector' in window;
+  const hasZXing = !!window.ZXing;
 
   cameraSupport.textContent = hasCamera && isSecure ? 'Disponible' : 'HTTPS requis';
   cameraSupport.style.background = hasCamera && isSecure ? '#ecfdf5' : '#fef2f2';
   cameraSupport.style.color = hasCamera && isSecure ? '#065f46' : '#991b1b';
 
-  scannerSupport.textContent = quaggaReady ? (ocrReady ? 'Quagga + OCR' : 'Quagga') : 'Chargement au scan';
-  scannerSupport.style.background = '#ecfdf5';
-  scannerSupport.style.color = '#065f46';
+  if (nativeScanActive || hasNative) {
+    scannerSupport.textContent = 'Natif (rapide)';
+    scannerSupport.style.background = '#ecfdf5';
+    scannerSupport.style.color = '#065f46';
+    supportHint.textContent = 'Ce navigateur utilise le scanner natif du telephone (BarcodeDetector). C est le mode le plus rapide, equivalent a Google Lens.';
+  } else if (zxingActive || hasZXing) {
+    scannerSupport.textContent = 'ZXing (bon)';
+    scannerSupport.style.background = '#fefce8';
+    scannerSupport.style.color = '#854d0e';
+    supportHint.textContent = 'Ce navigateur utilise ZXing. C est bon mais plus lent que le mode natif. Sur Android, utilisez Chrome pour obtenir le scanner natif.';
+  } else {
+    scannerSupport.textContent = hasNative ? 'Natif disponible' : 'ZXing / Quagga';
+    scannerSupport.style.background = '#ecfdf5';
+    scannerSupport.style.color = '#065f46';
+    supportHint.textContent = hasNative
+      ? 'Scanner natif disponible. Ouvrez la camera pour l activer.'
+      : 'Sur Android, utilisez Chrome pour le scanner natif (le plus rapide). Sur iPhone, ZXing est utilise automatiquement.';
+  }
 
   if (!isSecure) {
-    supportHint.textContent = 'Pour la camera sur telephone, utilisez une URL HTTPS. En HTTP local, la page peut ouvrir mais la camera peut etre bloquee.';
-  } else {
-    supportHint.textContent = 'La camera utilise Quagga pour les barres et essaie aussi de lire les chiffres du code quand les barres sont trop petites.';
+    supportHint.textContent = 'Pour la camera sur telephone, utilisez une URL HTTPS.';
+    cameraSupport.textContent = 'HTTPS requis';
+    cameraSupport.style.background = '#fef2f2';
+    cameraSupport.style.color = '#991b1b';
   }
 }
 
