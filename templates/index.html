@@ -258,6 +258,10 @@
       <button class="btn btn-inline" id="pauseScanButton" onclick="toggleScanPause()" style="display:none">⏸ Pause</button>
       <button class="btn btn-outline btn-inline" id="torchButton" onclick="toggleTorch()" style="display:none" title="Lampe de poche">💡</button>
       <input type="range" id="zoomSlider" min="1" max="5" step="0.5" value="1" style="display:none;width:64px;accent-color:#c8102e" title="Zoom" oninput="applyZoom(this.value)">
+      <label class="btn btn-outline btn-inline" style="cursor:pointer" title="Prendre une photo du code-barres">
+        📷
+        <input type="file" accept="image/*" capture="environment" style="display:none" onchange="scanFromPhoto(this)">
+      </label>
       <button class="btn btn-inline secondary" onclick="toggleCamera()" id="cameraButton">Ouvrir camera</button>
     </div>
   </div>
@@ -301,6 +305,10 @@
         <span id="searchScannerStatus" class="pill">Camera arretee</span>
         <button class="btn btn-outline btn-inline" id="searchTorchButton" onclick="toggleTorch()" style="display:none" title="Lampe de poche">💡</button>
         <input type="range" id="searchZoomSlider" min="1" max="5" step="0.5" value="1" style="display:none;width:64px;accent-color:#c8102e" title="Zoom" oninput="applyZoom(this.value)">
+        <label class="btn btn-outline btn-inline" style="cursor:pointer" title="Prendre une photo du code-barres">
+          📷
+          <input type="file" accept="image/*" capture="environment" style="display:none" onchange="scanFromPhoto(this, 'search')">
+        </label>
         <button class="btn btn-inline secondary" onclick="startSearchScan()" id="searchCameraButton">Ouvrir camera</button>
       </div>
     </div>
@@ -2323,6 +2331,66 @@ async function startZXingScan(video, status, button, reader) {
     } catch (_) {}
   };
   zxingFrame = requestAnimationFrame(loop);
+}
+
+async function scanFromPhoto(input, mode) {
+  const file = input.files[0];
+  input.value = '';
+  if (!file) return;
+  const prevMode = cameraUsageMode;
+  if (mode === 'search') cameraUsageMode = 'search';
+  const status = getCameraDom().status;
+  cameraUsageMode = prevMode;
+  if (status) status.textContent = 'Analyse de la photo...';
+
+  const img = new Image();
+  const url = URL.createObjectURL(file);
+  await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = url; });
+
+  const maxDim = 1920;
+  const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.floor(img.width * scale));
+  canvas.height = Math.max(1, Math.floor(img.height * scale));
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  URL.revokeObjectURL(url);
+
+  if ('BarcodeDetector' in window) {
+    try {
+      const det = new BarcodeDetector({formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf']});
+      const barcodes = await det.detect(canvas);
+      for (const bc of barcodes) {
+        if (validateRetailBarcode(bc.rawValue)) {
+          if (mode === 'search') { document.getElementById('searchInput').value = bc.rawValue; doSearch(); }
+          else await onDecodedCode(bc.rawValue);
+          return;
+        }
+      }
+    } catch (_) {}
+  }
+
+  const loaded = await ensureZXingLoaded();
+  if (loaded) {
+    const hints = new Map();
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+      ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
+      ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.UPC_E,
+      ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.CODE_39, ZXing.BarcodeFormat.ITF,
+    ]);
+    hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+    const reader = new ZXing.BrowserMultiFormatReader(hints);
+    try {
+      const result = reader.decodeFromCanvas(canvas);
+      if (result && validateRetailBarcode(result.getText())) {
+        if (mode === 'search') { document.getElementById('searchInput').value = result.getText(); doSearch(); }
+        else await onDecodedCode(result.getText());
+        return;
+      }
+    } catch (_) {}
+  }
+
+  if (status) status.textContent = 'Code non reconnu — reessayez plus pres';
 }
 
 function injectScript(src) {
