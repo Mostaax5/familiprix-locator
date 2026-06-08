@@ -2062,25 +2062,17 @@ async function startCamera() {
 
   resetCameraCandidate();
 
+  // Android Chrome: use native hardware BarcodeDetector
   if ('BarcodeDetector' in window) {
     try {
       await startNativeScan(video, status, button, reader);
-      return;
-    } catch (err) {
-      // fall through to ZXing
-    }
-  }
-
-  const zxingLoaded = await ensureZXingLoaded();
-  if (zxingLoaded) {
-    try {
-      await startZXingScan(video, status, button, reader);
       return;
     } catch (err) {
       // fall through to Quagga
     }
   }
 
+  // iPhone / Firefox / all others: Quagga2 (uses Web Workers — doesn't freeze UI)
   try {
     await ensureQuaggaLoaded();
     if (!('Quagga' in window)) {
@@ -2333,6 +2325,54 @@ async function startZXingScan(video, status, button, reader) {
   zxingFrame = requestAnimationFrame(loop);
 }
 
+async function photoToCanvas(file) {
+  const img = new Image();
+  const url = URL.createObjectURL(file);
+  await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = url; });
+  URL.revokeObjectURL(url);
+  const maxDim = 1920;
+  const scale = Math.min(1, maxDim / Math.max(img.width || 1, img.height || 1));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.floor(img.width * scale));
+  canvas.height = Math.max(1, Math.floor(img.height * scale));
+  canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+function cropCanvas(src, x, y, w, h, filter) {
+  const out = document.createElement('canvas');
+  const sx = Math.floor(src.width * x);
+  const sy = Math.floor(src.height * y);
+  out.width  = Math.max(1, Math.floor(src.width * w));
+  out.height = Math.max(1, Math.floor(src.height * h));
+  const ctx = out.getContext('2d', {willReadFrequently: true});
+  if (filter) ctx.filter = filter;
+  ctx.drawImage(src, sx, sy, Math.floor(src.width * w), Math.floor(src.height * h), 0, 0, out.width, out.height);
+  return out;
+}
+
+async function ocrBarcodeFromCanvas(canvas) {
+  if (!(await ensureOcrLoaded()) || !window.Tesseract) return null;
+  // Try several crops: bottom strip (digit row), center, full image
+  const crops = [
+    cropCanvas(canvas, 0,    0.60, 1, 0.40, 'grayscale(1) contrast(3) brightness(1.15)'),
+    cropCanvas(canvas, 0.05, 0.50, 0.90, 0.50, 'grayscale(1) contrast(2.5) brightness(1.1)'),
+    cropCanvas(canvas, 0,    0,    1, 1,    'grayscale(1) contrast(2)'),
+  ];
+  for (const crop of crops) {
+    try {
+      const { data } = await window.Tesseract.recognize(crop, 'eng', {
+        logger: () => {},
+        tessedit_char_whitelist: '0123456789 ',
+        tessedit_pageseg_mode: '6',
+      });
+      const candidates = extractBarcodeTextCandidates(data?.text || '');
+      if (candidates.length) return candidates[0];
+    } catch (_) {}
+  }
+  return null;
+}
+
 async function scanFromPhoto(input, mode) {
   const file = input.files[0];
   input.value = '';
@@ -2340,30 +2380,19 @@ async function scanFromPhoto(input, mode) {
 
   const isSearch = mode === 'search';
   const statusEl = document.getElementById(isSearch ? 'searchScannerStatus' : 'scannerStatus');
-  if (statusEl) statusEl.textContent = 'Analyse...';
+  const setStatus = t => { if (statusEl) statusEl.textContent = t; };
 
-  // Load image into canvas at full resolution
+  setStatus('Lecture de la photo...');
+
   let canvas;
-  try {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = url; });
-    URL.revokeObjectURL(url);
-    const maxDim = 1920;
-    const scale = Math.min(1, maxDim / Math.max(img.width || 1, img.height || 1));
-    canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.floor(img.width * scale));
-    canvas.height = Math.max(1, Math.floor(img.height * scale));
-    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-  } catch (_) {
-    if (statusEl) statusEl.textContent = 'Erreur lecture photo';
-    return;
-  }
+  try { canvas = await photoToCanvas(file); }
+  catch (_) { setStatus('Erreur lecture photo'); return; }
 
   let code = null;
 
-  // 1) Native BarcodeDetector (Android Chrome)
+  // 1) Native BarcodeDetector — fastest, most accurate (Android Chrome)
   if (!code && 'BarcodeDetector' in window) {
+    setStatus('Detection native...');
     try {
       const det = new BarcodeDetector({formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf']});
       for (const bc of await det.detect(canvas)) {
@@ -2372,40 +2401,57 @@ async function scanFromPhoto(input, mode) {
     } catch (_) {}
   }
 
-  // 2) ZXing (iPhone + all others)
+  // 2) ZXing barcode library (works on iPhone + all browsers, still image only)
   if (!code) {
+    setStatus('Lecture code-barres...');
     const loaded = await ensureZXingLoaded();
     if (loaded) {
       const hints = new Map();
       hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
         ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
-        ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.UPC_E,
+        ZXing.BarcodeFormat.UPC_A,  ZXing.BarcodeFormat.UPC_E,
         ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.CODE_39, ZXing.BarcodeFormat.ITF,
       ]);
       hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
       const reader = new ZXing.BrowserMultiFormatReader(hints);
-      try {
-        const r = reader.decodeFromCanvas(canvas);
-        if (r && validateRetailBarcode(r.getText())) code = r.getText();
-      } catch (_) {}
+      // Try full image, then each quadrant
+      const regions = [
+        canvas,
+        cropCanvas(canvas, 0,   0,   1,   0.5, null),
+        cropCanvas(canvas, 0,   0.5, 1,   0.5, null),
+        cropCanvas(canvas, 0.1, 0.2, 0.8, 0.6, null),
+      ];
+      for (const region of regions) {
+        if (code) break;
+        try {
+          const r = reader.decodeFromCanvas(region);
+          if (r && validateRetailBarcode(r.getText())) code = r.getText();
+        } catch (_) {}
+      }
     }
   }
 
+  // 3) OCR digit reading — reads the numbers printed under the barcode
   if (!code) {
-    if (statusEl) statusEl.textContent = 'Code non reconnu — rapprochez et reessayez';
+    setStatus('Lecture des chiffres...');
+    code = await ocrBarcodeFromCanvas(canvas);
+  }
+
+  if (!code) {
+    setStatus('Code non reconnu — reessayez plus pres avec bonne lumiere');
     return;
   }
 
-  // Put the code directly into the right input and trigger lookup — bypass streaming checks
+  // Put code directly in input and trigger lookup (bypass streaming camera checks)
   if (isSearch) {
     document.getElementById('searchInput').value = code;
-    if (statusEl) statusEl.textContent = `✓ ${code}`;
+    setStatus(`✓ ${code}`);
     doSearch();
   } else {
     scanPaused = false;
     document.getElementById('scanInput').value = code;
     persistScanDraft();
-    if (statusEl) statusEl.textContent = `✓ ${code}`;
+    setStatus(`✓ ${code}`);
     lookupScanFromInput(true, code);
   }
 }
