@@ -2337,60 +2337,77 @@ async function scanFromPhoto(input, mode) {
   const file = input.files[0];
   input.value = '';
   if (!file) return;
-  const prevMode = cameraUsageMode;
-  if (mode === 'search') cameraUsageMode = 'search';
-  const status = getCameraDom().status;
-  cameraUsageMode = prevMode;
-  if (status) status.textContent = 'Analyse de la photo...';
 
-  const img = new Image();
-  const url = URL.createObjectURL(file);
-  await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = url; });
+  const isSearch = mode === 'search';
+  const statusEl = document.getElementById(isSearch ? 'searchScannerStatus' : 'scannerStatus');
+  if (statusEl) statusEl.textContent = 'Analyse...';
 
-  const maxDim = 1920;
-  const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.floor(img.width * scale));
-  canvas.height = Math.max(1, Math.floor(img.height * scale));
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-  URL.revokeObjectURL(url);
+  // Load image into canvas at full resolution
+  let canvas;
+  try {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = url; });
+    URL.revokeObjectURL(url);
+    const maxDim = 1920;
+    const scale = Math.min(1, maxDim / Math.max(img.width || 1, img.height || 1));
+    canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.floor(img.width * scale));
+    canvas.height = Math.max(1, Math.floor(img.height * scale));
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+  } catch (_) {
+    if (statusEl) statusEl.textContent = 'Erreur lecture photo';
+    return;
+  }
 
-  if ('BarcodeDetector' in window) {
+  let code = null;
+
+  // 1) Native BarcodeDetector (Android Chrome)
+  if (!code && 'BarcodeDetector' in window) {
     try {
       const det = new BarcodeDetector({formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf']});
-      const barcodes = await det.detect(canvas);
-      for (const bc of barcodes) {
-        if (validateRetailBarcode(bc.rawValue)) {
-          if (mode === 'search') { document.getElementById('searchInput').value = bc.rawValue; doSearch(); }
-          else await onDecodedCode(bc.rawValue);
-          return;
-        }
+      for (const bc of await det.detect(canvas)) {
+        if (validateRetailBarcode(bc.rawValue)) { code = bc.rawValue; break; }
       }
     } catch (_) {}
   }
 
-  const loaded = await ensureZXingLoaded();
-  if (loaded) {
-    const hints = new Map();
-    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-      ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
-      ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.UPC_E,
-      ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.CODE_39, ZXing.BarcodeFormat.ITF,
-    ]);
-    hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-    const reader = new ZXing.BrowserMultiFormatReader(hints);
-    try {
-      const result = reader.decodeFromCanvas(canvas);
-      if (result && validateRetailBarcode(result.getText())) {
-        if (mode === 'search') { document.getElementById('searchInput').value = result.getText(); doSearch(); }
-        else await onDecodedCode(result.getText());
-        return;
-      }
-    } catch (_) {}
+  // 2) ZXing (iPhone + all others)
+  if (!code) {
+    const loaded = await ensureZXingLoaded();
+    if (loaded) {
+      const hints = new Map();
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+        ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
+        ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.UPC_E,
+        ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.CODE_39, ZXing.BarcodeFormat.ITF,
+      ]);
+      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      const reader = new ZXing.BrowserMultiFormatReader(hints);
+      try {
+        const r = reader.decodeFromCanvas(canvas);
+        if (r && validateRetailBarcode(r.getText())) code = r.getText();
+      } catch (_) {}
+    }
   }
 
-  if (status) status.textContent = 'Code non reconnu — reessayez plus pres';
+  if (!code) {
+    if (statusEl) statusEl.textContent = 'Code non reconnu — rapprochez et reessayez';
+    return;
+  }
+
+  // Put the code directly into the right input and trigger lookup — bypass streaming checks
+  if (isSearch) {
+    document.getElementById('searchInput').value = code;
+    if (statusEl) statusEl.textContent = `✓ ${code}`;
+    doSearch();
+  } else {
+    scanPaused = false;
+    document.getElementById('scanInput').value = code;
+    persistScanDraft();
+    if (statusEl) statusEl.textContent = `✓ ${code}`;
+    lookupScanFromInput(true, code);
+  }
 }
 
 function injectScript(src) {
