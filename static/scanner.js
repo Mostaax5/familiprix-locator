@@ -26,6 +26,7 @@ let torchEnabled = false;
 let zxingActive = false;
 let zxingFrame = null;
 let zxingLibraryPromise = null;
+let zoomDebounceTimer = null;
 
 // ── Camera DOM helpers ────────────────────────────────────────────────────────
 function getCameraDom() {
@@ -186,19 +187,32 @@ function showCameraExtras() {
     torchEl.style.color = '';
   }
   const zoomEl = document.getElementById(ids[1]);
+  const zoomLabelId = cameraUsageMode === 'scan' ? 'zoomValue' : 'searchZoomValue';
+  const zoomLabel = document.getElementById(zoomLabelId);
   if (zoomEl && caps.zoom) {
     zoomEl.min = caps.zoom.min ?? 1;
     zoomEl.max = caps.zoom.max ?? 5;
     zoomEl.step = caps.zoom.step ?? 0.5;
-    zoomEl.value = caps.zoom.min ?? 1;
+    const savedZoom = parseFloat(localStorage.getItem('familiprixZoom') || '0');
+    const clampedZoom = (savedZoom >= (caps.zoom.min ?? 1) && savedZoom <= (caps.zoom.max ?? 5))
+      ? savedZoom : (caps.zoom.min ?? 1);
+    zoomEl.value = clampedZoom;
     zoomEl.style.display = '';
+    if (zoomLabel) { zoomLabel.textContent = _zoomLabel(clampedZoom); zoomLabel.style.display = ''; }
+    if (clampedZoom > (caps.zoom.min ?? 1)) applyZoom(clampedZoom);
   } else if (zoomEl) {
     zoomEl.style.display = 'none';
+    if (zoomLabel) zoomLabel.style.display = 'none';
   }
 }
 
+function _zoomLabel(val) {
+  const n = parseFloat(val);
+  return (n % 1 === 0 ? n : n.toFixed(1)) + '×';
+}
+
 function hideCameraExtras() {
-  ['torchButton', 'zoomSlider', 'searchTorchButton', 'searchZoomSlider'].forEach(id => {
+  ['torchButton', 'zoomSlider', 'zoomValue', 'searchTorchButton', 'searchZoomSlider', 'searchZoomValue'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.style.display = 'none';
   });
@@ -221,11 +235,22 @@ async function toggleTorch() {
   });
 }
 
-async function applyZoom(val) {
-  if (!cameraTrack) return;
-  try {
-    await cameraTrack.applyConstraints({advanced: [{zoom: parseFloat(val)}]});
-  } catch (_) {}
+function applyZoom(val) {
+  const parsed = parseFloat(val);
+  const labelId = cameraUsageMode === 'scan' ? 'zoomValue' : 'searchZoomValue';
+  const sliderId = cameraUsageMode === 'scan' ? 'zoomSlider' : 'searchZoomSlider';
+  const label = document.getElementById(labelId);
+  const slider = document.getElementById(sliderId);
+  if (label) { label.textContent = _zoomLabel(parsed); label.style.display = ''; }
+  if (slider) slider.value = parsed;
+  window.clearTimeout(zoomDebounceTimer);
+  zoomDebounceTimer = window.setTimeout(async () => {
+    if (!cameraTrack) return;
+    try {
+      await cameraTrack.applyConstraints({advanced: [{zoom: parsed}]});
+      localStorage.setItem('familiprixZoom', parsed);
+    } catch (_) {}
+  }, 180);
 }
 
 // ── Library loaders ───────────────────────────────────────────────────────────

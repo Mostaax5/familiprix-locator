@@ -69,7 +69,8 @@
       <span id="scannerStatus" class="pill">Camera arretee</span>
       <button class="btn btn-outline btn-inline" id="pauseScanButton" onclick="toggleScanPause()" style="display:none">⏸ Pause</button>
       <button class="btn btn-outline btn-inline" id="torchButton" onclick="toggleTorch()" style="display:none" title="Lampe de poche">💡</button>
-      <input type="range" id="zoomSlider" min="1" max="5" step="0.5" value="1" style="display:none;width:64px;accent-color:#c8102e" title="Zoom" oninput="applyZoom(this.value)">
+      <input type="range" id="zoomSlider" min="1" max="5" step="0.5" value="1" style="display:none;width:72px;accent-color:#c8102e" title="Zoom" oninput="applyZoom(this.value)">
+      <span id="zoomValue" style="display:none;font-size:12px;font-weight:700;min-width:32px;text-align:center;color:#c8102e;cursor:pointer" title="Cliquer pour reinitialiser" onclick="applyZoom(1);document.getElementById('zoomSlider').value=1">1×</span>
       <label class="btn btn-outline btn-inline" style="cursor:pointer" title="Photo du code-barres">
         📷
         <input type="file" accept="image/*" capture="environment" style="display:none" onchange="scanFromPhoto(this)">
@@ -121,7 +122,8 @@
       <div class="scanner-bar">
         <span id="searchScannerStatus" class="pill">Camera arretee</span>
         <button class="btn btn-outline btn-inline" id="searchTorchButton" onclick="toggleTorch()" style="display:none" title="Lampe de poche">💡</button>
-        <input type="range" id="searchZoomSlider" min="1" max="5" step="0.5" value="1" style="display:none;width:64px;accent-color:#c8102e" title="Zoom" oninput="applyZoom(this.value)">
+        <input type="range" id="searchZoomSlider" min="1" max="5" step="0.5" value="1" style="display:none;width:72px;accent-color:#c8102e" title="Zoom" oninput="applyZoom(this.value)">
+        <span id="searchZoomValue" style="display:none;font-size:12px;font-weight:700;min-width:32px;text-align:center;color:#c8102e;cursor:pointer" title="Cliquer pour reinitialiser" onclick="applyZoom(1);document.getElementById('searchZoomSlider').value=1">1×</span>
         <label class="btn btn-outline btn-inline" style="cursor:pointer" title="Photo du code-barres">
           📷
           <input type="file" accept="image/*" capture="environment" style="display:none" onchange="scanFromPhoto(this, 'search')">
