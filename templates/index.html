@@ -11,197 +11,7 @@
 <link rel="manifest" href="/manifest.json"/>
 <link rel="apple-touch-icon" href="/static/icon.svg"/>
 <title>FamiliPrix - Localisateur</title>
-<style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  html{min-height:100%;-webkit-text-size-adjust:100%}
-  body{min-height:100%;font-family:system-ui,-apple-system,sans-serif;background:#f0f2f5;color:#1a1a1a;line-height:1.5;padding-bottom:env(safe-area-inset-bottom)}
-
-  /* ── Header ── */
-  .header{background:linear-gradient(150deg,#d4112e 0%,#a8102a 100%);color:white;padding:calc(14px + env(safe-area-inset-top)) 16px 16px;position:sticky;top:0;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,.18)}
-  .header h1{font-size:18px;font-weight:800;letter-spacing:-.2px}
-  .header p{font-size:12px;opacity:.8;margin-top:2px;font-weight:500}
-
-  /* ── Tabs ── */
-  .tabs{display:flex;background:white;border-bottom:2px solid #edeef0;position:sticky;top:calc(66px + env(safe-area-inset-top));z-index:9;box-shadow:0 1px 4px rgba(0,0,0,.06)}
-  .tab{flex:1;padding:12px 4px;font-size:12px;font-weight:600;text-align:center;border:none;background:none;color:#6b7280;cursor:pointer;border-bottom:3px solid transparent;margin-bottom:-2px;touch-action:manipulation;transition:color .18s,border-color .18s}
-  .tab.active{color:#c8102e;border-bottom-color:#c8102e;font-weight:700}
-
-  /* ── Layout ── */
-  .content{padding:14px;max-width:720px;margin:0 auto}
-  .app-shell{padding:12px 14px 0;max-width:720px;margin:0 auto}
-
-  /* ── Forms ── */
-  input,select,textarea{width:100%;padding:12px 14px;border:1.5px solid #dde1e9;border-radius:10px;font-size:16px;background:#fafbfc;margin-bottom:2px;color:#1a1a1a;transition:border-color .15s,box-shadow .15s}
-  textarea{resize:vertical;min-height:112px;font-family:inherit}
-  input:focus,select:focus,textarea:focus{outline:none;border-color:#c8102e;box-shadow:0 0 0 3px rgba(200,16,46,.1);background:white}
-
-  /* ── Cards ── */
-  .card{background:white;border-radius:14px;padding:16px;margin-bottom:12px;border:1px solid #e4e6ea;box-shadow:0 1px 4px rgba(0,0,0,.06)}
-  .card .name{font-size:15px;font-weight:700;margin-bottom:6px;line-height:1.3}
-
-  /* ── Buttons ── */
-  .btn{width:100%;padding:13px;background:#c8102e;color:white;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;margin-top:10px;touch-action:manipulation;transition:opacity .15s,transform .1s,background .15s;letter-spacing:.01em}
-  .btn:active{opacity:.82;transform:scale(.98)}
-  .btn.secondary{background:#2f343b}
-  .btn-outline{background:white;color:#c8102e;border:1.5px solid #c8102e}
-  .btn-outline:active{background:#fff5f6}
-  .btn-inline{width:auto;padding:9px 14px;margin-top:0;font-size:13px}
-  .btn-danger{border-color:#991b1b;color:#991b1b}
-  .btn-danger:active{background:#fef2f2}
-
-  /* ── Labels & fields ── */
-  .label{font-size:12px;color:#4b5563;margin-bottom:4px;margin-top:12px;display:block;font-weight:700;letter-spacing:.02em;text-transform:uppercase}
-  .label:first-child{margin-top:0}
-  .field{display:flex;flex-direction:column;gap:4px}
-  .field .label{margin:0}
-
-  /* ── Section headers ── */
-  .section-title{font-size:13px;font-weight:800;color:#1a1a1a;margin:4px 0 10px;padding-left:9px;border-left:3px solid #c8102e}
-  .section-note{font-size:12px;color:#6b7280;line-height:1.5;margin:-4px 0 10px}
-
-  /* ── Grids ── */
-  .row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-  .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
-
-  /* ── Messages ── */
-  .msg{font-size:13px;margin-top:8px;padding:10px 14px;border-radius:10px;line-height:1.45}
-  .msg.success{background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0}
-  .msg.error{background:#fef2f2;color:#991b1b;border:1px solid #fecaca}
-  .msg.info{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe}
-  .msg.warning{background:#fffbeb;color:#92400e;border:1px solid #fcd34d}
-
-  /* ── Misc ── */
-  .empty{text-align:center;padding:2.5rem 1rem;color:#9ca3af;font-size:14px}
-  .section{display:none}
-  .section.active{display:block}
-  .delete-btn{float:right;background:none;border:none;color:#9ca3af;font-size:18px;cursor:pointer;padding:0 0 0 8px;transition:color .15s}
-  .delete-btn:hover{color:#c8102e}
-
-  /* ── Location badge ── */
-  .location{display:inline-flex;align-items:center;gap:5px;background:#eff6ff;color:#1d4ed8;border-radius:8px;padding:5px 11px;font-size:12px;font-weight:700;margin-bottom:6px;border:1px solid #bfdbfe}
-
-  /* ── Text helpers ── */
-  .barcode-text{font-size:12px;color:#9ca3af;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.3px}
-  .desc-text{font-size:13px;color:#4b5563;line-height:1.5;margin-top:4px}
-  .lookup-image{width:86px;height:86px;object-fit:contain;border:1px solid #e4e6ea;border-radius:10px;background:#fafbfc}
-  .small{font-size:12px;color:#6b7280;line-height:1.5}
-
-  /* ── Scanner ── */
-  .scanner{overflow:hidden;padding:0;border-radius:14px}
-  .scanner-viewport{position:relative;width:100%;height:clamp(190px,36vh,300px);background:#0f1014;overflow:hidden}
-  .scanner-viewport::after{content:'';position:absolute;inset:0;background:linear-gradient(rgba(0,0,0,.28) 0%,transparent 28%,transparent 72%,rgba(0,0,0,.28) 100%);pointer-events:none;z-index:1}
-  .scanner-viewport::before{content:'';position:absolute;top:25%;left:8%;right:8%;bottom:25%;border:2px solid rgba(255,255,255,.55);border-radius:6px;pointer-events:none;z-index:2;box-shadow:0 0 0 9999px rgba(0,0,0,.3)}
-  .scanner video{width:100%;height:100%;background:#0f1014;display:block;object-fit:cover}
-  #html5Reader,#searchHtml5Reader{display:none;background:#0f1014;width:100%;height:100%;overflow:hidden;position:relative}
-  #html5Reader video,#searchHtml5Reader video{width:100% !important;height:100% !important;object-fit:cover}
-  #html5Reader canvas,#searchHtml5Reader canvas{width:100% !important;height:100% !important;object-fit:cover}
-  #html5Reader img,#searchHtml5Reader img{display:none}
-  #html5Reader > video,#html5Reader > canvas,#html5Reader video,#html5Reader canvas,#searchHtml5Reader > video,#searchHtml5Reader > canvas,#searchHtml5Reader video,#searchHtml5Reader canvas{max-width:100% !important;max-height:100% !important}
-  .scanner-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 14px;background:#fff;border-top:1px solid #f0f2f5}
-
-  /* ── Pills ── */
-  .pill{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:4px 10px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8;letter-spacing:.01em}
-  .pill.warning{background:#fff7ed;color:#9a3412}
-
-  /* ── Cursor / position ── */
-  .cursor{display:flex;align-items:center;justify-content:space-between;gap:10px}
-  .cursor strong{font-size:17px;font-weight:800;color:#1a1a1a}
-
-  /* ── Grids & rows ── */
-  .confirm-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
-  .tool-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
-  .tool-row .btn{width:auto;margin-top:0}
-  .device-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-  .scan-tools{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end}
-  .btn-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-
-  /* ── Shell banner ── */
-  .shell-banner{background:white;border:1px solid #e4e6ea;border-radius:14px;padding:12px 14px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
-  .shell-top{display:flex;align-items:center;justify-content:space-between;gap:10px}
-  .shell-title{font-size:13px;font-weight:800;color:#1a1a1a}
-  .shell-copy{font-size:12px;color:#6b7280;line-height:1.5;margin-top:4px}
-  .auth-grid{display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:10px;align-items:end}
-  .inline-note{font-size:12px;color:#6b7280;line-height:1.5;margin-top:8px}
-  .status-dot{display:inline-block;width:8px;height:8px;border-radius:999px;background:#16a34a;margin-right:5px}
-  .status-dot.offline{background:#dc2626}
-
-  /* ── Mono / chips ── */
-  .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-  .slot-preview{display:grid;gap:6px;margin-top:10px}
-  .slot-chip{display:inline-flex;align-items:center;gap:6px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:999px;padding:6px 11px;font-size:12px;color:#334155;font-weight:700}
-  .slot-chip.active{background:#ecfdf5;border-color:#86efac;color:#166534}
-
-  /* ── Plan tab ── */
-  .plan-sides{display:flex;flex-direction:column;gap:8px;margin-top:8px}
-  .plan-side{border:1px solid #e4e6ea;border-radius:10px;padding:10px;background:#fafbfc}
-  .plan-section{border:1px solid #e4e6ea;border-radius:10px;padding:10px;background:white;margin-top:8px}
-  .plan-shelf-grid{display:flex;flex-direction:column;gap:8px;margin-top:8px}
-  .tree-node{border:1px solid #e4e6ea;border-radius:12px;background:white;margin-top:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.05)}
-  .tree-node summary{list-style:none;cursor:pointer;padding:12px 14px;font-size:13px;font-weight:700;display:flex;align-items:center;gap:8px;flex-wrap:wrap;transition:background .15s}
-  .tree-node summary:hover{background:#fafbfc}
-  .tree-node summary::-webkit-details-marker{display:none}
-  .tree-node summary::before{content:'▸';color:#9ca3af;font-size:11px;flex-shrink:0;transition:color .15s}
-  .tree-node[open] > summary::before{content:'▾';color:#c8102e}
-  .tree-body{padding:0 14px 14px}
-  .tree-meta{font-size:12px;color:#6b7280;font-weight:600;flex:1}
-  .plan-meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
-  .plan-meta .pill{background:#f3f4f6;color:#374151}
-  .struct-details summary{list-style:none;cursor:pointer}
-  .struct-details summary::-webkit-details-marker{display:none}
-  .struct-toggle{display:block;width:100%;text-align:left;background:none;border:1px dashed #d1d5db;border-radius:8px;padding:8px 12px;font-size:12px;color:#6b7280;cursor:pointer;margin-top:8px;box-sizing:border-box;transition:background .15s}
-  .struct-toggle:hover{background:#f9fafb;border-color:#9ca3af}
-  .shelf-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
-  .shelf-title{font-size:12px;font-weight:700;color:#374151}
-  .shelf-fill{font-size:11px;color:#6b7280;background:#f3f4f6;border-radius:999px;padding:2px 8px;font-weight:600}
-  .plan-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-  .plan-shelf-card{border:1px solid #e4e6ea;border-radius:10px;background:#fff;padding:12px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
-  .plan-product-list{margin-top:6px}
-  .plan-product-item{padding:5px 0;border-bottom:1px solid #f3f4f6}
-  .plan-product-item:last-child{border-bottom:none}
-  .plan-product-row1{display:flex;gap:6px;align-items:baseline}
-  .plan-product-row2{padding-left:24px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;color:#9ca3af;letter-spacing:.3px;margin-top:2px}
-  .plan-pos-badge{min-width:20px;font-weight:700;color:#6b7280;font-size:11px;flex-shrink:0}
-  .plan-product-name{flex:1;color:#111827;font-size:13px;line-height:1.3}
-  .plan-product-brand{color:#6b7280;font-size:11px;flex-shrink:0}
-  .plan-slot-empty{color:#d1d5db;font-style:italic;font-size:12px}
-
-  /* ── Client / Advice ── */
-  .advice-card{background:#fafbfc;border:1px solid #e4e6ea;border-radius:12px;padding:14px;margin-top:10px}
-  .advice-list{display:grid;gap:6px;margin-top:10px}
-  .advice-item{font-size:12px;color:#334155;line-height:1.5;padding:9px 12px;border-radius:10px;background:white;border:1px solid #e4e6ea}
-
-  /* ── Product card enhanced ── */
-  .home-badge{display:inline-flex;align-items:center;gap:5px;background:linear-gradient(135deg,#c8102e 0%,#a50d25 100%);color:white;font-size:11px;font-weight:700;padding:4px 10px;border-radius:6px;margin-bottom:10px;letter-spacing:.03em;box-shadow:0 1px 3px rgba(200,16,46,.3)}
-  .product-layout{display:flex;gap:14px;align-items:flex-start}
-  .product-thumb{width:82px;height:82px;object-fit:contain;border:1px solid #e4e6ea;border-radius:10px;background:#fafbfc;flex-shrink:0}
-  .product-info{flex:1;min-width:0}
-  .product-brand{font-size:12px;color:#6b7280;font-weight:600;margin-top:3px}
-  .product-footer{margin-top:12px;padding-top:12px;border-top:1px solid #f0f2f5;display:flex;flex-direction:column;gap:6px}
-  .meta-row{display:flex;gap:8px;font-size:12px;color:#4b5563;line-height:1.45}
-  .meta-label{font-weight:700;color:#9ca3af;min-width:72px;flex-shrink:0}
-  .location{display:flex;flex-wrap:wrap;align-items:center;gap:3px 6px;background:#eff6ff;color:#1d4ed8;border-radius:8px;padding:7px 12px;font-size:12px;font-weight:700;margin:8px 0 4px;border:1px solid #bfdbfe}
-  .loc-sep{color:#93c5fd;font-weight:400}
-  .delete-btn{float:right;background:none;border:none;color:#d1d5db;font-size:13px;font-weight:700;cursor:pointer;padding:0 0 2px 10px;transition:color .15s;line-height:1}
-  .delete-btn:hover{color:#c8102e}
-
-  /* ── Scan line animation ── */
-  @keyframes scanline{0%,100%{top:26%}50%{top:68%}}
-  .scan-line{position:absolute;left:8%;right:8%;height:2px;background:linear-gradient(90deg,transparent,rgba(200,16,46,.9) 30%,#ff1a3c 50%,rgba(200,16,46,.9) 70%,transparent);z-index:3;pointer-events:none;animation:scanline 2.2s ease-in-out infinite;box-shadow:0 0 10px rgba(200,16,46,.5),0 0 3px rgba(200,16,46,.8)}
-
-  /* ── Advice card sections ── */
-  .advice-summary{font-size:14px;color:#111827;line-height:1.65;margin-top:8px}
-  .advice-section{margin-top:14px}
-  .advice-label{font-size:10px;font-weight:700;text-transform:uppercase;color:#9ca3af;letter-spacing:.08em;margin-bottom:6px;display:block}
-  .advice-item-product{background:#eff6ff !important;border-color:#bfdbfe !important;color:#1d4ed8 !important;font-weight:600}
-  .advice-item-flag{background:#fffbeb !important;border-color:#fcd34d !important;color:#92400e !important}
-
-  /* ── Position badge ── */
-  .position-badge{display:flex;align-items:center;gap:8px;background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:9px 12px;font-size:13px;font-weight:700;color:#166534;margin-top:10px}
-
-  /* ── Responsive ── */
-  @media (min-width:860px){.content{max-width:900px}}
-  @media (max-width:520px){.row2,.row3,.confirm-grid,.device-grid,.scan-tools,.btn-row{grid-template-columns:1fr}.tabs{top:calc(66px + env(safe-area-inset-top))}.tab{font-size:11px}.content{padding:12px}.cursor{align-items:flex-start;flex-direction:column}.btn-inline{width:100%}.scanner-viewport{height:min(36vh,230px)}}
-</style>
+<link rel="stylesheet" href="/static/style.css"/>
 </head>
 <body>
 
@@ -229,22 +39,24 @@
         <label class="label" for="editorName">Nom sur cet appareil</label>
         <input id="editorName" type="text" placeholder="Ex: Amine"/>
       </div>
-      <button class="btn btn-inline" onclick="saveEditorName()">Nommer cet appareil</button>
+      <button class="btn btn-inline" onclick="saveEditorName()">Nommer</button>
     </div>
-    <div id="editorSessionInfo" class="inline-note">Aucun mot de passe pour l instant. Si vous entrez un nom, il sera garde sur cet appareil pour suivre qui a change quoi.</div>
+    <div id="editorSessionInfo" class="inline-note">Aucun mot de passe. Si vous entrez un nom, il sera garde sur cet appareil pour suivre qui a change quoi.</div>
     <div id="backendStatusInfo" class="inline-note">Verification de la base partagee...</div>
   </div>
 </div>
 
+<!-- ── SCAN TAB ── -->
 <div id="scan" class="section active content">
-  <div class="card">
-    <div class="cursor">
-      <div>
-        <span class="small">Position actuelle</span>
-        <strong id="cursorText">Allee 1 - Avant - Gauche - Section 1 - Tablette 1 - Pos. 1</strong>
-        <div class="inline-note">Le point de depart du scan se choisit maintenant dans l onglet Plan pour rester aligne avec la vraie structure.</div>
-      </div>
-      <button class="btn btn-outline btn-inline" onclick="switchTab('add')">Configurer dans Plan</button>
+
+  <div class="cursor-card card">
+    <div class="cursor-location">
+      <span class="cursor-label-small">Position actuelle</span>
+      <strong id="cursorText">Allee 1 - Cote A - Section 1 - Tablette 1 - Pos. 1</strong>
+    </div>
+    <div class="cursor-actions">
+      <button class="btn btn-outline btn-inline cursor-back" onclick="rewindCursor()">← Refaire</button>
+      <button class="btn btn-inline cursor-skip" onclick="skipPosition()">Passer →</button>
     </div>
   </div>
 
@@ -252,13 +64,14 @@
     <div class="scanner-viewport">
       <video id="cameraPreview" playsinline muted></video>
       <div id="html5Reader"></div>
+      <div class="scan-line"></div>
     </div>
     <div class="scanner-bar">
       <span id="scannerStatus" class="pill">Camera arretee</span>
-      <button class="btn btn-inline" id="pauseScanButton" onclick="toggleScanPause()" style="display:none">⏸ Pause</button>
+      <button class="btn btn-outline btn-inline" id="pauseScanButton" onclick="toggleScanPause()" style="display:none">⏸ Pause</button>
       <button class="btn btn-outline btn-inline" id="torchButton" onclick="toggleTorch()" style="display:none" title="Lampe de poche">💡</button>
       <input type="range" id="zoomSlider" min="1" max="5" step="0.5" value="1" style="display:none;width:64px;accent-color:#c8102e" title="Zoom" oninput="applyZoom(this.value)">
-      <label class="btn btn-outline btn-inline" style="cursor:pointer" title="Prendre une photo du code-barres">
+      <label class="btn btn-outline btn-inline" style="cursor:pointer" title="Photo du code-barres">
         📷
         <input type="file" accept="image/*" capture="environment" style="display:none" onchange="scanFromPhoto(this)">
       </label>
@@ -266,46 +79,52 @@
     </div>
   </div>
 
-  <div class="card">
-    <div class="section-title">Code-barres detecte</div>
-    <div class="section-note">Tapez le code au complet, puis appuyez sur Enter ou Verifier. La camera attend un code-barres complet. Les scanners Zebra valident avec Enter ou Tab.</div>
-    <div class="scan-tools">
-      <div class="field">
-        <label class="label" for="scanInput">Code-barres</label>
-        <input type="text" id="scanInput" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Entrez ou scannez le code-barres..." onkeydown="handleScanInputKey(event)"/>
-      </div>
-      <button class="btn btn-outline btn-inline" onclick="clearScanInput()">Effacer</button>
-    </div>
-    <button class="btn btn-outline" onclick="lookupScanFromInput(true)">Verifier le code</button>
-    <div class="small" style="margin-top:8px">Si un scanner ne valide pas avec Enter ou Tab, le code sera rempli dans le champ; appuyez ensuite sur Verifier.</div>
-  </div>
-
-  <div class="card">
-    <div class="section-title">Compatibilite appareil</div>
-    <div class="device-grid">
-      <div><span class="small">Camera</span><div id="cameraSupport" class="pill">Verification...</div></div>
-      <div><span class="small">Lecteur code-barres</span><div id="scannerSupport" class="pill">Verification...</div></div>
-    </div>
-    <div id="supportHint" class="section-note" style="margin-top:10px">Sur iPhone et Android, ouvrez l app en HTTPS pour permettre l acces camera.</div>
-  </div>
-
   <div id="scanResult"></div>
+
+  <details class="card">
+    <summary class="details-summary">⌨ Saisir le code manuellement</summary>
+    <div class="details-body">
+      <div class="scan-tools">
+        <div class="field">
+          <label class="label" for="scanInput">Code-barres</label>
+          <input type="text" id="scanInput" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Entrez ou scannez le code-barres..." onkeydown="handleScanInputKey(event)"/>
+        </div>
+        <button class="btn btn-outline btn-inline" onclick="clearScanInput()">Effacer</button>
+      </div>
+      <button class="btn btn-outline" onclick="lookupScanFromInput(true)" style="margin-top:8px">Verifier le code</button>
+      <div class="small" style="margin-top:8px">Les scanners Zebra valident avec Enter ou Tab. Sinon, appuyez sur Verifier.</div>
+    </div>
+  </details>
+
+  <details class="card">
+    <summary class="details-summary">📱 Compatibilite appareil</summary>
+    <div class="details-body">
+      <div class="device-grid">
+        <div><span class="small">Camera</span><div id="cameraSupport" class="pill">Verification...</div></div>
+        <div><span class="small">Lecteur code-barres</span><div id="scannerSupport" class="pill">Verification...</div></div>
+      </div>
+      <div id="supportHint" class="section-note" style="margin-top:10px">Sur iPhone et Android, ouvrez l app en HTTPS pour permettre l acces camera.</div>
+    </div>
+  </details>
+
 </div>
 
+<!-- ── SEARCH TAB ── -->
 <div id="search" class="section content">
   <div class="card">
     <div class="section-title">Recherche rapide</div>
-    <div class="section-note">Scannez un code-barres avec la camera pour trouver directement le produit. Vous pouvez aussi chercher par nom, marque, mots-clés clients ou les 4 derniers chiffres du code.</div>
+    <div class="section-note">Scannez un code-barres avec la camera pour trouver directement le produit. Vous pouvez aussi chercher par nom, marque, mots-cles clients ou les 4 derniers chiffres du code.</div>
     <div class="card scanner" style="margin-top:10px;margin-bottom:0">
       <div class="scanner-viewport">
         <video id="searchCameraPreview" playsinline muted></video>
         <div id="searchHtml5Reader"></div>
+        <div class="scan-line"></div>
       </div>
       <div class="scanner-bar">
         <span id="searchScannerStatus" class="pill">Camera arretee</span>
         <button class="btn btn-outline btn-inline" id="searchTorchButton" onclick="toggleTorch()" style="display:none" title="Lampe de poche">💡</button>
         <input type="range" id="searchZoomSlider" min="1" max="5" step="0.5" value="1" style="display:none;width:64px;accent-color:#c8102e" title="Zoom" oninput="applyZoom(this.value)">
-        <label class="btn btn-outline btn-inline" style="cursor:pointer" title="Prendre une photo du code-barres">
+        <label class="btn btn-outline btn-inline" style="cursor:pointer" title="Photo du code-barres">
           📷
           <input type="file" accept="image/*" capture="environment" style="display:none" onchange="scanFromPhoto(this, 'search')">
         </label>
@@ -328,12 +147,13 @@
   <div id="searchResults"></div>
 </div>
 
+<!-- ── CLIENT TAB ── -->
 <div id="client" class="section content">
   <div class="card">
     <div class="section-title">Questions client</div>
     <div class="section-note">Ecrivez la demande du client. Le systeme cherche d abord avec vos regles et la base du magasin. Ensuite, l IA aide seulement a expliquer, comparer et dire quand il faut passer au pharmacien.</div>
     <div class="field">
-      <label class="label" for="clientQuestion">Question ou mots-clés</label>
+      <label class="label" for="clientQuestion">Question ou mots-cles</label>
       <textarea id="clientQuestion" placeholder="Ex: quelque chose pour la gorge irritee, la toux seche ou le nez bouche" oninput="scheduleClientSearch()"></textarea>
     </div>
     <div class="tool-row">
@@ -346,6 +166,7 @@
   <div id="clientMatches"></div>
 </div>
 
+<!-- ── PLAN TAB ── -->
 <div id="add" class="section content">
   <div class="card">
     <div class="section-title">Point de depart du scan</div>
@@ -411,8 +232,8 @@
       </label>
     </div>
     <div class="tool-row" style="margin-top:8px">
-      <button class="btn btn-outline btn-inline" class="btn-danger" onclick="resetDatabase(false)">🗑 Vider les produits</button>
-      <button class="btn btn-outline btn-inline" class="btn-danger" onclick="resetDatabase(true)">🗑 Tout effacer (produits + plan)</button>
+      <button class="btn btn-outline btn-inline btn-danger" onclick="resetDatabase(false)">🗑 Vider les produits</button>
+      <button class="btn btn-outline btn-inline btn-danger" onclick="resetDatabase(true)">🗑 Tout effacer (produits + plan)</button>
     </div>
     <div id="exportImportMsg"></div>
   </div>
@@ -459,40 +280,10 @@
   <div id="mapContent"></div>
 </div>
 
+<script src="/static/scanner.js"></script>
+<script src="/static/api.js"></script>
 <script>
-let scannerStream = null;
-let scanPaused = false;
-let currentScanProduct = null;
-let pendingLookupProduct = null;
-let pendingLookupAssist = null;
-let html5Scanner = null;
-let lastLookedUpBarcode = '';
-let hardwareScanBuffer = '';
-let hardwareScanTimer = null;
-let cameraCandidateBarcode = '';
-let cameraCandidateCount = 0;
-let cameraCandidateTimer = null;
-let lastAcceptedCameraBarcode = '';
-let lastAcceptedCameraAt = 0;
-let activeLookupBarcode = '';
-let barcodeLibraryPromise = null;
-let cameraUsageMode = 'scan';
-let scanFrameTimer = null;
-let cameraTrack = null;
-let quaggaActive = false;
-let quaggaDetectedHandler = null;
-let quaggaProcessedHandler = null;
-let quaggaOcrTimer = null;
-let quaggaStartedAt = 0;
-let ocrBusy = false;
-let quaggaLibraryPromise = null;
-let ocrLibraryPromise = null;
-let nativeScanActive = false;
-let nativeScanFrame = null;
-let torchEnabled = false;
-let zxingActive = false;
-let zxingFrame = null;
-let zxingLibraryPromise = null;
+// ── App globals ──────────────────────────────────────────────────────────────
 let allProductsCache = [];
 let mapLayouts = [];
 let searchTimer = null;
@@ -503,6 +294,12 @@ let lastLayoutsRefreshAt = 0;
 let dirtyLayoutAisles = new Set();
 let openPlanNodes = new Set();
 let planStartDraft = null;
+let currentScanProduct = null;
+let pendingLookupProduct = null;
+let pendingLookupAssist = null;
+let lastLookedUpBarcode = '';
+let activeLookupBarcode = '';
+
 const STORAGE_KEYS = {
   cursor: 'familiprixCursor',
   activeTab: 'familiprixActiveTab',
@@ -536,6 +333,7 @@ const cursor = {
   maxShelf: 5
 };
 
+// ── Utilities ────────────────────────────────────────────────────────────────
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -549,26 +347,15 @@ function isHomeBrand(brand) {
   return b.startsWith('essentiel') || b.startsWith('biomedic');
 }
 
-function startScanFromSection(aisle, side, sectionIndex) {
-  const config = getAisleLayoutConfig(aisle);
-  const slots = buildSlotsFromConfig(aisle, config, side);
-  const targetSlot = slots.find(slot => Number(slot.section) === sectionIndex + 1);
-  if (!targetSlot) {
-    document.getElementById('addMsg').innerHTML = '<div class="msg error">Aucune position dans cette section pour le moment.</div>';
-    return;
-  }
-  cursor.facing = 'Avant';
-  setCursorFromSlot(targetSlot);
-  updateCursorUi();
-  planStartDraft = getCursorSelection();
-  renderPlanStartEditor();
-  switchTab('scan');
-}
-
 function isStandaloneApp() {
   return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
 }
 
+function nowIsoWithoutMs() {
+  return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+// ── Product normalization ─────────────────────────────────────────────────────
 function normalizeProduct(product) {
   return {
     id: Number(product.id),
@@ -598,11 +385,8 @@ function normalizeProduct(product) {
 function upsertCachedProduct(product) {
   const normalized = normalizeProduct(product);
   const index = allProductsCache.findIndex(item => Number(item.id) === Number(normalized.id));
-  if (index >= 0) {
-    allProductsCache[index] = normalized;
-  } else {
-    allProductsCache.push(normalized);
-  }
+  if (index >= 0) allProductsCache[index] = normalized;
+  else allProductsCache.push(normalized);
   lastProductsRefreshAt = Date.now();
 }
 
@@ -611,6 +395,7 @@ function removeCachedProduct(productId) {
   lastProductsRefreshAt = Date.now();
 }
 
+// ── Search/scoring ─────────────────────────────────────────────────────────
 function normalizedDigits(value) {
   return String(value || '').replace(/\D/g, '');
 }
@@ -618,7 +403,7 @@ function normalizedDigits(value) {
 function normalizeSearchText(value) {
   return String(value || '')
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
@@ -651,22 +436,15 @@ function querySearchVariants(query) {
   const digits = normalizedDigits(query);
   const tokens = tokenizeSearchQuery(query);
   add(normalized);
-  if (tokens.length) {
-    add(tokens.join(' '));
-    tokens.forEach(add);
-  }
+  if (tokens.length) { add(tokens.join(' ')); tokens.forEach(add); }
   if (digits.length >= 4) add(digits);
   return variants;
 }
 
 function productSearchText(product) {
   return normalizeSearchText([
-    product.name,
-    product.brand,
-    product.description,
-    product.search_terms,
-    product.usage_notes,
-    product.alternative_suggestions
+    product.name, product.brand, product.description,
+    product.search_terms, product.usage_notes, product.alternative_suggestions
   ].join(' '));
 }
 
@@ -674,7 +452,6 @@ function scoreProductForQuery(product, query) {
   const loweredQuery = normalizeSearchText(query);
   const digitsQuery = normalizedDigits(query);
   if (!loweredQuery && !digitsQuery) return 0;
-
   const barcode = normalizedDigits(product.barcode);
   const name = normalizeSearchText(product.name);
   const brand = normalizeSearchText(product.brand);
@@ -684,32 +461,26 @@ function scoreProductForQuery(product, query) {
   const alternatives = normalizeSearchText(product.alternative_suggestions);
   const haystack = productSearchText(product);
   let score = 0;
-
   if (digitsQuery && barcode) {
     if (barcode === digitsQuery) score += 1200;
     else if (digitsQuery.length >= 4 && barcode.endsWith(digitsQuery)) score += 900;
     else if (barcode.includes(digitsQuery)) score += 500;
   }
-
   if (loweredQuery === name) score += 800;
   else if (name.startsWith(loweredQuery)) score += 650;
   else if (loweredQuery && name.includes(loweredQuery)) score += 450;
-
   if (loweredQuery === brand) score += 300;
   else if (loweredQuery && brand.includes(loweredQuery)) score += 180;
-
   if (loweredQuery && description.includes(loweredQuery)) score += 150;
   if (loweredQuery && searchTerms.includes(loweredQuery)) score += 240;
   if (loweredQuery && usageNotes.includes(loweredQuery)) score += 170;
   if (loweredQuery && alternatives.includes(loweredQuery)) score += 120;
-
   const uniqueTokens = [...new Set(tokenizeSearchQuery(query))];
   if (uniqueTokens.length) {
     const matchedTokens = uniqueTokens.filter(token => haystack.includes(token)).length;
     if (matchedTokens === uniqueTokens.length) score += 100 + (20 * matchedTokens);
     else if (matchedTokens > 0) score += 25 * matchedTokens;
   }
-
   return score;
 }
 
@@ -719,24 +490,19 @@ function searchProductsFromCache(query, limit=40) {
   const ranked = [];
   for (const product of allProductsCache) {
     let bestScore = 0;
-    for (const variant of variants) {
-      bestScore = Math.max(bestScore, scoreProductForQuery(product, variant));
-    }
+    for (const variant of variants) bestScore = Math.max(bestScore, scoreProductForQuery(product, variant));
     if (bestScore > 0) ranked.push({score: bestScore, product});
   }
   ranked.sort((a, b) => (b.score - a.score) || String(a.product.name || '').localeCompare(String(b.product.name || '')));
   return ranked.slice(0, limit).map(item => item.product);
 }
 
+// ── Editor session ────────────────────────────────────────────────────────────
 function loadEditorSession() {
   const raw = localStorage.getItem(STORAGE_KEYS.editorSession);
   if (!raw) return {username: 'appareil'};
-  try {
-    const parsed = JSON.parse(raw);
-    return {username: parsed.username || 'appareil'};
-  } catch (error) {
-    return {username: 'appareil'};
-  }
+  try { return {username: JSON.parse(raw).username || 'appareil'}; }
+  catch (e) { return {username: 'appareil'}; }
 }
 
 function saveEditorName() {
@@ -745,55 +511,38 @@ function saveEditorName() {
   updateAppShellState();
 }
 
-function requireEditorSession() {
-  return true;
-}
+function requireEditorSession() { return true; }
 
 function getEditorHeaders() {
-  return {
-    'X-User-Name': loadEditorSession().username || 'appareil'
-  };
+  return {'X-User-Name': loadEditorSession().username || 'appareil'};
 }
 
+// ── Layout config helpers ─────────────────────────────────────────────────────
 function canonicalSide(facing, viewedSide) {
-  if (facing === 'Arriere') {
-    return viewedSide === 'Gauche' ? 'Droite' : 'Gauche';
-  }
+  if (facing === 'Arriere') return viewedSide === 'Gauche' ? 'Droite' : 'Gauche';
   return viewedSide;
 }
 
 function viewedSideFromCanonical(facing, storedSide) {
-  if (facing === 'Arriere') {
-    return storedSide === 'Gauche' ? 'Droite' : 'Gauche';
-  }
+  if (facing === 'Arriere') return storedSide === 'Gauche' ? 'Droite' : 'Gauche';
   return storedSide;
 }
 
-function defaultLayoutConfig(maxSection = 0, maxShelf = 0, maxPosition = 0) {
-  const sectionCount = Math.max(0, Number(maxSection) || 0);
-  const shelfCount = Math.max(0, Number(maxShelf) || 0);
-  const positionCount = Math.max(0, Number(maxPosition) || 0);
-  const makeSections = () => Array.from({length: sectionCount}, () => ({
-    shelves: Array.from({length: shelfCount}, () => positionCount)
+function defaultLayoutConfig(maxSection=0, maxShelf=0, maxPosition=0) {
+  const sCount = Math.max(0, Number(maxSection) || 0);
+  const shCount = Math.max(0, Number(maxShelf) || 0);
+  const pCount = Math.max(0, Number(maxPosition) || 0);
+  const makeSections = () => Array.from({length: sCount}, () => ({
+    shelves: Array.from({length: shCount}, () => pCount)
   }));
-  return {
-    sides: {
-      Gauche: {sections: makeSections()},
-      Droite: {sections: makeSections()}
-    }
-  };
+  return {sides: {Gauche: {sections: makeSections()}, Droite: {sections: makeSections()}}};
 }
 
-function buildLayoutWithSideCounts(leftSections = 0, rightSections = 0, shelfCount = 0, positionCount = 0) {
-  const makeSections = (count) => Array.from({length: Math.max(0, Number(count) || 0)}, () => ({
+function buildLayoutWithSideCounts(leftSections=0, rightSections=0, shelfCount=0, positionCount=0) {
+  const makeSections = count => Array.from({length: Math.max(0, Number(count) || 0)}, () => ({
     shelves: Array.from({length: Math.max(0, Number(shelfCount) || 0)}, () => Math.max(0, Number(positionCount) || 0))
   }));
-  return {
-    sides: {
-      Gauche: {sections: makeSections(leftSections)},
-      Droite: {sections: makeSections(rightSections)}
-    }
-  };
+  return {sides: {Gauche: {sections: makeSections(leftSections)}, Droite: {sections: makeSections(rightSections)}}};
 }
 
 function getLayoutMetrics(config) {
@@ -802,32 +551,27 @@ function getLayoutMetrics(config) {
   const rightSections = Array.isArray(sides.Droite?.sections) ? sides.Droite.sections : [];
   const allSections = [...leftSections, ...rightSections];
   const maxSection = Math.max(leftSections.length, rightSections.length, 0);
-  const maxShelf = Math.max(0, ...allSections.map(section => Array.isArray(section?.shelves) ? section.shelves.length : 0));
-  const maxPosition = Math.max(0, ...allSections.flatMap(section => Array.isArray(section?.shelves) ? section.shelves : [0]));
-  return {
-    max_section: String(maxSection),
-    max_shelf: String(maxShelf),
-    max_position: String(maxPosition)
-  };
+  const maxShelf = Math.max(0, ...allSections.map(s => Array.isArray(s?.shelves) ? s.shelves.length : 0));
+  const maxPosition = Math.max(0, ...allSections.flatMap(s => Array.isArray(s?.shelves) ? s.shelves : [0]));
+  return {max_section: String(maxSection), max_shelf: String(maxShelf), max_position: String(maxPosition)};
 }
 
-function normalizeLayoutConfig(config, maxSection = 0, maxShelf = 0, maxPosition = 0) {
+function normalizeLayoutConfig(config, maxSection=0, maxShelf=0, maxPosition=0) {
   const base = defaultLayoutConfig(maxSection, maxShelf, maxPosition);
   const source = (config && typeof config === 'object') ? config : {};
   const sourceSides = (source.sides && typeof source.sides === 'object') ? source.sides : {};
   ['Gauche', 'Droite'].forEach(side => {
     const sections = Array.isArray(sourceSides[side]?.sections) ? sourceSides[side].sections : [];
-    const normalizedSections = sections
-      .map(section => Array.isArray(section?.shelves) ? section.shelves.map(value => Math.max(0, Number(value) || 0)) : null)
+    base.sides[side].sections = sections
+      .map(section => Array.isArray(section?.shelves) ? section.shelves.map(v => Math.max(0, Number(v) || 0)) : null)
       .filter(Boolean)
       .map(shelves => ({shelves}));
-    base.sides[side].sections = normalizedSections;
   });
   return base;
 }
 
 function countProductsInAisle(aisle) {
-  return allProductsCache.filter(product => String(product.aisle) === String(aisle)).length;
+  return allProductsCache.filter(p => String(p.aisle) === String(aisle)).length;
 }
 
 function sortMapLayouts() {
@@ -845,43 +589,30 @@ function syncLayoutRecord(layout) {
   return layout;
 }
 
-function nowIsoWithoutMs() {
-  return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-}
-
-function markLayoutDirty(aisle) {
-  dirtyLayoutAisles.add(String(aisle));
-}
-
-function clearLayoutDirty(aisle) {
-  dirtyLayoutAisles.delete(String(aisle));
-}
-
-function hasDirtyLayouts() {
-  return dirtyLayoutAisles.size > 0;
-}
+function markLayoutDirty(aisle) { dirtyLayoutAisles.add(String(aisle)); }
+function clearLayoutDirty(aisle) { dirtyLayoutAisles.delete(String(aisle)); }
+function hasDirtyLayouts() { return dirtyLayoutAisles.size > 0; }
 
 function getAisleLayoutConfig(aisle) {
   const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
   return normalizeLayoutConfig(layout?.config, layout?.max_section, layout?.max_shelf, layout?.max_position);
 }
 
-function buildSlotsFromConfig(aisle, config, sideFilter = null) {
+function getConfiguredLayoutForAisle(aisle) {
+  const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
+  return normalizeLayoutConfig(layout?.config, layout?.max_section, layout?.max_shelf, layout?.max_position);
+}
+
+// ── Slot helpers ──────────────────────────────────────────────────────────────
+function buildSlotsFromConfig(aisle, config, sideFilter=null) {
   const slots = [];
   ['Gauche', 'Droite'].forEach(side => {
     if (sideFilter && side !== sideFilter) return;
     const sections = config.sides[side].sections || [];
-    sections.forEach((section, sectionIndex) => {
-      const shelves = section.shelves || [];
-      shelves.forEach((positionCount, shelfIndex) => {
-        for (let position = 1; position <= Math.max(0, Number(positionCount) || 0); position += 1) {
-          slots.push({
-            aisle: String(aisle),
-            side,
-            section: String(sectionIndex + 1),
-            shelf: String(shelfIndex + 1),
-            position: String(position)
-          });
+    sections.forEach((section, si) => {
+      (section.shelves || []).forEach((positionCount, shi) => {
+        for (let p = 1; p <= Math.max(0, Number(positionCount) || 0); p++) {
+          slots.push({aisle: String(aisle), side, section: String(si + 1), shelf: String(shi + 1), position: String(p)});
         }
       });
     });
@@ -898,7 +629,7 @@ function compareSlotLocations(a, b) {
     (Number(a.shelf) || 1) - (Number(b.shelf) || 1),
     (Number(a.position) || 1) - (Number(b.position) || 1)
   ];
-  return checks.find(value => value !== 0) || 0;
+  return checks.find(v => v !== 0) || 0;
 }
 
 function getAllScanSlots() {
@@ -920,13 +651,13 @@ function syncCursorLimitsForAisle(aisle) {
   cursor.maxSection = Math.max(config.sides.Gauche.sections.length, config.sides.Droite.sections.length, 0);
   cursor.maxShelf = Math.max(
     0,
-    ...config.sides.Gauche.sections.map(section => section.shelves.length),
-    ...config.sides.Droite.sections.map(section => section.shelves.length)
+    ...config.sides.Gauche.sections.map(s => s.shelves.length),
+    ...config.sides.Droite.sections.map(s => s.shelves.length)
   );
   cursor.maxPosition = Math.max(
     0,
-    ...config.sides.Gauche.sections.flatMap(section => section.shelves),
-    ...config.sides.Droite.sections.flatMap(section => section.shelves)
+    ...config.sides.Gauche.sections.flatMap(s => s.shelves),
+    ...config.sides.Droite.sections.flatMap(s => s.shelves)
   );
 }
 
@@ -942,346 +673,49 @@ function setCursorFromSlot(slot) {
 function findBestCursorSlot() {
   const slots = getAllScanSlots();
   if (!slots.length) return null;
-  const current = {
-    aisle: cursor.aisle,
-    side: cursor.side,
-    section: cursor.section,
-    shelf: cursor.shelf,
-    position: cursor.position
-  };
+  const current = {aisle: cursor.aisle, side: cursor.side, section: cursor.section, shelf: cursor.shelf, position: cursor.position};
   return slots.find(slot => compareSlotLocations(slot, current) >= 0) || slots[slots.length - 1];
 }
 
 function normalizeCursorToLayout() {
   const slot = findBestCursorSlot();
-  if (!slot) return;
-  setCursorFromSlot(slot);
+  if (slot) setCursorFromSlot(slot);
 }
 
 function countProductsOutsideLayout(aisle, config) {
   return allProductsCache.filter(product => {
     if (String(product.aisle) !== String(aisle)) return false;
     const sideConfig = config.sides[String(product.side)] || {sections: []};
-    const sectionIndex = Math.max(0, Number(product.section || 1) - 1);
-    const shelfIndex = Math.max(0, Number(product.shelf || 1) - 1);
-    const positionValue = Number(product.position || 0);
-    if (sectionIndex >= sideConfig.sections.length) return true;
-    const shelves = sideConfig.sections[sectionIndex]?.shelves || [];
-    if (shelfIndex >= shelves.length) return true;
-    return positionValue < 1 || positionValue > Number(shelves[shelfIndex] || 0);
+    const si = Math.max(0, Number(product.section || 1) - 1);
+    const shi = Math.max(0, Number(product.shelf || 1) - 1);
+    const pos = Number(product.position || 0);
+    if (si >= sideConfig.sections.length) return true;
+    const shelves = sideConfig.sections[si]?.shelves || [];
+    if (shi >= shelves.length) return true;
+    return pos < 1 || pos > Number(shelves[shi] || 0);
   }).length;
 }
 
 function confirmLayoutReduction(aisle, nextConfig, subjectLabel) {
-  const removedProducts = countProductsOutsideLayout(aisle, nextConfig);
-  if (!removedProducts) {
-    return confirm(`${subjectLabel} ?`);
-  }
-  return confirm(`${subjectLabel} ?\n\nCela supprimera aussi ${removedProducts} produit(s) qui ne rentreront plus dans cette structure.`);
+  const removed = countProductsOutsideLayout(aisle, nextConfig);
+  if (!removed) return confirm(`${subjectLabel} ?`);
+  return confirm(`${subjectLabel} ?\n\nCela supprimera aussi ${removed} produit(s) qui ne rentreront plus dans cette structure.`);
 }
 
-async function apiFetch(url, options = {}) {
-  const opts = {...options, cache: options.cache || 'no-store'};
-  opts.headers = {...(options.headers || {})};
-  const res = await fetch(url, opts);
-  const contentType = res.headers.get('content-type') || '';
-  const data = contentType.includes('application/json') ? await res.json() : await res.text();
-  return {res, data};
-}
-
-async function apiGetProducts() {
-  const {res, data} = await apiFetch('/api/products');
-  if (!res.ok) throw new Error('products-fetch');
-  return Array.isArray(data) ? data.map(normalizeProduct) : [];
-}
-
-async function apiSearchProducts(query) {
-  const trimmed = String(query || '').trim();
-  if (!trimmed) return [];
-  const {res, data} = await apiFetch(`/api/products/search?q=${encodeURIComponent(trimmed)}&limit=40`);
-  if (!res.ok) throw new Error('search-fetch');
-  return Array.isArray(data) ? data.map(normalizeProduct) : [];
-}
-
-async function apiGetProductByBarcode(barcode) {
-  const {res, data} = await apiFetch(`/api/products/barcode/${encodeURIComponent(barcode)}`);
-  if (!res.ok) {
-    const error = new Error(res.status === 404 ? 'not-found' : 'barcode-fetch');
-    error.status = res.status;
-    throw error;
-  }
-  return normalizeProduct(data);
-}
-
-async function apiAddProduct(payload) {
-  try {
-    const {res, data} = await apiFetch('/api/products', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-      body: JSON.stringify(payload)
-    });
-    return res.ok ? data : {success: false, error: data.error || 'Erreur serveur pendant l ajout.'};
-  } catch (error) {
-    return {success: false, error: 'Impossible d ajouter le produit pour le moment.'};
-  }
-}
-
-async function apiUpdateProduct(product) {
-  try {
-    const {res, data} = await apiFetch(`/api/products/${product.id}`, {
-      method: 'PUT',
-      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-      body: JSON.stringify(product)
-    });
-    return res.ok ? data : {success: false, error: data.error || 'Erreur de sauvegarde.'};
-  } catch (error) {
-    return {success: false, error: 'Impossible de sauvegarder le produit pour le moment.'};
-  }
-}
-
-async function apiDeleteProduct(id) {
-  try {
-    const {res, data} = await apiFetch(`/api/products/${id}`, {method:'DELETE', headers: getEditorHeaders()});
-    return res.ok ? data : {success: false, error: data.error || 'Erreur de suppression.'};
-  } catch (error) {
-    return {success: false, error: 'Impossible de supprimer le produit pour le moment.'};
-  }
-}
-
-async function apiGetLayoutAisles() {
-  const {res, data} = await apiFetch('/api/layout/aisles');
-  if (!res.ok) throw new Error('layout-fetch');
-  return Array.isArray(data) ? data : [];
-}
-
-async function apiCreateLayoutAisle(payload) {
-  const {res, data} = await apiFetch('/api/layout/aisles', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-    body: JSON.stringify(payload)
-  });
-  return res.ok ? data : {success: false, error: data.error || 'Erreur de creation d allee.'};
-}
-
-async function apiUpdateLayoutAisle(aisle, payload) {
-  const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}`, {
-    method: 'PUT',
-    headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-    body: JSON.stringify(payload)
-  });
-  return res.ok ? data : {success: false, error: data.error || 'Erreur de mise a jour d allee.'};
-}
-
-async function apiDeleteLayoutAisle(aisle) {
-  try {
-    const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}`, {
-      method: 'DELETE',
-      headers: getEditorHeaders()
-    });
-    return res.ok ? data : {success: false, error: data.error || 'Erreur de suppression d allee.'};
-  } catch (error) {
-    return {success: false, error: 'Impossible de supprimer l allee pour le moment.'};
-  }
-}
-
-async function apiLookupOnline(barcode, signal) {
-  try {
-    const {data} = await apiFetch(`/api/products/lookup/${encodeURIComponent(barcode)}`, {signal});
-    return data;
-  } catch (error) {
-    return {found: false};
-  }
-}
-
-async function apiGenerateProductAssist(payload) {
-  try {
-    const {res, data} = await apiFetch('/api/products/assist', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-      body: JSON.stringify(payload)
-    });
-    return res.ok ? data : {success: false, error: data.error || 'Aide client indisponible pour le moment.'};
-  } catch (error) {
-    return {success: false, error: 'Aide client indisponible pour le moment.'};
-  }
-}
-
-async function apiGenerateClientHelp(payload) {
-  try {
-    const {res, data} = await apiFetch('/api/client/help', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-      body: JSON.stringify(payload)
-    });
-    return res.ok ? data : {success: false, error: data.error || 'Reponse client indisponible pour le moment.'};
-  } catch (error) {
-    return {success: false, error: 'Reponse client indisponible pour le moment.'};
-  }
-}
-
-async function exportDatabase() {
-  const msg = document.getElementById('exportImportMsg');
-  if (msg) { msg.className = 'msg info'; msg.textContent = 'Preparation du fichier...'; }
-  try {
-    const res = await fetch('/api/export');
-    if (!res.ok) throw new Error('Erreur serveur');
-    const blob = await res.blob();
-    const filename = `familiprix-backup-${new Date().toISOString().slice(0,10)}.json`;
-    const file = new File([blob], filename, {type: 'application/json'});
-    if (navigator.canShare && navigator.canShare({files: [file]})) {
-      await navigator.share({files: [file], title: 'Sauvegarde Familiprix', text: 'Base de donnees Familiprix Localisateur'});
-      if (msg) { msg.className = 'msg success'; msg.textContent = 'Fichier partage avec succes.'; }
-    } else {
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      if (msg) { msg.className = 'msg success'; msg.textContent = 'Fichier telecharge. Partagez-le via WhatsApp.'; }
-    }
-  } catch (e) {
-    if (e.name !== 'AbortError' && msg) { msg.className = 'msg error'; msg.textContent = 'Impossible de partager le fichier.'; }
-  }
-}
-
-async function loadGistStatus() {
-  const statusEl = document.getElementById('gistStatusMsg');
-  const actionsEl = document.getElementById('gistActions');
-  try {
-    const {res, data} = await apiFetch('/api/gist/status');
-    if (!res.ok) throw new Error();
-    if (data.configured) {
-      statusEl.textContent = 'Sauvegarde automatique GitHub active. Chaque produit scanne est sauvegarde automatiquement.';
-      if (actionsEl) actionsEl.style.display = '';
-    } else if (data.has_token && !data.has_gist_id) {
-      statusEl.innerHTML = 'GITHUB_TOKEN configure. Scannez un premier produit pour creer le gist, puis ajoutez <strong>GITHUB_GIST_ID</strong> dans les variables Render.';
-      if (actionsEl) actionsEl.style.display = '';
-    } else {
-      statusEl.innerHTML = 'Sauvegarde GitHub non configuree. Ajoutez <strong>GITHUB_TOKEN</strong> et <strong>GITHUB_GIST_ID</strong> dans les variables d\'environnement Render pour activer la sauvegarde automatique.';
-      if (actionsEl) actionsEl.style.display = 'none';
-    }
-  } catch (e) {
-    statusEl.textContent = 'Impossible de verifier le statut GitHub.';
-  }
-}
-
-async function gistBackupNow() {
-  const msg = document.getElementById('gistMsg');
-  if (msg) { msg.className = 'msg info'; msg.textContent = 'Sauvegarde en cours...'; }
-  try {
-    const {res, data} = await apiFetch('/api/gist/backup', {method: 'POST', headers: getEditorHeaders()});
-    if (!res.ok || !data.success) throw new Error(data.error || 'Echec');
-    if (msg) { msg.className = 'msg success'; msg.textContent = `Sauvegarde reussie sur GitHub Gist.`; }
-  } catch (e) {
-    if (msg) { msg.className = 'msg error'; msg.textContent = e.message || 'Erreur lors de la sauvegarde GitHub.'; }
-  }
-}
-
-async function gistRestoreNow() {
-  const msg = document.getElementById('gistMsg');
-  if (!confirm('Restaurer les donnees depuis GitHub Gist? Les produits existants seront conserves (fusion).')) return;
-  if (msg) { msg.className = 'msg info'; msg.textContent = 'Restauration en cours...'; }
-  try {
-    const {res, data} = await apiFetch('/api/gist/restore', {method: 'POST', headers: getEditorHeaders()});
-    if (!res.ok || !data.success) throw new Error(data.error || 'Echec');
-    if (msg) { msg.className = 'msg success'; msg.textContent = `Restauration terminee: ${data.imported_products} produit(s) et ${data.imported_layouts} allee(s) importes.`; }
-    await refreshProductsCache(true);
-    await refreshLayouts();
-    renderMapEditor();
-  } catch (e) {
-    if (msg) { msg.className = 'msg error'; msg.textContent = e.message || 'Erreur lors de la restauration GitHub.'; }
-  }
-}
-
-async function importDatabase(input) {
-  const msg = document.getElementById('exportImportMsg');
-  const file = input.files[0];
-  input.value = '';
-  if (!file) return;
-  if (msg) { msg.className = 'msg info'; msg.textContent = 'Lecture du fichier...'; }
-  let payload;
-  try {
-    payload = JSON.parse(await file.text());
-  } catch (e) {
-    if (msg) { msg.className = 'msg error'; msg.textContent = 'Fichier invalide. Utilisez uniquement un fichier exporte par cette application.'; }
-    return;
-  }
-  if (payload.export_version !== 1) {
-    if (msg) { msg.className = 'msg error'; msg.textContent = 'Format non reconnu. Fichier incompatible.'; }
-    return;
-  }
-  const products = (payload.products || []).length;
-  const layouts = (payload.aisle_layouts || []).length;
-  if (!confirm(`Importer ${products} produit(s) et ${layouts} allee(s) dans la base? Les positions existantes seront mises a jour.`)) return;
-  if (msg) { msg.className = 'msg info'; msg.textContent = 'Import en cours...'; }
-  try {
-    const {res, data} = await apiFetch('/api/import', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json', ...getEditorHeaders()},
-      body: JSON.stringify(payload)
-    });
-    if (!res.ok || !data.success) throw new Error(data.error || 'Import echoue');
-    if (msg) { msg.className = 'msg success'; msg.textContent = `Import termine: ${data.imported_products} produit(s) et ${data.imported_layouts} allee(s) importes. ${data.skipped_products ? data.skipped_products + ' ignore(s).' : ''}`; }
-    await refreshProductsCache(true);
-    await refreshLayouts();
-    renderMapEditor();
-  } catch (e) {
-    if (msg) { msg.className = 'msg error'; msg.textContent = e.message || 'Erreur lors de l import.'; }
-  }
-}
-
-async function resetDatabase(wipeLayouts) {
-  const msg = document.getElementById('exportImportMsg');
-  const what = wipeLayouts ? 'TOUS les produits ET le plan du magasin' : 'tous les produits';
-  if (!confirm(`Effacer ${what}? Cette action est irreversible. Faites une sauvegarde d abord si necessaire.`)) return;
-  if (!confirm('Confirmation finale: effacer definitivement?')) return;
-  if (msg) { msg.className = 'msg info'; msg.textContent = 'Suppression en cours...'; }
-  try {
-    const {res, data} = await apiFetch('/api/reset', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json', ...getEditorHeaders()},
-      body: JSON.stringify({wipe_layouts: wipeLayouts})
-    });
-    if (!res.ok || !data.success) throw new Error(data.error || 'Erreur');
-    if (msg) {
-      msg.className = 'msg success';
-      msg.textContent = `Base nettoyee: ${data.deleted_products} produit(s) supprime(s)${wipeLayouts ? `, ${data.deleted_layouts} allee(s) supprimee(s)` : ''}.`;
-    }
-    await refreshProductsCache(true);
-    if (wipeLayouts) { await refreshLayouts(); renderMapEditor(); }
-  } catch (e) {
-    if (msg) { msg.className = 'msg error'; msg.textContent = e.message || 'Erreur lors de la suppression.'; }
-  }
-}
-
-async function apiGetSystemInfo() {
-  const {res, data} = await apiFetch('/api/system/info');
-  if (!res.ok) throw new Error('system-info');
-  return data;
-}
-
+// ── Cache refresh ─────────────────────────────────────────────────────────────
 async function refreshProductsCache(force=false) {
-  if (!force && allProductsCache.length && (Date.now() - lastProductsRefreshAt) < 30000) {
-    return allProductsCache;
-  }
+  if (!force && allProductsCache.length && (Date.now() - lastProductsRefreshAt) < 30000) return allProductsCache;
   try {
     allProductsCache = await apiGetProducts();
     mapLayouts.forEach(layout => syncLayoutRecord(layout));
     lastProductsRefreshAt = Date.now();
-  } catch (error) {}
+  } catch (e) {}
   return allProductsCache;
 }
 
 async function refreshLayoutsCache(force=false) {
-  if (!force && hasDirtyLayouts()) {
-    return mapLayouts;
-  }
-  if (!force && mapLayouts.length && (Date.now() - lastLayoutsRefreshAt) < 30000) {
-    return mapLayouts;
-  }
+  if (!force && hasDirtyLayouts()) return mapLayouts;
+  if (!force && mapLayouts.length && (Date.now() - lastLayoutsRefreshAt) < 30000) return mapLayouts;
   try {
     mapLayouts = await apiGetLayoutAisles();
     mapLayouts = mapLayouts.map(layout => syncLayoutRecord({
@@ -1290,10 +724,11 @@ async function refreshLayoutsCache(force=false) {
     }));
     sortMapLayouts();
     lastLayoutsRefreshAt = Date.now();
-  } catch (error) {}
+  } catch (e) {}
   return mapLayouts;
 }
 
+// ── Cursor UI ─────────────────────────────────────────────────────────────────
 function facingLabel(value) {
   return value === 'Arriere' ? 'depuis l autre bout' : 'depuis le debut';
 }
@@ -1306,34 +741,6 @@ function cursorLabel() {
   return `Allee ${cursor.aisle} - ${sideDisplayLabel(cursor.side)} - Section ${cursor.section} - Tablette ${cursor.shelf} - Pos. ${cursor.position}`;
 }
 
-function currentLookupAssistPayload() {
-  return {
-    name: document.getElementById('scanProductName')?.value.trim() || '',
-    brand: document.getElementById('scanProductBrand')?.value.trim() || '',
-    description: document.getElementById('scanProductDescription')?.value.trim() || '',
-    barcode: document.getElementById('scanInput')?.value.trim() || ''
-  };
-}
-
-function renderLookupAssistPreview() {
-  const preview = document.getElementById('lookupAssistPreview');
-  const status = document.getElementById('lookupAssistStatus');
-  if (!preview || !status) return;
-  if (!pendingLookupAssist) {
-    preview.innerHTML = '';
-    status.textContent = backendInfo.ai_enabled
-      ? `Optionnel: genere des mots-cles clients, une explication simple et des alternatives via ${aiProviderLabel()}.`
-      : 'IA non configuree sur le serveur pour le moment. Ajoutez GEMINI_API_KEY sur Render.';
-    return;
-  }
-  status.textContent = 'Aide client generee. Elle sera sauvegardee avec ce produit.';
-  preview.innerHTML = `
-    ${pendingLookupAssist.search_terms ? `<div class="barcode-text">Mots-clés clients: ${esc(pendingLookupAssist.search_terms)}</div>` : ''}
-    ${pendingLookupAssist.usage_notes ? `<div class="desc-text">${esc(pendingLookupAssist.usage_notes)}</div>` : ''}
-    ${pendingLookupAssist.alternative_suggestions ? `<div class="barcode-text">Alternatives possibles: ${esc(pendingLookupAssist.alternative_suggestions)}</div>` : ''}
-  `;
-}
-
 function updateCursorUi() {
   document.getElementById('cursorText').textContent = cursorLabel();
   localStorage.setItem(STORAGE_KEYS.cursor, JSON.stringify(cursor));
@@ -1342,15 +749,62 @@ function updateCursorUi() {
 function loadCursor() {
   const saved = localStorage.getItem(STORAGE_KEYS.cursor);
   if (saved) {
-    try {
-      Object.assign(cursor, JSON.parse(saved));
-    } catch (error) {
-      localStorage.removeItem(STORAGE_KEYS.cursor);
-    }
+    try { Object.assign(cursor, JSON.parse(saved)); }
+    catch (e) { localStorage.removeItem(STORAGE_KEYS.cursor); }
   }
   updateCursorUi();
 }
 
+// ── Cursor navigation ─────────────────────────────────────────────────────────
+function advanceCursor() {
+  const slots = getAllScanSlots();
+  if (!slots.length) { updateCursorUi(); return; }
+  const currentIndex = slots.findIndex(slot => (
+    Number(slot.aisle) === Number(cursor.aisle) &&
+    slot.side === cursor.side &&
+    Number(slot.section) === Number(cursor.section) &&
+    Number(slot.shelf) === Number(cursor.shelf) &&
+    Number(slot.position) === Number(cursor.position)
+  ));
+  if (currentIndex >= 0 && slots[currentIndex + 1]) setCursorFromSlot(slots[currentIndex + 1]);
+  else {
+    const next = slots.find(slot => compareSlotLocations(slot, cursor) > 0);
+    if (next) setCursorFromSlot(next);
+    else setCursorFromSlot(slots[0]);
+  }
+  updateCursorUi();
+  renderScanPathPreview();
+}
+
+function rewindCursor() {
+  const slots = getAllScanSlots();
+  if (!slots.length) return;
+  const currentIndex = slots.findIndex(slot => (
+    Number(slot.aisle) === Number(cursor.aisle) &&
+    slot.side === cursor.side &&
+    Number(slot.section) === Number(cursor.section) &&
+    Number(slot.shelf) === Number(cursor.shelf) &&
+    Number(slot.position) === Number(cursor.position)
+  ));
+  if (currentIndex <= 0) return;
+  setCursorFromSlot(slots[currentIndex - 1]);
+  updateCursorUi();
+  persistScanDraft();
+  document.getElementById('scanResult').innerHTML = '';
+  document.getElementById('scanInput').value = '';
+  lastLookedUpBarcode = '';
+  activeLookupBarcode = '';
+}
+
+function skipPosition() {
+  document.getElementById('scanResult').innerHTML = '';
+  document.getElementById('scanInput').value = '';
+  lastLookedUpBarcode = '';
+  activeLookupBarcode = '';
+  advanceCursor();
+}
+
+// ── Draft persistence ─────────────────────────────────────────────────────────
 function persistScanDraft() {
   localStorage.setItem(STORAGE_KEYS.scanDraft, JSON.stringify({
     barcode: document.getElementById('scanInput').value.trim()
@@ -1363,7 +817,7 @@ function loadScanDraft() {
   try {
     const draft = JSON.parse(saved);
     if (draft.barcode) document.getElementById('scanInput').value = draft.barcode;
-  } catch (error) {}
+  } catch (e) {}
 }
 
 function persistAddDraft() {
@@ -1386,7 +840,7 @@ function loadAddDraft() {
     document.getElementById('mapRightSections').value = draft.rightSections ?? '0';
     document.getElementById('mapInitialShelves').value = draft.initialShelves ?? '0';
     document.getElementById('mapInitialPositions').value = draft.initialPositions ?? '0';
-  } catch (error) {}
+  } catch (e) {}
 }
 
 function persistClientDraft() {
@@ -1401,41 +855,37 @@ function loadClientDraft() {
   try {
     const draft = JSON.parse(saved);
     document.getElementById('clientQuestion').value = draft.question || '';
-  } catch (error) {}
+  } catch (e) {}
 }
 
+// ── App shell state ───────────────────────────────────────────────────────────
 function updateBackendStatusInfo() {
   const target = document.getElementById('backendStatusInfo');
   if (!target) return;
-  const messages = [];
+  const msgs = [];
   if (backendInfo.shared_sync) {
-    messages.push('Base partagee active: PostgreSQL. Les appareils connectes lisent la meme base.');
+    msgs.push('Base partagee active: PostgreSQL. Les appareils connectes lisent la meme base.');
   } else {
-    messages.push('Base locale active: SQLite. Pour une vraie synchronisation entre appareils, connectez Render Postgres et reglez DATABASE_URL.');
+    msgs.push('Base locale active: SQLite. Pour une vraie synchronisation entre appareils, connectez Render Postgres et reglez DATABASE_URL.');
   }
-  messages.push(backendInfo.ai_enabled
+  msgs.push(backendInfo.ai_enabled
     ? `Aide client IA active via ${aiProviderLabel()}.`
     : 'Aide client IA inactive tant que GEMINI_API_KEY n est pas configuree.');
-  if (Number(backendInfo.duplicate_slots || 0) > 0) {
-    messages.push(`Attention: ${backendInfo.duplicate_slots} position(s) contiennent deja plusieurs produits et doivent etre nettoyees.`);
-  }
-  if (Number(backendInfo.duplicate_barcodes || 0) > 0) {
-    messages.push(`Attention: ${backendInfo.duplicate_barcodes} code(s)-barres sont dupliques dans la base.`);
-  }
-  target.textContent = messages.join(' ');
+  if (Number(backendInfo.duplicate_slots || 0) > 0) msgs.push(`Attention: ${backendInfo.duplicate_slots} position(s) contiennent deja plusieurs produits.`);
+  if (Number(backendInfo.duplicate_barcodes || 0) > 0) msgs.push(`Attention: ${backendInfo.duplicate_barcodes} code(s)-barres sont dupliques dans la base.`);
+  target.textContent = msgs.join(' ');
 }
 
 function updateAppShellState() {
   const standalone = isStandaloneApp();
-  const modeLabel = standalone ? 'Mode app' : 'Mode web';
-  document.getElementById('appModeLabel').textContent = `${modeLabel} - ${backendInfo.label || 'Base serveur'}`;
+  document.getElementById('appModeLabel').textContent = `${standalone ? 'Mode app' : 'Mode web'} - ${backendInfo.label || 'Base serveur'}`;
   document.getElementById('installHint').textContent = standalone
     ? 'L app garde votre position et vos formulaires meme si Safari se ferme.'
     : 'Sur mobile: ouvrez le site puis ajoutez-le a l ecran d accueil pour un acces rapide.';
   const session = loadEditorSession();
   document.getElementById('editorSessionInfo').textContent = session?.username && session.username !== 'appareil'
     ? `Cet appareil signe les changements avec le nom ${session.username}.`
-    : 'Aucun mot de passe pour l instant. Si vous entrez un nom, il sera garde sur cet appareil pour suivre qui a change quoi.';
+    : 'Aucun mot de passe. Si vous entrez un nom, il sera garde sur cet appareil pour suivre qui a change quoi.';
   document.getElementById('editorName').value = session?.username === 'appareil' ? '' : (session?.username || '');
   updateBackendStatusInfo();
 }
@@ -1447,6 +897,7 @@ function updateNetworkStatus() {
     : '<span class="status-dot offline"></span>Hors ligne';
 }
 
+// ── Plan start editor ─────────────────────────────────────────────────────────
 function setSelectOptions(elementId, values, selectedValue) {
   const select = document.getElementById(elementId);
   if (!select) return;
@@ -1458,9 +909,9 @@ function setSelectOptions(elementId, values, selectedValue) {
     return;
   }
   select.disabled = false;
-  select.innerHTML = items.map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('');
-  const nextValue = items.includes(String(selectedValue)) ? String(selectedValue) : String(items[0]);
-  select.value = nextValue;
+  select.innerHTML = items.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+  const next = items.includes(String(selectedValue)) ? String(selectedValue) : String(items[0]);
+  select.value = next;
 }
 
 function getCursorSelection() {
@@ -1485,9 +936,7 @@ function readPlanStartSelectionFromDom() {
   const shelfEl = document.getElementById('planScanShelf');
   const positionEl = document.getElementById('planScanPosition');
   const facingEl = document.getElementById('planScanFacing');
-  if (!aisleEl || !sideEl || !sectionEl || !shelfEl || !positionEl || !facingEl) {
-    return getPlanStartDraft();
-  }
+  if (!aisleEl || !sideEl || !sectionEl || !shelfEl || !positionEl || !facingEl) return getPlanStartDraft();
   return {
     aisle: String(aisleEl.value || ''),
     facing: String(facingEl.value || 'Avant'),
@@ -1501,9 +950,7 @@ function readPlanStartSelectionFromDom() {
 function getPlanPreviewSelection() {
   if (document.getElementById('add')?.classList.contains('active')) {
     const draft = readPlanStartSelectionFromDom();
-    if (draft.aisle && draft.side && draft.section && draft.shelf && draft.position) {
-      return draft;
-    }
+    if (draft.aisle && draft.side && draft.section && draft.shelf && draft.position) return draft;
   }
   return getCursorSelection();
 }
@@ -1519,9 +966,7 @@ function setPlanSlotOptions(aisle, facing, selectedSlot) {
   const slots = buildSlotsFromConfig(aisle, config);
   if (!slots.length) {
     select.innerHTML = '<option value="">Aucun slot</option>';
-    select.value = '';
-    select.disabled = true;
-    return;
+    select.value = ''; select.disabled = true; return;
   }
   select.disabled = false;
   select.innerHTML = slots.map(slot => {
@@ -1530,8 +975,8 @@ function setPlanSlotOptions(aisle, facing, selectedSlot) {
     return `<option value="${esc(value)}">${esc(label)}</option>`;
   }).join('');
   const currentValue = slotValueKey(selectedSlot);
-  const availableValues = slots.map(slotValueKey);
-  select.value = availableValues.includes(currentValue) ? currentValue : availableValues[0];
+  const available = slots.map(slotValueKey);
+  select.value = available.includes(currentValue) ? currentValue : available[0];
 }
 
 function applySelectedPlanSlot() {
@@ -1542,13 +987,7 @@ function applySelectedPlanSlot() {
   document.getElementById('planScanSection').value = section;
   document.getElementById('planScanShelf').value = shelf;
   document.getElementById('planScanPosition').value = position;
-  planStartDraft = {
-    ...readPlanStartSelectionFromDom(),
-    side,
-    section,
-    shelf,
-    position
-  };
+  planStartDraft = {...readPlanStartSelectionFromDom(), side, section, shelf, position};
   renderScanPathPreview();
 }
 
@@ -1574,8 +1013,9 @@ function renderScanPathPreview() {
   ));
   const startIndex = currentIndex >= 0 ? currentIndex : 0;
   const preview = Array.from({length: Math.min(12, slots.length)}, (_, offset) => slots[(startIndex + offset) % slots.length]);
+  const isOnPlanTab = document.getElementById('add')?.classList.contains('active');
   div.innerHTML = `
-    <div class="small">${document.getElementById('add')?.classList.contains('active') ? 'Depart selectionne' : 'Position actuelle'}: <strong>${esc(`Allee ${previewSelection.aisle} - ${sideDisplayLabel(previewSelection.side)} - Section ${previewSelection.section} - Tablette ${previewSelection.shelf} - Pos. ${previewSelection.position}`)}</strong></div>
+    <div class="small">${isOnPlanTab ? 'Depart selectionne' : 'Position actuelle'}: <strong>${esc(`Allee ${previewSelection.aisle} - ${sideDisplayLabel(previewSelection.side)} - Section ${previewSelection.section} - Tablette ${previewSelection.shelf} - Pos. ${previewSelection.position}`)}</strong></div>
     <div class="small">Total de slots dans le plan: <strong>${slots.length}</strong></div>
     <div class="slot-preview">${preview.map((slot, index) => `<span class="slot-chip ${index === 0 ? 'active' : ''}">${index === 0 ? 'Maintenant' : `Puis ${index}`} ${esc(slotLabel(slot))}</span>`).join('')}</div>
   `;
@@ -1594,14 +1034,9 @@ function applySideTemplate(aisle, side) {
   const shelfCount = document.getElementById(`sideTemplateShelves-${aisle}-${side}`).value;
   const positionCount = document.getElementById(`sideTemplatePositions-${aisle}-${side}`).value;
   const nextConfig = normalizeLayoutConfig({
-    sides: {
-      ...layout.config.sides,
-      [side]: {sections: buildUniformSections(sectionCount, shelfCount, positionCount)}
-    }
+    sides: {...layout.config.sides, [side]: {sections: buildUniformSections(sectionCount, shelfCount, positionCount)}}
   }, layout.max_section, layout.max_shelf, layout.max_position);
-  if (!confirmLayoutReduction(aisle, nextConfig, `Appliquer ce modele uniforme au cote ${side}`)) {
-    return;
-  }
+  if (!confirmLayoutReduction(aisle, nextConfig, `Appliquer ce modele uniforme au cote ${side}`)) return;
   layout.config = nextConfig;
   syncLayoutRecord(layout);
   markLayoutDirty(aisle);
@@ -1610,16 +1045,14 @@ function applySideTemplate(aisle, side) {
 
 function renderPlanStartEditor() {
   const draft = getPlanStartDraft();
-  const aisleOptions = mapLayouts
-    .map(layout => String(layout.aisle))
-    .sort((a, b) => Number(a) - Number(b) || a.localeCompare(b));
+  const aisleOptions = mapLayouts.map(layout => String(layout.aisle)).sort((a, b) => Number(a) - Number(b) || a.localeCompare(b));
   setSelectOptions('planScanAisle', aisleOptions, draft.aisle);
   document.getElementById('planScanFacing').value = draft.facing || 'Avant';
   updatePlanStartSelectors();
   renderScanPathPreview();
 }
 
-function updatePlanStartSelectors(changedLevel = '') {
+function updatePlanStartSelectors(changedLevel='') {
   const currentDraft = readPlanStartSelectionFromDom();
   const draft = {...getPlanStartDraft(), ...currentDraft};
   const aisle = document.getElementById('planScanAisle').value;
@@ -1630,8 +1063,7 @@ function updatePlanStartSelectors(changedLevel = '') {
     const sideEl = document.getElementById('planScanSide');
     if (!sides.length) {
       sideEl.innerHTML = '<option value="">Aucun</option>';
-      sideEl.value = '';
-      sideEl.disabled = true;
+      sideEl.value = ''; sideEl.disabled = true;
     } else {
       sideEl.disabled = false;
       sideEl.innerHTML = sides.map(s => `<option value="${esc(s)}">${esc(sideDisplayLabel(s))}</option>`).join('');
@@ -1639,16 +1071,16 @@ function updatePlanStartSelectors(changedLevel = '') {
     }
   }
   const side = document.getElementById('planScanSide').value;
-  const sections = ((config.sides[side]?.sections) || []).map((_, index) => String(index + 1));
+  const sections = ((config.sides[side]?.sections) || []).map((_, i) => String(i + 1));
   const sectionSelected = ['aisle', 'side'].includes(changedLevel) ? sections[0] : draft.section;
   setSelectOptions('planScanSection', sections, sectionSelected);
   const sectionIndex = Math.max(0, Number(document.getElementById('planScanSection').value || '1') - 1);
-  const shelves = Array.from({length: config.sides[side]?.sections?.[sectionIndex]?.shelves?.length || 0}, (_, index) => String(index + 1));
+  const shelves = Array.from({length: config.sides[side]?.sections?.[sectionIndex]?.shelves?.length || 0}, (_, i) => String(i + 1));
   const shelfSelected = ['aisle', 'side', 'section'].includes(changedLevel) ? shelves[0] : draft.shelf;
   setSelectOptions('planScanShelf', shelves, shelfSelected);
   const shelfIndex = Math.max(0, Number(document.getElementById('planScanShelf').value || '1') - 1);
   const positionCount = Number(config.sides[side]?.sections?.[sectionIndex]?.shelves?.[shelfIndex] || 0);
-  const positions = Array.from({length: positionCount}, (_, index) => String(index + 1));
+  const positions = Array.from({length: positionCount}, (_, i) => String(i + 1));
   const positionSelected = ['aisle', 'side', 'section', 'shelf'].includes(changedLevel) ? positions[0] : draft.position;
   setSelectOptions('planScanPosition', positions, positionSelected);
   planStartDraft = {
@@ -1704,34 +1136,6 @@ function refreshPlanUi() {
   renderPlanStartEditor();
 }
 
-function advanceCursor() {
-  const slots = getAllScanSlots();
-  if (!slots.length) {
-    updateCursorUi();
-    return;
-  }
-  const currentIndex = slots.findIndex(slot => (
-    Number(slot.aisle) === Number(cursor.aisle) &&
-    slot.side === cursor.side &&
-    Number(slot.section) === Number(cursor.section) &&
-    Number(slot.shelf) === Number(cursor.shelf) &&
-    Number(slot.position) === Number(cursor.position)
-  ));
-
-  if (currentIndex >= 0 && slots[currentIndex + 1]) {
-    setCursorFromSlot(slots[currentIndex + 1]);
-  } else {
-    const nextSlot = slots.find(slot => compareSlotLocations(slot, cursor) > 0);
-    if (nextSlot) {
-      setCursorFromSlot(nextSlot);
-    } else {
-      setCursorFromSlot(slots[0]);
-    }
-  }
-  updateCursorUi();
-  renderScanPathPreview();
-}
-
 function captureOpenPlanNodesFromDom() {
   openPlanNodes = new Set(
     Array.from(document.querySelectorAll('#mapContent details[data-node-id][open]'))
@@ -1748,15 +1152,28 @@ function selectNumericField(input) {
   if (!input || input.dataset.autoSelectDone === '1') return;
   input.dataset.autoSelectDone = '1';
   window.requestAnimationFrame(() => {
-    try {
-      input.select();
-    } catch (error) {}
-    window.setTimeout(() => {
-      delete input.dataset.autoSelectDone;
-    }, 150);
+    try { input.select(); } catch (e) {}
+    window.setTimeout(() => { delete input.dataset.autoSelectDone; }, 150);
   });
 }
 
+function startScanFromSection(aisle, side, sectionIndex) {
+  const config = getAisleLayoutConfig(aisle);
+  const slots = buildSlotsFromConfig(aisle, config, side);
+  const targetSlot = slots.find(slot => Number(slot.section) === sectionIndex + 1);
+  if (!targetSlot) {
+    document.getElementById('addMsg').innerHTML = '<div class="msg error">Aucune position dans cette section pour le moment.</div>';
+    return;
+  }
+  cursor.facing = 'Avant';
+  setCursorFromSlot(targetSlot);
+  updateCursorUi();
+  planStartDraft = getCursorSelection();
+  renderPlanStartEditor();
+  switchTab('scan');
+}
+
+// ── Product card ──────────────────────────────────────────────────────────────
 function productCard(p, showDelete=true, showAiButton=true) {
   const locationParts = [
     `Allée ${esc(p.aisle)}`,
@@ -1773,9 +1190,7 @@ function productCard(p, showDelete=true, showAiButton=true) {
       <div class="product-info">
         <div class="name">${esc(p.name)}</div>
         ${p.brand ? `<div class="product-brand">${esc(p.brand)}</div>` : ''}
-        <div class="location">
-          ${locationParts.join('<span class="loc-sep"> · </span>')}
-        </div>
+        <div class="location">${locationParts.join('<span class="loc-sep"> · </span>')}</div>
       </div>
     </div>
     <div class="product-footer">
@@ -1791,8 +1206,8 @@ function productCard(p, showDelete=true, showAiButton=true) {
 }
 
 async function enrichStoredProductWithAi(productId) {
-  const cachedProducts = allProductsCache.length ? allProductsCache : await refreshProductsCache(true);
-  const product = cachedProducts.find(item => Number(item.id) === Number(productId)) || {};
+  const cached = allProductsCache.length ? allProductsCache : await refreshProductsCache(true);
+  const product = cached.find(item => Number(item.id) === Number(productId)) || {};
   if (!product.id) return;
   const searchDiv = document.getElementById('searchResults');
   searchDiv.insertAdjacentHTML('afterbegin', '<div class="msg info">Generation de l aide client...</div>');
@@ -1820,26 +1235,20 @@ async function enrichStoredProductWithAi(productId) {
   searchDiv.insertAdjacentHTML('afterbegin', '<div class="msg success">Aide client ajoutee au produit.</div>');
 }
 
-function getConfiguredLayoutForAisle(aisle) {
-  const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
-  return normalizeLayoutConfig(layout?.config, layout?.max_section, layout?.max_shelf, layout?.max_position);
-}
-
-function getCameraDom() {
-  if (cameraUsageMode === 'search') {
-    return {
-      status: document.getElementById('searchScannerStatus'),
-      button: document.getElementById('searchCameraButton'),
-      video: document.getElementById('searchCameraPreview'),
-      reader: document.getElementById('searchHtml5Reader')
-    };
+// ── Search tab ────────────────────────────────────────────────────────────────
+function filterByHomeBrand(brand) {
+  const products = allProductsCache.filter(p => brand ? p.brand?.toLowerCase().startsWith(brand.toLowerCase()) : isHomeBrand(p.brand));
+  const div = document.getElementById('searchResults');
+  if (!products.length) {
+    div.innerHTML = `<div class="empty">Aucun produit ${brand || 'marque maison'} cartographie pour le moment.</div>`;
+    return;
   }
-  return {
-    status: document.getElementById('scannerStatus'),
-    button: document.getElementById('cameraButton'),
-    video: document.getElementById('cameraPreview'),
-    reader: document.getElementById('html5Reader')
-  };
+  const sorted = [...products].sort((a, b) => {
+    const aKey = [a.aisle, a.side, a.section, a.shelf, a.position].join('-');
+    const bKey = [b.aisle, b.side, b.section, b.shelf, b.position].join('-');
+    return aKey.localeCompare(bKey);
+  });
+  div.innerHTML = `<div class="card"><div class="section-title">★ ${brand || 'Marques maison'} — ${sorted.length} produit${sorted.length > 1 ? 's' : ''} cartographie${sorted.length > 1 ? 's' : ''}</div>${sorted.map(p => productCard(p, false, false)).join('')}</div>`;
 }
 
 async function doSearch() {
@@ -1849,9 +1258,7 @@ async function doSearch() {
 
 function scheduleSearch() {
   window.clearTimeout(searchTimer);
-  searchTimer = window.setTimeout(() => {
-    doSearch();
-  }, 180);
+  searchTimer = window.setTimeout(() => doSearch(), 180);
 }
 
 async function doSearchValue(q) {
@@ -1862,8 +1269,8 @@ async function doSearchValue(q) {
       const product = await apiGetProductByBarcode(q);
       div.innerHTML = productCard(product, false);
       return;
-    } catch (error) {
-      if (error.status && error.status !== 404) {
+    } catch (e) {
+      if (e.status && e.status !== 404) {
         div.innerHTML = '<div class="msg error">Impossible de joindre la base pour le moment.</div>';
         return;
       }
@@ -1877,16 +1284,15 @@ async function doSearchValue(q) {
   try {
     const data = await apiSearchProducts(q);
     div.innerHTML = data.length ? data.map(p => productCard(p)).join('') : '<div class="empty">Aucun produit trouve.</div>';
-  } catch (error) {
+  } catch (e) {
     div.innerHTML = '<div class="msg error">Impossible de rechercher pour le moment.</div>';
   }
 }
 
+// ── Client tab ────────────────────────────────────────────────────────────────
 function scheduleClientSearch() {
   window.clearTimeout(clientSearchTimer);
-  clientSearchTimer = window.setTimeout(() => {
-    runClientSearch(false);
-  }, 220);
+  clientSearchTimer = window.setTimeout(() => runClientSearch(false), 220);
 }
 
 function getClientQuestion() {
@@ -1895,32 +1301,19 @@ function getClientQuestion() {
 
 function sanitizeProductForClientAi(product) {
   return {
-    name: product.name || '',
-    brand: product.brand || '',
-    description: product.description || '',
-    usage_notes: product.usage_notes || '',
-    search_terms: product.search_terms || '',
-    alternative_suggestions: product.alternative_suggestions || '',
-    barcode: product.barcode || '',
-    aisle: product.aisle || '',
-    side: product.side || '',
-    section: product.section || '',
-    shelf: product.shelf || '',
-    position: product.position || ''
+    name: product.name || '', brand: product.brand || '', description: product.description || '',
+    usage_notes: product.usage_notes || '', search_terms: product.search_terms || '',
+    alternative_suggestions: product.alternative_suggestions || '', barcode: product.barcode || '',
+    aisle: product.aisle || '', side: product.side || '', section: product.section || '',
+    shelf: product.shelf || '', position: product.position || ''
   };
 }
 
 function renderClientMatches(matches, question) {
   const target = document.getElementById('clientMatches');
   if (!target) return;
-  if (!question) {
-    target.innerHTML = '';
-    return;
-  }
-  if (!matches.length) {
-    target.innerHTML = '<div class="empty">Aucun produit correspondant pour le moment.</div>';
-    return;
-  }
+  if (!question) { target.innerHTML = ''; return; }
+  if (!matches.length) { target.innerHTML = '<div class="empty">Aucun produit correspondant pour le moment.</div>'; return; }
   target.innerHTML = `
     <div class="card">
       <div class="section-title">Produits proposes</div>
@@ -1933,12 +1326,9 @@ function renderClientMatches(matches, question) {
 function renderClientAdvice(advice, hasStoreProducts) {
   const target = document.getElementById('clientAdvice');
   if (!target) return;
-  if (!advice) {
-    target.innerHTML = '';
-    return;
-  }
+  if (!advice) { target.innerHTML = ''; return; }
   const generalNotice = !hasStoreProducts
-    ? `<div class="msg warning" style="margin-bottom:10px;font-weight:600;">⚠ Aucun produit du magasin n a ete trouve pour cette demande. Cette reponse est basee sur des connaissances generales en pharmacie — verifiez l inventaire avant de conseiller.</div>`
+    ? `<div class="msg warning" style="margin-bottom:10px;font-weight:600;">⚠ Aucun produit du magasin n a ete trouve pour cette demande. Cette reponse est basee sur des connaissances generales — verifiez l inventaire avant de conseiller.</div>`
     : '';
   target.innerHTML = `
     <div class="advice-card">
@@ -2002,12 +1392,9 @@ async function generateClientHelp() {
   if (status) {
     status.textContent = matches.length
       ? `Generation de la reponse via ${aiProviderLabel()} (${matches.length} produit(s) en stock)...`
-      : `Aucun produit en stock pour cette demande. L IA va repondre avec des conseils generaux...`;
+      : `Aucun produit en stock. L IA va repondre avec des conseils generaux...`;
   }
-  const result = await apiGenerateClientHelp({
-    question,
-    products: matches.slice(0, 20).map(sanitizeProductForClientAi)
-  });
+  const result = await apiGenerateClientHelp({question, products: matches.slice(0, 20).map(sanitizeProductForClientAi)});
   if (!result.success || !result.advice) {
     renderClientAdvice(null);
     if (status) status.textContent = result.error || 'Reponse client indisponible.';
@@ -2017,1139 +1404,33 @@ async function generateClientHelp() {
   if (status) status.textContent = `Reponse generee via ${aiProviderLabel()}. Verifiez avant de conseiller.`;
 }
 
-function toggleScanPause() {
-  const btn = document.getElementById('pauseScanButton');
-  const status = document.getElementById('scannerStatus');
-  if (scanPaused) {
-    scanPaused = false;
-    resetCameraCandidate();
-    if (btn) { btn.textContent = '⏸ Pause'; btn.style.background = ''; btn.style.color = ''; btn.style.borderColor = ''; }
-    if (quaggaActive) status.textContent = 'Cadrez les barres et les chiffres';
-  } else {
-    scanPaused = true;
-    if (btn) { btn.textContent = '▶ Reprendre'; btn.style.background = '#16a34a'; btn.style.color = 'white'; btn.style.borderColor = '#16a34a'; }
-    status.textContent = '⏸ En pause';
-  }
-}
-
-async function startSearchScan() {
-  if (scannerStream || html5Scanner || quaggaActive) {
-    await stopCamera();
-  }
-  cameraUsageMode = 'search';
-  document.getElementById('searchResults').innerHTML = '<div class="msg info">Ouverture de la camera pour rechercher un produit...</div>';
-  await startCamera();
-}
-
-async function toggleCamera() {
-  if (scannerStream || html5Scanner || quaggaActive) {
-    await stopCamera();
-    return;
-  }
-  if (!requireEditorSession('ouvrir la camera de scan')) return;
-  cameraUsageMode = 'scan';
-  await startCamera();
-}
-
-async function startCamera() {
-  const {status, button, video, reader} = getCameraDom();
-
-  if (!('mediaDevices' in navigator) || !navigator.mediaDevices.getUserMedia) {
-    status.textContent = 'Camera non disponible';
-    showCameraHint('Ce navigateur ne donne pas acces a la camera. Utilisez un navigateur mobile recent ou entrez le code manuellement.');
-    return;
-  }
-
-  resetCameraCandidate();
-
-  // Android Chrome: use native hardware BarcodeDetector
-  if ('BarcodeDetector' in window) {
-    try {
-      await startNativeScan(video, status, button, reader);
-      return;
-    } catch (err) {
-      // fall through to Quagga
-    }
-  }
-
-  // iPhone / Firefox / all others: Quagga2 (uses Web Workers — doesn't freeze UI)
-  try {
-    await ensureQuaggaLoaded();
-    if (!('Quagga' in window)) {
-      status.textContent = 'Scanner non supporte';
-      showCameraHint('Le moteur de scan Quagga n est pas charge. Verifiez la connexion internet ou entrez le code manuellement.');
-      return;
-    }
-    video.style.display = 'none';
-    reader.style.display = 'block';
-    reader.innerHTML = '';
-    await startQuaggaScanner(reader, status, button);
-  } catch (error) {
-    status.textContent = 'Camera bloquee';
-    showCameraHint(error.message || 'Impossible d ouvrir la camera. Sur telephone, utilisez une adresse HTTPS.');
-  }
-}
-
-async function startNativeScan(video, status, button, reader) {
-  const supported = await BarcodeDetector.getSupportedFormats();
-  const want = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf'];
-  const formats = want.filter(f => supported.includes(f));
-  const detector = new BarcodeDetector({formats: formats.length ? formats : ['ean_13', 'upc_a']});
-
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: {
-      facingMode: 'environment',
-      width: {ideal: 1920, min: 640},
-      height: {ideal: 1080, min: 480},
-      advanced: [{focusMode: 'continuous'}]
-    }
-  });
-  scannerStream = stream;
-  cameraTrack = stream.getVideoTracks()[0];
-  video.srcObject = stream;
-  video.style.display = 'block';
-  if (reader) { reader.style.display = 'none'; reader.innerHTML = ''; }
-  await video.play().catch(() => {});
-
-  showCameraExtras();
-
-  button.textContent = '■ Arreter camera';
-  button.style.background = '#c8102e';
-  button.style.color = 'white';
-  button.style.borderColor = '#c8102e';
-  if (cameraUsageMode === 'scan') {
-    const pb = document.getElementById('pauseScanButton');
-    if (pb) { pb.style.display = ''; pb.textContent = '⏸ Pause'; pb.style.background = ''; pb.style.color = ''; pb.style.borderColor = ''; }
-  }
-  status.textContent = 'Cadrez le code-barres';
-
-  nativeScanActive = true;
-  updateDeviceSupport();
-  const loop = async () => {
-    if (!nativeScanActive) return;
-    if (!scanPaused && video.readyState >= 2) {
-      try {
-        const barcodes = await detector.detect(video);
-        for (const bc of barcodes) {
-          if (validateRetailBarcode(bc.rawValue)) {
-            await onDecodedCode(bc.rawValue);
-          }
-        }
-      } catch (_) {}
-    }
-    nativeScanFrame = requestAnimationFrame(loop);
-  };
-  nativeScanFrame = requestAnimationFrame(loop);
-}
-
-function showCameraExtras() {
-  torchEnabled = false;
-  const ids = cameraUsageMode === 'scan'
-    ? ['torchButton', 'zoomSlider']
-    : ['searchTorchButton', 'searchZoomSlider'];
-  const caps = cameraTrack ? cameraTrack.getCapabilities() : {};
-
-  const torchEl = document.getElementById(ids[0]);
-  if (torchEl) {
-    torchEl.style.display = caps.torch ? '' : 'none';
-    torchEl.textContent = '💡';
-    torchEl.style.background = '';
-    torchEl.style.color = '';
-  }
-  const zoomEl = document.getElementById(ids[1]);
-  if (zoomEl && caps.zoom) {
-    zoomEl.min = caps.zoom.min ?? 1;
-    zoomEl.max = caps.zoom.max ?? 5;
-    zoomEl.step = caps.zoom.step ?? 0.5;
-    zoomEl.value = caps.zoom.min ?? 1;
-    zoomEl.style.display = '';
-  } else if (zoomEl) {
-    zoomEl.style.display = 'none';
-  }
-}
-
-function hideCameraExtras() {
-  ['torchButton', 'zoomSlider', 'searchTorchButton', 'searchZoomSlider'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.style.display = 'none';
-  });
-  torchEnabled = false;
-}
-
-async function toggleTorch() {
-  if (!cameraTrack) return;
-  torchEnabled = !torchEnabled;
-  try {
-    await cameraTrack.applyConstraints({advanced: [{torch: torchEnabled}]});
-  } catch (_) { torchEnabled = !torchEnabled; }
-  const ids = cameraUsageMode === 'scan' ? ['torchButton'] : ['searchTorchButton'];
-  ids.forEach(id => {
-    const el = document.getElementById(id);
-    if (el) {
-      el.style.background = torchEnabled ? '#f59e0b' : '';
-      el.style.color = torchEnabled ? '#fff' : '';
-    }
-  });
-}
-
-async function applyZoom(val) {
-  if (!cameraTrack) return;
-  try {
-    await cameraTrack.applyConstraints({advanced: [{zoom: parseFloat(val)}]});
-  } catch (_) {}
-}
-
-async function ensureQuaggaLoaded() {
-  if ('Quagga' in window) return true;
-  if (quaggaLibraryPromise) return quaggaLibraryPromise;
-  const sources = [
-    'https://cdn.jsdelivr.net/npm/@ericblade/quagga2/dist/quagga.min.js',
-    'https://unpkg.com/@ericblade/quagga2/dist/quagga.min.js'
-  ];
-  quaggaLibraryPromise = (async () => {
-    for (const src of sources) {
-      const loaded = await injectScript(src);
-      if (loaded && 'Quagga' in window) return true;
-    }
-    return false;
-  })();
-  return quaggaLibraryPromise;
-}
-
-async function ensureOcrLoaded() {
-  if ('Tesseract' in window) return true;
-  if (ocrLibraryPromise) return ocrLibraryPromise;
-  const sources = [
-    'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js',
-    'https://unpkg.com/tesseract.js@5/dist/tesseract.min.js'
-  ];
-  ocrLibraryPromise = (async () => {
-    for (const src of sources) {
-      const loaded = await injectScript(src);
-      if (loaded && 'Tesseract' in window) return true;
-    }
-    return false;
-  })();
-  return ocrLibraryPromise;
-}
-
-async function ensureZXingLoaded() {
-  if (window.ZXing) return true;
-  if (zxingLibraryPromise) return zxingLibraryPromise;
-  const sources = [
-    'https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js',
-    'https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js'
-  ];
-  zxingLibraryPromise = (async () => {
-    for (const src of sources) {
-      const loaded = await injectScript(src);
-      if (loaded && window.ZXing) return true;
-    }
-    return false;
-  })();
-  return zxingLibraryPromise;
-}
-
-async function startZXingScan(video, status, button, reader) {
-  const hints = new Map();
-  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-    ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
-    ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.UPC_E,
-    ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.CODE_39,
-    ZXing.BarcodeFormat.ITF,
-  ]);
-  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-  const zxingReader = new ZXing.BrowserMultiFormatReader(hints);
-
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: {
-      facingMode: 'environment',
-      width: {ideal: 1920, min: 640},
-      height: {ideal: 1080, min: 480},
-      advanced: [{focusMode: 'continuous'}]
-    }
-  });
-  scannerStream = stream;
-  cameraTrack = stream.getVideoTracks()[0];
-  video.srcObject = stream;
-  video.style.display = 'block';
-  if (reader) { reader.style.display = 'none'; reader.innerHTML = ''; }
-  await video.play().catch(() => {});
-  showCameraExtras();
-
-  button.textContent = '■ Arreter camera';
-  button.style.background = '#c8102e';
-  button.style.color = 'white';
-  button.style.borderColor = '#c8102e';
-  if (cameraUsageMode === 'scan') {
-    const pb = document.getElementById('pauseScanButton');
-    if (pb) { pb.style.display = ''; pb.textContent = '⏸ Pause'; pb.style.background = ''; pb.style.color = ''; pb.style.borderColor = ''; }
-  }
-  status.textContent = 'Cadrez le code-barres';
-
-  const scanCanvas = document.createElement('canvas');
-  const ctx = scanCanvas.getContext('2d', {willReadFrequently: true});
-  const ZXING_INTERVAL = 120;
-  const MAX_SCAN_DIM = 640;
-  let lastZxingScan = 0;
-  zxingActive = true;
-  updateDeviceSupport();
-
-  const loop = (ts) => {
-    if (!zxingActive) return;
-    zxingFrame = requestAnimationFrame(loop);
-    if (scanPaused || video.readyState < 2 || !video.videoWidth) return;
-    if (ts - lastZxingScan < ZXING_INTERVAL) return;
-    lastZxingScan = ts;
-
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
-    const cropX = Math.floor(vw * 0.05);
-    const cropY = Math.floor(vh * 0.20);
-    const cropW = Math.floor(vw * 0.90);
-    const cropH = Math.floor(vh * 0.60);
-    const scale = Math.min(1, MAX_SCAN_DIM / cropW);
-    const outW = Math.max(1, Math.floor(cropW * scale));
-    const outH = Math.max(1, Math.floor(cropH * scale));
-    scanCanvas.width = outW;
-    scanCanvas.height = outH;
-    ctx.filter = 'grayscale(1) contrast(1.8)';
-    ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, outW, outH);
-    try {
-      const result = zxingReader.decodeFromCanvas(scanCanvas);
-      if (result && validateRetailBarcode(result.getText())) {
-        onDecodedCode(result.getText());
-      }
-    } catch (_) {}
-  };
-  zxingFrame = requestAnimationFrame(loop);
-}
-
-function findBarcodeRegion(canvas) {
-  // Downscale for fast processing
-  const MAX_W = 400;
-  const scale = Math.min(1, MAX_W / canvas.width);
-  const sw = Math.max(2, Math.floor(canvas.width  * scale));
-  const sh = Math.max(2, Math.floor(canvas.height * scale));
-
-  const tmp = document.createElement('canvas');
-  tmp.width = sw; tmp.height = sh;
-  const ctx = tmp.getContext('2d', {willReadFrequently: true});
-  ctx.drawImage(canvas, 0, 0, sw, sh);
-  const data = ctx.getImageData(0, 0, sw, sh).data;
-
-  // Convert to grayscale
-  const gray = new Uint8Array(sw * sh);
-  for (let i = 0; i < sw * sh; i++) {
-    gray[i] = (data[i*4]*77 + data[i*4+1]*150 + data[i*4+2]*29) >> 8;
-  }
-
-  // For each column, sum absolute horizontal gradients (barcode = many transitions)
-  const colScore = new Float32Array(sw);
-  for (let x = 1; x < sw - 1; x++) {
-    let s = 0;
-    for (let y = 0; y < sh; y++) {
-      s += Math.abs(gray[y*sw + x+1] - gray[y*sw + x-1]);
-    }
-    colScore[x] = s / sh;
-  }
-
-  // Smooth scores with a small box blur
-  const blurW = Math.max(1, Math.floor(sw * 0.02));
-  const smooth = new Float32Array(sw);
-  for (let x = 0; x < sw; x++) {
-    let s = 0, n = 0;
-    for (let dx = -blurW; dx <= blurW; dx++) {
-      const nx = x + dx;
-      if (nx >= 0 && nx < sw) { s += colScore[nx]; n++; }
-    }
-    smooth[x] = s / n;
-  }
-
-  // Threshold = mean + 0.5 * stddev
-  let mean = 0;
-  for (let x = 0; x < sw; x++) mean += smooth[x];
-  mean /= sw;
-  let variance = 0;
-  for (let x = 0; x < sw; x++) variance += (smooth[x] - mean) ** 2;
-  const threshold = mean + 0.5 * Math.sqrt(variance / sw);
-
-  // Find the longest connected run of columns above threshold
-  let bestStart = -1, bestLen = 0, curStart = -1, curLen = 0;
-  for (let x = 0; x < sw; x++) {
-    if (smooth[x] > threshold) {
-      if (curStart < 0) curStart = x;
-      curLen++;
-    } else {
-      if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; }
-      curStart = -1; curLen = 0;
-    }
-  }
-  if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; }
-
-  // Must be wide enough to be a real barcode (EAN-13 needs ~95 modules)
-  if (bestStart < 0 || bestLen < sw * 0.04) return null;
-
-  // Find vertical extent inside that column band
-  let minY = sh, maxY = 0;
-  for (let y = 0; y < sh; y++) {
-    let rowGrad = 0;
-    for (let x = bestStart; x < Math.min(bestStart + bestLen, sw - 1); x++) {
-      rowGrad += Math.abs(gray[y*sw + x+1] - gray[y*sw + x-1]);
-    }
-    if (rowGrad / bestLen > threshold * 0.4) {
-      minY = Math.min(minY, y);
-      maxY = Math.max(maxY, y);
-    }
-  }
-  if (maxY <= minY) return null;
-
-  // Return as 0–1 fractions with generous padding (include digit row below bars)
-  const padX = 0.06, padY = 0.05, extraBottom = 0.12;
+// ── Scan lookup ───────────────────────────────────────────────────────────────
+function currentLookupAssistPayload() {
   return {
-    x: Math.max(0, bestStart / sw - padX),
-    y: Math.max(0, minY / sh - padY),
-    w: Math.min(1 - Math.max(0, bestStart / sw - padX), bestLen / sw + padX * 2),
-    h: Math.min(1, (maxY - minY) / sh + padY + extraBottom),
+    name: document.getElementById('scanProductName')?.value.trim() || '',
+    brand: document.getElementById('scanProductBrand')?.value.trim() || '',
+    description: document.getElementById('scanProductDescription')?.value.trim() || '',
+    barcode: document.getElementById('scanInput')?.value.trim() || ''
   };
 }
 
-async function photoToCanvas(file) {
-  const img = new Image();
-  const url = URL.createObjectURL(file);
-  await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = url; });
-  URL.revokeObjectURL(url);
-  const maxDim = 1920;
-  const scale = Math.min(1, maxDim / Math.max(img.width || 1, img.height || 1));
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.floor(img.width * scale));
-  canvas.height = Math.max(1, Math.floor(img.height * scale));
-  canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-  return canvas;
-}
-
-function cropCanvas(src, x, y, w, h, filter) {
-  const out = document.createElement('canvas');
-  const sx = Math.floor(src.width * x);
-  const sy = Math.floor(src.height * y);
-  out.width  = Math.max(1, Math.floor(src.width * w));
-  out.height = Math.max(1, Math.floor(src.height * h));
-  const ctx = out.getContext('2d', {willReadFrequently: true});
-  if (filter) ctx.filter = filter;
-  ctx.drawImage(src, sx, sy, Math.floor(src.width * w), Math.floor(src.height * h), 0, 0, out.width, out.height);
-  return out;
-}
-
-async function ocrBarcodeFromCanvas(canvas) {
-  if (!(await ensureOcrLoaded()) || !window.Tesseract) return null;
-  // Try several crops: bottom strip (digit row), center, full image
-  const crops = [
-    cropCanvas(canvas, 0,    0.60, 1, 0.40, 'grayscale(1) contrast(3) brightness(1.15)'),
-    cropCanvas(canvas, 0.05, 0.50, 0.90, 0.50, 'grayscale(1) contrast(2.5) brightness(1.1)'),
-    cropCanvas(canvas, 0,    0,    1, 1,    'grayscale(1) contrast(2)'),
-  ];
-  for (const crop of crops) {
-    try {
-      const { data } = await window.Tesseract.recognize(crop, 'eng', {
-        logger: () => {},
-        tessedit_char_whitelist: '0123456789 ',
-        tessedit_pageseg_mode: '6',
-      });
-      const candidates = extractBarcodeTextCandidates(data?.text || '');
-      if (candidates.length) return candidates[0];
-    } catch (_) {}
-  }
-  return null;
-}
-
-async function scanFromPhoto(input, mode) {
-  const file = input.files[0];
-  input.value = '';
-  if (!file) return;
-
-  const isSearch = mode === 'search';
-  const statusEl = document.getElementById(isSearch ? 'searchScannerStatus' : 'scannerStatus');
-  const setStatus = t => { if (statusEl) statusEl.textContent = t; };
-
-  setStatus('Lecture de la photo...');
-
-  let canvas;
-  try { canvas = await photoToCanvas(file); }
-  catch (_) { setStatus('Erreur lecture photo'); return; }
-
-  let code = null;
-
-  // 1) Native BarcodeDetector — fastest, most accurate (Android Chrome)
-  if (!code && 'BarcodeDetector' in window) {
-    setStatus('Detection native...');
-    try {
-      const det = new BarcodeDetector({formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf']});
-      for (const bc of await det.detect(canvas)) {
-        if (validateRetailBarcode(bc.rawValue)) { code = bc.rawValue; break; }
-      }
-    } catch (_) {}
-  }
-
-  // 2) Locate the barcode region automatically (gradient-based detection)
-  setStatus('Localisation du code-barres...');
-  const region = findBarcodeRegion(canvas);
-  const regionCanvas = region ? cropCanvas(canvas, region.x, region.y, region.w, region.h, null) : null;
-
-  // Try BarcodeDetector again on the auto-detected region
-  if (!code && regionCanvas && 'BarcodeDetector' in window) {
-    try {
-      const det = new BarcodeDetector({formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf']});
-      for (const bc of await det.detect(regionCanvas)) {
-        if (validateRetailBarcode(bc.rawValue)) { code = bc.rawValue; break; }
-      }
-    } catch (_) {}
-  }
-
-  // 3) ZXing — try full image, then auto-detected region, then fixed quadrants
-  if (!code) {
-    setStatus('Lecture code-barres...');
-    const loaded = await ensureZXingLoaded();
-    if (loaded) {
-      const hints = new Map();
-      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-        ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
-        ZXing.BarcodeFormat.UPC_A,  ZXing.BarcodeFormat.UPC_E,
-        ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.CODE_39, ZXing.BarcodeFormat.ITF,
-      ]);
-      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-      const reader = new ZXing.BrowserMultiFormatReader(hints);
-      const attempts = [
-        canvas,
-        regionCanvas,                                        // auto-detected region
-        cropCanvas(canvas, 0,   0,   1,   0.5, null),       // top half
-        cropCanvas(canvas, 0,   0.5, 1,   0.5, null),       // bottom half
-        cropCanvas(canvas, 0.1, 0.2, 0.8, 0.6, null),       // center
-      ].filter(Boolean);
-      for (const attempt of attempts) {
-        if (code) break;
-        try {
-          const r = reader.decodeFromCanvas(attempt);
-          if (r && validateRetailBarcode(r.getText())) code = r.getText();
-        } catch (_) {}
-      }
-    }
-  }
-
-  // 4) OCR digit reading — reads the printed numbers under the barcode bars
-  //    Uses auto-detected region first (much more accurate on busy packaging)
-  if (!code) {
-    setStatus('Lecture des chiffres...');
-    code = regionCanvas
-      ? await ocrBarcodeFromCanvas(regionCanvas)
-      : await ocrBarcodeFromCanvas(canvas);
-  }
-
-  if (!code) {
-    setStatus('Code non reconnu — reessayez plus pres avec bonne lumiere');
+function renderLookupAssistPreview() {
+  const preview = document.getElementById('lookupAssistPreview');
+  const status = document.getElementById('lookupAssistStatus');
+  if (!preview || !status) return;
+  if (!pendingLookupAssist) {
+    preview.innerHTML = '';
+    status.textContent = backendInfo.ai_enabled
+      ? `Optionnel: genere des mots-cles clients, une explication simple et des alternatives via ${aiProviderLabel()}.`
+      : 'IA non configuree sur le serveur. Ajoutez GEMINI_API_KEY sur Render.';
     return;
   }
-
-  // Put code directly in input and trigger lookup (bypass streaming camera checks)
-  playBeep();
-  vibratePhone();
-  if (isSearch) {
-    document.getElementById('searchInput').value = code;
-    setStatus(`✓ ${code}`);
-    doSearch();
-  } else {
-    scanPaused = false;
-    document.getElementById('scanInput').value = code;
-    persistScanDraft();
-    setStatus(`✓ ${code}`);
-    lookupScanFromInput(true, code);
-  }
-}
-
-function injectScript(src) {
-  return new Promise(resolve => {
-    const existing = document.querySelector(`script[data-src="${src}"]`);
-    if (existing) {
-      if (existing.dataset.loaded === '1') {
-        resolve(true);
-        return;
-      }
-      existing.addEventListener('load', () => resolve(true), {once: true});
-      existing.addEventListener('error', () => resolve(false), {once: true});
-      return;
-    }
-    const script = document.createElement('script');
-    script.src = src;
-    script.async = true;
-    script.dataset.src = src;
-    script.onload = () => {
-      script.dataset.loaded = '1';
-      resolve(true);
-    };
-    script.onerror = () => resolve(false);
-    document.head.appendChild(script);
-  });
-}
-
-function makeScanCanvas(width, height) {
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(32, Math.floor(width));
-  canvas.height = Math.max(32, Math.floor(height));
-  return canvas;
-}
-
-function drawProcessedCrop(video, crop) {
-  const sourceWidth = video.videoWidth;
-  const sourceHeight = video.videoHeight;
-  if (!sourceWidth || !sourceHeight) return null;
-  const sx = Math.max(0, Math.floor(sourceWidth * crop.x));
-  const sy = Math.max(0, Math.floor(sourceHeight * crop.y));
-  const sw = Math.max(64, Math.floor(sourceWidth * crop.w));
-  const sh = Math.max(32, Math.floor(sourceHeight * crop.h));
-  const canvas = makeScanCanvas(sw * crop.scale, sh * crop.scale);
-  const ctx = canvas.getContext('2d', {willReadFrequently: true});
-  if (!ctx) return null;
-  ctx.filter = 'grayscale(1) contrast(2.2) brightness(1.18) saturate(0) sharpen(1)';
-  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
-  return canvas;
-}
-
-function getQuaggaVideoElement(reader) {
-  return reader.querySelector('video');
-}
-
-function validateRetailBarcode(code) {
-  const digits = String(code || '').replace(/\D/g, '');
-  if (/^\d{8}$/.test(digits)) return checkEanChecksum(digits, 8);
-  if (/^\d{12}$/.test(digits)) return checkEanChecksum(digits, 12);
-  if (/^\d{13}$/.test(digits)) return checkEanChecksum(digits, 13);
-  if (/^\d{14}$/.test(digits)) return true;
-  return false;
-}
-
-function checkEanChecksum(code, length) {
-  if (code.length !== length) return false;
-  const digits = code.split('').map(Number);
-  const checkDigit = digits.pop();
-  const reversed = digits.reverse();
-  const sum = reversed.reduce((total, digit, index) => {
-    const weight = index % 2 === 0 ? 3 : 1;
-    return total + digit * weight;
-  }, 0);
-  return (10 - (sum % 10)) % 10 === checkDigit;
-}
-
-function extractBarcodeTextCandidates(text) {
-  const rawDigits = String(text || '').replace(/\D/g, ' ');
-  const chunks = rawDigits.split(/\s+/).filter(Boolean);
-  const candidates = new Set();
-  for (const chunk of chunks) {
-    for (const size of [14, 13, 12, 8]) {
-      if (chunk.length === size) candidates.add(chunk);
-      if (chunk.length > size) {
-        for (let start = 0; start <= chunk.length - size; start += 1) {
-          candidates.add(chunk.slice(start, start + size));
-        }
-      }
-    }
-  }
-  // Also try all digits joined — barcode digit rows are often printed with a space between each digit
-  const allDigits = chunks.join('');
-  if (allDigits.length >= 8) {
-    for (const size of [13, 12, 8]) {
-      if (allDigits.length === size) {
-        candidates.add(allDigits);
-      } else if (allDigits.length > size) {
-        // Prefer the rightmost match to avoid an internal code on the left
-        for (let start = allDigits.length - size; start >= 0; start -= 1) {
-          candidates.add(allDigits.slice(start, start + size));
-        }
-      }
-    }
-  }
-  return Array.from(candidates).filter(validateRetailBarcode);
-}
-
-async function recognizeBarcodeDigitsFromVideo(reader) {
-  const video = getQuaggaVideoElement(reader);
-  if (!video || !video.videoWidth || !video.videoHeight) return null;
-  if (!(await ensureOcrLoaded()) || !window.Tesseract) return null;
-
-  const crops = [
-    {x: 0.20, y: 0.55, w: 0.72, h: 0.22, scale: 2.5},
-    {x: 0.05, y: 0.50, w: 0.90, h: 0.28, scale: 2.0}
-  ];
-
-  for (const crop of crops) {
-    const canvas = drawProcessedCrop(video, crop);
-    if (!canvas) continue;
-    const result = await window.Tesseract.recognize(canvas, 'eng', {
-      logger: () => {},
-      tessedit_char_whitelist: '0123456789'
-    });
-    const candidates = extractBarcodeTextCandidates(result?.data?.text || '');
-    if (candidates.length) return candidates[0];
-  }
-  return null;
-}
-
-async function maybeRunOcrFallback(reader, status) {
-  if (ocrBusy || scanPaused || !quaggaActive) return;
-  if (Date.now() - quaggaStartedAt < 2000) return;
-  if (cameraUsageMode === 'search') return;
-  ocrBusy = true;
-  try {
-    status.textContent = 'Lecture des chiffres...';
-    const candidate = await recognizeBarcodeDigitsFromVideo(reader);
-    if (candidate) {
-      await onDecodedCode(candidate);
-      return;
-    }
-  } catch (error) {
-  } finally {
-    ocrBusy = false;
-  }
-  if (!scanPaused) {
-    status.textContent = 'Cadrez les barres et les chiffres';
-  }
-}
-
-async function startQuaggaScanner(reader, status, button) {
-  reader.style.height = '100%';
-  reader.style.minHeight = '0';
-  const config = {
-    inputStream: {
-      type: 'LiveStream',
-      target: reader,
-      constraints: {
-        facingMode: 'environment',
-        width: {min: 1280, ideal: 1920},
-        height: {min: 720, ideal: 1080},
-        advanced: [{focusMode: 'continuous'}]
-      },
-      area: {
-        top: '20%',
-        right: '2%',
-        left: '2%',
-        bottom: '20%'
-      }
-    },
-    locator: {
-      patchSize: 'x-small',
-      halfSample: false
-    },
-    numOfWorkers: navigator.hardwareConcurrency >= 4 ? 4 : 2,
-    frequency: 15,
-    locate: true,
-    decoder: {
-      readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader', 'code_128_reader', 'code_39_reader', 'i2of5_reader'],
-      multiple: false
-    }
-  };
-
-  await new Promise((resolve, reject) => {
-    window.Quagga.init(config, err => err ? reject(err) : resolve());
-  });
-
-  // Grab the track Quagga opened so torch/zoom work
-  const quaggaVideo = reader.querySelector('video');
-  if (quaggaVideo && quaggaVideo.srcObject) {
-    const tracks = quaggaVideo.srcObject.getVideoTracks();
-    if (tracks.length) {
-      cameraTrack = tracks[0];
-      showCameraExtras();
-    }
-  }
-
-  quaggaDetectedHandler = result => {
-    const code = String(result?.codeResult?.code || '').trim();
-    if (!code || !validateRetailBarcode(code)) return;
-    onDecodedCode(code);
-  };
-  quaggaProcessedHandler = () => {
-    if (!scanPaused) {
-      status.textContent = 'Cadrez les barres et les chiffres';
-    }
-  };
-
-  window.Quagga.onDetected(quaggaDetectedHandler);
-  window.Quagga.onProcessed(quaggaProcessedHandler);
-  window.Quagga.start();
-  quaggaActive = true;
-  quaggaStartedAt = Date.now();
-  updateDeviceSupport();
-  button.textContent = '■ Arreter camera';
-  button.style.background = '#c8102e';
-  button.style.color = 'white';
-  button.style.borderColor = '#c8102e';
-  if (cameraUsageMode === 'scan') {
-    const pb = document.getElementById('pauseScanButton');
-    if (pb) { pb.style.display = ''; pb.textContent = '⏸ Pause'; pb.style.background = ''; pb.style.color = ''; pb.style.borderColor = ''; }
-  }
-  status.textContent = 'Cadrez les barres et les chiffres';
-  quaggaOcrTimer = window.setInterval(() => {
-    maybeRunOcrFallback(reader, status);
-  }, 3000);
-}
-
-async function stopCamera() {
-  const {status, button, video, reader} = getCameraDom();
-  scanPaused = false;
-  window.clearTimeout(scanFrameTimer);
-  scanFrameTimer = null;
-  window.clearInterval(quaggaOcrTimer);
-  quaggaOcrTimer = null;
-  resetCameraCandidate();
-  if (nativeScanActive) {
-    nativeScanActive = false;
-    if (nativeScanFrame !== null) { cancelAnimationFrame(nativeScanFrame); nativeScanFrame = null; }
-  }
-  if (zxingActive) {
-    zxingActive = false;
-    if (zxingFrame !== null) { cancelAnimationFrame(zxingFrame); zxingFrame = null; }
-  }
-  hideCameraExtras();
-  if (quaggaActive && 'Quagga' in window) {
-    try {
-      if (quaggaDetectedHandler) window.Quagga.offDetected(quaggaDetectedHandler);
-      if (quaggaProcessedHandler) window.Quagga.offProcessed(quaggaProcessedHandler);
-      window.Quagga.stop();
-    } catch (error) {}
-  }
-  quaggaActive = false;
-  quaggaDetectedHandler = null;
-  quaggaProcessedHandler = null;
-  if (scannerStream) {
-    scannerStream.getTracks().forEach(track => track.stop());
-  }
-  if (html5Scanner) {
-    try {
-      await html5Scanner.stop();
-      await html5Scanner.clear();
-    } catch (error) {}
-  }
-  scannerStream = null;
-  cameraTrack = null;
-  html5Scanner = null;
-  video.srcObject = null;
-  video.style.display = 'block';
-  reader.innerHTML = '';
-  reader.style.display = 'none';
-  status.textContent = 'Camera arretee';
-  button.textContent = 'Ouvrir camera';
-  button.style.background = '';
-  button.style.color = '';
-  button.style.borderColor = '';
-  const pb = document.getElementById('pauseScanButton');
-  if (pb) { pb.style.display = 'none'; pb.textContent = '⏸ Pause'; pb.style.background = ''; pb.style.color = ''; pb.style.borderColor = ''; }
-  if (cameraUsageMode === 'search') {
-    document.getElementById('cameraPreview').srcObject = null;
-    document.getElementById('cameraPreview').style.display = 'block';
-    document.getElementById('html5Reader').style.display = 'none';
-    document.getElementById('scannerStatus').textContent = 'Camera arretee';
-    const cb = document.getElementById('cameraButton');
-    cb.textContent = 'Ouvrir camera';
-    cb.style.background = ''; cb.style.color = ''; cb.style.borderColor = '';
-  } else {
-    document.getElementById('searchCameraPreview').srcObject = null;
-    document.getElementById('searchCameraPreview').style.display = 'block';
-    document.getElementById('searchHtml5Reader').style.display = 'none';
-    document.getElementById('searchScannerStatus').textContent = 'Camera arretee';
-    const scb = document.getElementById('searchCameraButton');
-    scb.textContent = 'Ouvrir camera';
-    scb.style.background = ''; scb.style.color = ''; scb.style.borderColor = '';
-  }
-  cameraUsageMode = 'scan';
-}
-
-function responsiveScanBox(viewfinderWidth, viewfinderHeight) {
-  const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-  return {
-    width: Math.max(280, Math.floor(viewfinderWidth * 0.92)),
-    height: Math.max(82, Math.floor(minEdge * 0.16))
-  };
-}
-
-function html5ScannerConfig() {
-  if (!('Html5QrcodeSupportedFormats' in window)) return {};
-  return {
-    formatsToSupport: [
-      Html5QrcodeSupportedFormats.EAN_13,
-      Html5QrcodeSupportedFormats.EAN_8,
-      Html5QrcodeSupportedFormats.UPC_A,
-      Html5QrcodeSupportedFormats.UPC_E,
-      Html5QrcodeSupportedFormats.CODE_128,
-      Html5QrcodeSupportedFormats.CODE_39,
-      Html5QrcodeSupportedFormats.ITF
-    ].filter(Boolean)
-  };
-}
-
-function playBeep() {
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.frequency.value = 1400;
-    osc.type = 'sine';
-    gain.gain.setValueAtTime(0.35, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.13);
-    osc.start(ctx.currentTime);
-    osc.stop(ctx.currentTime + 0.13);
-  } catch (e) {}
-}
-
-function vibratePhone() {
-  try { navigator.vibrate && navigator.vibrate(80); } catch (e) {}
-}
-
-function flashScannerSuccess() {
-  const {reader} = getCameraDom();
-  reader.style.outline = '5px solid #16a34a';
-  reader.style.outlineOffset = '-5px';
-  window.setTimeout(() => {
-    reader.style.outline = '';
-    reader.style.outlineOffset = '';
-  }, 500);
-}
-
-function onDecodedCode(decodedText) {
-  const rawValue = String(decodedText || '').trim();
-  if (!rawValue || scanPaused) return;
-  if (!confirmStableCameraBarcode(rawValue)) return;
-  scanPaused = true;
-  playBeep();
-  vibratePhone();
-  flashScannerSuccess();
-  setScannedBarcode(rawValue);
-  getCameraDom().status.textContent = '✓ ' + rawValue;
-
-  // Fire search/lookup without awaiting — camera stays live
-  if (cameraUsageMode === 'search') {
-    doSearchValue(rawValue);
-  } else {
-    lookupScanFromInput(true, rawValue);
-  }
-
-  // Re-enable scanning after brief debounce so a new barcode replaces immediately
-  window.setTimeout(() => {
-    scanPaused = false;
-    if (scannerStream || html5Scanner) {
-      getCameraDom().status.textContent = 'Pret a scanner...';
-    }
-  }, 1200);
-}
-
-function confirmStableCameraBarcode(barcode) {
-  const normalized = barcode.trim();
-  if (!looksLikeBarcode(normalized)) return false;
-  const now = Date.now();
-
-  if (normalized === lastAcceptedCameraBarcode && now - lastAcceptedCameraAt < 1500) {
-    return false;
-  }
-
-  if (looksLikeCompleteRetailBarcode(normalized)) {
-    lastAcceptedCameraBarcode = normalized;
-    lastAcceptedCameraAt = now;
-    resetCameraCandidate();
-    return true;
-  }
-
-  if (normalized === cameraCandidateBarcode) {
-    cameraCandidateCount += 1;
-  } else {
-    cameraCandidateBarcode = normalized;
-    cameraCandidateCount = 1;
-  }
-
-  window.clearTimeout(cameraCandidateTimer);
-  cameraCandidateTimer = window.setTimeout(resetCameraCandidate, 250);
-
-  if (cameraCandidateCount < 2) {
-    getCameraDom().status.textContent = 'Verif rapide...';
-    return false;
-  }
-
-  lastAcceptedCameraBarcode = normalized;
-  lastAcceptedCameraAt = now;
-  resetCameraCandidate();
-  return true;
-}
-
-function resetCameraCandidate() {
-  cameraCandidateBarcode = '';
-  cameraCandidateCount = 0;
-  window.clearTimeout(cameraCandidateTimer);
-  cameraCandidateTimer = null;
-}
-
-function getActiveBarcodeInput() {
-  return cameraUsageMode === 'search'
-    ? document.getElementById('searchInput')
-    : document.getElementById('scanInput');
-}
-
-function setScannedBarcode(barcode) {
-  const input = getActiveBarcodeInput();
-  const nextValue = String(barcode || '').trim();
-  try {
-    input.focus({preventScroll: true});
-  } catch (error) {
-    try {
-      input.focus();
-    } catch (innerError) {}
-  }
-  input.value = nextValue;
-  input.setAttribute('value', nextValue);
-  input.dispatchEvent(new Event('input', {bubbles: true}));
-  input.dispatchEvent(new Event('change', {bubbles: true}));
-  if (typeof input.setSelectionRange === 'function') {
-    input.setSelectionRange(input.value.length, input.value.length);
-  }
-  if (input.id === 'scanInput') persistScanDraft();
-}
-
-function clearScanInput() {
-  const input = document.getElementById('scanInput');
-  input.value = '';
-  input.blur();
-  currentScanProduct = null;
-  lastLookedUpBarcode = '';
-  activeLookupBarcode = '';
-  scanPaused = false;
-  resetCameraCandidate();
-  persistScanDraft();
-  if (scannerStream || html5Scanner) getCameraDom().status.textContent = 'Recherche code...';
-}
-
-function clearSearchInput() {
-  window.clearTimeout(searchTimer);
-  document.getElementById('searchInput').value = '';
-  document.getElementById('searchResults').innerHTML = '';
-  if (scannerStream || html5Scanner) getCameraDom().status.textContent = 'Recherche code...';
-}
-
-function filterByHomeBrand(brand) {
-  const products = allProductsCache.filter(p => brand ? p.brand?.toLowerCase().startsWith(brand.toLowerCase()) : isHomeBrand(p.brand));
-  const div = document.getElementById('searchResults');
-  if (!products.length) {
-    div.innerHTML = `<div class="empty">Aucun produit ${brand || 'marque maison'} cartographie pour le moment.</div>`;
-    return;
-  }
-  const sorted = [...products].sort((a, b) => {
-    const aKey = [a.aisle, a.side, a.section, a.shelf, a.position].join('-');
-    const bKey = [b.aisle, b.side, b.section, b.shelf, b.position].join('-');
-    return aKey.localeCompare(bKey);
-  });
-  div.innerHTML = `<div class="card"><div class="section-title">★ ${brand || 'Marques maison'} — ${sorted.length} produit${sorted.length > 1 ? 's' : ''} cartographie${sorted.length > 1 ? 's' : ''}</div>${sorted.map(p => productCard(p, false, false)).join('')}</div>`;
-}
-
-function looksLikeBarcode(value) {
-  return /^[0-9A-Za-z.-]{6,}$/.test(value);
-}
-
-function looksLikeCompleteRetailBarcode(value) {
-  return /^[0-9]{8}$|^[0-9]{12}$|^[0-9]{13}$|^[0-9]{14}$/.test(value);
-}
-
-function focusScanInput() {
-  const input = document.getElementById('scanInput');
-  if (input && document.getElementById('scan').classList.contains('active')) {
-    input.focus({preventScroll: true});
-  }
-}
-
-function handleScanInputKey(event) {
-  if (event.key !== 'Enter' && event.key !== 'Tab') return;
-  const value = document.getElementById('scanInput').value.trim();
-  if (!value) return;
-  if (!requireEditorSession('utiliser le scan')) {
-    event.preventDefault();
-    return;
-  }
-  event.preventDefault();
-  lookupScanFromInput(true);
-}
-
-function handleHardwareScannerKey(event) {
-  if (!document.getElementById('scan').classList.contains('active')) return;
-  if (event.ctrlKey || event.altKey || event.metaKey) return;
-
-  const target = event.target;
-  const tag = target && target.tagName ? target.tagName.toLowerCase() : '';
-  const isEditable = tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable;
-
-  if (isEditable) return;
-
-  if (event.key === 'Enter' || event.key === 'Tab') {
-    if (hardwareScanBuffer.length >= 6) {
-      event.preventDefault();
-      setScannedBarcode(hardwareScanBuffer);
-      hardwareScanBuffer = '';
-      lookupScanFromInput(true);
-    }
-    return;
-  }
-
-  if (event.key.length !== 1) return;
-  hardwareScanBuffer += event.key;
-  window.clearTimeout(hardwareScanTimer);
-  hardwareScanTimer = window.setTimeout(() => {
-    if (looksLikeCompleteRetailBarcode(hardwareScanBuffer)) {
-      setScannedBarcode(hardwareScanBuffer);
-      lookupScanFromInput(true);
-    } else if (looksLikeBarcode(hardwareScanBuffer)) {
-      setScannedBarcode(hardwareScanBuffer);
-      document.getElementById('scannerStatus').textContent = 'Code rempli - appuyez sur Verifier';
-    }
-    hardwareScanBuffer = '';
-  }, 500);
-}
-
-function showCameraHint(message) {
-  document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(message)}</div>`;
-}
-
-function updateDeviceSupport() {
-  const cameraSupport = document.getElementById('cameraSupport');
-  const scannerSupport = document.getElementById('scannerSupport');
-  const supportHint = document.getElementById('supportHint');
-  const hasCamera = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
-  const isSecure = window.isSecureContext || location.hostname === '127.0.0.1' || location.hostname === 'localhost';
-  const hasNative = 'BarcodeDetector' in window;
-  const hasZXing = !!window.ZXing;
-
-  cameraSupport.textContent = hasCamera && isSecure ? 'Disponible' : 'HTTPS requis';
-  cameraSupport.style.background = hasCamera && isSecure ? '#ecfdf5' : '#fef2f2';
-  cameraSupport.style.color = hasCamera && isSecure ? '#065f46' : '#991b1b';
-
-  if (nativeScanActive || hasNative) {
-    scannerSupport.textContent = 'Natif (rapide)';
-    scannerSupport.style.background = '#ecfdf5';
-    scannerSupport.style.color = '#065f46';
-    supportHint.textContent = 'Ce navigateur utilise le scanner natif du telephone (BarcodeDetector). C est le mode le plus rapide, equivalent a Google Lens.';
-  } else if (zxingActive || hasZXing) {
-    scannerSupport.textContent = 'ZXing (bon)';
-    scannerSupport.style.background = '#fefce8';
-    scannerSupport.style.color = '#854d0e';
-    supportHint.textContent = 'Ce navigateur utilise ZXing. C est bon mais plus lent que le mode natif. Sur Android, utilisez Chrome pour obtenir le scanner natif.';
-  } else {
-    scannerSupport.textContent = hasNative ? 'Natif disponible' : 'ZXing / Quagga';
-    scannerSupport.style.background = '#ecfdf5';
-    scannerSupport.style.color = '#065f46';
-    supportHint.textContent = hasNative
-      ? 'Scanner natif disponible. Ouvrez la camera pour l activer.'
-      : 'Sur Android, utilisez Chrome pour le scanner natif (le plus rapide). Sur iPhone, ZXing est utilise automatiquement.';
-  }
-
-  if (!isSecure) {
-    supportHint.textContent = 'Pour la camera sur telephone, utilisez une URL HTTPS.';
-    cameraSupport.textContent = 'HTTPS requis';
-    cameraSupport.style.background = '#fef2f2';
-    cameraSupport.style.color = '#991b1b';
-  }
+  status.textContent = 'Aide client generee. Elle sera sauvegardee avec ce produit.';
+  preview.innerHTML = `
+    ${pendingLookupAssist.search_terms ? `<div class="barcode-text">Mots-clés clients: ${esc(pendingLookupAssist.search_terms)}</div>` : ''}
+    ${pendingLookupAssist.usage_notes ? `<div class="desc-text">${esc(pendingLookupAssist.usage_notes)}</div>` : ''}
+    ${pendingLookupAssist.alternative_suggestions ? `<div class="barcode-text">Alternatives possibles: ${esc(pendingLookupAssist.alternative_suggestions)}</div>` : ''}
+  `;
 }
 
 async function lookupScanFromInput(force=false, barcodeOverride='') {
@@ -3157,9 +1438,7 @@ async function lookupScanFromInput(force=false, barcodeOverride='') {
   const barcode = String(barcodeOverride || document.getElementById('scanInput').value || '').trim();
   const div = document.getElementById('scanResult');
   if (!barcode) return;
-  if (document.getElementById('scanInput').value.trim() !== barcode) {
-    setScannedBarcode(barcode);
-  }
+  if (document.getElementById('scanInput').value.trim() !== barcode) setScannedBarcode(barcode);
   activeLookupBarcode = barcode;
   if (!force && barcode === lastLookedUpBarcode) return;
   lastLookedUpBarcode = barcode;
@@ -3177,8 +1456,8 @@ async function lookupScanFromInput(force=false, barcodeOverride='') {
       <div class="msg info">Nouveau: ${esc(cursorLabel())}</div>
       <button class="btn" onclick="confirmExistingLocation()">Confirmer ce nouvel emplacement</button>
     </div>`;
-  } catch (error) {
-    if (error.status && error.status !== 404) {
+  } catch (e) {
+    if (e.status && e.status !== 404) {
       div.innerHTML = '<div class="msg error">Impossible de verifier la base partagee pour le moment. Evitez d ajouter ce produit avant le retour du serveur.</div>';
       return;
     }
@@ -3238,13 +1517,11 @@ async function hydrateOnlineLookup(barcode) {
   try {
     const lookupData = await apiLookupOnline(barcode, controller.signal);
     if (lookupData.found) lookupProduct = lookupData.product;
-  } catch (error) {}
+  } catch (e) {}
   window.clearTimeout(timeoutId);
-
   if (activeLookupBarcode !== barcode) return;
   const status = document.getElementById('lookupStatus');
   if (!status) return;
-
   if (lookupProduct) {
     pendingLookupProduct = lookupProduct;
     if (!document.getElementById('scanProductName').value.trim()) document.getElementById('scanProductName').value = lookupProduct.name || '';
@@ -3253,13 +1530,11 @@ async function hydrateOnlineLookup(barcode) {
     status.className = 'msg success';
     status.textContent = `Trouve dans ${lookupProduct.source}. Verifiez avant de confirmer.`;
     document.getElementById('lookupSource').innerHTML = lookupProduct.source_url ? `Source: <a href="${esc(lookupProduct.source_url)}" target="_blank" rel="noopener noreferrer">${esc(lookupProduct.source_url)}</a>` : '';
-    if (lookupProduct.image_url) {
-      document.getElementById('lookupImageWrap').innerHTML = `<img class="lookup-image" src="${esc(lookupProduct.image_url)}" alt="Image produit">`;
-    }
+    if (lookupProduct.image_url) document.getElementById('lookupImageWrap').innerHTML = `<img class="lookup-image" src="${esc(lookupProduct.image_url)}" alt="Image produit">`;
   } else {
     pendingLookupProduct = null;
     status.className = 'msg error';
-    status.textContent = 'Introuvable dans toutes les bases (UPC Item DB, Open Facts, EAN Search, Barcode Lookup, Go UPC, sites pharmacies). Remplissez manuellement — marque maison? Utilisez les boutons Biomedic / Essentiel.';
+    status.textContent = 'Introuvable dans toutes les bases. Remplissez manuellement — marque maison? Utilisez les boutons Biomedic / Essentiel.';
   }
 }
 
@@ -3289,20 +1564,13 @@ async function confirmExistingLocation() {
   if (!requireEditorSession('confirmer un emplacement')) return;
   if (!currentScanProduct) return;
   const payload = {
-    name: currentScanProduct.name,
-    brand: currentScanProduct.brand || '',
-    description: currentScanProduct.description || '',
-    image_url: currentScanProduct.image_url || '',
-    source_url: currentScanProduct.source_url || '',
-    search_terms: currentScanProduct.search_terms || '',
-    usage_notes: currentScanProduct.usage_notes || '',
-    alternative_suggestions: currentScanProduct.alternative_suggestions || '',
+    name: currentScanProduct.name, brand: currentScanProduct.brand || '',
+    description: currentScanProduct.description || '', image_url: currentScanProduct.image_url || '',
+    source_url: currentScanProduct.source_url || '', search_terms: currentScanProduct.search_terms || '',
+    usage_notes: currentScanProduct.usage_notes || '', alternative_suggestions: currentScanProduct.alternative_suggestions || '',
     barcode: currentScanProduct.barcode || '',
-    aisle: String(cursor.aisle),
-    side: cursor.side,
-    section: String(cursor.section),
-    shelf: String(cursor.shelf),
-    position: String(cursor.position)
+    aisle: String(cursor.aisle), side: cursor.side, section: String(cursor.section),
+    shelf: String(cursor.shelf), position: String(cursor.position)
   };
   const data = await apiUpdateProduct({...payload, id: currentScanProduct.id});
   if (!data.success) {
@@ -3324,20 +1592,15 @@ async function confirmNewProduct() {
     return;
   }
   const data = await apiAddProduct({
-    name,
-    brand,
-    description,
+    name, brand, description,
     image_url: pendingLookupProduct?.image_url || '',
     source_url: pendingLookupProduct?.source_url || '',
     search_terms: pendingLookupAssist?.search_terms || '',
     usage_notes: pendingLookupAssist?.usage_notes || '',
     alternative_suggestions: pendingLookupAssist?.alternative_suggestions || '',
     barcode,
-    aisle: String(cursor.aisle),
-    side: cursor.side,
-    section: String(cursor.section),
-    shelf: String(cursor.shelf),
-    position: String(cursor.position)
+    aisle: String(cursor.aisle), side: cursor.side, section: String(cursor.section),
+    shelf: String(cursor.shelf), position: String(cursor.position)
   });
   if (data.success) {
     if (data.product) upsertCachedProduct(data.product);
@@ -3353,8 +1616,7 @@ async function confirmUnknownProduct() {
   if (!barcode) return;
   const placeholderName = `A identifier - ${barcode}`;
   const data = await apiAddProduct({
-    name: placeholderName,
-    brand: '',
+    name: placeholderName, brand: '',
     description: pendingLookupAssist?.usage_notes || 'A identifier',
     image_url: pendingLookupProduct?.image_url || '',
     source_url: pendingLookupProduct?.source_url || '',
@@ -3362,11 +1624,8 @@ async function confirmUnknownProduct() {
     usage_notes: pendingLookupAssist?.usage_notes || '',
     alternative_suggestions: pendingLookupAssist?.alternative_suggestions || '',
     barcode,
-    aisle: String(cursor.aisle),
-    side: cursor.side,
-    section: String(cursor.section),
-    shelf: String(cursor.shelf),
-    position: String(cursor.position)
+    aisle: String(cursor.aisle), side: cursor.side, section: String(cursor.section),
+    shelf: String(cursor.shelf), position: String(cursor.position)
   });
   if (data.success) {
     if (data.product) upsertCachedProduct(data.product);
@@ -3401,12 +1660,11 @@ function finishConfirmed(message, brand) {
   }, 1200);
 }
 
+// ── Plan editor ───────────────────────────────────────────────────────────────
 function renderShelfProductList(aisle, side, section, shelf, positions) {
   const products = allProductsCache.filter(p =>
-    String(p.aisle) === String(aisle) &&
-    p.side === side &&
-    String(p.section) === String(section) &&
-    String(p.shelf) === String(shelf)
+    String(p.aisle) === String(aisle) && p.side === side &&
+    String(p.section) === String(section) && String(p.shelf) === String(shelf)
   ).sort((a, b) => Number(a.position) - Number(b.position));
   const filled = products.length;
   const total = Number(positions) || 0;
@@ -3479,7 +1737,6 @@ function renderMapEditor() {
         <div class="plan-sides">
         ${['Gauche','Droite'].map(side => {
           const sections = config.sides[side].sections;
-          const sideSlots = buildSlotsFromConfig(layout.aisle, config, side);
           const sideNodeId = `planSide-${layout.aisle}-${side}`;
           const sideLabel = sideDisplayLabel(side);
           const sideProducts = allProductsCache.filter(p => String(p.aisle) === String(layout.aisle) && p.side === side);
@@ -3577,9 +1834,7 @@ function renderMapEditor() {
 }
 
 function setAllPlanTrees(open) {
-  document.querySelectorAll('#mapContent details.tree-node').forEach(node => {
-    node.open = open;
-  });
+  document.querySelectorAll('#mapContent details.tree-node').forEach(node => { node.open = open; });
   captureOpenPlanNodesFromDom();
 }
 
@@ -3587,17 +1842,12 @@ function setPlanAisleTrees(aisle, open) {
   const root = document.getElementById(`planAisle-${aisle}`);
   if (!root) return;
   root.open = open;
-  root.querySelectorAll('details.tree-node').forEach(node => {
-    node.open = open;
-  });
+  root.querySelectorAll('details.tree-node').forEach(node => { node.open = open; });
   captureOpenPlanNodesFromDom();
 }
 
 async function loadMapEditor(forceServer=false) {
-  await Promise.allSettled([
-    refreshProductsCache(forceServer),
-    refreshLayoutsCache(forceServer)
-  ]);
+  await Promise.allSettled([refreshProductsCache(forceServer), refreshLayoutsCache(forceServer)]);
   refreshPlanUi();
 }
 
@@ -3637,8 +1887,7 @@ function setSideSectionCount(aisle, side, rawValue) {
     }
   }, layout.max_section, layout.max_shelf, layout.max_position);
   if (count < currentCount && !confirmLayoutReduction(aisle, nextConfig, `Reduire le nombre de sections du cote ${side} a ${count}`)) {
-    refreshPlanUi();
-    return;
+    refreshPlanUi(); return;
   }
   while (sections.length < count) sections.push({shelves: fallbackShelves.slice()});
   sections.length = count;
@@ -3667,8 +1916,7 @@ function setSectionShelfCount(aisle, side, sectionIndex, rawValue) {
     }
   }, layout.max_section, layout.max_shelf, layout.max_position);
   if (count < currentCount && !confirmLayoutReduction(aisle, nextConfig, `Reduire le nombre de tablettes de la section ${sectionIndex + 1} a ${count}`)) {
-    refreshPlanUi();
-    return;
+    refreshPlanUi(); return;
   }
   while (shelves.length < count) shelves.push(fallbackValue);
   shelves.length = count;
@@ -3689,14 +1937,13 @@ function setShelfPositionCount(aisle, side, sectionIndex, shelfIndex, rawValue) 
       ...layout.config.sides,
       [side]: {
         sections: layout.config.sides[side].sections.map((item, index) => index === sectionIndex
-          ? {shelves: item.shelves.map((value, idx) => idx === shelfIndex ? nextValue : value)}
+          ? {shelves: item.shelves.map((v, idx) => idx === shelfIndex ? nextValue : v)}
           : item)
       }
     }
   }, layout.max_section, layout.max_shelf, layout.max_position);
   if (nextValue < currentValue && !confirmLayoutReduction(aisle, nextConfig, `Reduire le nombre de positions de la tablette ${shelfIndex + 1} a ${nextValue}`)) {
-    refreshPlanUi();
-    return;
+    refreshPlanUi(); return;
   }
   section.shelves[shelfIndex] = nextValue;
   syncLayoutRecord(layout);
@@ -3714,10 +1961,7 @@ async function createAisleLayout() {
   const msgDiv = document.getElementById('addMsg');
   const max_section = Math.max(Number(leftSections) || 0, Number(rightSections) || 0);
   const data = await apiCreateLayoutAisle({
-    aisle,
-    max_section,
-    max_shelf,
-    max_position,
+    aisle, max_section, max_shelf, max_position,
     config: buildLayoutWithSideCounts(leftSections, rightSections, max_shelf, max_position)
   });
   msgDiv.className = data.success ? 'msg success' : 'msg error';
@@ -3725,12 +1969,9 @@ async function createAisleLayout() {
   if (data.success) {
     const config = normalizeLayoutConfig(buildLayoutWithSideCounts(leftSections, rightSections, max_shelf, max_position), max_section, max_shelf, max_position);
     mapLayouts.push(syncLayoutRecord({
-      aisle: String(aisle),
-      config,
-      enabled: true,
+      aisle: String(aisle), config, enabled: true,
       modified_by: loadEditorSession().username || '',
-      modified_at: nowIsoWithoutMs(),
-      product_count: 0,
+      modified_at: nowIsoWithoutMs(), product_count: 0,
       ...getLayoutMetrics(config)
     }));
     sortMapLayouts();
@@ -3779,11 +2020,8 @@ function applyAisleLayoutToCursor(aisle) {
   if (layout && config) {
     syncCursorLimitsForAisle(aisle);
     const aisleSlots = buildSlotsFromConfig(aisle, config);
-    if (aisleSlots.length) {
-      setCursorFromSlot(aisleSlots[0]);
-    } else {
-      normalizeCursorToLayout();
-    }
+    if (aisleSlots.length) setCursorFromSlot(aisleSlots[0]);
+    else normalizeCursorToLayout();
   }
   updateCursorUi();
   planStartDraft = getCursorSelection();
@@ -3796,15 +2034,12 @@ async function removeAisleLayout(aisle) {
   const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
   const productCount = Number(layout?.product_count || 0);
   const question = productCount
-    ? `Supprimer l allee ${aisle} ?\\n\\nCela supprimera aussi ${productCount} produit(s) qui sont dans cette allee.`
+    ? `Supprimer l allee ${aisle} ?\n\nCela supprimera aussi ${productCount} produit(s) qui sont dans cette allee.`
     : `Supprimer l allee ${aisle} ?`;
   if (!confirm(question)) return;
   let data = null;
-  try {
-    data = await apiDeleteLayoutAisle(aisle);
-  } catch (error) {
-    data = {success: false, error: 'Suppression impossible pour le moment.'};
-  }
+  try { data = await apiDeleteLayoutAisle(aisle); }
+  catch (e) { data = {success: false, error: 'Suppression impossible pour le moment.'}; }
   const msgDiv = document.getElementById('addMsg');
   const success = Boolean(data && data.success);
   msgDiv.className = success ? 'msg success' : 'msg error';
@@ -3836,10 +2071,145 @@ async function deleteProduct(id) {
   document.getElementById('searchResults').insertAdjacentHTML('afterbegin', `<div class="msg success">${esc(data.message || 'Produit supprime.')}</div>`);
 }
 
-async function switchTab(tab) {
-  if (scannerStream || html5Scanner) {
-    await stopCamera();
+// ── Database management ───────────────────────────────────────────────────────
+async function exportDatabase() {
+  const msg = document.getElementById('exportImportMsg');
+  if (msg) { msg.className = 'msg info'; msg.textContent = 'Preparation du fichier...'; }
+  try {
+    const res = await fetch('/api/export');
+    if (!res.ok) throw new Error('Erreur serveur');
+    const blob = await res.blob();
+    const filename = `familiprix-backup-${new Date().toISOString().slice(0,10)}.json`;
+    const file = new File([blob], filename, {type: 'application/json'});
+    if (navigator.canShare && navigator.canShare({files: [file]})) {
+      await navigator.share({files: [file], title: 'Sauvegarde Familiprix', text: 'Base de donnees Familiprix Localisateur'});
+      if (msg) { msg.className = 'msg success'; msg.textContent = 'Fichier partage avec succes.'; }
+    } else {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      if (msg) { msg.className = 'msg success'; msg.textContent = 'Fichier telecharge. Partagez-le via WhatsApp.'; }
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError' && msg) { msg.className = 'msg error'; msg.textContent = 'Impossible de partager le fichier.'; }
   }
+}
+
+async function importDatabase(input) {
+  const msg = document.getElementById('exportImportMsg');
+  const file = input.files[0];
+  input.value = '';
+  if (!file) return;
+  if (msg) { msg.className = 'msg info'; msg.textContent = 'Lecture du fichier...'; }
+  let payload;
+  try { payload = JSON.parse(await file.text()); }
+  catch (e) {
+    if (msg) { msg.className = 'msg error'; msg.textContent = 'Fichier invalide. Utilisez uniquement un fichier exporte par cette application.'; }
+    return;
+  }
+  if (payload.export_version !== 1) {
+    if (msg) { msg.className = 'msg error'; msg.textContent = 'Format non reconnu. Fichier incompatible.'; }
+    return;
+  }
+  const products = (payload.products || []).length;
+  const layouts = (payload.aisle_layouts || []).length;
+  if (!confirm(`Importer ${products} produit(s) et ${layouts} allee(s) dans la base? Les positions existantes seront mises a jour.`)) return;
+  if (msg) { msg.className = 'msg info'; msg.textContent = 'Import en cours...'; }
+  try {
+    const {res, data} = await apiFetch('/api/import', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', ...getEditorHeaders()},
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok || !data.success) throw new Error(data.error || 'Import echoue');
+    if (msg) { msg.className = 'msg success'; msg.textContent = `Import termine: ${data.imported_products} produit(s) et ${data.imported_layouts} allee(s) importes. ${data.skipped_products ? data.skipped_products + ' ignore(s).' : ''}`; }
+    await refreshProductsCache(true);
+    await refreshLayoutsCache(true);
+    renderMapEditor();
+  } catch (e) {
+    if (msg) { msg.className = 'msg error'; msg.textContent = e.message || 'Erreur lors de l import.'; }
+  }
+}
+
+async function resetDatabase(wipeLayouts) {
+  const msg = document.getElementById('exportImportMsg');
+  const what = wipeLayouts ? 'TOUS les produits ET le plan du magasin' : 'tous les produits';
+  if (!confirm(`Effacer ${what}? Cette action est irreversible. Faites une sauvegarde d abord si necessaire.`)) return;
+  if (!confirm('Confirmation finale: effacer definitivement?')) return;
+  if (msg) { msg.className = 'msg info'; msg.textContent = 'Suppression en cours...'; }
+  try {
+    const {res, data} = await apiFetch('/api/reset', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', ...getEditorHeaders()},
+      body: JSON.stringify({wipe_layouts: wipeLayouts})
+    });
+    if (!res.ok || !data.success) throw new Error(data.error || 'Erreur');
+    if (msg) {
+      msg.className = 'msg success';
+      msg.textContent = `Base nettoyee: ${data.deleted_products} produit(s) supprime(s)${wipeLayouts ? `, ${data.deleted_layouts} allee(s) supprimee(s)` : ''}.`;
+    }
+    await refreshProductsCache(true);
+    if (wipeLayouts) { await refreshLayoutsCache(true); renderMapEditor(); }
+  } catch (e) {
+    if (msg) { msg.className = 'msg error'; msg.textContent = e.message || 'Erreur lors de la suppression.'; }
+  }
+}
+
+// ── GitHub Gist backup ────────────────────────────────────────────────────────
+async function loadGistStatus() {
+  const statusEl = document.getElementById('gistStatusMsg');
+  const actionsEl = document.getElementById('gistActions');
+  try {
+    const {res, data} = await apiFetch('/api/gist/status');
+    if (!res.ok) throw new Error();
+    if (data.configured) {
+      statusEl.textContent = 'Sauvegarde automatique GitHub active. Chaque produit scanne est sauvegarde automatiquement.';
+      if (actionsEl) actionsEl.style.display = '';
+    } else if (data.has_token && !data.has_gist_id) {
+      statusEl.innerHTML = 'GITHUB_TOKEN configure. Scannez un premier produit pour creer le gist, puis ajoutez <strong>GITHUB_GIST_ID</strong> dans les variables Render.';
+      if (actionsEl) actionsEl.style.display = '';
+    } else {
+      statusEl.innerHTML = 'Sauvegarde GitHub non configuree. Ajoutez <strong>GITHUB_TOKEN</strong> et <strong>GITHUB_GIST_ID</strong> dans les variables d\'environnement Render pour activer la sauvegarde automatique.';
+      if (actionsEl) actionsEl.style.display = 'none';
+    }
+  } catch (e) {
+    statusEl.textContent = 'Impossible de verifier le statut GitHub.';
+  }
+}
+
+async function gistBackupNow() {
+  const msg = document.getElementById('gistMsg');
+  if (msg) { msg.className = 'msg info'; msg.textContent = 'Sauvegarde en cours...'; }
+  try {
+    const {res, data} = await apiFetch('/api/gist/backup', {method: 'POST', headers: getEditorHeaders()});
+    if (!res.ok || !data.success) throw new Error(data.error || 'Echec');
+    if (msg) { msg.className = 'msg success'; msg.textContent = 'Sauvegarde reussie sur GitHub Gist.'; }
+  } catch (e) {
+    if (msg) { msg.className = 'msg error'; msg.textContent = e.message || 'Erreur lors de la sauvegarde GitHub.'; }
+  }
+}
+
+async function gistRestoreNow() {
+  const msg = document.getElementById('gistMsg');
+  if (!confirm('Restaurer les donnees depuis GitHub Gist? Les produits existants seront conserves (fusion).')) return;
+  if (msg) { msg.className = 'msg info'; msg.textContent = 'Restauration en cours...'; }
+  try {
+    const {res, data} = await apiFetch('/api/gist/restore', {method: 'POST', headers: getEditorHeaders()});
+    if (!res.ok || !data.success) throw new Error(data.error || 'Echec');
+    if (msg) { msg.className = 'msg success'; msg.textContent = `Restauration terminee: ${data.imported_products} produit(s) et ${data.imported_layouts} allee(s) importes.`; }
+    await refreshProductsCache(true);
+    await refreshLayoutsCache(true);
+    renderMapEditor();
+  } catch (e) {
+    if (msg) { msg.className = 'msg error'; msg.textContent = e.message || 'Erreur lors de la restauration GitHub.'; }
+  }
+}
+
+// ── Tab switching ─────────────────────────────────────────────────────────────
+async function switchTab(tab) {
+  if (scannerStream || html5Scanner) await stopCamera();
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.getElementById(tab).classList.add('active');
@@ -3850,17 +2220,13 @@ async function switchTab(tab) {
   if (tab === 'search') {
     if (document.getElementById('searchInput')?.value.trim()) doSearch();
     refreshProductsCache().then(() => {
-      if (document.getElementById('search').classList.contains('active') && document.getElementById('searchInput')?.value.trim()) {
-        doSearch();
-      }
+      if (document.getElementById('search').classList.contains('active') && document.getElementById('searchInput')?.value.trim()) doSearch();
     });
   }
   if (tab === 'client') {
     runClientSearch(false);
     refreshProductsCache().then(() => {
-      if (document.getElementById('client').classList.contains('active')) {
-        runClientSearch(false);
-      }
+      if (document.getElementById('client').classList.contains('active')) runClientSearch(false);
     });
   }
   if (tab === 'scan') window.setTimeout(focusScanInput, 50);
@@ -3868,16 +2234,12 @@ async function switchTab(tab) {
   if (tab === 'search') window.setTimeout(() => document.getElementById('searchInput')?.focus(), 50);
 }
 
+// ── Boot ──────────────────────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/service-worker.js').then(registration => {
       registration.update().catch(() => {});
     }).catch(() => {});
-    updateDeviceSupport();
-    updateAppShellState();
-    updateNetworkStatus();
-    focusScanInput();
-    loadGistStatus();
   });
 }
 
@@ -3904,30 +2266,19 @@ document.getElementById('clientQuestion').addEventListener('input', persistClien
 window.addEventListener('online', updateNetworkStatus);
 window.addEventListener('offline', updateNetworkStatus);
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && (scannerStream || html5Scanner)) {
-    stopCamera();
-  }
+  if (document.hidden && (scannerStream || html5Scanner)) stopCamera();
 });
-window.addEventListener('pageshow', () => {
-  updateAppShellState();
-  updateNetworkStatus();
-});
+window.addEventListener('pageshow', () => { updateAppShellState(); updateNetworkStatus(); });
 window.addEventListener('pagehide', () => {
-  persistScanDraft();
-  persistAddDraft();
-  persistClientDraft();
+  persistScanDraft(); persistAddDraft(); persistClientDraft();
   if (scannerStream || html5Scanner) stopCamera();
 });
 
 async function bootApp() {
   const [systemResult, productsResult, layoutsResult] = await Promise.allSettled([
-    apiGetSystemInfo(),
-    apiGetProducts(),
-    apiGetLayoutAisles()
+    apiGetSystemInfo(), apiGetProducts(), apiGetLayoutAisles()
   ]);
-  if (systemResult.status === 'fulfilled') {
-    backendInfo = {...backendInfo, ...systemResult.value};
-  }
+  if (systemResult.status === 'fulfilled') backendInfo = {...backendInfo, ...systemResult.value};
   if (productsResult.status === 'fulfilled') {
     allProductsCache = productsResult.value;
     lastProductsRefreshAt = Date.now();
