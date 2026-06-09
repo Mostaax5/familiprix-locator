@@ -735,15 +735,15 @@ async function startQuaggaScanner(reader, status, button) {
       target: reader,
       constraints: {
         facingMode: 'environment',
-        width: {min: 1280, ideal: 1920},
-        height: {min: 720, ideal: 1080},
+        width: {min: 640, ideal: 1280},
+        height: {min: 480, ideal: 720},
         advanced: [{focusMode: 'continuous'}]
       },
-      area: {top: '20%', right: '2%', left: '2%', bottom: '20%'}
+      area: {top: '15%', right: '2%', left: '2%', bottom: '15%'}
     },
-    locator: {patchSize: 'x-small', halfSample: false},
-    numOfWorkers: navigator.hardwareConcurrency >= 4 ? 4 : 2,
-    frequency: 15,
+    locator: {patchSize: 'medium', halfSample: true},
+    numOfWorkers: 2,
+    frequency: 25,
     locate: true,
     decoder: {
       readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader', 'code_128_reader', 'code_39_reader', 'i2of5_reader'],
