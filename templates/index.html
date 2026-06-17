@@ -1994,7 +1994,7 @@ function setPresentoirShelfLabel(aisle, presIndex, shelfIndex, value) {
   markLayoutDirty(aisle); refreshPlanUi();
 }
 
-function _renderFixtureShelfGrid(aisle, sideName, shelves, labels, aisleSt, presOrFacadeKey, callbackShelfCount, callbackShelfPos, callbackShelfLabel) {
+function _facadeShelfGrid(aisle, sideName, fk, shelves, labels) {
   return (shelves || []).map((positions, shi) => {
     const sl = (labels || [])[shi] || '';
     const title = sl ? `📎 ${esc(sl)}` : `Tablette ${shi + 1}`;
@@ -2003,21 +2003,23 @@ function _renderFixtureShelfGrid(aisle, sideName, shelves, labels, aisleSt, pres
       String(p.aisle) === String(aisle) && p.side === sideName && String(p.shelf) === String(shi + 1)
     ).length;
     return `<div class="plan-shelf-card" style="${bg}">
-      <div class="shelf-header">
+      <div class="shelf-header" style="gap:4px">
         <span class="shelf-title">${title}</span>
-        <span class="shelf-fill">${filled}/${positions} occ.</span>
+        <input type="number" min="1" value="${positions}" title="Positions"
+               style="width:46px;padding:2px 4px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px;text-align:center"
+               onchange="setFacadeShelfPositions('${esc(aisle)}','${fk}',${shi},this.value)"/>
+        <span style="font-size:10px;color:#94a3b8">pos</span>
+        <span style="font-size:11px;color:#64748b">${filled} prod.</span>
+        <button onclick="setFacadeShelfCount('${esc(aisle)}','${fk}',${shelves.length - 1 > shi ? shelves.length : shelves.length - 1})"
+                style="margin-left:auto;background:none;border:none;color:#c8102e;cursor:pointer;font-size:14px;line-height:1;padding:0"
+                title="Supprimer tablette"
+                onclick="javascript:void(0)">✕</button>
       </div>
       <details class="struct-details">
-        <summary class="struct-toggle">⚙ ${sl || 'T'+(shi+1)} · Pos: ${positions}</summary>
-        <div class="field" style="margin-top:8px">
-          <label class="label">Nom</label>
-          <input type="text" value="${esc(sl)}" placeholder="Ex: Accroche..."
-                 oninput="${callbackShelfLabel}(${shi},this.value)"/>
-        </div>
-        <div class="field">
-          <label class="label">Positions</label>
-          <input type="number" min="0" value="${positions}"
-                 onchange="${callbackShelfPos}(${shi},this.value)"/>
+        <summary class="struct-toggle" style="font-size:11px">⚙ Nom / étiquette</summary>
+        <div class="field" style="margin-top:6px">
+          <input type="text" value="${esc(sl)}" placeholder="Laisser vide = Tablette ${shi + 1}"
+                 oninput="setFacadeShelfLabel('${esc(aisle)}','${fk}',${shi},this.value)"/>
         </div>
       </details>
       ${renderShelfProductList(aisle, sideName, 1, shi + 1, positions)}
@@ -2027,32 +2029,25 @@ function _renderFixtureShelfGrid(aisle, sideName, shelves, labels, aisleSt, pres
 
 function renderFacadesSection(aisle, config) {
   const parts = [
-    {label: 'Façade A', key: 'facade_a', sideName: 'Façade A', icon: '🔲'},
-    {label: 'Façade B', key: 'facade_b', sideName: 'Façade B', icon: '🔲'},
-  ].map(({label, key, sideName, icon}) => {
+    {label: 'Façade A', key: 'facade_a', sideName: 'Façade A'},
+    {label: 'Façade B', key: 'facade_b', sideName: 'Façade B'},
+  ].map(({label, key, sideName}) => {
     const fx = config[key] || {shelves: [], labels: []};
     const shelves = fx.shelves || []; const labels = fx.labels || [];
     const nodeId = `planFacade-${aisle}-${key}`;
     const prods = allProductsCache.filter(p => String(p.aisle) === String(aisle) && p.side === sideName);
-    const shelvesHtml = _renderFixtureShelfGrid(aisle, sideName, shelves, labels, aisle, key,
-      `setFacadeShelfCount('${esc(aisle)}','${key}',${shelves.length})`,
-      `(shi,v)=>setFacadeShelfPositions('${esc(aisle)}','${key}',shi,v)`,
-      `(shi,v)=>setFacadeShelfLabel('${esc(aisle)}','${key}',shi,v)`);
+    const shelvesHtml = _facadeShelfGrid(aisle, sideName, key, shelves, labels);
     return `<details class="tree-node plan-section" data-node-id="${nodeId}"${detailsOpenAttr(nodeId)}>
       <summary>
-        <span>${icon} ${label}</span>
+        <span>🔲 ${label}</span>
         <span class="tree-meta">${shelves.length} tablette${shelves.length!==1?'s':''} · ${prods.length} produit${prods.length!==1?'s':''}</span>
       </summary>
       <div class="tree-body">
-        <details class="struct-details">
-          <summary class="struct-toggle">⚙ Tablettes — ${label}</summary>
-          <div class="field" style="margin-top:8px">
-            <label class="label">Nombre de tablettes</label>
-            <input type="number" min="0" value="${shelves.length}"
-                   onchange="setFacadeShelfCount('${esc(aisle)}','${key}',this.value)"/>
-          </div>
-        </details>
-        ${shelves.length ? '' : '<div class="small" style="padding:8px 0;color:#94a3b8">Aucune tablette. Configurez ci-dessus.</div>'}
+        <div style="display:flex;gap:6px;margin:6px 0 8px">
+          <button class="btn btn-outline btn-inline" style="font-size:12px"
+                  onclick="setFacadeShelfCount('${esc(aisle)}','${key}',${shelves.length + 1})">➕ Tablette</button>
+        </div>
+        ${shelves.length ? '' : '<div class="small" style="color:#94a3b8;padding:4px 0">Aucune tablette.</div>'}
         <div class="plan-shelf-grid">${shelvesHtml}</div>
       </div>
     </details>`;
@@ -2133,6 +2128,68 @@ function renderPresentoirSection(aisle, config) {
     </div>
     ${presHtml || '<div class="small" style="color:#94a3b8;padding:4px 0">Aucun présentoir.</div>'}
   </div>`;
+}
+
+// ── Direct section / shelf / position editing ─────────────────────────────────
+function addSection(aisle, side) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const sections = layout.config.sides[side].sections;
+  const last = sections[sections.length - 1];
+  const newShelvesCount = last?.shelves?.length ?? 3;
+  const newPositions = last?.shelves?.[0] ?? 8;
+  sections.push({
+    shelves: Array.from({length: newShelvesCount}, () => newPositions),
+    labels:  Array.from({length: newShelvesCount}, () => '')
+  });
+  syncLayoutRecord(layout);
+  markLayoutDirty(aisle);
+  refreshPlanUi();
+}
+
+function removeSection(aisle, side, sectionIndex) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const sections = layout.config.sides[side].sections;
+  const hasProducts = allProductsCache.some(p =>
+    String(p.aisle) === String(aisle) && p.side === side && String(p.section) === String(sectionIndex + 1)
+  );
+  if (hasProducts && !confirm(`La section ${sectionIndex + 1} contient des produits. Supprimer quand même ?`)) return;
+  sections.splice(sectionIndex, 1);
+  syncLayoutRecord(layout);
+  markLayoutDirty(aisle);
+  refreshPlanUi();
+}
+
+function addShelf(aisle, side, sectionIndex) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const section = layout.config.sides[side].sections[sectionIndex];
+  if (!section) return;
+  const fallback = section.shelves[section.shelves.length - 1] ?? 8;
+  section.shelves.push(fallback);
+  if (!section.labels) section.labels = [];
+  section.labels.push('');
+  syncLayoutRecord(layout);
+  markLayoutDirty(aisle);
+  refreshPlanUi();
+}
+
+function removeShelf(aisle, side, sectionIndex, shelfIndex) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const section = layout.config.sides[side].sections[sectionIndex];
+  if (!section) return;
+  const hasProducts = allProductsCache.some(p =>
+    String(p.aisle) === String(aisle) && p.side === side &&
+    String(p.section) === String(sectionIndex + 1) && String(p.shelf) === String(shelfIndex + 1)
+  );
+  if (hasProducts && !confirm(`La tablette ${shelfIndex + 1} contient des produits. Supprimer quand même ?`)) return;
+  section.shelves.splice(shelfIndex, 1);
+  if (section.labels) section.labels.splice(shelfIndex, 1);
+  syncLayoutRecord(layout);
+  markLayoutDirty(aisle);
+  refreshPlanUi();
 }
 
 // ── Plan editor ───────────────────────────────────────────────────────────────
@@ -2245,7 +2302,7 @@ function renderMapEditor() {
                   </div>
                 </div>
               </details>
-              ${sections.length ? '' : `<div class="small" style="padding:8px 0">Aucune section sur ${sideLabel} pour le moment.</div>`}
+              ${sections.length ? '' : `<div class="small" style="padding:8px 0">Aucune section sur ${sideLabel}.</div>`}
               ${sections.map((section, sectionIndex) => {
                 const sectionNodeId = `planSection-${layout.aisle}-${side}-${sectionIndex}`;
                 const sectionHomeBrands = allProductsCache.filter(p =>
@@ -2259,19 +2316,16 @@ function renderMapEditor() {
                 return `<details class="tree-node plan-section" data-node-id="${sectionNodeId}"${detailsOpenAttr(sectionNodeId)}>
                 <summary>
                   <span>Section ${sectionIndex + 1}</span>
-                  <span class="tree-meta">${sectionProducts.length} produit${sectionProducts.length !== 1 ? 's' : ''} · ${section.shelves.length} tablette${section.shelves.length !== 1 ? 's' : ''}${sectionHomeBrands.length ? ` · <span style="color:#c8102e">★${sectionHomeBrands.length}</span>` : ''}</span>
+                  <span class="tree-meta">${sectionProducts.length} prod. · ${section.shelves.length} T${sectionHomeBrands.length ? ` · <span style="color:#c8102e">★${sectionHomeBrands.length}</span>` : ''}</span>
                 </summary>
                 <div class="tree-body">
-                  <button class="btn btn-outline btn-inline" style="margin-top:4px;width:100%" onclick="startScanFromSection('${esc(layout.aisle)}','${side}',${sectionIndex})">▶ Commencer scan a la Section ${sectionIndex + 1}</button>
-                  <details class="struct-details">
-                    <summary class="struct-toggle">⚙ Modifier tablettes de la section ${sectionIndex + 1}</summary>
-                    <div class="field" style="margin-top:8px">
-                      <label class="label" for="shelfCount-${layout.aisle}-${side}-${sectionIndex}">Nombre de tablettes</label>
-                      <input id="shelfCount-${layout.aisle}-${side}-${sectionIndex}" type="number" min="0" value="${section.shelves.length}" onchange="setSectionShelfCount('${esc(layout.aisle)}','${side}', ${sectionIndex}, this.value)"/>
-                    </div>
-                    <button class="btn btn-outline btn-inline" style="margin-top:6px;font-size:12px" onclick="addAccrocheToSection('${esc(layout.aisle)}','${side}',${sectionIndex})">📎 Ajouter une accroche</button>
-                  </details>
-                  ${section.shelves.length ? '' : `<div class="small" style="padding:8px 0">Aucune tablette dans cette section pour le moment.</div>`}
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 10px">
+                    <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addShelf('${esc(layout.aisle)}','${side}',${sectionIndex})">➕ Tablette</button>
+                    <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addAccrocheToSection('${esc(layout.aisle)}','${side}',${sectionIndex})">📎 Accroche</button>
+                    <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="startScanFromSection('${esc(layout.aisle)}','${side}',${sectionIndex})">▶ Scanner ici</button>
+                    <button class="btn btn-outline btn-inline" style="font-size:12px;color:#c8102e;border-color:#f1b8c2;margin-left:auto" onclick="removeSection('${esc(layout.aisle)}','${side}',${sectionIndex})">✕ Section</button>
+                  </div>
+                  ${section.shelves.length ? '' : `<div class="small" style="padding:4px 0;color:#94a3b8">Aucune tablette — cliquez ➕ Tablette ci-dessus.</div>`}
                   <div class="plan-shelf-grid">
                     ${section.shelves.map((positions, shelfIndex) => {
                       const shelfFilled = allProductsCache.filter(p =>
@@ -2280,24 +2334,24 @@ function renderMapEditor() {
                         String(p.shelf) === String(shelfIndex + 1)
                       ).length;
                       const shelfLabel = section.labels?.[shelfIndex] || '';
-                      const shelfTitle = shelfLabel ? `📎 ${esc(shelfLabel)}` : `Tablette ${shelfIndex + 1}`;
+                      const shelfTitle = shelfLabel ? `📎 ${esc(shelfLabel)}` : `T${shelfIndex + 1}`;
                       const accrocheBg = shelfLabel ? 'background:#fffbf0;border-color:#fbbf24' : '';
                       return `<div class="plan-shelf-card" style="${accrocheBg}">
-                        <div class="shelf-header">
+                        <div class="shelf-header" style="gap:4px">
                           <span class="shelf-title">${shelfTitle}</span>
-                          <span class="shelf-fill">${shelfFilled}/${positions} occupée${shelfFilled !== 1 ? 's' : ''}</span>
+                          <input type="number" min="1" value="${positions}" title="Positions"
+                                 style="width:46px;padding:2px 4px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px;text-align:center"
+                                 onchange="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},this.value)"/>
+                          <span style="font-size:10px;color:#94a3b8">pos</span>
+                          <span style="font-size:11px;color:#64748b">${shelfFilled} prod.</span>
+                          <button onclick="removeShelf('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex})"
+                                  style="margin-left:auto;background:none;border:none;color:#c8102e;cursor:pointer;font-size:14px;padding:0;line-height:1" title="Supprimer tablette">✕</button>
                         </div>
                         <details class="struct-details">
-                          <summary class="struct-toggle">⚙ ${shelfLabel ? esc(shelfLabel) : `T${shelfIndex + 1}`} · Positions: ${positions}</summary>
-                          <div class="field" style="margin-top:8px">
-                            <label class="label">Nom de la tablette</label>
-                            <input type="text" value="${esc(shelfLabel)}" placeholder="Ex: Accroche, Tête de gondole..."
+                          <summary class="struct-toggle" style="font-size:11px">⚙ Nom / étiquette</summary>
+                          <div class="field" style="margin-top:6px">
+                            <input type="text" value="${esc(shelfLabel)}" placeholder="Laisser vide = Tablette ${shelfIndex + 1}"
                                    oninput="setShelfLabel('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},this.value)"/>
-                            <div class="small" style="margin-top:2px;color:#94a3b8">Vide = Tablette ${shelfIndex + 1} (standard)</div>
-                          </div>
-                          <div class="field">
-                            <label class="label" for="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}">Nombre de positions</label>
-                            <input id="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}" type="number" min="0" value="${positions}" onchange="setShelfPositionCount('${esc(layout.aisle)}','${side}', ${sectionIndex}, ${shelfIndex}, this.value)"/>
                           </div>
                         </details>
                         ${renderShelfProductList(layout.aisle, side, sectionIndex + 1, shelfIndex + 1, positions)}
@@ -2307,6 +2361,7 @@ function renderMapEditor() {
                 </div>
               </details>`;
               }).join('')}
+              <button class="btn btn-outline btn-inline" style="margin-top:8px;font-size:12px;width:100%" onclick="addSection('${esc(layout.aisle)}','${side}')">➕ Ajouter une section</button>
             </div>
           </details>`;
         }).join('')}
@@ -2494,7 +2549,9 @@ async function createAisleLayout() {
     config: buildLayoutWithSideCounts(leftSections, rightSections, max_shelf, max_position)
   });
   msgDiv.className = data.success ? 'msg success' : 'msg error';
-  msgDiv.textContent = data.success ? `Allee ${aisle} ajoutee.` : (data.error || 'Creation impossible.');
+  msgDiv.textContent = data.success ? `✅ Allée ${aisle} créée.` : (data.error || 'Création impossible. Vérifiez le numéro d allée.');
+  msgDiv.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  if (!data.success) return;
   if (data.success) {
     const config = normalizeLayoutConfig(buildLayoutWithSideCounts(leftSections, rightSections, max_shelf, max_position), max_section, max_shelf, max_position);
     mapLayouts.push(syncLayoutRecord({
