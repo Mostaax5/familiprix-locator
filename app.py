@@ -2267,11 +2267,7 @@ def add_product():
         return jsonify({
             "error": f'Position deja occupee par "{occupied["name"]}" (code {occupied["barcode"] or "sans code"}).'
         }), 409
-    duplicate_barcode = find_product_by_barcode(db, barcode)
-    if duplicate_barcode:
-        return jsonify({
-            "error": f'Ce code-barres existe deja dans l allee {duplicate_barcode["aisle"]}, {duplicate_barcode["side"]}, section {duplicate_barcode["section"]}, tablette {duplicate_barcode["shelf"]}, position {duplicate_barcode["position"]}.'
-        }), 409
+    # Note: same barcode at a different location is intentionally allowed (multi-location support).
 
     try:
         cursor = db.execute(
@@ -2346,11 +2342,7 @@ def update_product(product_id):
         return jsonify({
             "error": f'Position deja occupee par "{occupied["name"]}" (code {occupied["barcode"] or "sans code"}).'
         }), 409
-    duplicate_barcode = find_product_by_barcode(db, data.get("barcode", ""), exclude_id=product_id)
-    if duplicate_barcode:
-        return jsonify({
-            "error": f'Ce code-barres existe deja dans l allee {duplicate_barcode["aisle"]}, {duplicate_barcode["side"]}, section {duplicate_barcode["section"]}, tablette {duplicate_barcode["shelf"]}, position {duplicate_barcode["position"]}.'
-        }), 409
+    # Note: same barcode at a different location is intentionally allowed (multi-location support).
 
     try:
         result = db.execute(

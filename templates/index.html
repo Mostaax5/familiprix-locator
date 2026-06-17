@@ -50,14 +50,32 @@
 <!-- ── SCAN TAB ── -->
 <div id="scan" class="section active content">
 
-  <div class="cursor-card card">
-    <div class="cursor-location">
-      <span class="cursor-label-small">Position actuelle</span>
-      <strong id="cursorText">Allee 1 - Cote A - Section 1 - Tablette 1 - Pos. 1</strong>
+  <!-- Rayon context picker -->
+  <div class="card">
+    <div class="section-title">📍 Rayon en cours</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;align-items:flex-end">
+      <div class="field">
+        <label class="label">Allée</label>
+        <input type="text" id="rayonAisle" placeholder="Ex: 3" inputmode="numeric" autocomplete="off" oninput="updateRayonCtx()"/>
+      </div>
+      <div class="field">
+        <label class="label">Côté</label>
+        <select id="rayonSide" onchange="updateRayonCtx()">
+          <option value="Gauche">Gauche</option>
+          <option value="Droite">Droite</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="label">Section</label>
+        <input type="number" id="rayonSection" value="1" min="1" oninput="updateRayonCtx()"/>
+      </div>
+      <div class="field">
+        <label class="label">Tablette</label>
+        <input type="number" id="rayonShelf" placeholder="#" min="1" oninput="updateRayonCtx()"/>
+      </div>
     </div>
-    <div class="cursor-actions">
-      <button class="btn btn-outline btn-inline cursor-back" onclick="rewindCursor()">← Refaire</button>
-      <button class="btn btn-inline cursor-skip" onclick="skipPosition()">Passer →</button>
+    <div id="rayonBadge" style="font-size:13px;margin-top:8px;padding:8px 10px;border-radius:8px;background:#f8fafc;color:#94a3b8;font-weight:500">
+      Choisissez un rayon pour commencer le scan
     </div>
   </div>
 
@@ -81,6 +99,15 @@
   </div>
 
   <div id="scanResult"></div>
+
+  <!-- Products on current shelf -->
+  <div class="card" id="rayonListCard" style="display:none">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+      <strong style="font-size:14px;color:#1e293b">Sur ce rayon — <span id="rayonCount">0</span> produit(s)</strong>
+      <button class="btn btn-outline btn-inline" style="font-size:11px;padding:3px 10px" onclick="refreshRayonList()">↻</button>
+    </div>
+    <div id="rayonProductList"></div>
+  </div>
 
   <details class="card">
     <summary class="details-summary">⌨ Saisir le code manuellement</summary>
@@ -1334,6 +1361,13 @@ async function doSearchValue(q) {
   const div = document.getElementById('searchResults');
   if (!q) { div.innerHTML = ''; return; }
   if (looksLikeCompleteRetailBarcode(q)) {
+    // Show ALL locations for this barcode from cache
+    const byCodes = build_barcode_candidates_js(q);
+    const allByBarcode = allProductsCache.filter(p => p.barcode && byCodes.includes(String(p.barcode).replace(/\s/g,'')));
+    if (allByBarcode.length) {
+      div.innerHTML = productCardMultiLocation(allByBarcode);
+      return;
+    }
     try {
       const product = await apiGetProductByBarcode(q);
       div.innerHTML = productCard(product, false);
@@ -1347,15 +1381,57 @@ async function doSearchValue(q) {
   }
   const cached = searchProductsFromCache(q, 40);
   if (cached.length || allProductsCache.length) {
-    div.innerHTML = cached.length ? cached.map(p => productCard(p)).join('') : '<div class="empty">Aucun produit trouve.</div>';
+    // Group results by barcode — if a barcode appears at multiple locations, merge them
+    div.innerHTML = cached.length ? groupAndRenderSearchResults(cached) : '<div class="empty">Aucun produit trouve.</div>';
     return;
   }
   try {
     const data = await apiSearchProducts(q);
-    div.innerHTML = data.length ? data.map(p => productCard(p)).join('') : '<div class="empty">Aucun produit trouve.</div>';
+    div.innerHTML = data.length ? groupAndRenderSearchResults(data) : '<div class="empty">Aucun produit trouve.</div>';
   } catch (e) {
     div.innerHTML = '<div class="msg error">Impossible de rechercher pour le moment.</div>';
   }
+}
+
+function groupAndRenderSearchResults(products) {
+  // Group products by barcode; products without barcode are shown individually
+  const groups = [];
+  const seenBarcodes = new Set();
+  for (const p of products) {
+    const bc = String(p.barcode || '').trim();
+    if (!bc) { groups.push([p]); continue; }
+    if (seenBarcodes.has(bc)) continue;
+    seenBarcodes.add(bc);
+    // Find all entries with same barcode in the result set
+    const group = products.filter(x => String(x.barcode || '').trim() === bc);
+    groups.push(group);
+  }
+  return groups.map(g => g.length > 1 ? productCardMultiLocation(g) : productCard(g[0])).join('');
+}
+
+function productCardMultiLocation(entries) {
+  const primary = entries[0];
+  const locBadges = entries.map(p =>
+    `<span style="display:inline-block;background:#fff0f0;color:#c8102e;border-radius:12px;padding:2px 8px;font-size:11px;font-weight:600;margin:2px">
+      A${esc(p.aisle)} ${esc(sideDisplayLabel(p.side)[0])} S${esc(p.section||'1')} T${esc(p.shelf)} P${esc(p.position)}
+    </span>`
+  ).join('');
+  return `<div class="card">
+    ${entries.some(p => isHomeBrand(p.brand)) ? `<div class="home-badge">★ Marque maison Familiprix</div>` : ''}
+    <div class="product-layout">
+      ${primary.image_url ? `<img class="product-thumb" src="${esc(primary.image_url)}" alt="">` : ''}
+      <div class="product-info">
+        <div class="name">${esc(primary.name)}</div>
+        ${primary.brand ? `<div class="product-brand">${esc(primary.brand)}</div>` : ''}
+        <div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:2px">${locBadges}</div>
+      </div>
+    </div>
+    <div class="product-footer">
+      ${primary.barcode ? `<div class="meta-row"><span class="meta-label">Code-barres</span><span class="barcode-text">${esc(primary.barcode)}</span></div>` : ''}
+      ${primary.description ? `<div class="desc-text">${esc(primary.description)}</div>` : ''}
+      ${primary.usage_notes ? `<div class="desc-text">${esc(primary.usage_notes)}</div>` : ''}
+    </div>
+  </div>`;
 }
 
 // ── Client tab ────────────────────────────────────────────────────────────────
@@ -1511,27 +1587,74 @@ async function lookupScanFromInput(force=false, barcodeOverride='') {
   activeLookupBarcode = barcode;
   if (!force && barcode === lastLookedUpBarcode) return;
   lastLookedUpBarcode = barcode;
-  try {
-    currentScanProduct = await apiGetProductByBarcode(barcode);
-    div.innerHTML = `<div class="card">
-      <div class="pill">Produit existant</div>
-      ${currentScanProduct.image_url ? `<img class="lookup-image" src="${esc(currentScanProduct.image_url)}" alt="Image produit" style="margin-top:10px">` : ''}
-      <div class="name" style="margin-top:10px">${esc(currentScanProduct.name)}</div>
-      ${currentScanProduct.brand ? `<div class="barcode-text">Marque: ${esc(currentScanProduct.brand)}</div>` : ''}
-      <div class="barcode-text">Ancien: Allee ${esc(currentScanProduct.aisle)} - ${esc(sideDisplayLabel(currentScanProduct.side))} - Section ${esc(currentScanProduct.section || '1')} - Tablette ${esc(currentScanProduct.shelf)} - Pos. ${esc(currentScanProduct.position)}</div>
-      ${currentScanProduct.description ? `<div class="desc-text">${esc(currentScanProduct.description)}</div>` : ''}
-      ${currentScanProduct.usage_notes ? `<div class="desc-text">${esc(currentScanProduct.usage_notes)}</div>` : ''}
-      ${currentScanProduct.alternative_suggestions ? `<div class="barcode-text">Alternatives possibles: ${esc(currentScanProduct.alternative_suggestions)}</div>` : ''}
-      <div class="msg info">Nouveau: ${esc(cursorLabel())}</div>
-      <button class="btn" onclick="confirmExistingLocation()">Confirmer ce nouvel emplacement</button>
+
+  // Require rayon context
+  if (!rayonCtx.aisle || !rayonCtx.shelf) {
+    div.innerHTML = `<div class="msg error" style="font-weight:600">
+      Définissez d abord l Allée et la Tablette dans "Rayon en cours" ci-dessus, puis scannez.
     </div>`;
-  } catch (e) {
-    if (e.status && e.status !== 404) {
-      div.innerHTML = '<div class="msg error">Impossible de verifier la base partagee pour le moment. Evitez d ajouter ce produit avant le retour du serveur.</div>';
-      return;
-    }
-    showOnlineLookupForm(barcode);
+    return;
   }
+
+  // Find all entries with this barcode in the local cache
+  const allMatches = allProductsCache.filter(p =>
+    p.barcode && build_barcode_candidates_js(barcode).includes(String(p.barcode).replace(/\s/g,''))
+  );
+
+  const atCurrentRayon = allMatches.find(p =>
+    String(p.aisle) === rayonCtx.aisle && p.side === rayonCtx.side &&
+    String(p.section || '1') === rayonCtx.section && String(p.shelf) === rayonCtx.shelf
+  );
+
+  if (atCurrentRayon) {
+    // Already on this shelf — green flash
+    div.innerHTML = `<div class="card" style="border-left:4px solid #16a34a;padding:12px 16px">
+      <div style="font-size:12px;font-weight:700;color:#16a34a;margin-bottom:4px">✓ Déjà sur ce rayon — Position ${esc(atCurrentRayon.position)}</div>
+      <div class="name">${esc(atCurrentRayon.name)}</div>
+      ${atCurrentRayon.brand ? `<div class="barcode-text">${esc(atCurrentRayon.brand)}</div>` : ''}
+    </div>`;
+    if (navigator.vibrate) navigator.vibrate([40, 20, 40]);
+    window.setTimeout(() => { lastLookedUpBarcode = ''; div.innerHTML = ''; }, 2500);
+    return;
+  }
+
+  if (allMatches.length > 0) {
+    // Found at other location(s) — offer multi-location options
+    currentScanProduct = allMatches[0];
+    const nextPos = nextRayonPosition();
+    const otherLocs = allMatches.map(p =>
+      `<div class="barcode-text">→ Allée ${esc(p.aisle)} — ${esc(sideDisplayLabel(p.side))} — S${esc(p.section||'1')} — T${esc(p.shelf)} — Pos.${esc(p.position)}</div>`
+    ).join('');
+    div.innerHTML = `<div class="card">
+      <div class="pill">Produit trouvé — autre emplacement</div>
+      ${allMatches[0].image_url ? `<img class="lookup-image" src="${esc(allMatches[0].image_url)}" alt="" style="margin-top:8px">` : ''}
+      <div class="name" style="margin-top:8px">${esc(allMatches[0].name)}</div>
+      ${allMatches[0].brand ? `<div class="barcode-text">${esc(allMatches[0].brand)}</div>` : ''}
+      ${allMatches[0].description ? `<div class="desc-text">${esc(allMatches[0].description)}</div>` : ''}
+      <div style="margin-top:8px;padding:8px;background:#f8fafc;border-radius:8px">
+        <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:4px">EMPLACEMENT(S) ACTUEL(S)</div>
+        ${otherLocs}
+      </div>
+      <div class="msg info" style="margin-top:8px">Rayon cible: <strong>${esc(rayonLabel())} — Pos. ${nextPos}</strong></div>
+      <div class="btn-row">
+        <button class="btn" onclick="addProductToCurrentRayon(${allMatches[0].id},'${nextPos}')">+ Ajouter ici aussi</button>
+        <button class="btn btn-outline" onclick="moveProductToCurrentRayon(${allMatches[0].id},'${nextPos}')">Déplacer ici</button>
+      </div>
+    </div>`;
+    return;
+  }
+
+  // Not in DB anywhere — online lookup form
+  showOnlineLookupForm(barcode);
+}
+
+function build_barcode_candidates_js(barcode) {
+  const raw = String(barcode || '').trim();
+  const digits = raw.replace(/\D/g, '');
+  const candidates = new Set([raw, digits]);
+  if (digits.length === 13 && digits.startsWith('0')) candidates.add(digits.slice(1));
+  if (digits.length === 12) candidates.add('0' + digits);
+  return [...candidates].filter(Boolean);
 }
 
 function showOnlineLookupForm(barcode) {
@@ -1569,10 +1692,10 @@ function showOnlineLookupForm(barcode) {
       <span id="lookupAssistStatus" class="small"></span>
     </div>
     <div id="lookupAssistPreview"></div>
-    <div class="msg info">Emplacement: ${esc(cursorLabel())}</div>
+    <div class="msg info">Emplacement: <strong>${esc(rayonLabel())}</strong> — Pos. <strong>${nextRayonPosition()}</strong></div>
     <div class="btn-row">
-      <button class="btn" onclick="confirmNewProduct()">Enregistrer ce code-barres a cette position</button>
-      <button class="btn btn-outline" onclick="confirmUnknownProduct()">Ajouter comme produit a identifier</button>
+      <button class="btn" onclick="confirmNewProduct()">Enregistrer ici</button>
+      <button class="btn btn-outline" onclick="confirmUnknownProduct()">Ajouter à identifier</button>
     </div>
   </div>`;
   renderLookupAssistPreview();
@@ -1630,50 +1753,39 @@ async function generateLookupAssist() {
 }
 
 async function confirmExistingLocation() {
+  // kept for backward compat — now moves to rayon context
   if (!requireEditorSession('confirmer un emplacement')) return;
   if (!currentScanProduct) return;
-  const payload = {
-    name: currentScanProduct.name, brand: currentScanProduct.brand || '',
-    description: currentScanProduct.description || '', image_url: currentScanProduct.image_url || '',
-    source_url: currentScanProduct.source_url || '', search_terms: currentScanProduct.search_terms || '',
-    usage_notes: currentScanProduct.usage_notes || '', alternative_suggestions: currentScanProduct.alternative_suggestions || '',
-    barcode: currentScanProduct.barcode || '',
-    aisle: String(cursor.aisle), side: cursor.side, section: String(cursor.section),
-    shelf: String(cursor.shelf), position: String(cursor.position)
-  };
-  const data = await apiUpdateProduct({...payload, id: currentScanProduct.id});
-  if (!data.success) {
-    document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Deplacement impossible.')}</div>`;
-    return;
-  }
-  if (data.product) upsertCachedProduct(data.product);
-  finishConfirmed(`"${currentScanProduct.name}" place a ${cursorLabel()}.`, currentScanProduct.brand);
+  const pos = nextRayonPosition();
+  await moveProductToCurrentRayon(currentScanProduct.id, pos);
 }
 
 async function confirmNewProduct() {
   if (!requireEditorSession('ajouter un produit')) return;
   const barcode = document.getElementById('scanInput').value.trim();
-  const name = document.getElementById('scanProductName').value.trim() || `A identifier - ${barcode}`;
+  const name = document.getElementById('scanProductName')?.value.trim() || `A identifier - ${barcode}`;
   const brand = document.getElementById('scanProductBrand')?.value.trim() || '';
   const description = document.getElementById('scanProductDescription')?.value.trim() || '';
   if (!barcode) {
     document.getElementById('scanResult').insertAdjacentHTML('beforeend', '<div class="msg error">Code requis.</div>');
     return;
   }
+  const pos = nextRayonPosition();
   const data = await apiAddProduct({
     name, brand, description,
     image_url: pendingLookupProduct?.image_url || '',
     source_url: pendingLookupProduct?.source_url || '',
-    search_terms: pendingLookupAssist?.search_terms || '',
+    search_terms: pendingLookupAssist?.search_terms || pendingLookupProduct?.search_terms || '',
     usage_notes: pendingLookupAssist?.usage_notes || '',
     alternative_suggestions: pendingLookupAssist?.alternative_suggestions || '',
     barcode,
-    aisle: String(cursor.aisle), side: cursor.side, section: String(cursor.section),
-    shelf: String(cursor.shelf), position: String(cursor.position)
+    aisle: rayonCtx.aisle, side: rayonCtx.side, section: rayonCtx.section || '1',
+    shelf: rayonCtx.shelf, position: pos
   });
-  if (data.success) {
-    if (data.product) upsertCachedProduct(data.product);
-    finishConfirmed(`"${name}" ajoute a ${cursorLabel()}.`, brand);
+  if (data.success !== false && !data.error) {
+    if (data.product) upsertCachedProduct(normalizeProduct(data.product));
+    await refreshProductsCache(true);
+    finishConfirmed(`"${name}" enregistré à ${rayonLabel()} — Pos. ${pos}.`, brand);
   } else {
     document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur pendant l ajout.')}</div>`;
   }
@@ -1683,30 +1795,28 @@ async function confirmUnknownProduct() {
   if (!requireEditorSession('ajouter un produit')) return;
   const barcode = document.getElementById('scanInput').value.trim();
   if (!barcode) return;
+  const pos = nextRayonPosition();
   const placeholderName = `A identifier - ${barcode}`;
   const data = await apiAddProduct({
     name: placeholderName, brand: '',
-    description: pendingLookupAssist?.usage_notes || 'A identifier',
+    description: 'A identifier',
     image_url: pendingLookupProduct?.image_url || '',
     source_url: pendingLookupProduct?.source_url || '',
-    search_terms: pendingLookupAssist?.search_terms || '',
-    usage_notes: pendingLookupAssist?.usage_notes || '',
-    alternative_suggestions: pendingLookupAssist?.alternative_suggestions || '',
+    search_terms: '', usage_notes: '', alternative_suggestions: '',
     barcode,
-    aisle: String(cursor.aisle), side: cursor.side, section: String(cursor.section),
-    shelf: String(cursor.shelf), position: String(cursor.position)
+    aisle: rayonCtx.aisle, side: rayonCtx.side, section: rayonCtx.section || '1',
+    shelf: rayonCtx.shelf, position: pos
   });
-  if (data.success) {
-    if (data.product) upsertCachedProduct(data.product);
-    finishConfirmed(`"${placeholderName}" ajoute a ${cursorLabel()}.`);
+  if (data.success !== false && !data.error) {
+    if (data.product) upsertCachedProduct(normalizeProduct(data.product));
+    await refreshProductsCache(true);
+    finishConfirmed(`"${placeholderName}" ajouté à ${rayonLabel()} — Pos. ${pos}.`);
   } else {
     document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur pendant l ajout.')}</div>`;
   }
 }
 
 function finishConfirmed(message, brand) {
-  const oldLocation = cursorLabel();
-  advanceCursor();
   document.getElementById('scanInput').value = '';
   persistScanDraft();
   lastLookedUpBarcode = '';
@@ -1715,10 +1825,10 @@ function finishConfirmed(message, brand) {
   pendingLookupProduct = null;
   pendingLookupAssist = null;
   const homeTip = isHomeBrand(brand)
-    ? `<div class="msg warning" style="margin-top:6px">★ Marque maison Familiprix — privilegiez tablette 2 ou 3, positions 1-3 pour une meilleure visibilite client.</div>`
+    ? `<div class="msg warning" style="margin-top:6px">★ Marque maison — tablette 2 ou 3, positions 1-3 recommandées.</div>`
     : '';
-  document.getElementById('scanResult').innerHTML = `<div class="msg success">${esc(message)} Prochaine position: ${esc(cursorLabel())}</div>${homeTip}`;
-  getCameraDom().status.textContent = `Confirme: ${oldLocation}`;
+  document.getElementById('scanResult').innerHTML = `<div class="msg success">${esc(message)}</div>${homeTip}`;
+  refreshRayonList();
   window.setTimeout(() => {
     scanPaused = false;
     resetCameraCandidate();
@@ -2273,6 +2383,114 @@ async function gistRestoreNow() {
     renderMapEditor();
   } catch (e) {
     if (msg) { msg.className = 'msg error'; msg.textContent = e.message || 'Erreur lors de la restauration GitHub.'; }
+  }
+}
+
+// ── Rayon context ─────────────────────────────────────────────────────────────
+let rayonCtx = {aisle:'', side:'Gauche', section:'1', shelf:''};
+
+function updateRayonCtx() {
+  rayonCtx.aisle   = (document.getElementById('rayonAisle')?.value   || '').trim();
+  rayonCtx.side    =  document.getElementById('rayonSide')?.value    || 'Gauche';
+  rayonCtx.section = (document.getElementById('rayonSection')?.value || '1').trim() || '1';
+  rayonCtx.shelf   = (document.getElementById('rayonShelf')?.value   || '').trim();
+  const badge = document.getElementById('rayonBadge');
+  if (!badge) return;
+  if (rayonCtx.aisle && rayonCtx.shelf) {
+    badge.style.background = '#fff0f0';
+    badge.style.color = '#c8102e';
+    badge.innerHTML = `📍 <strong>Allée ${esc(rayonCtx.aisle)}</strong> — ${esc(rayonCtx.side)} — Section ${esc(rayonCtx.section)} — Tablette ${esc(rayonCtx.shelf)}`;
+    refreshRayonList();
+  } else {
+    badge.style.background = '#f8fafc';
+    badge.style.color = '#94a3b8';
+    badge.textContent = 'Choisissez un rayon pour commencer le scan';
+    document.getElementById('rayonListCard').style.display = 'none';
+  }
+}
+
+function rayonLabel() {
+  if (!rayonCtx.aisle || !rayonCtx.shelf) return 'rayon non défini';
+  return `Allée ${rayonCtx.aisle} — ${rayonCtx.side} — Section ${rayonCtx.section} — Tablette ${rayonCtx.shelf}`;
+}
+
+function nextRayonPosition() {
+  const {aisle, side, section, shelf} = rayonCtx;
+  if (!aisle || !shelf) return '1';
+  const taken = allProductsCache
+    .filter(p => String(p.aisle) === aisle && p.side === side &&
+                 String(p.section || '1') === section && String(p.shelf) === shelf)
+    .map(p => parseInt(p.position) || 0);
+  return taken.length ? String(Math.max(...taken) + 1) : '1';
+}
+
+function refreshRayonList() {
+  const {aisle, side, section, shelf} = rayonCtx;
+  if (!aisle || !shelf) return;
+  const products = allProductsCache
+    .filter(p => String(p.aisle) === aisle && p.side === side &&
+                 String(p.section || '1') === section && String(p.shelf) === shelf)
+    .sort((a, b) => (parseInt(a.position) || 0) - (parseInt(b.position) || 0));
+  const card  = document.getElementById('rayonListCard');
+  const list  = document.getElementById('rayonProductList');
+  const count = document.getElementById('rayonCount');
+  if (!card) return;
+  card.style.display = '';
+  count.textContent = products.length;
+  if (!products.length) {
+    list.innerHTML = '<div class="empty">Aucun produit scanné sur ce rayon.</div>';
+    return;
+  }
+  list.innerHTML = products.map(p => `
+    <div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #f1f5f9">
+      <div style="flex:none;width:30px;height:30px;background:#f1f5f9;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#64748b">P${esc(p.position)}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.name)}</div>
+        ${p.brand ? `<div style="font-size:11px;color:#64748b">${esc(p.brand)}</div>` : ''}
+        ${p.barcode ? `<div style="font-size:10px;color:#94a3b8;font-family:monospace">${esc(p.barcode)}</div>` : ''}
+      </div>
+      <button class="btn btn-outline btn-inline" style="flex:none;font-size:11px;padding:3px 8px;color:#c8102e;border-color:#c8102e" onclick="deleteProduct(${p.id})" title="Retirer">✕</button>
+    </div>`).join('');
+}
+
+async function addProductToCurrentRayon(productId, position) {
+  if (!requireEditorSession('ajouter un emplacement')) return;
+  const existing = allProductsCache.find(p => p.id === productId);
+  if (!existing) return;
+  const payload = {
+    name: existing.name, brand: existing.brand || '', description: existing.description || '',
+    image_url: existing.image_url || '', source_url: existing.source_url || '',
+    search_terms: existing.search_terms || '', usage_notes: existing.usage_notes || '',
+    alternative_suggestions: existing.alternative_suggestions || '', barcode: existing.barcode || '',
+    aisle: rayonCtx.aisle, side: rayonCtx.side, section: rayonCtx.section || '1',
+    shelf: rayonCtx.shelf, position
+  };
+  const data = await apiAddProduct(payload);
+  if (data.success !== false && !data.error) {
+    if (data.product) upsertCachedProduct(normalizeProduct(data.product));
+    await refreshProductsCache(true);
+    finishConfirmed(`"${existing.name}" ajouté à ${rayonLabel()} — Pos. ${position}.`);
+  } else {
+    document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur d ajout.')}</div>`;
+  }
+}
+
+async function moveProductToCurrentRayon(productId, position) {
+  if (!requireEditorSession('déplacer un produit')) return;
+  const existing = allProductsCache.find(p => p.id === productId);
+  if (!existing) return;
+  const payload = {
+    ...existing,
+    aisle: rayonCtx.aisle, side: rayonCtx.side, section: rayonCtx.section || '1',
+    shelf: rayonCtx.shelf, position
+  };
+  const data = await apiUpdateProduct(payload);
+  if (data.success !== false && !data.error) {
+    if (data.product) upsertCachedProduct(normalizeProduct(data.product));
+    await refreshProductsCache(true);
+    finishConfirmed(`"${existing.name}" déplacé à ${rayonLabel()} — Pos. ${position}.`);
+  } else {
+    document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur de déplacement.')}</div>`;
   }
 }
 

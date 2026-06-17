@@ -286,12 +286,11 @@ def ensure_best_effort_unique_indexes(db):
     except DatabaseIntegrityError:
         print("Avertissement: impossible d imposer l unicite des positions car des doublons existent deja.")
 
+    # Barcode uniqueness intentionally removed: same product can be at multiple locations.
     try:
-        db.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_products_unique_barcode ON products(barcode) WHERE barcode <> ''"
-        )
-    except DatabaseIntegrityError:
-        print("Avertissement: impossible d imposer l unicite des codes-barres car des doublons existent deja.")
+        db.execute("DROP INDEX IF EXISTS idx_products_unique_barcode")
+    except Exception:
+        pass
 
 
 def get_backend_summary():
