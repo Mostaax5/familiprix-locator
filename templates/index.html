@@ -2222,6 +2222,20 @@ function renderShelfProductList(aisle, side, section, shelf, positions) {
   const filled = products.length;
   const total = Number(positions) || 0;
   if (!total && !filled) return '';
+
+  // Mode libre (positions = 0): show all scanned products without fixed slots
+  if (!total) {
+    return `<div class="plan-product-list">
+      <div style="font-size:10px;color:#8b5cf6;font-weight:600;padding:3px 0 4px">📦 ${filled} produit${filled!==1?'s':''} libre${filled!==1?'s':''}</div>
+      ${products.map(p => `<div class="plan-product-item">
+        <div class="plan-product-row1">
+          <span class="plan-product-name">${esc(p.name)}${p.brand ? ` <span class="plan-product-brand">${esc(p.brand)}</span>` : ''}</span>
+        </div>
+        <div class="plan-product-row2">${p.barcode ? esc(p.barcode) : '—'}</div>
+      </div>`).join('')}
+      ${!filled ? `<div class="plan-product-item"><span class="plan-slot-empty">Scannez les produits via le Scan tab</span></div>` : ''}
+    </div>`;
+  }
   const byPos = {};
   products.forEach(p => { byPos[Number(p.position)] = p; });
   let html = `<div class="plan-product-list">`;
@@ -2355,16 +2369,24 @@ function renderMapEditor() {
                         String(p.shelf) === String(shelfIndex + 1)
                       ).length;
                       const shelfLabel = section.labels?.[shelfIndex] || '';
-                      const shelfTitle = shelfLabel ? `📎 ${esc(shelfLabel)}` : `T${shelfIndex + 1}`;
-                      const accrocheBg = shelfLabel ? 'background:#fffbf0;border-color:#fbbf24' : '';
-                      return `<div class="plan-shelf-card" style="${accrocheBg}">
+                      const isLibre = positions === 0;
+                      const shelfTitle = shelfLabel ? `${isLibre ? '📦 ' : '📎 '}${esc(shelfLabel)}` : (isLibre ? `📦 T${shelfIndex + 1} Libre` : `T${shelfIndex + 1}`);
+                      const cardBg = isLibre ? 'background:#faf5ff;border-color:#a78bfa' : (shelfLabel ? 'background:#fffbf0;border-color:#fbbf24' : '');
+                      return `<div class="plan-shelf-card" style="${cardBg}">
                         <div class="shelf-header" style="gap:4px">
                           <span class="shelf-title">${shelfTitle}</span>
-                          <input type="number" min="1" value="${positions}" title="Positions"
-                                 style="width:46px;padding:2px 4px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px;text-align:center"
-                                 onchange="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},this.value)"/>
-                          <span style="font-size:10px;color:#94a3b8">pos</span>
-                          <span style="font-size:11px;color:#64748b">${shelfFilled} prod.</span>
+                          ${isLibre
+                            ? `<span style="font-size:10px;color:#8b5cf6;font-weight:700">LIBRE · ${shelfFilled} prod.</span>
+                               <button title="Définir un nombre fixe de positions" style="background:none;border:1px solid #a78bfa;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
+                                       onclick="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},prompt('Nombre de positions fixes ?','8')||0)">→ Positions fixes</button>`
+                            : `<input type="number" min="1" value="${positions}" title="Positions"
+                                     style="width:46px;padding:2px 4px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px;text-align:center"
+                                     onchange="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},this.value)"/>
+                               <span style="font-size:10px;color:#94a3b8">pos</span>
+                               <span style="font-size:11px;color:#64748b">${shelfFilled} prod.</span>
+                               <button title="Passer en mode libre (cosmétiques, présentoirs...)" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
+                                       onclick="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},0)">📦 Libre</button>`
+                          }
                           <button onclick="removeShelf('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex})"
                                   style="margin-left:auto;background:none;border:none;color:#c8102e;cursor:pointer;font-size:14px;padding:0;line-height:1" title="Supprimer tablette">✕</button>
                         </div>
@@ -2520,6 +2542,20 @@ function addAccrocheToSection(aisle, side, sectionIndex) {
   refreshPlanUi();
 }
 
+function _isLibreShelf(aisle, side, section, shelf) {
+  const config = getAisleLayoutConfig(aisle);
+  const si = parseInt(section) - 1;
+  const ti = parseInt(shelf) - 1;
+  if (side === 'Gauche' || side === 'Droite') {
+    const positions = config?.sides?.[side]?.sections?.[si]?.shelves?.[ti];
+    return positions === 0;
+  }
+  if (side === 'Façade A') return (config?.facade_a?.shelves?.[ti] ?? -1) === 0;
+  if (side === 'Façade B') return (config?.facade_b?.shelves?.[ti] ?? -1) === 0;
+  const pres = (config?.presentoirs || []).find(p => p.name === side);
+  return (pres?.shelves?.[ti] ?? -1) === 0;
+}
+
 function getShelfLabel(aisle, side, section, shelf) {
   const config = getAisleLayoutConfig(aisle);
   const ti = parseInt(shelf) - 1;
@@ -2539,18 +2575,21 @@ function setShelfPositionCount(aisle, side, sectionIndex, shelfIndex, rawValue) 
   if (!section || section.shelves[shelfIndex] == null) return;
   const currentValue = Number(section.shelves[shelfIndex] || 0);
   const nextValue = Math.max(0, Number(rawValue) || 0);
-  const nextConfig = normalizeLayoutConfig({
-    sides: {
-      ...layout.config.sides,
-      [side]: {
-        sections: layout.config.sides[side].sections.map((item, index) => index === sectionIndex
-          ? {shelves: item.shelves.map((v, idx) => idx === shelfIndex ? nextValue : v)}
-          : item)
+  // nextValue === 0 means "mode libre" — no confirmation needed, products stay on shelf
+  if (nextValue > 0 && nextValue < currentValue) {
+    const nextConfig = normalizeLayoutConfig({
+      sides: {
+        ...layout.config.sides,
+        [side]: {
+          sections: layout.config.sides[side].sections.map((item, index) => index === sectionIndex
+            ? {shelves: item.shelves.map((v, idx) => idx === shelfIndex ? nextValue : v)}
+            : item)
+        }
       }
+    }, layout.max_section, layout.max_shelf, layout.max_position);
+    if (!confirmLayoutReduction(aisle, nextConfig, `Réduire le nombre de positions de la tablette ${shelfIndex + 1} à ${nextValue}`)) {
+      refreshPlanUi(); return;
     }
-  }, layout.max_section, layout.max_shelf, layout.max_position);
-  if (nextValue < currentValue && !confirmLayoutReduction(aisle, nextConfig, `Reduire le nombre de positions de la tablette ${shelfIndex + 1} a ${nextValue}`)) {
-    refreshPlanUi(); return;
   }
   section.shelves[shelfIndex] = nextValue;
   syncLayoutRecord(layout);
@@ -2848,7 +2887,8 @@ function updateRayonCtx() {
     badge.style.background = '#fff0f0';
     badge.style.color = '#c8102e';
     const shelfLabel = getShelfLabel(rayonCtx.aisle, rayonCtx.side, rayonCtx.section, rayonCtx.shelf);
-    const labelSuffix = shelfLabel ? ` — <em style="color:#92400e">📎 ${esc(shelfLabel)}</em>` : '';
+    const isLibreShelf = _isLibreShelf(rayonCtx.aisle, rayonCtx.side, rayonCtx.section, rayonCtx.shelf);
+    const labelSuffix = shelfLabel ? ` — <em style="color:${isLibreShelf?'#8b5cf6':'#92400e'}">${isLibreShelf?'📦':'📎'} ${esc(shelfLabel)}</em>` : (isLibreShelf ? ' — <em style="color:#8b5cf6">📦 Mode libre</em>' : '');
     badge.innerHTML = `📍 <strong>Allée ${esc(rayonCtx.aisle)}</strong> — ${esc(rayonLabel().split(' — ').slice(1).join(' — '))}${labelSuffix}`;
     refreshRayonList();
   } else {
