@@ -2213,29 +2213,52 @@ function removeShelf(aisle, side, sectionIndex, shelfIndex) {
   refreshPlanUi();
 }
 
-function moveSection(aisle, side, sectionIndex, direction) {
+async function moveSection(aisle, side, sectionIndex, direction) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
   const sections = layout.config.sides[side].sections;
   const target = sectionIndex + direction;
   if (target < 0 || target >= sections.length) return;
+  const secA = String(sectionIndex + 1); // 1-indexed
+  const secB = String(target + 1);
+  // Move products in DB: swap section numbers
+  const productsA = allProductsCache.filter(p => String(p.aisle)===String(aisle) && p.side===side && String(p.section||'1')===secA);
+  const productsB = allProductsCache.filter(p => String(p.aisle)===String(aisle) && p.side===side && String(p.section||'1')===secB);
+  const tempSec = '__swap__';
+  await Promise.all(productsA.map(p => apiUpdateProduct({...p, section: tempSec})));
+  await Promise.all(productsB.map(p => apiUpdateProduct({...p, section: secA})));
+  await Promise.all(productsA.map(p => apiUpdateProduct({...p, section: secB})));
+  // Swap config
   [sections[sectionIndex], sections[target]] = [sections[target], sections[sectionIndex]];
   syncLayoutRecord(layout);
   markLayoutDirty(aisle);
+  await refreshProductsCache(true);
   refreshPlanUi();
 }
 
-function moveShelf(aisle, side, sectionIndex, shelfIndex, direction) {
+async function moveShelf(aisle, side, sectionIndex, shelfIndex, direction) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
   const section = layout.config.sides[side].sections[sectionIndex];
   if (!section) return;
   const target = shelfIndex + direction;
   if (target < 0 || target >= section.shelves.length) return;
+  const sec = String(sectionIndex + 1);
+  const shelfA = String(shelfIndex + 1);
+  const shelfB = String(target + 1);
+  // Move products in DB: swap shelf numbers
+  const productsA = allProductsCache.filter(p => String(p.aisle)===String(aisle) && p.side===side && String(p.section||'1')===sec && String(p.shelf)===shelfA);
+  const productsB = allProductsCache.filter(p => String(p.aisle)===String(aisle) && p.side===side && String(p.section||'1')===sec && String(p.shelf)===shelfB);
+  const tempShelf = '__swap__';
+  await Promise.all(productsA.map(p => apiUpdateProduct({...p, shelf: tempShelf})));
+  await Promise.all(productsB.map(p => apiUpdateProduct({...p, shelf: shelfA})));
+  await Promise.all(productsA.map(p => apiUpdateProduct({...p, shelf: shelfB})));
+  // Swap config
   [section.shelves[shelfIndex], section.shelves[target]] = [section.shelves[target], section.shelves[shelfIndex]];
   if (section.labels) [section.labels[shelfIndex], section.labels[target]] = [section.labels[target], section.labels[shelfIndex]];
   syncLayoutRecord(layout);
   markLayoutDirty(aisle);
+  await refreshProductsCache(true);
   refreshPlanUi();
 }
 
@@ -2403,15 +2426,15 @@ function renderMapEditor() {
                   <span class="tree-meta">${sectionProducts.length} prod. · ${section.shelves.length} T${sectionHomeBrands.length ? ` · <span style="color:#c8102e">★${sectionHomeBrands.length}</span>` : ''}</span>
                 </summary>
                 <div class="tree-body">
-                  <div style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 10px;align-items:center">
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 6px">
                     <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addShelf('${esc(layout.aisle)}','${side}',${sectionIndex})">➕ Tablette</button>
                     <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addAccrocheToSection('${esc(layout.aisle)}','${side}',${sectionIndex})">📎 Accroche</button>
                     <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="startScanFromSection('${esc(layout.aisle)}','${side}',${sectionIndex})">▶ Scanner ici</button>
-                    <div style="display:flex;gap:2px;margin-left:auto">
-                      <button title="Monter la section" style="background:none;border:1px solid #e2e8f0;border-radius:4px;cursor:pointer;padding:2px 7px;font-size:13px;${sectionIndex===0?'opacity:.3;cursor:default':''}" onclick="moveSection('${esc(layout.aisle)}','${side}',${sectionIndex},-1)" ${sectionIndex===0?'disabled':''}>↑</button>
-                      <button title="Descendre la section" style="background:none;border:1px solid #e2e8f0;border-radius:4px;cursor:pointer;padding:2px 7px;font-size:13px;${sectionIndex===sections.length-1?'opacity:.3;cursor:default':''}" onclick="moveSection('${esc(layout.aisle)}','${side}',${sectionIndex},1)" ${sectionIndex===sections.length-1?'disabled':''}>↓</button>
-                      <button class="btn btn-outline btn-inline" style="font-size:12px;color:#c8102e;border-color:#f1b8c2" onclick="removeSection('${esc(layout.aisle)}','${side}',${sectionIndex})">✕</button>
-                    </div>
+                  </div>
+                  <div style="display:flex;gap:6px;margin-bottom:10px;align-items:center">
+                    <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${esc(layout.aisle)}','${side}',${sectionIndex},-1)">↑ Monter</button>
+                    <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${esc(layout.aisle)}','${side}',${sectionIndex},1)">↓ Descendre</button>
+                    <button class="btn btn-outline btn-inline" style="font-size:12px;color:#c8102e;border-color:#f1b8c2;margin-left:auto" onclick="removeSection('${esc(layout.aisle)}','${side}',${sectionIndex})">✕ Supprimer section</button>
                   </div>
                   ${section.shelves.length ? '' : `<div class="small" style="padding:4px 0;color:#94a3b8">Aucune tablette — cliquez ➕ Tablette ci-dessus.</div>`}
                   <div class="plan-shelf-grid">
@@ -2440,11 +2463,11 @@ function renderMapEditor() {
                                <button title="Passer en mode libre (cosmétiques, présentoirs...)" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
                                        onclick="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},0)">📦 Libre</button>`
                           }
-                          <div style="display:flex;gap:2px;margin-left:auto;align-items:center">
-                            <button title="Monter la tablette" style="background:none;border:1px solid #e2e8f0;border-radius:4px;cursor:pointer;padding:1px 6px;font-size:12px;${shelfIndex===0?'opacity:.3;cursor:default':''}" onclick="moveShelf('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},-1)" ${shelfIndex===0?'disabled':''}>↑</button>
-                            <button title="Descendre la tablette" style="background:none;border:1px solid #e2e8f0;border-radius:4px;cursor:pointer;padding:1px 6px;font-size:12px;${shelfIndex===section.shelves.length-1?'opacity:.3;cursor:default':''}" onclick="moveShelf('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},1)" ${shelfIndex===section.shelves.length-1?'disabled':''}>↓</button>
-                            <button onclick="removeShelf('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex})" style="background:none;border:none;color:#c8102e;cursor:pointer;font-size:14px;padding:0 2px;line-height:1" title="Supprimer tablette">✕</button>
-                          </div>
+                          <button onclick="removeShelf('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex})" style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5" title="Supprimer cette tablette">✕ Suppr.</button>
+                        </div>
+                        <div style="display:flex;gap:6px;padding:5px 0 4px;border-top:1px solid rgba(0,0,0,.06);margin-top:4px">
+                          <button class="btn btn-outline btn-inline" style="font-size:12px;flex:1" onclick="moveShelf('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},-1)">↑ Monter</button>
+                          <button class="btn btn-outline btn-inline" style="font-size:12px;flex:1" onclick="moveShelf('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},1)">↓ Descendre</button>
                         </div>
                         <details class="struct-details">
                           <summary class="struct-toggle" style="font-size:11px">⚙ Nom / étiquette</summary>
