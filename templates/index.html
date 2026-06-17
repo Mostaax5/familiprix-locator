@@ -99,8 +99,18 @@
     </div>
   </div>
 
-  <!-- Last scanned barcode — always visible -->
-  <div id="lastScanCode" style="display:none;background:#1e293b;color:#e2e8f0;padding:8px 14px;border-radius:10px;font-family:monospace;font-size:15px;font-weight:700;letter-spacing:1px;text-align:center;margin-top:2px"></div>
+  <!-- Always-visible barcode input (camera fills it automatically; can also type manually) -->
+  <div class="card" style="padding:10px 12px">
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="text" id="scanInput" inputmode="numeric" autocomplete="off" autocapitalize="off"
+             spellcheck="false" placeholder="Code-barres — caméra ou saisie manuelle"
+             onkeydown="handleScanInputKey(event)"
+             style="flex:1;padding:10px 12px;border:2px solid #e2e8f0;border-radius:8px;font-size:15px;font-family:monospace;letter-spacing:1px"/>
+      <button class="btn btn-outline btn-inline" onclick="clearScanInput()" style="flex:none;font-size:18px;padding:6px 12px">✕</button>
+      <button class="btn btn-inline" onclick="lookupScanFromInput(true)" style="flex:none;padding:10px 14px;font-size:14px">→ OK</button>
+    </div>
+    <div class="small" style="margin-top:5px;color:#94a3b8">La caméra remplit ce champ automatiquement. Vous pouvez aussi taper le code manuellement et appuyer sur → OK (ou Entrée).</div>
+  </div>
 
   <div id="scanResult"></div>
 
@@ -112,21 +122,6 @@
     </div>
     <div id="rayonProductList"></div>
   </div>
-
-  <details class="card">
-    <summary class="details-summary">⌨ Saisir le code manuellement</summary>
-    <div class="details-body">
-      <div class="scan-tools">
-        <div class="field">
-          <label class="label" for="scanInput">Code-barres</label>
-          <input type="text" id="scanInput" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Entrez ou scannez le code-barres..." onkeydown="handleScanInputKey(event)"/>
-        </div>
-        <button class="btn btn-outline btn-inline" onclick="clearScanInput()">Effacer</button>
-      </div>
-      <button class="btn btn-outline" onclick="lookupScanFromInput(true)" style="margin-top:8px">Verifier le code</button>
-      <div class="small" style="margin-top:8px">Les scanners Zebra valident avec Enter ou Tab. Sinon, appuyez sur Verifier.</div>
-    </div>
-  </details>
 
   <details class="card">
     <summary class="details-summary">📱 Compatibilite appareil</summary>
@@ -1687,9 +1682,6 @@ async function lookupScanFromInput(force=false, barcodeOverride='') {
   activeLookupBarcode = barcode;
   if (!force && barcode === lastLookedUpBarcode) return;
   lastLookedUpBarcode = barcode;
-  // Show scanned barcode prominently
-  const _codeEl = document.getElementById('lastScanCode');
-  if (_codeEl) { _codeEl.textContent = `🔍 ${barcode}`; _codeEl.style.display = 'block'; }
 
   // Require rayon context
   if (!rayonCtx.aisle || !rayonCtx.shelf) {
@@ -1930,9 +1922,6 @@ function finishConfirmed(message, brand) {
   const homeTip = isHomeBrand(brand)
     ? `<div class="msg warning" style="margin-top:6px">★ Marque maison — tablette 2 ou 3, positions 1-3 recommandées.</div>`
     : '';
-  // Hide barcode display and update next-position badge
-  const _cd = document.getElementById('lastScanCode');
-  if (_cd) _cd.style.display = 'none';
   document.getElementById('scanResult').innerHTML = `<div class="msg success">${esc(message)}</div>${homeTip}`;
   refreshRayonList();
   updateRayonCtx(); // refresh P→N indicator in badge
