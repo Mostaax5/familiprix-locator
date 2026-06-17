@@ -22,9 +22,9 @@
 
 <div class="tabs">
   <button class="tab active" id="tabBtn-scan" onclick="switchTab('scan')">Scan 🔒</button>
+  <button class="tab" id="tabBtn-add" onclick="switchTab('add')">Plan 🔒</button>
   <button class="tab" onclick="switchTab('search')">Recherche</button>
   <button class="tab" onclick="switchTab('client')">Client</button>
-  <button class="tab" id="tabBtn-add" onclick="switchTab('add')">Plan 🔒</button>
   <button id="lockButton" onclick="lockApp()" title="Verrouiller la session" style="display:none;flex:none;width:36px;padding:0;border:none;background:none;font-size:17px;cursor:pointer;color:#6b7280;touch-action:manipulation">🔓</button>
 </div>
 
@@ -631,7 +631,8 @@ function defaultLayoutConfig(maxSection=0, maxShelf=0, maxPosition=0) {
   const shCount = Math.max(0, Number(maxShelf) || 0);
   const pCount = Math.max(0, Number(maxPosition) || 0);
   const makeSections = () => Array.from({length: sCount}, () => ({
-    shelves: Array.from({length: shCount}, () => pCount)
+    shelves: Array.from({length: shCount}, () => pCount),
+    labels:  Array.from({length: shCount}, () => '')
   }));
   return {sides: {Gauche: {sections: makeSections()}, Droite: {sections: makeSections()}}};
 }
@@ -661,9 +662,14 @@ function normalizeLayoutConfig(config, maxSection=0, maxShelf=0, maxPosition=0) 
   ['Gauche', 'Droite'].forEach(side => {
     const sections = Array.isArray(sourceSides[side]?.sections) ? sourceSides[side].sections : [];
     base.sides[side].sections = sections
-      .map(section => Array.isArray(section?.shelves) ? section.shelves.map(v => Math.max(0, Number(v) || 0)) : null)
-      .filter(Boolean)
-      .map(shelves => ({shelves}));
+      .map(section => {
+        if (!Array.isArray(section?.shelves)) return null;
+        const shelves = section.shelves.map(v => Math.max(0, Number(v) || 0));
+        const rawLabels = Array.isArray(section.labels) ? section.labels : [];
+        const labels = shelves.map((_, i) => String(rawLabels[i] || ''));
+        return {shelves, labels};
+      })
+      .filter(Boolean);
   });
   return base;
 }
@@ -1975,6 +1981,7 @@ function renderMapEditor() {
                       <label class="label" for="shelfCount-${layout.aisle}-${side}-${sectionIndex}">Nombre de tablettes</label>
                       <input id="shelfCount-${layout.aisle}-${side}-${sectionIndex}" type="number" min="0" value="${section.shelves.length}" onchange="setSectionShelfCount('${esc(layout.aisle)}','${side}', ${sectionIndex}, this.value)"/>
                     </div>
+                    <button class="btn btn-outline btn-inline" style="margin-top:6px;font-size:12px" onclick="addAccrocheToSection('${esc(layout.aisle)}','${side}',${sectionIndex})">📎 Ajouter une accroche</button>
                   </details>
                   ${section.shelves.length ? '' : `<div class="small" style="padding:8px 0">Aucune tablette dans cette section pour le moment.</div>`}
                   <div class="plan-shelf-grid">
@@ -1984,14 +1991,23 @@ function renderMapEditor() {
                         String(p.section) === String(sectionIndex + 1) &&
                         String(p.shelf) === String(shelfIndex + 1)
                       ).length;
-                      return `<div class="plan-shelf-card">
+                      const shelfLabel = section.labels?.[shelfIndex] || '';
+                      const shelfTitle = shelfLabel ? `📎 ${esc(shelfLabel)}` : `Tablette ${shelfIndex + 1}`;
+                      const accrocheBg = shelfLabel ? 'background:#fffbf0;border-color:#fbbf24' : '';
+                      return `<div class="plan-shelf-card" style="${accrocheBg}">
                         <div class="shelf-header">
-                          <span class="shelf-title">Tablette ${shelfIndex + 1}</span>
-                          <span class="shelf-fill">${shelfFilled}/${positions} occupee${shelfFilled !== 1 ? 's' : ''}</span>
+                          <span class="shelf-title">${shelfTitle}</span>
+                          <span class="shelf-fill">${shelfFilled}/${positions} occupée${shelfFilled !== 1 ? 's' : ''}</span>
                         </div>
                         <details class="struct-details">
-                          <summary class="struct-toggle">⚙ Positions: ${positions}</summary>
+                          <summary class="struct-toggle">⚙ ${shelfLabel ? esc(shelfLabel) : `T${shelfIndex + 1}`} · Positions: ${positions}</summary>
                           <div class="field" style="margin-top:8px">
+                            <label class="label">Nom de la tablette</label>
+                            <input type="text" value="${esc(shelfLabel)}" placeholder="Ex: Accroche, Tête de gondole..."
+                                   oninput="setShelfLabel('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},this.value)"/>
+                            <div class="small" style="margin-top:2px;color:#94a3b8">Vide = Tablette ${shelfIndex + 1} (standard)</div>
+                          </div>
+                          <div class="field">
                             <label class="label" for="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}">Nombre de positions</label>
                             <input id="shelfPos-${layout.aisle}-${side}-${sectionIndex}-${shelfIndex}" type="number" min="0" value="${positions}" onchange="setShelfPositionCount('${esc(layout.aisle)}','${side}', ${sectionIndex}, ${shelfIndex}, this.value)"/>
                           </div>
@@ -2101,9 +2117,46 @@ function setSectionShelfCount(aisle, side, sectionIndex, rawValue) {
   }
   while (shelves.length < count) shelves.push(fallbackValue);
   shelves.length = count;
+  if (!section.labels) section.labels = [];
+  while (section.labels.length < count) section.labels.push('');
+  section.labels.length = count;
   syncLayoutRecord(layout);
   markLayoutDirty(aisle);
   refreshPlanUi();
+}
+
+function setShelfLabel(aisle, side, sectionIndex, shelfIndex, value) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const section = layout.config.sides[side]?.sections[sectionIndex];
+  if (!section) return;
+  if (!section.labels) section.labels = section.shelves.map(() => '');
+  while (section.labels.length < section.shelves.length) section.labels.push('');
+  section.labels[shelfIndex] = value.trim();
+  markLayoutDirty(aisle);
+  refreshPlanUi();
+}
+
+function addAccrocheToSection(aisle, side, sectionIndex) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const section = layout.config.sides[side]?.sections[sectionIndex];
+  if (!section) return;
+  const fallback = section.shelves[section.shelves.length - 1] ?? 8;
+  section.shelves.push(fallback);
+  if (!section.labels) section.labels = section.shelves.map(() => '');
+  while (section.labels.length < section.shelves.length) section.labels.push('');
+  section.labels[section.shelves.length - 1] = 'Accroche';
+  syncLayoutRecord(layout);
+  markLayoutDirty(aisle);
+  refreshPlanUi();
+}
+
+function getShelfLabel(aisle, side, section, shelf) {
+  const config = getAisleLayoutConfig(aisle);
+  const si = parseInt(section) - 1;
+  const ti = parseInt(shelf) - 1;
+  return config?.sides?.[side]?.sections?.[si]?.labels?.[ti] || '';
 }
 
 function setShelfPositionCount(aisle, side, sectionIndex, shelfIndex, rawValue) {
@@ -2401,7 +2454,9 @@ function updateRayonCtx() {
   if (rayonCtx.aisle && rayonCtx.shelf) {
     badge.style.background = '#fff0f0';
     badge.style.color = '#c8102e';
-    badge.innerHTML = `📍 <strong>Allée ${esc(rayonCtx.aisle)}</strong> — ${esc(rayonCtx.side)} — Section ${esc(rayonCtx.section)} — Tablette ${esc(rayonCtx.shelf)}`;
+    const shelfLabel = getShelfLabel(rayonCtx.aisle, rayonCtx.side, rayonCtx.section, rayonCtx.shelf);
+    const labelSuffix = shelfLabel ? ` — <em style="color:#92400e">📎 ${esc(shelfLabel)}</em>` : '';
+    badge.innerHTML = `📍 <strong>Allée ${esc(rayonCtx.aisle)}</strong> — ${esc(rayonCtx.side)} — Section ${esc(rayonCtx.section)} — Tablette ${esc(rayonCtx.shelf)}${labelSuffix}`;
     refreshRayonList();
   } else {
     badge.style.background = '#f8fafc';
@@ -2699,11 +2754,15 @@ function lockApp() {
 // ── Tab switching ─────────────────────────────────────────────────────────────
 async function switchTab(tab) {
   if (LOCKED_TABS.has(tab) && !isUnlocked()) { showLockModal(tab); return; }
+  // Refresh 4h session timer on each access to a locked section
+  if (LOCKED_TABS.has(tab) && isUnlocked()) {
+    localStorage.setItem('familiprixSessionAt', String(Date.now()));
+  }
   if (scannerStream || html5Scanner) await stopCamera();
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.getElementById(tab).classList.add('active');
-  const tabs = ['scan','search','client','add'];
+  const tabs = ['scan','add','search','client'];
   document.querySelectorAll('.tab')[tabs.indexOf(tab)].classList.add('active');
   localStorage.setItem(STORAGE_KEYS.activeTab, tab);
   if (tab === 'add') loadMapEditor();

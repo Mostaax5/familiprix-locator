@@ -2109,7 +2109,7 @@ def build_default_layout_config(max_section, max_shelf, max_position):
     section_count = clamp_non_negative_int(max_section)
     shelf_count = clamp_non_negative_int(max_shelf)
     position_count = clamp_non_negative_int(max_position)
-    section_template = [{"shelves": [position_count for _ in range(shelf_count)]} for _ in range(section_count)]
+    section_template = [{"shelves": [position_count for _ in range(shelf_count)], "labels": ["" for _ in range(shelf_count)]} for _ in range(section_count)]
     return {
         "sides": {
             "Gauche": {"sections": json.loads(json.dumps(section_template))},
@@ -2141,10 +2141,12 @@ def normalize_layout_config(config_value, max_section="1", max_shelf="5", max_po
             shelves = section.get("shelves") if isinstance(section, dict) else None
             if not isinstance(shelves, list):
                 continue
-            cleaned_shelves = []
-            for shelf in shelves:
-                cleaned_shelves.append(clamp_non_negative_int(shelf))
-            normalized_sections.append({"shelves": cleaned_shelves})
+            cleaned_shelves = [clamp_non_negative_int(shelf) for shelf in shelves]
+            raw_labels = section.get("labels", []) if isinstance(section, dict) else []
+            if not isinstance(raw_labels, list):
+                raw_labels = []
+            cleaned_labels = [str(raw_labels[i]) if i < len(raw_labels) else "" for i in range(len(cleaned_shelves))]
+            normalized_sections.append({"shelves": cleaned_shelves, "labels": cleaned_labels})
         if not has_explicit_sections:
             normalized_sections = default["sides"][side]["sections"]
         normalized_sides[side] = {"sections": normalized_sections}
