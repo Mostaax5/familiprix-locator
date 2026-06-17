@@ -499,6 +499,196 @@ def reset_database():
     })
 
 
+# ── API: Planogram import ──────────────────────────────────────────────────
+
+@app.route("/api/import/planogram-parse", methods=["POST"])
+def parse_planogram_pdf():
+    try:
+        import pdfplumber
+        import io as _io
+    except ImportError:
+        return jsonify({"success": False, "error": "pdfplumber n est pas installe sur ce serveur."}), 503
+
+    if "file" not in request.files:
+        return jsonify({"success": False, "error": "Aucun fichier fourni."}), 400
+    f = request.files["file"]
+    if not f.filename.lower().endswith(".pdf"):
+        return jsonify({"success": False, "error": "Le fichier doit etre un PDF."}), 400
+
+    products = []
+    seen = {}
+
+    def _clean(val):
+        return str(val or "").strip()
+
+    def _is_int(val):
+        try:
+            int(_clean(val))
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    try:
+        with pdfplumber.open(_io.BytesIO(f.read())) as pdf:
+            for page in pdf.pages:
+                for table in (page.extract_tables() or []):
+                    current_col = None
+                    last_tab = last_pos = None
+
+                    for row in table:
+                        if not row:
+                            continue
+                        cells = [_clean(c) for c in row]
+                        lower = [c.lower() for c in cells]
+
+                        # Detect header row by looking for "upc" and "description" cells
+                        if any(c == "upc" for c in lower) and any("description" in c for c in lower):
+                            current_col = {}
+                            for j, h in enumerate(lower):
+                                if h == "tablette":                  current_col["t"] = j
+                                elif h == "position":                current_col["p"] = j
+                                elif "fa" in h and "ade" in h:       current_col["f"] = j
+                                elif h == "upc":                     current_col["u"] = j
+                                elif "code" in h and "upc" not in h: current_col["c"] = j
+                                elif "description" in h:             current_col["d"] = j
+                                elif "ajout" in h:                   current_col["a"] = j
+                                elif "statut" in h:                  current_col["s"] = j
+                                elif "stock" in h:                   current_col["e"] = j
+                            continue
+
+                        if not current_col or "u" not in current_col or "d" not in current_col:
+                            continue
+
+                        def g(k, _cells=cells, _col=current_col):
+                            i = _col.get(k)
+                            return _cells[i] if i is not None and i < len(_cells) else ""
+
+                        tab = g("t") or last_tab
+                        pos = g("p") or last_pos
+                        if not _is_int(tab) or not _is_int(pos):
+                            continue
+
+                        upc  = re.sub(r"\s+", "", g("u"))
+                        desc = g("d")
+                        if not upc or not desc:
+                            continue
+
+                        last_tab, last_pos = tab, pos
+                        t_int, p_int = int(tab), int(pos)
+                        key = (t_int, p_int)
+                        ajout    = g("a").lower() == "oui"
+                        en_stock = g("e").lower() != "non"
+
+                        if key in seen:
+                            idx = seen[key]
+                            if ajout:              products[idx]["is_new"]  = True
+                            if g("e").lower() == "oui": products[idx]["en_stock"] = True
+                            continue
+
+                        seen[key] = len(products)
+                        products.append({
+                            "tablette": t_int,
+                            "position": p_int,
+                            "barcode":  upc,
+                            "code_familiprix": g("c"),
+                            "name":     desc,
+                            "is_new":   ajout,
+                            "en_stock": en_stock,
+                        })
+    except Exception as exc:
+        return jsonify({"success": False, "error": f"Erreur d analyse PDF: {exc}"}), 500
+
+    products.sort(key=lambda x: (x["tablette"], x["position"]))
+
+    tablettes = {}
+    for p in products:
+        t = str(p["tablette"])
+        tablettes[t] = tablettes.get(t, 0) + 1
+
+    return jsonify({"success": True, "products": products, "count": len(products), "tablettes": tablettes})
+
+
+@app.route("/api/products/bulk-import", methods=["POST"])
+def bulk_import_products():
+    username, error = require_editor()
+    if error:
+        return error
+
+    data           = request.get_json() or {}
+    aisle          = str(data.get("aisle", "")).strip()
+    side           = str(data.get("side", "Droite")).strip()
+    section        = str(data.get("section", "1")).strip()
+    shelf_offset   = int(data.get("shelf_offset", 0))
+    tablette_start = int(data.get("tablette_start", 1))
+    tablette_end   = int(data.get("tablette_end", 99))
+    replace        = bool(data.get("replace_existing", False))
+    skip_ns        = bool(data.get("skip_non_stock", False))
+    products       = data.get("products", [])
+
+    if not aisle:
+        return jsonify({"success": False, "error": "Allee requise."}), 400
+
+    db = get_db()
+    now = utc_now_iso()
+    imported = skipped = errors = 0
+
+    for p in products:
+        try:
+            tab = int(p.get("tablette", 0))
+            pos = int(p.get("position", 0))
+        except (ValueError, TypeError):
+            errors += 1
+            continue
+
+        if not (tablette_start <= tab <= tablette_end):
+            continue
+        if skip_ns and not p.get("en_stock", True):
+            continue
+
+        shelf    = str(tab + shelf_offset)
+        position = str(pos)
+        name     = str(p.get("name", "")).strip()
+        barcode  = str(p.get("barcode", "")).strip()
+        code     = str(p.get("code_familiprix", "")).strip()
+        notes    = f"[PLANO] {code}" if code else "[PLANO]"
+
+        if not name:
+            errors += 1
+            continue
+
+        try:
+            existing = db.execute(
+                "SELECT id FROM products WHERE aisle=? AND side=? AND section=? AND shelf=? AND position=?",
+                (aisle, side, section, shelf, position)
+            ).fetchone()
+
+            if existing and not replace:
+                skipped += 1
+                continue
+
+            if existing:
+                row_id = existing["id"] if isinstance(existing, dict) else existing[0]
+                db.execute(
+                    "UPDATE products SET name=?, barcode=?, search_terms=?, modified_by=?, modified_at=? WHERE id=?",
+                    (name, barcode, notes, username, now, row_id)
+                )
+            else:
+                db.execute(
+                    """INSERT INTO products
+                       (name, barcode, aisle, side, section, shelf, position,
+                        search_terms, created_by, created_at, modified_by, modified_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (name, barcode, aisle, side, section, shelf, position,
+                     notes, username, now, username, now)
+                )
+            imported += 1
+        except Exception:
+            errors += 1
+
+    db.commit()
+    return jsonify({"success": True, "imported": imported, "skipped": skipped, "errors": errors})
+
+
 # ── API: Products ──────────────────────────────────────────────────────────
 
 @app.route("/api/products", methods=["GET"])

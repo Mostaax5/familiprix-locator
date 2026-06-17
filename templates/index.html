@@ -223,6 +223,70 @@
   </div>
 
   <div class="card">
+    <div class="section-title">Importer un planogramme PDF</div>
+    <div class="section-note">Importez le PDF de planogramme Familiprix. Choisissez l allée, le côté et la section de départ — les produits sont insérés tablette par tablette, position par position, dans l ordre du planogramme.</div>
+
+    <div class="tool-row">
+      <label class="btn btn-outline btn-inline" style="cursor:pointer">
+        📋 Choisir le PDF du planogramme
+        <input type="file" accept=".pdf,application/pdf" style="display:none" onchange="parsePlanogramPDF(this)"/>
+      </label>
+    </div>
+    <div id="planoMsg" style="min-height:18px;font-size:13px;margin-top:6px"></div>
+
+    <div id="planoConfig" style="display:none">
+      <div class="row3" style="margin-top:10px">
+        <div class="field">
+          <label class="label">Allée</label>
+          <select id="planoAisle" onchange="updatePlanoPreview()"></select>
+        </div>
+        <div class="field">
+          <label class="label">Côté</label>
+          <select id="planoSide" onchange="updatePlanoPreview()">
+            <option value="Gauche">Gauche</option>
+            <option value="Droite">Droite</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="label">Section</label>
+          <input type="number" id="planoSection" value="1" min="1" style="width:64px" oninput="updatePlanoPreview()"/>
+        </div>
+      </div>
+
+      <div class="row3" style="margin-top:6px">
+        <div class="field">
+          <label class="label" title="Première tablette du plano à importer">Tablette début</label>
+          <input type="number" id="planoTabStart" value="1" min="1" max="20" style="width:64px" oninput="updatePlanoPreview()"/>
+        </div>
+        <div class="field">
+          <label class="label" title="Dernière tablette du plano à importer">Tablette fin</label>
+          <input type="number" id="planoTabEnd" value="8" min="1" max="20" style="width:64px" oninput="updatePlanoPreview()"/>
+        </div>
+        <div class="field">
+          <label class="label" title="Tablette 1 du plano = Tablette (1 + décalage) dans le magasin">Décalage tablette</label>
+          <input type="number" id="planoShelfOffset" value="0" min="-10" max="20" style="width:64px" oninput="updatePlanoPreview()"/>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:18px;margin-top:10px;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="planoReplace"/> Remplacer les positions existantes
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="planoSkipNonStock" onchange="updatePlanoPreview()"/> Ignorer «&nbsp;En stock: non&nbsp;»
+        </label>
+      </div>
+
+      <div id="planoPreview" style="margin-top:12px;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;max-height:260px;overflow-y:auto"></div>
+
+      <div class="tool-row" style="margin-top:10px">
+        <button id="planoImportBtn" class="btn" onclick="importPlanogram()">Importer dans le plan</button>
+      </div>
+      <div id="planoImportMsg" style="min-height:18px;font-size:13px;margin-top:4px"></div>
+    </div>
+  </div>
+
+  <div class="card">
     <div class="section-title">Sauvegarde de la base</div>
     <div class="section-note">Telechargez une copie complete du magasin (produits + plan) pour la partager ou la garder. Importez un fichier de sauvegarde pour restaurer ou fusionner les donnees.</div>
     <div class="tool-row">
@@ -2210,6 +2274,141 @@ async function gistRestoreNow() {
   } catch (e) {
     if (msg) { msg.className = 'msg error'; msg.textContent = e.message || 'Erreur lors de la restauration GitHub.'; }
   }
+}
+
+// ── Planogram import ──────────────────────────────────────────────────────────
+let planoData = null;
+
+async function parsePlanogramPDF(input) {
+  const file = input.files[0];
+  input.value = '';
+  if (!file) return;
+  const msg = document.getElementById('planoMsg');
+  msg.textContent = 'Analyse en cours…';
+  msg.style.color = '#64748b';
+  document.getElementById('planoConfig').style.display = 'none';
+  planoData = null;
+
+  const form = new FormData();
+  form.append('file', file);
+  try {
+    const res  = await fetch('/api/import/planogram-parse', {method:'POST', body: form});
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      msg.textContent = data.error || 'Erreur lors de l analyse.';
+      msg.style.color = '#c8102e';
+      return;
+    }
+    planoData = data;
+    const tabs = Object.keys(data.tablettes).map(Number).sort((a,b)=>a-b);
+    document.getElementById('planoTabStart').value = tabs[0] || 1;
+    document.getElementById('planoTabEnd').value   = tabs[tabs.length-1] || 8;
+    const aisleSelect = document.getElementById('planoAisle');
+    aisleSelect.innerHTML = mapLayouts.map(l=>`<option value="${l.aisle}">${l.aisle}</option>`).join('');
+    const sum = Object.entries(data.tablettes).map(([t,n])=>`T${t}:${n}`).join(' | ');
+    msg.innerHTML = `<strong style="color:#16a34a">${data.count} produits</strong> trouvés — ${sum}`;
+    msg.style.color = '#16a34a';
+    document.getElementById('planoConfig').style.display = '';
+    updatePlanoPreview();
+  } catch(e) {
+    msg.textContent = 'Erreur réseau.';
+    msg.style.color = '#c8102e';
+  }
+}
+
+function updatePlanoPreview() {
+  if (!planoData) return;
+  const aisle    = document.getElementById('planoAisle').value;
+  const side     = document.getElementById('planoSide').value;
+  const section  = document.getElementById('planoSection').value || '1';
+  const tabStart = parseInt(document.getElementById('planoTabStart').value) || 1;
+  const tabEnd   = parseInt(document.getElementById('planoTabEnd').value)   || 99;
+  const offset   = parseInt(document.getElementById('planoShelfOffset').value) || 0;
+  const skipNS   = document.getElementById('planoSkipNonStock').checked;
+
+  const filtered = planoData.products.filter(p =>
+    p.tablette >= tabStart && p.tablette <= tabEnd &&
+    !(skipNS && !p.en_stock)
+  );
+
+  const preview = document.getElementById('planoPreview');
+  if (!filtered.length) {
+    preview.innerHTML = '<div style="padding:10px;font-size:12px;color:#64748b">Aucun produit dans cette sélection.</div>';
+    return;
+  }
+
+  const rows = filtered.slice(0, 20).map(p => {
+    const storeShelf = p.tablette + offset;
+    const nsTag  = !p.en_stock ? '<span style="color:#dc2626;font-size:10px;margin-left:3px">NON LIVRÉ</span>' : '';
+    const newTag = p.is_new   ? '<span style="color:#2563eb;font-size:10px;margin-left:3px">NOUVEAU</span>' : '';
+    return `<tr style="border-bottom:1px solid #f1f5f9">
+      <td style="padding:4px 8px;color:#64748b;font-size:11px;white-space:nowrap">T${p.tablette} P${p.position}</td>
+      <td style="padding:4px 8px;font-size:11px;color:#475569;white-space:nowrap">→ A${aisle} ${side} S${section} T${storeShelf} P${p.position}</td>
+      <td style="padding:4px 8px;font-size:11px">${p.name}${newTag}${nsTag}</td>
+    </tr>`;
+  }).join('');
+
+  const more = filtered.length > 20
+    ? `<div style="padding:6px 8px;font-size:11px;color:#64748b">… et ${filtered.length-20} autres</div>`
+    : '';
+
+  preview.innerHTML = `<table style="width:100%;border-collapse:collapse">
+    <thead><tr style="background:#f8fafc">
+      <th style="padding:4px 8px;text-align:left;font-size:11px;color:#64748b;white-space:nowrap">Plano</th>
+      <th style="padding:4px 8px;text-align:left;font-size:11px;color:#64748b;white-space:nowrap">Magasin</th>
+      <th style="padding:4px 8px;text-align:left;font-size:11px;color:#64748b">Produit</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>${more}
+  <div style="padding:6px 8px;font-size:12px;font-weight:600;color:#1e293b;background:#f8fafc;border-top:1px solid #e2e8f0">
+    Total: <strong>${filtered.length}</strong> produit(s) à importer
+  </div>`;
+}
+
+async function importPlanogram() {
+  if (!planoData) return;
+  const aisle   = document.getElementById('planoAisle').value;
+  if (!aisle) { document.getElementById('planoImportMsg').textContent = 'Choisissez une allée.'; return; }
+  const side     = document.getElementById('planoSide').value;
+  const section  = document.getElementById('planoSection').value || '1';
+  const tabStart = parseInt(document.getElementById('planoTabStart').value)    || 1;
+  const tabEnd   = parseInt(document.getElementById('planoTabEnd').value)      || 99;
+  const offset   = parseInt(document.getElementById('planoShelfOffset').value) || 0;
+  const replace  = document.getElementById('planoReplace').checked;
+  const skipNS   = document.getElementById('planoSkipNonStock').checked;
+
+  const btn = document.getElementById('planoImportBtn');
+  btn.disabled = true; btn.textContent = 'Importation…';
+  const msg = document.getElementById('planoImportMsg');
+  msg.textContent = '';
+
+  try {
+    const {res, data} = await apiFetch('/api/products/bulk-import', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: JSON.stringify({
+        aisle, side, section,
+        shelf_offset:   offset,
+        tablette_start: tabStart,
+        tablette_end:   tabEnd,
+        replace_existing: replace,
+        skip_non_stock:   skipNS,
+        products: planoData.products
+      })
+    });
+    if (res.ok && data.success) {
+      const errTxt = data.errors > 0 ? `, ${data.errors} erreur(s)` : '';
+      msg.innerHTML = `✅ <strong>${data.imported}</strong> importé(s), ${data.skipped} ignoré(s)${errTxt}.`;
+      msg.style.color = '#16a34a';
+      refreshProductsCache();
+    } else {
+      msg.textContent = data.error || 'Erreur lors de l importation.';
+      msg.style.color = '#c8102e';
+    }
+  } catch(e) {
+    msg.textContent = 'Erreur réseau.'; msg.style.color = '#c8102e';
+  }
+  btn.disabled = false; btn.textContent = 'Importer dans le plan';
 }
 
 // ── Lock / unlock ─────────────────────────────────────────────────────────────
