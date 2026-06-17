@@ -99,17 +99,17 @@
     </div>
   </div>
 
-  <!-- Always-visible barcode input (camera fills it automatically; can also type manually) -->
-  <div class="card" style="padding:10px 12px">
-    <div style="display:flex;gap:8px;align-items:center">
-      <input type="text" id="scanInput" inputmode="numeric" autocomplete="off" autocapitalize="off"
-             spellcheck="false" placeholder="Code-barres — caméra ou saisie manuelle"
-             onkeydown="handleScanInputKey(event)"
-             style="flex:1;padding:10px 12px;border:2px solid #e2e8f0;border-radius:8px;font-size:15px;font-family:monospace;letter-spacing:1px"/>
-      <button class="btn btn-outline btn-inline" onclick="clearScanInput()" style="flex:none;font-size:18px;padding:6px 12px">✕</button>
-      <button class="btn btn-inline" onclick="lookupScanFromInput(true)" style="flex:none;padding:10px 14px;font-size:14px">→ OK</button>
+  <!-- Always-visible barcode field — large, readable, camera-filled or manual -->
+  <div class="card" style="padding:14px 16px">
+    <div class="label" style="margin-bottom:8px;font-size:12px;color:#64748b">Code-barres — caméra automatique ou saisie manuelle</div>
+    <input type="text" id="scanInput" inputmode="numeric" autocomplete="off" autocapitalize="off"
+           spellcheck="false" placeholder="0 0 0 0 0 0 0 0 0 0 0 0 0"
+           onkeydown="handleScanInputKey(event)"
+           style="width:100%;box-sizing:border-box;padding:14px 12px;border:2px solid #e2e8f0;border-radius:10px;font-size:22px;font-family:monospace;font-weight:700;letter-spacing:3px;text-align:center;color:#1e293b;background:#f8fafc"/>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button class="btn btn-outline" onclick="clearScanInput()" style="flex:1;padding:11px;font-size:14px">✕ Effacer</button>
+      <button class="btn" onclick="lookupScanFromInput(true)" style="flex:2;padding:11px;font-size:15px;font-weight:700">→ Vérifier le code</button>
     </div>
-    <div class="small" style="margin-top:5px;color:#94a3b8">La caméra remplit ce champ automatiquement. Vous pouvez aussi taper le code manuellement et appuyer sur → OK (ou Entrée).</div>
   </div>
 
   <div id="scanResult"></div>
