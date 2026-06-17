@@ -833,6 +833,69 @@ def create_layout_aisle():
     return jsonify({"success": True})
 
 
+@app.route("/api/layout/aisles/<aisle>/swap-sections", methods=["POST"])
+def swap_sections(aisle):
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json() or {}
+    side  = str(data.get("side", "")).strip()
+    sec_a = str(data.get("section_a", "")).strip()
+    sec_b = str(data.get("section_b", "")).strip()
+    if not side or not sec_a or not sec_b or sec_a == sec_b:
+        return jsonify({"success": False, "error": "Paramètres invalides."}), 400
+    now = utc_now_iso()
+    db = get_db()
+    db.execute("UPDATE products SET section='__sw__', modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=?", (username, now, aisle, side, sec_a))
+    db.execute("UPDATE products SET section=?,       modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=?", (sec_a, username, now, aisle, side, sec_b))
+    db.execute("UPDATE products SET section=?,       modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=?", (sec_b, username, now, aisle, side, "__sw__"))
+    db.commit()
+    return jsonify({"success": True})
+
+
+@app.route("/api/layout/aisles/<aisle>/swap-shelves", methods=["POST"])
+def swap_shelves(aisle):
+    username, error = require_editor()
+    if error:
+        return error
+    data    = request.get_json() or {}
+    side    = str(data.get("side", "")).strip()
+    section = str(data.get("section", "1")).strip()
+    sh_a    = str(data.get("shelf_a", "")).strip()
+    sh_b    = str(data.get("shelf_b", "")).strip()
+    if not side or not sh_a or not sh_b or sh_a == sh_b:
+        return jsonify({"success": False, "error": "Paramètres invalides."}), 400
+    now = utc_now_iso()
+    db = get_db()
+    db.execute("UPDATE products SET shelf='__sw__', modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=? AND shelf=?", (username, now, aisle, side, section, sh_a))
+    db.execute("UPDATE products SET shelf=?,        modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=? AND shelf=?", (sh_a, username, now, aisle, side, section, sh_b))
+    db.execute("UPDATE products SET shelf=?,        modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=? AND shelf=?", (sh_b, username, now, aisle, side, section, "__sw__"))
+    db.commit()
+    return jsonify({"success": True})
+
+
+@app.route("/api/layout/aisles/<aisle>/swap-positions", methods=["POST"])
+def swap_positions_route(aisle):
+    username, error = require_editor()
+    if error:
+        return error
+    data    = request.get_json() or {}
+    side    = str(data.get("side", "")).strip()
+    section = str(data.get("section", "1")).strip()
+    shelf   = str(data.get("shelf", "")).strip()
+    pos_a   = str(data.get("position_a", "")).strip()
+    pos_b   = str(data.get("position_b", "")).strip()
+    if not side or not shelf or not pos_a or not pos_b or pos_a == pos_b:
+        return jsonify({"success": False, "error": "Paramètres invalides."}), 400
+    now = utc_now_iso()
+    db = get_db()
+    db.execute("UPDATE products SET position='__sw__', modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=? AND shelf=? AND position=?", (username, now, aisle, side, section, shelf, pos_a))
+    db.execute("UPDATE products SET position=?,        modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=? AND shelf=? AND position=?", (pos_a, username, now, aisle, side, section, shelf, pos_b))
+    db.execute("UPDATE products SET position=?,        modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=? AND shelf=? AND position=?", (pos_b, username, now, aisle, side, section, shelf, "__sw__"))
+    db.commit()
+    return jsonify({"success": True})
+
+
 @app.route("/api/layout/aisles/<aisle>", methods=["PUT"])
 def update_layout_aisle(aisle):
     username, error = require_editor()

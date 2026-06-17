@@ -2213,22 +2213,22 @@ function removeShelf(aisle, side, sectionIndex, shelfIndex) {
   refreshPlanUi();
 }
 
+async function _swapCall(aisle, endpoint, body) {
+  const {res, data} = await apiFetch(
+    `/api/layout/aisles/${encodeURIComponent(aisle)}/${endpoint}`,
+    {method:'POST', headers:{'Content-Type':'application/json',...getEditorHeaders()}, body:JSON.stringify(body)}
+  );
+  return res.ok && data.success;
+}
+
 async function moveSection(aisle, side, sectionIndex, direction) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
   const sections = layout.config.sides[side].sections;
   const target = sectionIndex + direction;
   if (target < 0 || target >= sections.length) return;
-  const secA = String(sectionIndex + 1); // 1-indexed
-  const secB = String(target + 1);
-  // Move products in DB: swap section numbers
-  const productsA = allProductsCache.filter(p => String(p.aisle)===String(aisle) && p.side===side && String(p.section||'1')===secA);
-  const productsB = allProductsCache.filter(p => String(p.aisle)===String(aisle) && p.side===side && String(p.section||'1')===secB);
-  const tempSec = '__swap__';
-  await Promise.all(productsA.map(p => apiUpdateProduct({...p, section: tempSec})));
-  await Promise.all(productsB.map(p => apiUpdateProduct({...p, section: secA})));
-  await Promise.all(productsA.map(p => apiUpdateProduct({...p, section: secB})));
-  // Swap config
+  // Single server call — 3 SQL statements regardless of product count
+  await _swapCall(aisle, 'swap-sections', {side, section_a: String(sectionIndex+1), section_b: String(target+1)});
   [sections[sectionIndex], sections[target]] = [sections[target], sections[sectionIndex]];
   syncLayoutRecord(layout);
   markLayoutDirty(aisle);
@@ -2243,17 +2243,7 @@ async function moveShelf(aisle, side, sectionIndex, shelfIndex, direction) {
   if (!section) return;
   const target = shelfIndex + direction;
   if (target < 0 || target >= section.shelves.length) return;
-  const sec = String(sectionIndex + 1);
-  const shelfA = String(shelfIndex + 1);
-  const shelfB = String(target + 1);
-  // Move products in DB: swap shelf numbers
-  const productsA = allProductsCache.filter(p => String(p.aisle)===String(aisle) && p.side===side && String(p.section||'1')===sec && String(p.shelf)===shelfA);
-  const productsB = allProductsCache.filter(p => String(p.aisle)===String(aisle) && p.side===side && String(p.section||'1')===sec && String(p.shelf)===shelfB);
-  const tempShelf = '__swap__';
-  await Promise.all(productsA.map(p => apiUpdateProduct({...p, shelf: tempShelf})));
-  await Promise.all(productsB.map(p => apiUpdateProduct({...p, shelf: shelfA})));
-  await Promise.all(productsA.map(p => apiUpdateProduct({...p, shelf: shelfB})));
-  // Swap config
+  await _swapCall(aisle, 'swap-shelves', {side, section: String(sectionIndex+1), shelf_a: String(shelfIndex+1), shelf_b: String(target+1)});
   [section.shelves[shelfIndex], section.shelves[target]] = [section.shelves[target], section.shelves[shelfIndex]];
   if (section.labels) [section.labels[shelfIndex], section.labels[target]] = [section.labels[target], section.labels[shelfIndex]];
   syncLayoutRecord(layout);
@@ -2263,16 +2253,7 @@ async function moveShelf(aisle, side, sectionIndex, shelfIndex, direction) {
 }
 
 async function swapPositions(aisle, side, section, shelf, posA, posB) {
-  const match = p =>
-    String(p.aisle) === String(aisle) && p.side === side &&
-    String(p.section || '1') === String(section) && String(p.shelf) === String(shelf);
-  const pA = allProductsCache.find(p => match(p) && String(p.position) === String(posA));
-  const pB = allProductsCache.find(p => match(p) && String(p.position) === String(posB));
-  if (!pA && !pB) return;
-  const updates = [];
-  if (pA) updates.push(apiUpdateProduct({...pA, position: String(posB)}));
-  if (pB) updates.push(apiUpdateProduct({...pB, position: String(posA)}));
-  await Promise.all(updates);
+  await _swapCall(aisle, 'swap-positions', {side, section: String(section), shelf: String(shelf), position_a: String(posA), position_b: String(posB)});
   await refreshProductsCache(true);
   refreshPlanUi();
 }
