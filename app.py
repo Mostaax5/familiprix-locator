@@ -2311,7 +2311,7 @@ def normalize_layout_config(config_value, max_section="1", max_shelf="5", max_po
     normalized_facade_a = norm_fixture(config.get("facade_a") if isinstance(config, dict) else None)
     normalized_facade_b = norm_fixture(config.get("facade_b") if isinstance(config, dict) else None)
 
-    # Présentoirs (freestanding displays in corridor)
+    # Présentoirs — each has facades (array), or legacy flat shelves/labels
     raw_pres = config.get("presentoirs", []) if isinstance(config, dict) else []
     if not isinstance(raw_pres, list): raw_pres = []
     normalized_pres = []
@@ -2319,8 +2319,20 @@ def normalize_layout_config(config_value, max_section="1", max_shelf="5", max_po
         if not isinstance(p, dict):
             continue
         name = str(p.get("name", "Présentoir")).strip() or "Présentoir"
-        fx = norm_fixture(p)
-        normalized_pres.append({"name": name, "shelves": fx["shelves"], "labels": fx["labels"]})
+        raw_facades = p.get("facades") if isinstance(p.get("facades"), list) else None
+        if raw_facades:
+            facades = []
+            for i, f in enumerate(raw_facades):
+                if not isinstance(f, dict):
+                    continue
+                fname = str(f.get("name", f"Façade {i+1}")).strip() or f"Façade {i+1}"
+                fx = norm_fixture(f)
+                facades.append({"name": fname, "shelves": fx["shelves"], "labels": fx["labels"]})
+        else:
+            # Legacy: flat shelves/labels → single facade
+            fx = norm_fixture(p)
+            facades = [{"name": "Façade 1", "shelves": fx["shelves"], "labels": fx["labels"]}]
+        normalized_pres.append({"name": name, "facades": facades})
 
     return {"sides": normalized_sides, "facade_a": normalized_facade_a, "facade_b": normalized_facade_b, "presentoirs": normalized_pres}
 
@@ -2357,8 +2369,11 @@ def _get_shelves_for_side(config, side):
     if side == "Façade B":
         return (config.get("facade_b") or {}).get("shelves", []), False
     for pres in (config.get("presentoirs") or []):
-        if pres.get("name") == side:
-            return pres.get("shelves", []), False
+        pname = pres.get("name", "")
+        for facade in (pres.get("facades") or []):
+            fname = facade.get("name", "")
+            if side == f"{pname} - {fname}":
+                return facade.get("shelves", []), False
     return [], False
 
 

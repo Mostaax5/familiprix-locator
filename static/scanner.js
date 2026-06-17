@@ -1042,6 +1042,8 @@ function clearScanInput() {
   scanPaused = false;
   resetCameraCandidate();
   persistScanDraft();
+  const codeEl = document.getElementById('lastScanCode');
+  if (codeEl) codeEl.style.display = 'none';
   if (scannerStream || html5Scanner) getCameraDom().status.textContent = 'Recherche code...';
 }
 
