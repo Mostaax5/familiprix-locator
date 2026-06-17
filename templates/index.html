@@ -57,13 +57,13 @@
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;align-items:flex-end;margin-top:8px">
       <div class="field">
         <label class="label">Allée</label>
-        <input type="text" id="rayonAisle" placeholder="Ex: 3" inputmode="numeric" autocomplete="off" oninput="updateRayonCtx()"/>
+        <input type="text" id="rayonAisle" placeholder="Ex: 3" inputmode="numeric" autocomplete="off" oninput="updateRayonSideOptions();updateRayonCtx()"/>
       </div>
       <div class="field">
-        <label class="label">Côté</label>
+        <label class="label">Côté / Façade</label>
         <select id="rayonSide" onchange="updateRayonCtx()">
-          <option value="Gauche">Gauche</option>
-          <option value="Droite">Droite</option>
+          <option value="Gauche">Côté A</option>
+          <option value="Droite">Côté B</option>
         </select>
       </div>
       <div class="field">
@@ -350,11 +350,11 @@
         <input type="number" id="mapAisle" min="1" placeholder="Ex: 9"/>
       </div>
       <div class="field">
-        <label class="label" for="mapLeftSections">Sections cote gauche</label>
+        <label class="label" for="mapLeftSections">Sections Côté A</label>
         <input type="number" id="mapLeftSections" min="0" value="0"/>
       </div>
       <div class="field">
-        <label class="label" for="mapRightSections">Sections cote droit</label>
+        <label class="label" for="mapRightSections">Sections Côté B</label>
         <input type="number" id="mapRightSections" min="0" value="0"/>
       </div>
       <div class="field">
@@ -637,7 +637,12 @@ function defaultLayoutConfig(maxSection=0, maxShelf=0, maxPosition=0) {
     shelves: Array.from({length: shCount}, () => pCount),
     labels:  Array.from({length: shCount}, () => '')
   }));
-  return {sides: {Gauche: {sections: makeSections()}, Droite: {sections: makeSections()}}};
+  return {
+    sides: {Gauche: {sections: makeSections()}, Droite: {sections: makeSections()}},
+    facade_a: {shelves: [], labels: []},   // end cap at entrance of aisle
+    facade_b: {shelves: [], labels: []},   // end cap at far end of aisle
+    presentoirs: [],                       // freestanding displays in corridor
+  };
 }
 
 function buildLayoutWithSideCounts(leftSections=0, rightSections=0, shelfCount=0, positionCount=0) {
@@ -674,6 +679,23 @@ function normalizeLayoutConfig(config, maxSection=0, maxShelf=0, maxPosition=0) 
       })
       .filter(Boolean);
   });
+  // Normalize a simple fixture: {shelves: [...], labels: [...]}
+  const normFixture = fd => {
+    const rawSh = Array.isArray(fd?.shelves) ? fd.shelves : [];
+    const shelves = rawSh.map(v => Math.max(0, Number(v) || 0));
+    const rawL = Array.isArray(fd?.labels) ? fd.labels : [];
+    return {shelves, labels: shelves.map((_, i) => String(rawL[i] || ''))};
+  };
+  // Façades: two end caps per aisle
+  base.facade_a = normFixture(source.facade_a);
+  base.facade_b = normFixture(source.facade_b);
+  // Présentoirs: freestanding displays in corridor
+  base.presentoirs = (Array.isArray(source.presentoirs) ? source.presentoirs : [])
+    .map(p => {
+      if (!p || typeof p !== 'object') return null;
+      const name = String(p.name || 'Présentoir').trim() || 'Présentoir';
+      return {name, ...normFixture(p)};
+    }).filter(Boolean);
   return base;
 }
 
@@ -722,6 +744,24 @@ function buildSlotsFromConfig(aisle, config, sideFilter=null) {
           slots.push({aisle: String(aisle), side, section: String(si + 1), shelf: String(shi + 1), position: String(p)});
         }
       });
+    });
+  });
+  // Façade slots (end caps at each end of the aisle)
+  [['Façade A', config.facade_a], ['Façade B', config.facade_b]].forEach(([sideName, fixture]) => {
+    if (sideFilter && sideName !== sideFilter) return;
+    (fixture?.shelves || []).forEach((posCount, shi) => {
+      for (let p = 1; p <= Math.max(0, Number(posCount) || 0); p++) {
+        slots.push({aisle: String(aisle), side: sideName, section: '1', shelf: String(shi+1), position: String(p)});
+      }
+    });
+  });
+  // Présentoir slots (freestanding displays in corridor)
+  (config.presentoirs || []).forEach(pres => {
+    if (sideFilter && pres.name !== sideFilter) return;
+    (pres.shelves || []).forEach((posCount, shi) => {
+      for (let p = 1; p <= Math.max(0, Number(posCount) || 0); p++) {
+        slots.push({aisle: String(aisle), side: pres.name, section: '1', shelf: String(shi+1), position: String(p)});
+      }
     });
   });
   return slots;
@@ -1859,6 +1899,242 @@ function finishConfirmed(message, brand) {
   }, 1200);
 }
 
+// ── Façade & Présentoir management ────────────────────────────────────────────
+function _fixFixture(fixture) {
+  // Ensure {shelves, labels} are arrays of same length
+  if (!fixture) return {shelves: [], labels: []};
+  if (!Array.isArray(fixture.shelves)) fixture.shelves = [];
+  if (!Array.isArray(fixture.labels)) fixture.labels = [];
+  while (fixture.labels.length < fixture.shelves.length) fixture.labels.push('');
+  fixture.labels.length = fixture.shelves.length;
+  return fixture;
+}
+
+function setFacadeShelfCount(aisle, facadeKey, rawValue) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  if (!layout.config[facadeKey]) layout.config[facadeKey] = {shelves: [], labels: []};
+  const fx = _fixFixture(layout.config[facadeKey]);
+  const count = Math.max(0, parseInt(rawValue) || 0);
+  const fallback = fx.shelves[fx.shelves.length - 1] ?? 8;
+  while (fx.shelves.length < count) { fx.shelves.push(fallback); fx.labels.push(''); }
+  fx.shelves.length = count; fx.labels.length = count;
+  markLayoutDirty(aisle); refreshPlanUi();
+}
+
+function setFacadeShelfPositions(aisle, facadeKey, shelfIndex, rawValue) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const fx = _fixFixture(layout.config[facadeKey]);
+  fx.shelves[shelfIndex] = Math.max(0, parseInt(rawValue) || 0);
+  markLayoutDirty(aisle); refreshPlanUi();
+}
+
+function setFacadeShelfLabel(aisle, facadeKey, shelfIndex, value) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const fx = _fixFixture(layout.config[facadeKey]);
+  fx.labels[shelfIndex] = value.trim();
+  markLayoutDirty(aisle); refreshPlanUi();
+}
+
+function addPresentoir(aisle) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  if (!layout.config.presentoirs) layout.config.presentoirs = [];
+  const n = layout.config.presentoirs.length + 1;
+  layout.config.presentoirs.push({name: `Présentoir ${n}`, shelves: [8], labels: ['']});
+  markLayoutDirty(aisle); refreshPlanUi();
+}
+
+function removePresentoir(aisle, presIndex) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const pres = layout.config.presentoirs?.[presIndex];
+  if (!pres) return;
+  if (!confirm(`Supprimer "${pres.name}" ? Les produits assignés restent en base.`)) return;
+  layout.config.presentoirs.splice(presIndex, 1);
+  markLayoutDirty(aisle); refreshPlanUi();
+}
+
+function renamePresentoir(aisle, presIndex, value) {
+  const layout = getMutableLayout(aisle);
+  if (!layout || !layout.config.presentoirs?.[presIndex]) return;
+  layout.config.presentoirs[presIndex].name = value.trim() || `Présentoir ${presIndex + 1}`;
+  markLayoutDirty(aisle);
+}
+
+function setPresentoirShelfCount(aisle, presIndex, rawValue) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const pres = layout.config.presentoirs?.[presIndex];
+  if (!pres) return;
+  _fixFixture(pres);
+  const count = Math.max(0, parseInt(rawValue) || 0);
+  const fallback = pres.shelves[pres.shelves.length - 1] ?? 8;
+  while (pres.shelves.length < count) { pres.shelves.push(fallback); pres.labels.push(''); }
+  pres.shelves.length = count; pres.labels.length = count;
+  markLayoutDirty(aisle); refreshPlanUi();
+}
+
+function setPresentoirShelfPositions(aisle, presIndex, shelfIndex, rawValue) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const pres = layout.config.presentoirs?.[presIndex];
+  if (pres) { pres.shelves[shelfIndex] = Math.max(0, parseInt(rawValue) || 0); markLayoutDirty(aisle); refreshPlanUi(); }
+}
+
+function setPresentoirShelfLabel(aisle, presIndex, shelfIndex, value) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const pres = layout.config.presentoirs?.[presIndex];
+  if (!pres) return;
+  _fixFixture(pres);
+  pres.labels[shelfIndex] = value.trim();
+  markLayoutDirty(aisle); refreshPlanUi();
+}
+
+function _renderFixtureShelfGrid(aisle, sideName, shelves, labels, aisleSt, presOrFacadeKey, callbackShelfCount, callbackShelfPos, callbackShelfLabel) {
+  return (shelves || []).map((positions, shi) => {
+    const sl = (labels || [])[shi] || '';
+    const title = sl ? `📎 ${esc(sl)}` : `Tablette ${shi + 1}`;
+    const bg = sl ? 'background:#fffbf0;border-color:#fbbf24' : '';
+    const filled = allProductsCache.filter(p =>
+      String(p.aisle) === String(aisle) && p.side === sideName && String(p.shelf) === String(shi + 1)
+    ).length;
+    return `<div class="plan-shelf-card" style="${bg}">
+      <div class="shelf-header">
+        <span class="shelf-title">${title}</span>
+        <span class="shelf-fill">${filled}/${positions} occ.</span>
+      </div>
+      <details class="struct-details">
+        <summary class="struct-toggle">⚙ ${sl || 'T'+(shi+1)} · Pos: ${positions}</summary>
+        <div class="field" style="margin-top:8px">
+          <label class="label">Nom</label>
+          <input type="text" value="${esc(sl)}" placeholder="Ex: Accroche..."
+                 oninput="${callbackShelfLabel}(${shi},this.value)"/>
+        </div>
+        <div class="field">
+          <label class="label">Positions</label>
+          <input type="number" min="0" value="${positions}"
+                 onchange="${callbackShelfPos}(${shi},this.value)"/>
+        </div>
+      </details>
+      ${renderShelfProductList(aisle, sideName, 1, shi + 1, positions)}
+    </div>`;
+  }).join('');
+}
+
+function renderFacadesSection(aisle, config) {
+  const parts = [
+    {label: 'Façade A', key: 'facade_a', sideName: 'Façade A', icon: '🔲'},
+    {label: 'Façade B', key: 'facade_b', sideName: 'Façade B', icon: '🔲'},
+  ].map(({label, key, sideName, icon}) => {
+    const fx = config[key] || {shelves: [], labels: []};
+    const shelves = fx.shelves || []; const labels = fx.labels || [];
+    const nodeId = `planFacade-${aisle}-${key}`;
+    const prods = allProductsCache.filter(p => String(p.aisle) === String(aisle) && p.side === sideName);
+    const shelvesHtml = _renderFixtureShelfGrid(aisle, sideName, shelves, labels, aisle, key,
+      `setFacadeShelfCount('${esc(aisle)}','${key}',${shelves.length})`,
+      `(shi,v)=>setFacadeShelfPositions('${esc(aisle)}','${key}',shi,v)`,
+      `(shi,v)=>setFacadeShelfLabel('${esc(aisle)}','${key}',shi,v)`);
+    return `<details class="tree-node plan-section" data-node-id="${nodeId}"${detailsOpenAttr(nodeId)}>
+      <summary>
+        <span>${icon} ${label}</span>
+        <span class="tree-meta">${shelves.length} tablette${shelves.length!==1?'s':''} · ${prods.length} produit${prods.length!==1?'s':''}</span>
+      </summary>
+      <div class="tree-body">
+        <details class="struct-details">
+          <summary class="struct-toggle">⚙ Tablettes — ${label}</summary>
+          <div class="field" style="margin-top:8px">
+            <label class="label">Nombre de tablettes</label>
+            <input type="number" min="0" value="${shelves.length}"
+                   onchange="setFacadeShelfCount('${esc(aisle)}','${key}',this.value)"/>
+          </div>
+        </details>
+        ${shelves.length ? '' : '<div class="small" style="padding:8px 0;color:#94a3b8">Aucune tablette. Configurez ci-dessus.</div>'}
+        <div class="plan-shelf-grid">${shelvesHtml}</div>
+      </div>
+    </details>`;
+  }).join('');
+
+  return `<div style="margin-top:12px">
+    <div style="font-weight:700;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Façades (bouts d allée)</div>
+    ${parts}
+  </div>`;
+}
+
+function renderPresentoirSection(aisle, config) {
+  const presentoirs = config.presentoirs || [];
+  const presHtml = presentoirs.map((pres, pi) => {
+    const presId = `planPres-${aisle}-${pi}`;
+    const prods = allProductsCache.filter(p => String(p.aisle) === String(aisle) && p.side === pres.name);
+    const shelves = pres.shelves || []; const labels = pres.labels || [];
+    const shelvesHtml = (shelves).map((positions, shi) => {
+      const sl = (labels)[shi] || '';
+      const title = sl ? `📎 ${esc(sl)}` : `Tablette ${shi + 1}`;
+      const bg = sl ? 'background:#fffbf0;border-color:#fbbf24' : '';
+      const filled = allProductsCache.filter(p =>
+        String(p.aisle) === String(aisle) && p.side === pres.name && String(p.shelf) === String(shi + 1)
+      ).length;
+      return `<div class="plan-shelf-card" style="${bg}">
+        <div class="shelf-header">
+          <span class="shelf-title">${title}</span>
+          <span class="shelf-fill">${filled}/${positions} occ.</span>
+        </div>
+        <details class="struct-details">
+          <summary class="struct-toggle">⚙ ${sl || 'T'+(shi+1)} · Pos: ${positions}</summary>
+          <div class="field" style="margin-top:8px">
+            <label class="label">Nom</label>
+            <input type="text" value="${esc(sl)}" placeholder="Ex: Accroche..."
+                   oninput="setPresentoirShelfLabel('${esc(aisle)}',${pi},${shi},this.value)"/>
+          </div>
+          <div class="field">
+            <label class="label">Positions</label>
+            <input type="number" min="0" value="${positions}"
+                   onchange="setPresentoirShelfPositions('${esc(aisle)}',${pi},${shi},this.value)"/>
+          </div>
+        </details>
+        ${renderShelfProductList(aisle, pres.name, 1, shi + 1, positions)}
+      </div>`;
+    }).join('');
+
+    return `<details class="tree-node plan-pres" data-node-id="${presId}"${detailsOpenAttr(presId)}>
+      <summary>
+        <span>📦 ${esc(pres.name)}</span>
+        <span class="tree-meta">${shelves.length} tablette${shelves.length!==1?'s':''} · ${prods.length} produit${prods.length!==1?'s':''}</span>
+      </summary>
+      <div class="tree-body">
+        <div style="display:flex;gap:8px;align-items:center;margin:8px 0">
+          <label class="label" style="margin:0;white-space:nowrap">Nom:</label>
+          <input type="text" value="${esc(pres.name)}"
+                 style="flex:1;padding:5px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px"
+                 oninput="renamePresentoir('${esc(aisle)}',${pi},this.value)"/>
+          <button class="btn btn-outline btn-inline" style="color:#c8102e;border-color:#f1b8c2;font-size:12px;flex:none"
+                  onclick="removePresentoir('${esc(aisle)}',${pi})">✕ Supprimer</button>
+        </div>
+        <details class="struct-details">
+          <summary class="struct-toggle">⚙ Tablettes du présentoir</summary>
+          <div class="field" style="margin-top:8px">
+            <label class="label">Nombre de tablettes</label>
+            <input type="number" min="0" value="${shelves.length}"
+                   onchange="setPresentoirShelfCount('${esc(aisle)}',${pi},this.value)"/>
+          </div>
+        </details>
+        <div class="plan-shelf-grid">${shelvesHtml}</div>
+      </div>
+    </details>`;
+  }).join('');
+
+  return `<div style="margin-top:12px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <div style="font-weight:700;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">Présentoirs (couloir)</div>
+      <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addPresentoir('${esc(aisle)}')">📦 Ajouter présentoir</button>
+    </div>
+    ${presHtml || '<div class="small" style="color:#94a3b8;padding:4px 0">Aucun présentoir.</div>'}
+  </div>`;
+}
+
 // ── Plan editor ───────────────────────────────────────────────────────────────
 function renderShelfProductList(aisle, side, section, shelf, positions) {
   const products = allProductsCache.filter(p =>
@@ -2035,6 +2311,8 @@ function renderMapEditor() {
           </details>`;
         }).join('')}
         </div>
+        ${renderFacadesSection(layout.aisle, config)}
+        ${renderPresentoirSection(layout.aisle, config)}
         </div>
       </details>`;
       }).join('')
@@ -2166,9 +2444,14 @@ function addAccrocheToSection(aisle, side, sectionIndex) {
 
 function getShelfLabel(aisle, side, section, shelf) {
   const config = getAisleLayoutConfig(aisle);
-  const si = parseInt(section) - 1;
   const ti = parseInt(shelf) - 1;
-  return config?.sides?.[side]?.sections?.[si]?.labels?.[ti] || '';
+  if (side === 'Gauche' || side === 'Droite') {
+    return config?.sides?.[side]?.sections?.[parseInt(section)-1]?.labels?.[ti] || '';
+  }
+  if (side === 'Façade A') return config?.facade_a?.labels?.[ti] || '';
+  if (side === 'Façade B') return config?.facade_b?.labels?.[ti] || '';
+  const pres = (config?.presentoirs || []).find(p => p.name === side);
+  return pres?.labels?.[ti] || '';
 }
 
 function setShelfPositionCount(aisle, side, sectionIndex, shelfIndex, rawValue) {
@@ -2456,6 +2739,24 @@ async function gistRestoreNow() {
 // ── Rayon context ─────────────────────────────────────────────────────────────
 let rayonCtx = {aisle:'', side:'Gauche', section:'1', shelf:''};
 
+function updateRayonSideOptions() {
+  const aisle = (document.getElementById('rayonAisle')?.value || '').trim();
+  const select = document.getElementById('rayonSide');
+  if (!select) return;
+  const current = select.value;
+  const config = aisle ? getAisleLayoutConfig(aisle) : null;
+  let html = '<option value="Gauche">Côté A</option><option value="Droite">Côté B</option>';
+  // Façades (end caps)
+  if ((config?.facade_a?.shelves || []).length > 0) html += '<option value="Façade A">🔲 Façade A</option>';
+  if ((config?.facade_b?.shelves || []).length > 0) html += '<option value="Façade B">🔲 Façade B</option>';
+  // Présentoirs (freestanding displays)
+  (config?.presentoirs || []).forEach(p => {
+    html += `<option value="${esc(p.name)}">📦 ${esc(p.name || 'Présentoir')}</option>`;
+  });
+  select.innerHTML = html;
+  if ([...select.options].some(o => o.value === current)) select.value = current;
+}
+
 function updateRayonCtx() {
   rayonCtx.aisle   = (document.getElementById('rayonAisle')?.value   || '').trim();
   rayonCtx.side    =  document.getElementById('rayonSide')?.value    || 'Gauche';
@@ -2468,7 +2769,7 @@ function updateRayonCtx() {
     badge.style.color = '#c8102e';
     const shelfLabel = getShelfLabel(rayonCtx.aisle, rayonCtx.side, rayonCtx.section, rayonCtx.shelf);
     const labelSuffix = shelfLabel ? ` — <em style="color:#92400e">📎 ${esc(shelfLabel)}</em>` : '';
-    badge.innerHTML = `📍 <strong>Allée ${esc(rayonCtx.aisle)}</strong> — ${esc(rayonCtx.side)} — Section ${esc(rayonCtx.section)} — Tablette ${esc(rayonCtx.shelf)}${labelSuffix}`;
+    badge.innerHTML = `📍 <strong>Allée ${esc(rayonCtx.aisle)}</strong> — ${esc(rayonLabel().split(' — ').slice(1).join(' — '))}${labelSuffix}`;
     refreshRayonList();
   } else {
     badge.style.background = '#f8fafc';
@@ -2479,8 +2780,10 @@ function updateRayonCtx() {
 }
 
 function rayonLabel() {
-  if (!rayonCtx.aisle || !rayonCtx.shelf) return 'rayon non défini';
-  return `Allée ${rayonCtx.aisle} — ${rayonCtx.side} — Section ${rayonCtx.section} — Tablette ${rayonCtx.shelf}`;
+  if (!rayonCtx.aisle || !rayonCtx.shelf) return 'emplacement non défini';
+  const sideDisplay = rayonCtx.side === 'Gauche' ? 'Côté A' : rayonCtx.side === 'Droite' ? 'Côté B' : rayonCtx.side;
+  const sectionPart = (rayonCtx.side === 'Gauche' || rayonCtx.side === 'Droite') ? ` — Section ${rayonCtx.section}` : '';
+  return `Allée ${rayonCtx.aisle} — ${sideDisplay}${sectionPart} — Tablette ${rayonCtx.shelf}`;
 }
 
 function nextRayonPosition() {

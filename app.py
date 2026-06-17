@@ -2194,7 +2194,8 @@ def build_default_layout_config(max_section, max_shelf, max_position):
         "sides": {
             "Gauche": {"sections": json.loads(json.dumps(section_template))},
             "Droite": {"sections": json.loads(json.dumps(section_template))},
-        }
+        },
+        "presentoirs": [],
     }
 
 
@@ -2231,7 +2232,34 @@ def normalize_layout_config(config_value, max_section="1", max_shelf="5", max_po
             normalized_sections = default["sides"][side]["sections"]
         normalized_sides[side] = {"sections": normalized_sections}
 
-    return {"sides": normalized_sides}
+    # Normalize a simple fixture: {shelves: [...], labels: [...]}
+    def norm_fixture(fx):
+        if not isinstance(fx, dict):
+            return {"shelves": [], "labels": []}
+        raw_sh = fx.get("shelves", [])
+        if not isinstance(raw_sh, list): raw_sh = []
+        shelves = [clamp_non_negative_int(v) for v in raw_sh]
+        raw_lab = fx.get("labels", [])
+        if not isinstance(raw_lab, list): raw_lab = []
+        labels = [str(raw_lab[i]) if i < len(raw_lab) else "" for i in range(len(shelves))]
+        return {"shelves": shelves, "labels": labels}
+
+    # Façades (end caps of the aisle)
+    normalized_facade_a = norm_fixture(config.get("facade_a") if isinstance(config, dict) else None)
+    normalized_facade_b = norm_fixture(config.get("facade_b") if isinstance(config, dict) else None)
+
+    # Présentoirs (freestanding displays in corridor)
+    raw_pres = config.get("presentoirs", []) if isinstance(config, dict) else []
+    if not isinstance(raw_pres, list): raw_pres = []
+    normalized_pres = []
+    for p in raw_pres:
+        if not isinstance(p, dict):
+            continue
+        name = str(p.get("name", "Présentoir")).strip() or "Présentoir"
+        fx = norm_fixture(p)
+        normalized_pres.append({"name": name, "shelves": fx["shelves"], "labels": fx["labels"]})
+
+    return {"sides": normalized_sides, "facade_a": normalized_facade_a, "facade_b": normalized_facade_b, "presentoirs": normalized_pres}
 
 
 def layout_metrics(config):
@@ -2254,15 +2282,38 @@ def get_layout_row(db, aisle):
     ).fetchone()
 
 
+def _get_shelves_for_side(config, side):
+    """Return the shelves list for any side (Gauche/Droite, Façade A/B, or présentoir name).
+    For regular sides, shelves come from sections[section_index].shelves.
+    For façades/présentoirs, shelves are at the top level of the fixture.
+    Returns (shelves, is_sectioned) where is_sectioned=True means caller must use section_index."""
+    if side in ("Gauche", "Droite"):
+        return None, True  # caller handles sections
+    if side == "Façade A":
+        return (config.get("facade_a") or {}).get("shelves", []), False
+    if side == "Façade B":
+        return (config.get("facade_b") or {}).get("shelves", []), False
+    for pres in (config.get("presentoirs") or []):
+        if pres.get("name") == side:
+            return pres.get("shelves", []), False
+    return [], False
+
+
 def product_fits_layout(product, config):
     side = str(product["side"]).strip()
-    section_index = clamp_non_negative_int(product.get("section", "0")) - 1
     shelf_index = clamp_non_negative_int(product.get("shelf", "0")) - 1
     position_value = clamp_non_negative_int(product.get("position", "0"))
-    sections = ((config.get("sides", {}) or {}).get(side, {}) or {}).get("sections", [])
-    if section_index < 0 or section_index >= len(sections):
-        return False
-    shelves = sections[section_index].get("shelves", [])
+
+    shelves, is_sectioned = _get_shelves_for_side(config, side)
+
+    if is_sectioned:
+        # Regular Gauche/Droite side — use sections
+        section_index = clamp_non_negative_int(product.get("section", "0")) - 1
+        sections = ((config.get("sides", {}) or {}).get(side, {}) or {}).get("sections", [])
+        if section_index < 0 or section_index >= len(sections):
+            return False
+        shelves = sections[section_index].get("shelves", [])
+
     if shelf_index < 0 or shelf_index >= len(shelves):
         return False
     return 1 <= position_value <= clamp_non_negative_int(shelves[shelf_index])
