@@ -437,7 +437,7 @@ function esc(value) {
 }
 
 function sideDisplayLabel(side) {
-  return side === 'Gauche' ? 'Côté A' : side === 'Droite' ? 'Côté B' : String(side || '');
+  return String(side || '');
 }
 
 function isHomeBrand(brand) {
@@ -1241,15 +1241,23 @@ function refreshPlanUi() {
 }
 
 function captureOpenPlanNodesFromDom() {
-  openPlanNodes = new Set(
-    Array.from(document.querySelectorAll('#mapContent details[data-node-id][open]'))
-      .map(node => node.dataset.nodeId)
-      .filter(Boolean)
-  );
+  const next = new Set();
+  document.querySelectorAll('#mapContent details[data-node-id]').forEach(node => {
+    const id = node.dataset.nodeId;
+    if (!id) return;
+    if (node.open) {
+      next.add(id);
+    } else if (id.startsWith('planAisle-')) {
+      next.add('--closed--' + id); // track explicitly closed aisles
+    }
+  });
+  openPlanNodes = next;
 }
 
 function detailsOpenAttr(nodeId) {
-  return openPlanNodes.has(nodeId) ? ' open' : '';
+  if (openPlanNodes.has('--closed--' + nodeId)) return '';          // explicitly closed
+  if (openPlanNodes.has(nodeId)) return ' open';                    // explicitly open
+  return nodeId.startsWith('planAisle-') ? ' open' : '';            // default: aisles open
 }
 
 function selectNumericField(input) {
@@ -1281,7 +1289,7 @@ function startScanFromSection(aisle, side, sectionIndex) {
 function productCard(p, showDelete=true, showAiButton=true) {
   const locationParts = [
     `Allée ${esc(p.aisle)}`,
-    esc(sideDisplayLabel(p.side)),
+    esc(p.side || ''),
     `Section ${esc(p.section || '1')}`,
     `Tablette ${esc(p.shelf)}`,
     `Pos. ${esc(p.position)}`
@@ -1419,11 +1427,12 @@ function groupAndRenderSearchResults(products) {
 
 function productCardMultiLocation(entries) {
   const primary = entries[0];
-  const locBadges = entries.map(p =>
-    `<span style="display:inline-block;background:#fff0f0;color:#c8102e;border-radius:12px;padding:2px 8px;font-size:11px;font-weight:600;margin:2px">
-      A${esc(p.aisle)} ${esc(sideDisplayLabel(p.side)[0])} S${esc(p.section||'1')} T${esc(p.shelf)} P${esc(p.position)}
-    </span>`
-  ).join('');
+  const locBadges = entries.map(p => {
+    const sd = p.side === 'Gauche' ? 'G' : p.side === 'Droite' ? 'D' : esc(p.side || '');
+    return `<span style="display:inline-block;background:#fff0f0;color:#c8102e;border-radius:12px;padding:3px 9px;font-size:11px;font-weight:600;margin:2px">
+      Allée ${esc(p.aisle)} · ${sd} · S${esc(p.section||'1')} · T${esc(p.shelf)} · P${esc(p.position)}
+    </span>`;
+  }).join('');
   return `<div class="card">
     ${entries.some(p => isHomeBrand(p.brand)) ? `<div class="home-badge">★ Marque maison Familiprix</div>` : ''}
     <div class="product-layout">
@@ -1631,7 +1640,7 @@ async function lookupScanFromInput(force=false, barcodeOverride='') {
     currentScanProduct = allMatches[0];
     const nextPos = nextRayonPosition();
     const otherLocs = allMatches.map(p =>
-      `<div class="barcode-text">→ Allée ${esc(p.aisle)} — ${esc(sideDisplayLabel(p.side))} — S${esc(p.section||'1')} — T${esc(p.shelf)} — Pos.${esc(p.position)}</div>`
+      `<div class="barcode-text">→ Allée ${esc(p.aisle)} — ${esc(p.side)} — Section ${esc(p.section||'1')} — Tablette ${esc(p.shelf)} — Pos. ${esc(p.position)}</div>`
     ).join('');
     div.innerHTML = `<div class="card">
       <div class="pill">Produit trouvé — autre emplacement</div>
