@@ -1,4 +1,6 @@
 import os
+import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, render_template, request, jsonify, send_from_directory, Response
 from database import (
@@ -64,6 +66,64 @@ OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 GITHUB_GIST_ID = os.environ.get("GITHUB_GIST_ID", "").strip()
 _GIST_FILENAME = "familiprix-backup.json"
+
+# ── AI cost controls ───────────────────────────────────────────────────────────
+# Pricing per million tokens (verify at ai.google.dev — rates change)
+_GEMINI_INPUT_COST_PER_M  = 0.075   # USD per 1M input tokens
+_GEMINI_OUTPUT_COST_PER_M = 0.30    # USD per 1M output tokens
+_OPENAI_INPUT_COST_PER_M  = 0.15    # gpt-4o-mini input USD/1M
+_OPENAI_OUTPUT_COST_PER_M = 0.60    # gpt-4o-mini output USD/1M
+
+# Rate limiting: max AI calls per IP per window
+_AI_RATE_LIMIT  = int(os.environ.get("AI_RATE_LIMIT",  "30"))    # calls
+_AI_RATE_WINDOW = int(os.environ.get("AI_RATE_WINDOW", "3600"))  # seconds (1h)
+_ai_rate_buckets: dict = defaultdict(list)   # ip -> [timestamps]
+
+# Simple-answer bypass: questions that never need an LLM call
+_SIMPLE_ANSWERS = {
+    "heure":      "Pour les heures d ouverture, consultez votre succursale Familiprix locale ou familiprix.com.",
+    "ouvert":     "Pour les heures d ouverture, consultez votre succursale Familiprix locale ou familiprix.com.",
+    "ferm":       "Pour les heures d ouverture, consultez votre succursale Familiprix locale ou familiprix.com.",
+    "livraison":  "La livraison varie selon les succursales. Contactez directement votre pharmacie Familiprix.",
+    "telephone":  "Le numero de telephone est affiche a l entree du magasin ou sur familiprix.com.",
+    "adresse":    "L adresse se trouve sur familiprix.com dans le localisateur de pharmacies.",
+    "retour":     "La politique de retour varie. Adressez-vous au comptoir de votre succursale.",
+    "stationnement": "Renseignez-vous directement aupres de votre succursale pour le stationnement.",
+    "pharmacien": "Pour parler a un pharmacien, presentez-vous au comptoir de la pharmacie.",
+}
+
+
+def _check_ai_rate_limit() -> bool:
+    """Returns True if the request is within limits, False if it should be rejected."""
+    ip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "unknown").split(",")[0].strip()
+    now = time.time()
+    cutoff = now - _AI_RATE_WINDOW
+    bucket = _ai_rate_buckets[ip]
+    # Remove timestamps outside the window
+    _ai_rate_buckets[ip] = [t for t in bucket if t > cutoff]
+    if len(_ai_rate_buckets[ip]) >= _AI_RATE_LIMIT:
+        return False
+    _ai_rate_buckets[ip].append(now)
+    return True
+
+
+def _try_simple_answer(question: str):
+    """Return a canned answer for common non-product questions, or None."""
+    q = question.lower()
+    for keyword, answer in _SIMPLE_ANSWERS.items():
+        if keyword in q:
+            return answer
+    return None
+
+
+def _log_ai_usage(provider: str, input_tokens: int, output_tokens: int, question_preview: str = "") -> None:
+    if provider == "gemini":
+        cost = (input_tokens * _GEMINI_INPUT_COST_PER_M + output_tokens * _GEMINI_OUTPUT_COST_PER_M) / 1_000_000
+    else:
+        cost = (input_tokens * _OPENAI_INPUT_COST_PER_M + output_tokens * _OPENAI_OUTPUT_COST_PER_M) / 1_000_000
+    preview = question_preview[:60].replace("\n", " ")
+    print(f"[AI-COST] provider={provider} model={GEMINI_MODEL if provider=='gemini' else OPENAI_MODEL} "
+          f"in={input_tokens} out={output_tokens} cost=${cost:.6f} q=\"{preview}\"")
 
 # ── Pages ──────────────────────────────────────────────────────────────────
 
@@ -892,16 +952,33 @@ def client_help():
     question = str(data.get("question", "")).strip()
     if not question:
         return jsonify({"success": False, "error": "Question client requise."}), 400
+
+    # Change 5: answer trivial questions without touching the LLM
+    simple = _try_simple_answer(question)
+    if simple:
+        return jsonify({"success": True, "advice": {
+            "summary": simple,
+            "recommended_product_names": [],
+            "follow_up_questions": [],
+            "safety_flags": [],
+            "pharmacist_referral": False,
+            "pharmacist_reason": "",
+        }})
+
     if not configured_ai_provider()["name"]:
         return jsonify({"success": False, "error": "GEMINI_API_KEY n est pas configure sur le serveur."}), 503
 
+    # Change 3: rate limiting — 30 AI calls per IP per hour by default
+    if not _check_ai_rate_limit():
+        return jsonify({"success": False, "error": "Trop de requetes IA. Reessayez dans une heure."}), 429
+
     raw_products = data.get("products")
     if isinstance(raw_products, list):
-        matched_products = [product_context_for_client_help(item) for item in raw_products[:20] if isinstance(item, dict)]
+        matched_products = [product_context_for_client_help(item) for item in raw_products[:15] if isinstance(item, dict)]
     else:
         db = get_db()
         products = [row_to_product(p) for p in db.execute("SELECT * FROM products").fetchall()]
-        matched_products = [product_context_for_client_help(item) for item in rank_products_for_query(products, question, limit=20)]
+        matched_products = [product_context_for_client_help(item) for item in rank_products_for_query(products, question, limit=15)]
 
     advice = generate_client_help_payload(question, matched_products)
     if not advice:
@@ -1677,21 +1754,13 @@ def generate_product_assist_payload(name, brand, description, barcode):
 
 
 def product_context_for_client_help(product):
+    # Change 2: only send what the AI actually needs — drops barcode, search_terms,
+    # alternative_suggestions, section, position (saves ~80 tokens per product × 15 products)
     return {
-        "name": str(product.get("name", "")).strip(),
-        "brand": str(product.get("brand", "")).strip(),
-        "description": str(product.get("description", "")).strip(),
-        "usage_notes": str(product.get("usage_notes", "")).strip(),
-        "search_terms": str(product.get("search_terms", "")).strip(),
-        "alternative_suggestions": str(product.get("alternative_suggestions", "")).strip(),
-        "barcode": str(product.get("barcode", "")).strip(),
-        "location": (
-            f"Allee {str(product.get('aisle', '')).strip()} - "
-            f"{str(product.get('side', '')).strip()} - "
-            f"Section {str(product.get('section', '')).strip()} - "
-            f"Tablette {str(product.get('shelf', '')).strip()} - "
-            f"Position {str(product.get('position', '')).strip()}"
-        ).strip(),
+        "name":     str(product.get("name", "")).strip(),
+        "brand":    str(product.get("brand", "")).strip(),
+        "notes":    str(product.get("usage_notes", "") or product.get("description", "")).strip(),
+        "location": f"Allee {str(product.get('aisle','')).strip()} {str(product.get('side','')).strip()} T{str(product.get('shelf','')).strip()}",
     }
 
 
@@ -1732,6 +1801,7 @@ def generate_client_help_payload_gemini(question, products):
         "generationConfig": {
             "temperature": 0.2,
             "responseMimeType": "application/json",
+            "maxOutputTokens": 600,   # Change 1: cap output to prevent runaway costs
         },
     }
     request_obj = Request(
@@ -1745,6 +1815,9 @@ def generate_client_help_payload_gemini(question, products):
             raw_response = json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
         return None
+    # Change 4: log token usage and estimated cost
+    usage = raw_response.get("usageMetadata", {})
+    _log_ai_usage("gemini", usage.get("promptTokenCount", 0), usage.get("candidatesTokenCount", 0), question)
     raw_text = extract_gemini_output_text(raw_response)
     if not raw_text:
         return None
@@ -1829,6 +1902,8 @@ def generate_client_help_payload_openai(question, products):
             raw_response = json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
         return None
+    usage = raw_response.get("usage", {})
+    _log_ai_usage("openai", usage.get("input_tokens", 0), usage.get("output_tokens", 0), question)
     raw_text = extract_openai_output_text(raw_response)
     if not raw_text:
         return None
@@ -1864,6 +1939,7 @@ def generate_product_assist_payload_gemini(name, brand, description, barcode):
         "generationConfig": {
             "temperature": 0.2,
             "responseMimeType": "application/json",
+            "maxOutputTokens": 400,   # product assist output is small; cap firmly
         },
     }
     request_obj = Request(
@@ -1878,6 +1954,8 @@ def generate_product_assist_payload_gemini(name, brand, description, barcode):
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
         return None
 
+    usage = raw_response.get("usageMetadata", {})
+    _log_ai_usage("gemini", usage.get("promptTokenCount", 0), usage.get("candidatesTokenCount", 0), name)
     raw_text = extract_gemini_output_text(raw_response)
     if not raw_text:
         return None
@@ -1946,6 +2024,8 @@ def generate_product_assist_payload_openai(name, brand, description, barcode):
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
         return None
 
+    usage = raw_response.get("usage", {})
+    _log_ai_usage("openai", usage.get("input_tokens", 0), usage.get("output_tokens", 0), name)
     raw_text = extract_openai_output_text(raw_response)
     if not raw_text:
         return None
