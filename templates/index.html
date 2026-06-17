@@ -21,10 +21,10 @@
 </div>
 
 <div class="tabs">
-  <button class="tab active" id="tabBtn-scan" onclick="switchTab('scan')">Scan 🔒</button>
-  <button class="tab" id="tabBtn-add" onclick="switchTab('add')">Plan 🔒</button>
   <button class="tab" onclick="switchTab('search')">Recherche</button>
   <button class="tab" onclick="switchTab('client')">Client</button>
+  <button class="tab active" id="tabBtn-scan" onclick="switchTab('scan')">Scan 🔒</button>
+  <button class="tab" id="tabBtn-add" onclick="switchTab('add')">Plan 🔒</button>
   <button id="lockButton" onclick="lockApp()" title="Verrouiller la session" style="display:none;flex:none;width:36px;padding:0;border:none;background:none;font-size:17px;cursor:pointer;color:#6b7280;touch-action:manipulation">🔓</button>
 </div>
 
@@ -2762,7 +2762,7 @@ async function switchTab(tab) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.getElementById(tab).classList.add('active');
-  const tabs = ['scan','add','search','client'];
+  const tabs = ['search','client','scan','add'];
   document.querySelectorAll('.tab')[tabs.indexOf(tab)].classList.add('active');
   localStorage.setItem(STORAGE_KEYS.activeTab, tab);
   if (tab === 'add') loadMapEditor();
