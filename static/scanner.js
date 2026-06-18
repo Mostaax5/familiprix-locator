@@ -760,18 +760,21 @@ async function startQuaggaScanner(reader, status, button) {
       target: reader,
       constraints: {
         facingMode: 'environment',
-        width: {min: 640, ideal: 1280},
-        height: {min: 480, ideal: 720},
+        width:  {min: 640, ideal: 1920},
+        height: {min: 480, ideal: 1080},
         advanced: [{focusMode: 'continuous'}]
       },
-      area: {top: '15%', right: '2%', left: '2%', bottom: '15%'}
+      // Tight centre strip — ignores background shelf labels
+      area: {top: '30%', right: '10%', left: '10%', bottom: '30%'}
     },
-    locator: {patchSize: 'medium', halfSample: true},
+    // halfSample: false (default) — full resolution prevents phantom barcode artifacts
+    locator: {patchSize: 'medium', halfSample: false},
     numOfWorkers: 2,
-    frequency: 25,
+    frequency: 10,   // 10 fps is plenty; 25 fps + halfSample was causing false positives
     locate: true,
     decoder: {
-      readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader', 'code_128_reader', 'code_39_reader', 'i2of5_reader'],
+      // Only EAN/UPC — they all have checksums. Code39 and ITF removed (no checksum → false fires)
+      readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader', 'code_128_reader'],
       multiple: false
     }
   };
@@ -968,17 +971,13 @@ function confirmStableCameraBarcode(barcode) {
   if (!looksLikeBarcode(normalized)) return false;
   const now = Date.now();
 
+  // Reject if this exact code was just accepted (debounce repeated fires)
   if (normalized === lastAcceptedCameraBarcode && now - lastAcceptedCameraAt < 1500) {
     return false;
   }
 
-  if (looksLikeCompleteRetailBarcode(normalized)) {
-    lastAcceptedCameraBarcode = normalized;
-    lastAcceptedCameraAt = now;
-    resetCameraCandidate();
-    return true;
-  }
-
+  // Require the same code twice in a row for ALL formats — eliminates
+  // single-frame phantom reads caused by image processing artifacts
   if (normalized === cameraCandidateBarcode) {
     cameraCandidateCount += 1;
   } else {
@@ -987,10 +986,11 @@ function confirmStableCameraBarcode(barcode) {
   }
 
   window.clearTimeout(cameraCandidateTimer);
-  cameraCandidateTimer = window.setTimeout(resetCameraCandidate, 250);
+  // Reset candidate if no matching frame arrives within 400 ms
+  cameraCandidateTimer = window.setTimeout(resetCameraCandidate, 400);
 
   if (cameraCandidateCount < 2) {
-    getCameraDom().status.textContent = 'Verif rapide...';
+    getCameraDom().status.textContent = 'Cadrez les barres et les chiffres';
     return false;
   }
 
