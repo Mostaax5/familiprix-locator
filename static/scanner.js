@@ -27,6 +27,7 @@ let zxingActive = false;
 let zxingFrame = null;
 let zxingLibraryPromise = null;
 let zoomDebounceTimer = null;
+let lastOcrCandidate = '';
 
 // ── Camera DOM helpers ────────────────────────────────────────────────────────
 function getCameraDom() {
@@ -660,7 +661,7 @@ function validateRetailBarcode(code) {
   if (/^\d{8}$/.test(digits)) return checkEanChecksum(digits, 8);
   if (/^\d{12}$/.test(digits)) return checkEanChecksum(digits, 12);
   if (/^\d{13}$/.test(digits)) return checkEanChecksum(digits, 13);
-  if (/^\d{14}$/.test(digits)) return true;
+  if (/^\d{14}$/.test(digits)) return checkEanChecksum(digits, 14);
   return false;
 }
 
@@ -738,10 +739,19 @@ async function maybeRunOcrFallback(reader, status) {
     status.textContent = 'Lecture des chiffres...';
     const candidate = await recognizeBarcodeDigitsFromVideo(reader);
     if (candidate) {
-      await onDecodedCode(candidate);
-      return;
+      if (candidate === lastOcrCandidate) {
+        // Same code found on two consecutive OCR attempts — accept it
+        lastOcrCandidate = '';
+        await onDecodedCode(candidate);
+        return;
+      }
+      // First time seeing this candidate — hold and wait for confirmation
+      lastOcrCandidate = candidate;
+    } else {
+      lastOcrCandidate = '';
     }
   } catch (error) {
+    lastOcrCandidate = '';
   } finally {
     ocrBusy = false;
   }
@@ -774,7 +784,7 @@ async function startQuaggaScanner(reader, status, button) {
     locate: true,
     decoder: {
       // Only EAN/UPC — they all have checksums. Code39 and ITF removed (no checksum → false fires)
-      readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader', 'code_128_reader'],
+      readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader'],
       multiple: false
     }
   };
@@ -825,6 +835,7 @@ async function startQuaggaScanner(reader, status, button) {
 async function stopCamera() {
   const {status, button, video, reader} = getCameraDom();
   scanPaused = false;
+  lastOcrCandidate = '';
   window.clearTimeout(scanFrameTimer);
   scanFrameTimer = null;
   window.clearInterval(quaggaOcrTimer);
@@ -945,6 +956,7 @@ function onDecodedCode(decodedText) {
   const rawValue = String(decodedText || '').trim();
   if (!rawValue || scanPaused) return;
   if (!confirmStableCameraBarcode(rawValue)) return;
+  lastOcrCandidate = '';
   scanPaused = true;
   playBeep();
   vibratePhone();
