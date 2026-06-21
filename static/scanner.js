@@ -1101,8 +1101,10 @@ async function maybeRunOcrFallback(reader, status) {
   try {
     const video = getQuaggaVideoElement(reader);
     if (!video || !video.videoWidth) return;
-    // Wider crop so the printed digit row below the bars is always included.
-    const canvas = _ocrCrop(video, 0.12, 0.28, 0.76, 0.52, 3.0);
+    // Tall+wide crop covering the whole scan area. Per-line parsing isolates the
+    // 13-digit barcode row; prices/words/short numbers fail validation and are
+    // ignored. y 0.10-0.85 guarantees the digit row is captured wherever framed.
+    const canvas = _ocrCrop(video, 0.06, 0.10, 0.88, 0.75, 3.0);
     if (!canvas) return;
     const result = await window.Tesseract.recognize(canvas, 'eng', {
       logger: () => {},
@@ -1263,12 +1265,13 @@ async function startZXingParallel(reader) {
     if (scanPaused || !quaggaActive) return;
     const video = reader.querySelector('video');
     if (!video || !video.videoWidth) return;
-    // Full-resolution center crop (80% w × 50% h) — keeps small bars sharp.
+    // Near-FULL frame at full resolution so the whole barcode is always included
+    // (the earlier tight crop cut off the top of barcodes in the upper frame).
     const vw = video.videoWidth, vh = video.videoHeight;
-    const sx = Math.floor(vw * 0.10), sy = Math.floor(vh * 0.25);
-    const sw = Math.floor(vw * 0.80), sh = Math.floor(vh * 0.50);
+    const sx = Math.floor(vw * 0.02), sy = Math.floor(vh * 0.05);
+    const sw = Math.floor(vw * 0.96), sh = Math.floor(vh * 0.90);
     cv.width = sw; cv.height = sh;
-    cx.filter = 'grayscale(1) contrast(1.5)';
+    cx.filter = 'grayscale(1)';   // minimal processing — let ZXing do its thing
     cx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
     try {
       const r = zxReader.decodeFromCanvas(cv);
@@ -1278,8 +1281,15 @@ async function startZXingParallel(reader) {
         _renderDbg();
         if (validateRetailBarcode(txt)) onDecodedCode(txt, true);
       }
-    } catch (_) { /* no code this frame */ }
-  }, 180);
+    } catch (e) {
+      // Show WHY ZXing fails: NotFoundException = no barcode located (normal),
+      // anything else = a real problem worth knowing about.
+      const name = (e && e.name) ? e.name : 'err';
+      if (name !== 'NotFoundException' && name !== 'NotFoundException2') {
+        _dbg.zRead = '(' + name + ')'; _renderDbg();
+      }
+    }
+  }, 200);
 }
 
 // ── Stop camera ───────────────────────────────────────────────────────────────
