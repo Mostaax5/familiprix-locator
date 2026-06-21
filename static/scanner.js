@@ -168,7 +168,8 @@ async function startNativeScan(video, status, button, reader) {
         const barcodes = await detector.detect(video);
         for (const bc of barcodes) {
           if (validateRetailBarcode(bc.rawValue)) {
-            await onDecodedCode(bc.rawValue);
+            // Native hardware decode — trustworthy, accept on first read (instant)
+            await onDecodedCode(bc.rawValue, true);
           }
         }
       } catch (_) {}
@@ -1056,6 +1057,17 @@ async function maybeRunOcrFallback(reader, status) {
   }
 }
 
+// Average per-bar decode error from a Quagga result (0 = perfect, 1 = garbage).
+// This is Quagga's own confidence metric — the professional way to reject false
+// reads instantly without needing OCR cross-checks or multiple frames.
+function quaggaDecodeError(result) {
+  const codes = result && result.codeResult && result.codeResult.decodedCodes;
+  if (!Array.isArray(codes)) return 1;
+  const errs = codes.filter(c => c && typeof c.error === 'number').map(c => c.error);
+  if (!errs.length) return 1;
+  return errs.reduce((a, b) => a + b, 0) / errs.length;
+}
+
 // ── Quagga scanner ────────────────────────────────────────────────────────────
 async function startQuaggaScanner(reader, status, button) {
   reader.style.height = '100%';
@@ -1101,7 +1113,11 @@ async function startQuaggaScanner(reader, status, button) {
   quaggaDetectedHandler = result => {
     const code = String(result?.codeResult?.code || '').trim();
     if (!code || !validateRetailBarcode(code)) return;
-    onDecodedCode(code);
+    // Quagga reports a per-bar decode error. A clean read of a real barcode has
+    // near-zero error; halfSample artifacts and partial misreads have high error.
+    const err = quaggaDecodeError(result);
+    if (err > 0.18) return;            // too noisy — reject outright (no random reads)
+    onDecodedCode(code, err < 0.08);   // very clean → accept instantly; marginal → 2-frame
   };
   quaggaProcessedHandler = () => {
     if (!scanPaused) status.textContent = 'Cadrez les barres et les chiffres';
@@ -1249,10 +1265,10 @@ function flashScannerSuccess() {
 }
 
 // ── Decode callback ───────────────────────────────────────────────────────────
-function onDecodedCode(decodedText) {
+function onDecodedCode(decodedText, instant=false) {
   const rawValue = String(decodedText || '').trim();
   if (!rawValue || scanPaused) return;
-  if (!confirmStableCameraBarcode(rawValue)) return;
+  if (!confirmStableCameraBarcode(rawValue, instant)) return;
   lastOcrCandidate = '';
   scanPaused = true;
   playBeep();
@@ -1275,7 +1291,7 @@ function onDecodedCode(decodedText) {
   }, 1200);
 }
 
-function confirmStableCameraBarcode(barcode) {
+function confirmStableCameraBarcode(barcode, instant=false) {
   const normalized = barcode.trim();
   if (!looksLikeBarcode(normalized)) return false;
   const now = Date.now();
@@ -1285,10 +1301,19 @@ function confirmStableCameraBarcode(barcode) {
     return false;
   }
 
-  // Require the SAME code on 2 consecutive Quagga decodes — for ALL formats.
-  // This is the only reliable guard against halfSample pixel artifacts: a real
-  // barcode decodes to the same digits frame after frame, while an artifact false
-  // read differs every frame and never repeats. At 20fps this confirms in ~100ms.
+  // Instant accept for high-confidence reads:
+  //  - native hardware BarcodeDetector (never hallucinates), or
+  //  - Quagga reads with very low decode error (< 0.08)
+  // These are trustworthy on the first frame → truly instantaneous.
+  if (instant) {
+    lastAcceptedCameraBarcode = normalized;
+    lastAcceptedCameraAt = now;
+    resetCameraCandidate();
+    return true;
+  }
+
+  // Marginal reads: require the SAME code on 2 consecutive frames.
+  // A real barcode is stable frame-to-frame; an artifact differs every frame.
   if (normalized === cameraCandidateBarcode) {
     cameraCandidateCount += 1;
   } else {
