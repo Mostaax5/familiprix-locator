@@ -818,7 +818,7 @@ async function startQuaggaScanner(reader, status, button) {
     // halfSample: false — full resolution prevents phantom barcode artifacts
     locator: {patchSize: 'medium', halfSample: false},
     numOfWorkers: 2,
-    frequency: 10,
+    frequency: 15,   // 15 fps — fast enough for instant reads without overloading workers
     locate: true,
     decoder: {
       // Only EAN/UPC — all have checksums; Code39/ITF removed (no checksum → false fires)
@@ -840,10 +840,6 @@ async function startQuaggaScanner(reader, status, button) {
     }
   }
 
-  // Multi-scale: every 3rd processed frame also try patchSize:'large' via decodeSingle
-  // to catch close-up/zoomed barcodes that fill more of the frame.
-  let _largeScanCounter = 0;
-
   quaggaDetectedHandler = result => {
     const code = String(result?.codeResult?.code || '').trim();
     if (!code || !validateRetailBarcode(code)) return;
@@ -851,28 +847,6 @@ async function startQuaggaScanner(reader, status, button) {
   };
   quaggaProcessedHandler = () => {
     if (!scanPaused) status.textContent = 'Cadrez les barres et les chiffres';
-    _largeScanCounter++;
-    if (_largeScanCounter < 3) return;
-    _largeScanCounter = 0;
-    // Secondary decode with large patches for zoomed-in barcodes
-    const vid = reader.querySelector('video');
-    if (!vid || !vid.videoWidth || scanPaused) return;
-    const tmpCanvas = document.createElement('canvas');
-    tmpCanvas.width  = vid.videoWidth;
-    tmpCanvas.height = vid.videoHeight;
-    tmpCanvas.getContext('2d').drawImage(vid, 0, 0);
-    window.Quagga.decodeSingle({
-      src: tmpCanvas.toDataURL('image/jpeg', 0.9),
-      numOfWorkers: 0,
-      locate: true,
-      inputStream: {size: Math.min(tmpCanvas.width, 1280)},
-      locator: {patchSize: 'large', halfSample: false},
-      decoder: {readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader'], multiple: false}
-    }, result => {
-      if (!result || !result.codeResult) return;
-      const code = String(result.codeResult.code || '').trim();
-      if (code && validateRetailBarcode(code)) onDecodedCode(code);
-    });
   };
 
   window.Quagga.onDetected(quaggaDetectedHandler);
@@ -1047,28 +1021,32 @@ function confirmStableCameraBarcode(barcode) {
   if (!looksLikeBarcode(normalized)) return false;
   const now = Date.now();
 
-  // Reject if this exact code was just accepted (debounce repeated fires)
+  // Debounce: don't re-accept the same code within 1500 ms
   if (normalized === lastAcceptedCameraBarcode && now - lastAcceptedCameraAt < 1500) {
     return false;
   }
 
-  // Require the same code twice in a row for ALL formats — eliminates
-  // single-frame phantom reads caused by image processing artifacts
+  // EAN-8/12/13 and UPC codes all carry a checksum that validateRetailBarcode
+  // already verified. A single clean read from halfSample:false full-res video
+  // is reliable — accept immediately for maximum speed.
+  if (looksLikeCompleteRetailBarcode(normalized)) {
+    lastAcceptedCameraBarcode = normalized;
+    lastAcceptedCameraAt = now;
+    resetCameraCandidate();
+    return true;
+  }
+
+  // Partial / non-checksummed reads still require two consecutive frames
   if (normalized === cameraCandidateBarcode) {
     cameraCandidateCount += 1;
   } else {
     cameraCandidateBarcode = normalized;
     cameraCandidateCount = 1;
   }
-
   window.clearTimeout(cameraCandidateTimer);
-  // Reset candidate if no matching frame arrives within 400 ms
-  cameraCandidateTimer = window.setTimeout(resetCameraCandidate, 400);
+  cameraCandidateTimer = window.setTimeout(resetCameraCandidate, 500);
 
-  if (cameraCandidateCount < 2) {
-    getCameraDom().status.textContent = 'Cadrez les barres et les chiffres';
-    return false;
-  }
+  if (cameraCandidateCount < 2) return false;
 
   lastAcceptedCameraBarcode = normalized;
   lastAcceptedCameraAt = now;
