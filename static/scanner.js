@@ -103,32 +103,14 @@ async function startCamera() {
     }
   }
 
-  // ZXing: accurate, no halfSample artifacts, industry-standard (used by Google/Android)
-  // Preferred over Quagga for iPhone/Firefox — scans line-by-line, no downsampling
+  // Smart localise-then-read scanner for iPhone/Firefox:
+  //   1. Gradient detector finds where the barcode is in frame
+  //   2. Cropped region → ZXing bar-pattern decode
+  //   3. Digit strip below barcode → OCR (the numbers printed under every UPC)
   try {
-    const zxingLoaded = await ensureZXingLoaded();
-    if (zxingLoaded && window.ZXing) {
-      video.style.display = 'block';
-      if (reader) { reader.style.display = 'none'; reader.innerHTML = ''; }
-      await startZXingLiveScan(video, status, button);
-      return;
-    }
-  } catch (err) {
-    // fall through to Quagga
-  }
-
-  // Quagga: last resort (halfSample artifacts possible but kept as ultimate fallback)
-  try {
-    await ensureQuaggaLoaded();
-    if (!('Quagga' in window)) {
-      status.textContent = 'Scanner non supporte';
-      showCameraHint('Le moteur de scan Quagga n est pas charge. Verifiez la connexion internet ou entrez le code manuellement.');
-      return;
-    }
-    video.style.display = 'none';
-    reader.style.display = 'block';
-    reader.innerHTML = '';
-    await startQuaggaScanner(reader, status, button);
+    video.style.display = 'block';
+    if (reader) { reader.style.display = 'none'; reader.innerHTML = ''; }
+    await startSmartScan(video, status, button);
   } catch (error) {
     status.textContent = 'Camera bloquee';
     showCameraHint(error.message || 'Impossible d ouvrir la camera. Sur telephone, utilisez une adresse HTTPS.');
@@ -318,6 +300,156 @@ async function ensureZXingLoaded() {
     return false;
   })();
   return zxingLibraryPromise;
+}
+
+// ── Smart two-stage scanner: localise barcode → read region + digit OCR ───────
+// Stage 1: findBarcodeRegion() locates the high-gradient bar area in the frame.
+// Stage 2a: ZXing decodes the bar pattern from that cropped region only.
+// Stage 2b: OCR reads the human-readable digits printed directly below the bars.
+// Both paths go through validateRetailBarcode (EAN checksum guard).
+let _smartBarcodeRegion = null;  // last located region, shared with OCR loop
+
+async function startSmartScan(video, status, button) {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: 'environment',
+      width:  {min: 640, ideal: 1280},
+      height: {min: 480, ideal: 720},
+      advanced: [{focusMode: 'continuous'}]
+    }
+  });
+  scannerStream = stream;
+  cameraTrack = stream.getVideoTracks()[0];
+  video.srcObject = stream;
+  await video.play().catch(() => {});
+  showCameraExtras();
+
+  button.textContent = '■ Arreter camera';
+  button.style.background = '#c8102e'; button.style.color = 'white'; button.style.borderColor = '#c8102e';
+  if (cameraUsageMode === 'scan') {
+    const pb = document.getElementById('pauseScanButton');
+    if (pb) { pb.style.display = ''; pb.textContent = '⏸ Pause'; pb.style.background = ''; pb.style.color = ''; pb.style.borderColor = ''; }
+  }
+  status.textContent = 'Cadrez le code-barres';
+  zxingActive = true;
+  quaggaStartedAt = Date.now();
+  updateDeviceSupport();
+
+  // Load ZXing for bar-pattern decoding
+  const zxingLoaded = await ensureZXingLoaded().catch(() => false);
+  let zxingReader = null;
+  if (zxingLoaded && window.ZXing) {
+    const hints = new Map();
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+      ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
+      ZXing.BarcodeFormat.UPC_A,  ZXing.BarcodeFormat.UPC_E,
+    ]);
+    hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+    zxingReader = new ZXing.BrowserMultiFormatReader(hints);
+  }
+
+  const workCanvas = document.createElement('canvas');
+  const workCtx   = workCanvas.getContext('2d', {willReadFrequently: true});
+  const INTERVAL = 120;  // ~8 fps for localise+decode; OCR runs separately
+  let lastScan = 0;
+
+  const loop = (ts) => {
+    if (!zxingActive) return;
+    zxingFrame = requestAnimationFrame(loop);
+    if (scanPaused || video.readyState < 2 || !video.videoWidth) return;
+    if (ts - lastScan < INTERVAL) return;
+    lastScan = ts;
+
+    // Reduce frame to max 640px wide for fast gradient analysis
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const sc = Math.min(1, 640 / vw);
+    const sw = Math.max(1, Math.floor(vw * sc)), sh = Math.max(1, Math.floor(vh * sc));
+    workCanvas.width = sw; workCanvas.height = sh;
+    workCtx.filter = 'none';
+    workCtx.drawImage(video, 0, 0, sw, sh);
+
+    // Stage 1: find the barcode region (gradient-based)
+    const region = findBarcodeRegion(workCanvas);
+    _smartBarcodeRegion = region;  // share with OCR loop
+
+    if (!region) return;
+
+    // Stage 2a: crop region + high-contrast, try ZXing bar decode
+    if (zxingReader) {
+      const bc = cropCanvas(workCanvas, region.x, region.y, region.w, region.h, 'grayscale(1) contrast(2.5)');
+      try {
+        const r = zxingReader.decodeFromCanvas(bc);
+        if (r && validateRetailBarcode(r.getText())) { onDecodedCode(r.getText()); return; }
+      } catch (_) {}
+    }
+
+    // Stage 2b (synchronous quick check): also try native BarcodeDetector on the crop
+    // when available (works on iOS 17.4+ as well as Android)
+    if ('BarcodeDetector' in window && !ocrBusy) {
+      const bc2 = cropCanvas(workCanvas, region.x, region.y, region.w, region.h, null);
+      const det = new BarcodeDetector({formats: ['ean_13','ean_8','upc_a','upc_e']});
+      det.detect(bc2).then(bcs => {
+        for (const bc of bcs) {
+          if (validateRetailBarcode(bc.rawValue)) { onDecodedCode(bc.rawValue); break; }
+        }
+      }).catch(() => {});
+    }
+  };
+  zxingFrame = requestAnimationFrame(loop);
+
+  // OCR loop: reads the printed digits below the barcode every 1000ms.
+  // Even when the bar pattern can't be decoded (glare, angle), the large
+  // printed numbers below are almost always readable by Tesseract.
+  quaggaOcrTimer = window.setInterval(() => _smartOcrDigits(video, status), 1000);
+}
+
+async function _smartOcrDigits(video, status) {
+  if (ocrBusy || scanPaused || !zxingActive || cameraUsageMode === 'search') return;
+  if (Date.now() - quaggaStartedAt < 1500) return;
+  if (!video || !video.videoWidth) return;
+  ocrBusy = true;
+  try {
+    if (!(await ensureOcrLoaded()) || !window.Tesseract) return;
+
+    // Find where to crop for digits.
+    // If gradient locator found a barcode region, the digits are right below it.
+    // Otherwise fall back to the lower-center of the frame.
+    let x, y, w, h;
+    const reg = _smartBarcodeRegion;
+    if (reg) {
+      // Digits are immediately below the barcode bars, roughly 20% the bar height
+      x = Math.max(0, reg.x - 0.02);
+      y = Math.min(0.95, reg.y + reg.h);
+      w = Math.min(1 - x, reg.w + 0.04);
+      h = Math.min(1 - y, Math.max(0.06, reg.h * 0.25));
+    } else {
+      x = 0.05; y = 0.60; w = 0.90; h = 0.22;
+    }
+
+    const canvas = _ocrCrop(video, x, y, w, h, 3.5);
+    if (!canvas) return;
+
+    const result = await window.Tesseract.recognize(canvas, 'eng', {
+      logger: () => {},
+      tessedit_char_whitelist: '0123456789'
+    });
+    const raw = result?.data?.text || '';
+    const candidates = extractBarcodeTextCandidates(raw);
+    if (raw.replace(/\s/g,'').length > 3)
+      console.log('[OCR-digits]', raw.trim().replace(/\n/g,' '), '→', candidates[0] || 'none');
+
+    if (!candidates.length) { lastOcrCandidate = ''; return; }
+    if (candidates[0] === lastOcrCandidate) {
+      lastOcrCandidate = '';
+      onDecodedCode(candidates[0]);
+    } else {
+      lastOcrCandidate = candidates[0];
+    }
+  } catch (_) { lastOcrCandidate = ''; }
+  finally {
+    ocrBusy = false;
+    if (!scanPaused && zxingActive) status.textContent = 'Cadrez les barres et les chiffres';
+  }
 }
 
 // ── ZXing live stream — primary scanner for iPhone/Firefox ───────────────────
@@ -944,12 +1076,12 @@ async function startQuaggaScanner(reader, status, button) {
       // Wide area — covers most frame, excludes very edges where shelf noise is worst
       area: {top: '15%', right: '5%', left: '5%', bottom: '15%'}
     },
-    // halfSample:true is REQUIRED on mobile — halves resolution before processing,
-    // making Quagga 4× faster. Without it iPhone CPU can't process frames fast enough.
-    // Hallucination protection comes from EAN checksum (validateRetailBarcode) + low frequency.
+    // halfSample:true is REQUIRED on iPhone — halves resolution before processing,
+    // making Quagga 4× faster. Without it the iPhone CPU can't process frames fast enough.
+    // Artifact protection: 2 consecutive reads required + EAN checksum validation.
     locator: {patchSize: 'medium', halfSample: true},
     numOfWorkers: 2,
-    frequency: 15,   // 15 fps — with 2-consecutive requirement, this gives ~130ms to detect
+    frequency: 20,   // 20 fps → 2 consecutive reads = ~100ms = instant detection
     locate: true,
     decoder: {
       // Only EAN/UPC — all have checksums; Code39/ITF removed (no checksum → false fires)
@@ -1169,8 +1301,8 @@ function confirmStableCameraBarcode(barcode) {
   }
 
   window.clearTimeout(cameraCandidateTimer);
-  // Reset if no matching frame within 300ms (4–5 frames at 15fps)
-  cameraCandidateTimer = window.setTimeout(resetCameraCandidate, 300);
+  // Reset if no matching frame arrives within 400ms (8 frames at 20fps)
+  cameraCandidateTimer = window.setTimeout(resetCameraCandidate, 400);
 
   if (cameraCandidateCount < 2) return false;
 
