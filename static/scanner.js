@@ -707,24 +707,62 @@ function extractBarcodeTextCandidates(text) {
 }
 
 // ── OCR from video stream ─────────────────────────────────────────────────────
+
+// Crop + binarize a region of the video for OCR.
+// Binarization (black/white threshold) greatly stabilises digit recognition
+// frame-to-frame, reducing the noise that caused the "never matches twice" problem.
+function _ocrCrop(video, x, y, w, h, scale) {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  if (!vw || !vh) return null;
+  const sx = Math.floor(vw * x);
+  const sy = Math.floor(vh * y);
+  const sw = Math.max(1, Math.floor(vw * w));
+  const sh = Math.max(1, Math.floor(vh * h));
+  const out = document.createElement('canvas');
+  out.width  = Math.max(1, Math.floor(sw * scale));
+  out.height = Math.max(1, Math.floor(sh * scale));
+  const ctx = out.getContext('2d', {willReadFrequently: true});
+  // High-contrast grayscale
+  ctx.filter = 'grayscale(1) contrast(2.4) brightness(1.1)';
+  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, out.width, out.height);
+  // Binarization: threshold at 128 for clean black/white output
+  const img = ctx.getImageData(0, 0, out.width, out.height);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const v = d[i] > 128 ? 255 : 0;
+    d[i] = d[i+1] = d[i+2] = v;
+  }
+  ctx.putImageData(img, 0, 0);
+  return out;
+}
+
 async function recognizeBarcodeDigitsFromVideo(reader) {
   const video = getQuaggaVideoElement(reader);
   if (!video || !video.videoWidth || !video.videoHeight) return null;
   if (!(await ensureOcrLoaded()) || !window.Tesseract) return null;
 
+  // Crops target the digit strip immediately below the barcode lines.
+  // Quagga area is top:15%→bottom:15%, so barcode sits roughly in y:15%–85%.
+  // Human-readable digits print at the base of the bars, roughly y:65%–82%.
   const crops = [
-    {x: 0.20, y: 0.55, w: 0.72, h: 0.22, scale: 2.5},
-    {x: 0.05, y: 0.50, w: 0.90, h: 0.28, scale: 2.0}
+    {x: 0.10, y: 0.64, w: 0.80, h: 0.18, scale: 3.0},  // tight digit strip
+    {x: 0.05, y: 0.58, w: 0.90, h: 0.28, scale: 2.2},   // wider fallback
   ];
 
   for (const crop of crops) {
-    const canvas = drawProcessedCrop(video, crop);
+    const canvas = _ocrCrop(video, crop.x, crop.y, crop.w, crop.h, crop.scale);
     if (!canvas) continue;
     const result = await window.Tesseract.recognize(canvas, 'eng', {
       logger: () => {},
       tessedit_char_whitelist: '0123456789'
     });
-    const candidates = extractBarcodeTextCandidates(result?.data?.text || '');
+    const rawText = result?.data?.text || '';
+    const candidates = extractBarcodeTextCandidates(rawText);
+    // Debug log — remove once confirmed working
+    if (rawText.replace(/\s/g, '').length > 3) {
+      console.log('[OCR] raw:', rawText.trim().replace(/\n/g, ' '), '| candidate:', candidates[0] || 'none');
+    }
     if (candidates.length) return candidates[0];
   }
   return null;
@@ -774,16 +812,16 @@ async function startQuaggaScanner(reader, status, button) {
         height: {min: 480, ideal: 1080},
         advanced: [{focusMode: 'continuous'}]
       },
-      // Tight centre strip — ignores background shelf labels
-      area: {top: '30%', right: '10%', left: '10%', bottom: '30%'}
+      // Wider area: covers most of the frame while excluding very edges (background noise)
+      area: {top: '15%', right: '5%', left: '5%', bottom: '15%'}
     },
-    // halfSample: false (default) — full resolution prevents phantom barcode artifacts
+    // halfSample: false — full resolution prevents phantom barcode artifacts
     locator: {patchSize: 'medium', halfSample: false},
     numOfWorkers: 2,
-    frequency: 10,   // 10 fps is plenty; 25 fps + halfSample was causing false positives
+    frequency: 10,
     locate: true,
     decoder: {
-      // Only EAN/UPC — they all have checksums. Code39 and ITF removed (no checksum → false fires)
+      // Only EAN/UPC — all have checksums; Code39/ITF removed (no checksum → false fires)
       readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader'],
       multiple: false
     }
@@ -802,6 +840,10 @@ async function startQuaggaScanner(reader, status, button) {
     }
   }
 
+  // Multi-scale: every 3rd processed frame also try patchSize:'large' via decodeSingle
+  // to catch close-up/zoomed barcodes that fill more of the frame.
+  let _largeScanCounter = 0;
+
   quaggaDetectedHandler = result => {
     const code = String(result?.codeResult?.code || '').trim();
     if (!code || !validateRetailBarcode(code)) return;
@@ -809,6 +851,28 @@ async function startQuaggaScanner(reader, status, button) {
   };
   quaggaProcessedHandler = () => {
     if (!scanPaused) status.textContent = 'Cadrez les barres et les chiffres';
+    _largeScanCounter++;
+    if (_largeScanCounter < 3) return;
+    _largeScanCounter = 0;
+    // Secondary decode with large patches for zoomed-in barcodes
+    const vid = reader.querySelector('video');
+    if (!vid || !vid.videoWidth || scanPaused) return;
+    const tmpCanvas = document.createElement('canvas');
+    tmpCanvas.width  = vid.videoWidth;
+    tmpCanvas.height = vid.videoHeight;
+    tmpCanvas.getContext('2d').drawImage(vid, 0, 0);
+    window.Quagga.decodeSingle({
+      src: tmpCanvas.toDataURL('image/jpeg', 0.9),
+      numOfWorkers: 0,
+      locate: true,
+      inputStream: {size: Math.min(tmpCanvas.width, 1280)},
+      locator: {patchSize: 'large', halfSample: false},
+      decoder: {readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader'], multiple: false}
+    }, result => {
+      if (!result || !result.codeResult) return;
+      const code = String(result.codeResult.code || '').trim();
+      if (code && validateRetailBarcode(code)) onDecodedCode(code);
+    });
   };
 
   window.Quagga.onDetected(quaggaDetectedHandler);
@@ -828,7 +892,7 @@ async function startQuaggaScanner(reader, status, button) {
   status.textContent = 'Cadrez les barres et les chiffres';
   quaggaOcrTimer = window.setInterval(() => {
     maybeRunOcrFallback(reader, status);
-  }, 3000);
+  }, 1200);
 }
 
 // ── Stop camera ───────────────────────────────────────────────────────────────
