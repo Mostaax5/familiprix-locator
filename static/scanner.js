@@ -28,6 +28,8 @@ let zxingFrame = null;
 let zxingLibraryPromise = null;
 let zoomDebounceTimer = null;
 let lastOcrCandidate = '';
+let ocrHistory = [];        // recent valid OCR candidates (for agreement check)
+let ocrLoadState = 'idle';  // 'idle' | 'loading' | 'ready' | 'failed' — shown on screen
 
 // ── Camera DOM helpers ────────────────────────────────────────────────────────
 function getCameraDom() {
@@ -1051,26 +1053,53 @@ async function recognizeBarcodeDigitsFromVideo(reader) {
 
 async function maybeRunOcrFallback(reader, status) {
   if (ocrBusy || scanPaused || !quaggaActive) return;
-  if (Date.now() - quaggaStartedAt < 800) return;
   if (cameraUsageMode === 'search') return;
+
+  // Make the OCR engine state visible on screen (no devtools needed).
+  if (!('Tesseract' in window)) {
+    if (ocrLoadState !== 'loading' && ocrLoadState !== 'failed') {
+      ocrLoadState = 'loading';
+      status.textContent = '⏳ Chargement lecteur chiffres...';
+      ensureOcrLoaded().then(ok => { ocrLoadState = ok ? 'ready' : 'failed'; })
+                       .catch(() => { ocrLoadState = 'failed'; });
+    } else if (ocrLoadState === 'failed') {
+      status.textContent = '⚠ Lecteur chiffres indisponible';
+    }
+    return;
+  }
+
   ocrBusy = true;
   try {
-    const candidate = await recognizeBarcodeDigitsFromVideo(reader);
-    if (candidate && candidate === lastOcrCandidate) {
-      // Same valid number read on 2 consecutive OCR passes → trust it.
-      // (exact-length + checksum + tight crop + 2x stability = no random reads)
-      lastOcrCandidate = '';
-      await onDecodedCode(candidate, true);
-    } else {
-      lastOcrCandidate = candidate || '';
+    const video = getQuaggaVideoElement(reader);
+    if (!video || !video.videoWidth) return;
+    const canvas = _ocrCrop(video, 0.15, 0.32, 0.70, 0.40, 3.0);
+    if (!canvas) return;
+    const result = await window.Tesseract.recognize(canvas, 'eng', {
+      logger: () => {}, tessedit_char_whitelist: '0123456789'
+    });
+    const rawText = result?.data?.text || '';
+    const candidate = ocrBarcodeCandidate(rawText);
+
+    // Show what OCR is reading, live, on screen (so the user can report it).
+    const seen = rawText.replace(/[^0-9]/g, '');
+    if (seen.length >= 4) status.textContent = '🔢 ' + seen.slice(0, 14) + (candidate ? ' ✓' : '');
+
+    if (candidate) {
+      ocrHistory.push(candidate);
+      if (ocrHistory.length > 5) ocrHistory.shift();
+      // Accept when the SAME valid number appears at least twice in the recent
+      // window — tolerates one-digit OCR flicker between frames while still
+      // requiring agreement (a random misread won't repeat the same value).
+      const count = ocrHistory.filter(c => c === candidate).length;
+      if (count >= 2) {
+        ocrHistory = [];
+        await onDecodedCode(candidate, true);
+      }
     }
   } catch (error) {
-    lastOcrCandidate = '';
+    /* keep scanning */
   } finally {
     ocrBusy = false;
-  }
-  if (!scanPaused) {
-    status.textContent = 'Cadrez les barres et les chiffres';
   }
 }
 
@@ -1141,7 +1170,11 @@ async function startQuaggaScanner(reader, status, button) {
     onDecodedCode(code, err < 0.08);   // very clean → accept instantly; marginal → 2-frame
   };
   quaggaProcessedHandler = () => {
-    if (!scanPaused) status.textContent = 'Cadrez les barres et les chiffres';
+    // Don't overwrite the live OCR readout (🔢 / ⏳ / ⚠ / 🔍)
+    if (scanPaused) return;
+    const t = status.textContent || '';
+    if (/^[🔢⏳⚠🔍✓]/.test(t)) return;
+    status.textContent = 'Cadrez les barres et les chiffres';
   };
 
   window.Quagga.onDetected(quaggaDetectedHandler);
