@@ -1078,13 +1078,17 @@ async function startQuaggaScanner(reader, status, button) {
       target: reader,
       constraints: {
         facingMode: 'environment',
-        width:  {min: 640, ideal: 1280},
-        height: {min: 480, ideal: 720},
+        // High capture resolution so small/dense etiquette barcodes keep enough
+        // detail even after halfSample (1920 → 960px processing = sharp thin bars).
+        width:  {min: 640, ideal: 1920},
+        height: {min: 480, ideal: 1080},
         advanced: [{focusMode: 'continuous'}]
       },
       area: {top: '15%', right: '5%', left: '5%', bottom: '15%'}
     },
-    locator: {patchSize: 'medium', halfSample: true},
+    // patchSize 'small' locates small/dense barcodes (etiquettes) far better than
+    // 'medium'. The decode-error gate now rejects any false reads this enables.
+    locator: {patchSize: 'small', halfSample: true},
     numOfWorkers: 2,
     frequency: 20,
     locate: true,
@@ -1265,8 +1269,16 @@ function flashScannerSuccess() {
 }
 
 // ── Decode callback ───────────────────────────────────────────────────────────
+// Quagga returns UPC-A barcodes in 13-digit EAN-13 form (leading 0 added).
+// Strip it so we store/show the real 12-digit UPC-A printed on the product.
+function normalizeScannedBarcode(code) {
+  const digits = String(code || '').replace(/\D/g, '');
+  if (digits.length === 13 && digits.startsWith('0')) return digits.slice(1);
+  return digits;
+}
+
 function onDecodedCode(decodedText, instant=false) {
-  const rawValue = String(decodedText || '').trim();
+  const rawValue = normalizeScannedBarcode(decodedText);
   if (!rawValue || scanPaused) return;
   if (!confirmStableCameraBarcode(rawValue, instant)) return;
   lastOcrCandidate = '';
