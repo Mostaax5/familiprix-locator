@@ -1039,17 +1039,24 @@ function _ocrCrop(video, x, y, w, h, scale) {
 // the printed barcode number is a clean 12/13-digit run; prices/lot numbers are
 // the wrong length and get rejected, never sliced into fake barcodes.
 function ocrBarcodeCandidate(text) {
-  const compact = String(text || '').replace(/[^0-9\s]/g, ' ');
-  // Fully-joined first: handles UPC printed as "0 74170 45887 9"
-  const joined = compact.replace(/\s+/g, '');
-  if ([8, 12, 13, 14].includes(joined.length) && validateRetailBarcode(joined)) {
-    return joined;
+  const raw = String(text || '');
+  const tryStr = s => {
+    const d = String(s).replace(/[^0-9]/g, '');
+    return ([8, 12, 13, 14].includes(d.length) && validateRetailBarcode(d)) ? d : null;
+  };
+  // KEY: check each LINE separately. The printed barcode digits are their own
+  // line (e.g. "3 6 1 6 3 0 3 2 4 2 2 8 2"); the bar pattern above produces a
+  // separate garbage line. Per-line parsing isolates the real digit row.
+  for (const line of raw.split(/[\r\n]+/)) {
+    const hit = tryStr(line);            // digits in this line, joined
+    if (hit) return hit;
   }
-  // Else any single whitespace-separated run of an exact valid length
-  for (const run of compact.split(/\s+/)) {
-    if ([8, 12, 13, 14].includes(run.length) && validateRetailBarcode(run)) return run;
+  // Then each whitespace-separated run on any line
+  for (const run of raw.replace(/[^0-9\s]/g, ' ').split(/\s+/)) {
+    if (tryStr(run)) return run.replace(/[^0-9]/g, '');
   }
-  return null;
+  // Last: whole text joined (handles digits split oddly across lines)
+  return tryStr(raw);
 }
 
 async function recognizeBarcodeDigitsFromVideo(reader) {
@@ -1094,10 +1101,13 @@ async function maybeRunOcrFallback(reader, status) {
   try {
     const video = getQuaggaVideoElement(reader);
     if (!video || !video.videoWidth) return;
-    const canvas = _ocrCrop(video, 0.15, 0.32, 0.70, 0.40, 3.0);
+    // Wider crop so the printed digit row below the bars is always included.
+    const canvas = _ocrCrop(video, 0.12, 0.28, 0.76, 0.52, 3.0);
     if (!canvas) return;
     const result = await window.Tesseract.recognize(canvas, 'eng', {
-      logger: () => {}, tessedit_char_whitelist: '0123456789'
+      logger: () => {},
+      tessedit_char_whitelist: '0123456789',
+      preserve_interword_spaces: '1'
     });
     const rawText = result?.data?.text || '';
     const candidate = ocrBarcodeCandidate(rawText);
