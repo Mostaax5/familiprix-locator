@@ -31,6 +31,29 @@ let lastOcrCandidate = '';
 let ocrHistory = [];        // recent valid OCR candidates (for agreement check)
 let ocrLoadState = 'idle';  // 'idle' | 'loading' | 'ready' | 'failed' — shown on screen
 
+// ── Live diagnostic panel (temporary, on-screen, no devtools needed) ──────────
+const _dbg = {q:'?', z:'?', t:'?', qRead:'-', qErr:'-', zRead:'-', ocr:'-'};
+function _renderDbg() {
+  let el = document.getElementById('scanDbgPanel');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'scanDbgPanel';
+    el.style.cssText = 'position:fixed;left:4px;right:4px;bottom:4px;z-index:9999;'
+      + 'font:11px/1.4 monospace;background:rgba(15,23,42,.94);color:#a7f3d0;'
+      + 'padding:7px 9px;border-radius:8px;white-space:pre-wrap;pointer-events:none';
+    document.body.appendChild(el);
+  }
+  el.textContent =
+    `moteurs  Quagga:${_dbg.q}  ZXing:${_dbg.z}  OCR:${_dbg.t}\n` +
+    `Quagga lit : ${_dbg.qRead}   (erreur ${_dbg.qErr})\n` +
+    `ZXing  lit : ${_dbg.zRead}\n` +
+    `OCR    lit : ${_dbg.ocr}`;
+}
+function _removeDbg() {
+  const el = document.getElementById('scanDbgPanel');
+  if (el) el.remove();
+}
+
 // ── Camera DOM helpers ────────────────────────────────────────────────────────
 function getCameraDom() {
   if (cameraUsageMode === 'search') {
@@ -1055,18 +1078,17 @@ async function maybeRunOcrFallback(reader, status) {
   if (ocrBusy || scanPaused || !quaggaActive) return;
   if (cameraUsageMode === 'search') return;
 
-  // Make the OCR engine state visible on screen (no devtools needed).
+  // Make the OCR engine state visible (diagnostic panel).
   if (!('Tesseract' in window)) {
     if (ocrLoadState !== 'loading' && ocrLoadState !== 'failed') {
       ocrLoadState = 'loading';
-      status.textContent = '⏳ Chargement lecteur chiffres...';
-      ensureOcrLoaded().then(ok => { ocrLoadState = ok ? 'ready' : 'failed'; })
-                       .catch(() => { ocrLoadState = 'failed'; });
-    } else if (ocrLoadState === 'failed') {
-      status.textContent = '⚠ Lecteur chiffres indisponible';
+      _dbg.t = '⏳'; _renderDbg();
+      ensureOcrLoaded().then(ok => { ocrLoadState = ok ? 'ready' : 'failed'; _dbg.t = ok ? '✓' : '✗ pas chargé'; _renderDbg(); })
+                       .catch(() => { ocrLoadState = 'failed'; _dbg.t = '✗ pas chargé'; _renderDbg(); });
     }
     return;
   }
+  _dbg.t = '✓';
 
   ocrBusy = true;
   try {
@@ -1080,9 +1102,10 @@ async function maybeRunOcrFallback(reader, status) {
     const rawText = result?.data?.text || '';
     const candidate = ocrBarcodeCandidate(rawText);
 
-    // Show what OCR is reading, live, on screen (so the user can report it).
+    // Show what OCR is reading, live (diagnostic panel).
     const seen = rawText.replace(/[^0-9]/g, '');
-    if (seen.length >= 4) status.textContent = '🔢 ' + seen.slice(0, 14) + (candidate ? ' ✓' : '');
+    _dbg.ocr = (seen ? seen.slice(0, 16) : '(rien)') + (candidate ? ' ✓' : '');
+    _renderDbg();
 
     if (candidate) {
       ocrHistory.push(candidate);
@@ -1162,12 +1185,14 @@ async function startQuaggaScanner(reader, status, button) {
 
   quaggaDetectedHandler = result => {
     const code = String(result?.codeResult?.code || '').trim();
-    if (!code || !validateRetailBarcode(code)) return;
-    // Quagga reports a per-bar decode error. A clean read of a real barcode has
-    // near-zero error; halfSample artifacts and partial misreads have high error.
     const err = quaggaDecodeError(result);
-    if (err > 0.18) return;            // too noisy — reject outright (no random reads)
-    onDecodedCode(code, err < 0.08);   // very clean → accept instantly; marginal → 2-frame
+    // Diagnostic: show EVERY raw read and its error, even ones we reject.
+    _dbg.qRead = code || '(rien)';
+    _dbg.qErr = err.toFixed(3);
+    _renderDbg();
+    if (!code || !validateRetailBarcode(code)) return;
+    if (err > 0.30) return;            // only reject very noisy reads
+    onDecodedCode(code, err < 0.10);   // clean → instant; marginal → 2-frame confirm
   };
   quaggaProcessedHandler = () => {
     // Don't overwrite the live OCR readout (🔢 / ⏳ / ⚠ / 🔍)
@@ -1182,6 +1207,7 @@ async function startQuaggaScanner(reader, status, button) {
   window.Quagga.start();
   quaggaActive = true;
   quaggaStartedAt = Date.now();
+  _dbg.q = '✓'; _renderDbg();
   updateDeviceSupport();
   button.textContent = '■ Arreter camera';
   button.style.background = '#c8102e';
@@ -1209,8 +1235,10 @@ async function startQuaggaScanner(reader, status, button) {
 
 let _zxingParallelReader = null;
 async function startZXingParallel(reader) {
+  _dbg.z = '⏳'; _renderDbg();
   const ok = await ensureZXingLoaded().catch(() => false);
-  if (!ok || !window.ZXing) return;
+  if (!ok || !window.ZXing) { _dbg.z = '✗ pas chargé'; _renderDbg(); return; }
+  _dbg.z = '✓'; _renderDbg();
   const hints = new Map();
   hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
     ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
@@ -1234,8 +1262,11 @@ async function startZXingParallel(reader) {
     cx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
     try {
       const r = zxReader.decodeFromCanvas(cv);
-      if (r && validateRetailBarcode(r.getText())) {
-        onDecodedCode(r.getText(), true);   // full-res + checksum → trustworthy
+      if (r) {
+        const txt = r.getText();
+        _dbg.zRead = txt + (validateRetailBarcode(txt) ? ' ✓' : ' (checksum?)');
+        _renderDbg();
+        if (validateRetailBarcode(txt)) onDecodedCode(txt, true);
       }
     } catch (_) { /* no code this frame */ }
   }, 180);
@@ -1247,6 +1278,7 @@ async function stopCamera() {
   scanPaused = false;
   lastOcrCandidate = '';
   ocrHistory = [];
+  _removeDbg();
   window.clearInterval(scanFrameTimer);   // ZXing parallel decoder interval
   scanFrameTimer = null;
   window.clearInterval(quaggaOcrTimer);
