@@ -1245,19 +1245,29 @@ async function startQuaggaScanner(reader, status, button) {
   startZXingParallel(reader);
 }
 
-let _zxingParallelReader = null;
 async function startZXingParallel(reader) {
   _dbg.z = '⏳'; _renderDbg();
   const ok = await ensureZXingLoaded().catch(() => false);
   if (!ok || !window.ZXing) { _dbg.z = '✗ pas chargé'; _renderDbg(); return; }
-  _dbg.z = '✓'; _renderDbg();
-  const hints = new Map();
-  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-    ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
-    ZXing.BarcodeFormat.UPC_A,  ZXing.BarcodeFormat.UPC_E,
-  ]);
-  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-  const zxReader = new ZXing.BrowserMultiFormatReader(hints);
+
+  // Correct low-level API: MultiFormatReader.decode(BinaryBitmap).
+  // (decodeFromCanvas does not exist in this build → was throwing TypeError.)
+  let mfReader, hints;
+  try {
+    hints = new Map();
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+      ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
+      ZXing.BarcodeFormat.UPC_A,  ZXing.BarcodeFormat.UPC_E,
+    ]);
+    hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+    mfReader = new ZXing.MultiFormatReader();
+    mfReader.setHints(hints);
+    _dbg.z = '✓'; _renderDbg();
+  } catch (e) {
+    _dbg.z = '✗ init:' + (e && e.name); _renderDbg();
+    return;
+  }
+
   const cv = document.createElement('canvas');
   const cx = cv.getContext('2d', {willReadFrequently: true});
 
@@ -1265,29 +1275,27 @@ async function startZXingParallel(reader) {
     if (scanPaused || !quaggaActive) return;
     const video = reader.querySelector('video');
     if (!video || !video.videoWidth) return;
-    // Near-FULL frame at full resolution so the whole barcode is always included
-    // (the earlier tight crop cut off the top of barcodes in the upper frame).
     const vw = video.videoWidth, vh = video.videoHeight;
     const sx = Math.floor(vw * 0.02), sy = Math.floor(vh * 0.05);
     const sw = Math.floor(vw * 0.96), sh = Math.floor(vh * 0.90);
     cv.width = sw; cv.height = sh;
-    cx.filter = 'grayscale(1)';   // minimal processing — let ZXing do its thing
     cx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
     try {
-      const r = zxReader.decodeFromCanvas(cv);
+      const source = new ZXing.HTMLCanvasElementLuminanceSource(cv);
+      const bitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(source));
+      const r = mfReader.decode(bitmap);
       if (r) {
         const txt = r.getText();
-        _dbg.zRead = txt + (validateRetailBarcode(txt) ? ' ✓' : ' (checksum?)');
+        _dbg.zRead = txt + (validateRetailBarcode(txt) ? ' ✓' : ' (cksum?)');
         _renderDbg();
         if (validateRetailBarcode(txt)) onDecodedCode(txt, true);
       }
     } catch (e) {
-      // Show WHY ZXing fails: NotFoundException = no barcode located (normal),
-      // anything else = a real problem worth knowing about.
       const name = (e && e.name) ? e.name : 'err';
-      if (name !== 'NotFoundException' && name !== 'NotFoundException2') {
-        _dbg.zRead = '(' + name + ')'; _renderDbg();
-      }
+      // NotFoundException is normal (no barcode this frame); show any other error.
+      if (name.indexOf('NotFound') < 0) { _dbg.zRead = '(' + name + ')'; _renderDbg(); }
+    } finally {
+      try { mfReader.reset(); } catch (_) {}   // required between decodes
     }
   }, 200);
 }
