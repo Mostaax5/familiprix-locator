@@ -93,15 +93,20 @@ async function startCamera() {
 
   resetCameraCandidate();
 
-  // Android Chrome: use native hardware BarcodeDetector
+  // Native BarcodeDetector: hardware-accelerated, works on iOS 17.4+ AND Android Chrome
   if ('BarcodeDetector' in window) {
     try {
       await startNativeScan(video, status, button, reader);
       return;
     } catch (err) {
-      // fall through to Quagga
+      console.warn('[Scanner] BarcodeDetector failed, falling to Quagga:', err);
     }
   }
+
+  // Pre-load Tesseract NOW so OCR is ready the moment Quagga needs a fallback.
+  // Without this, OCR fires at ~1.5s but Tesseract still takes 3-5s to download,
+  // so the first several OCR cycles silently return null.
+  ensureOcrLoaded().catch(() => {});
 
   // iPhone / Firefox: Quagga2 — the only engine proven on iPhone WebKit
   try {
@@ -409,7 +414,7 @@ async function startSmartScan(video, status, button) {
 
 async function _smartOcrDigits(video, status) {
   if (ocrBusy || scanPaused || !zxingActive || cameraUsageMode === 'search') return;
-  if (Date.now() - quaggaStartedAt < 1500) return;
+  if (Date.now() - quaggaStartedAt < 800) return;
   if (!video || !video.videoWidth) return;
   ocrBusy = true;
   try {
@@ -1027,7 +1032,7 @@ async function recognizeBarcodeDigitsFromVideo(reader) {
 
 async function maybeRunOcrFallback(reader, status) {
   if (ocrBusy || scanPaused || !quaggaActive) return;
-  if (Date.now() - quaggaStartedAt < 1500) return;
+  if (Date.now() - quaggaStartedAt < 800) return;
   if (cameraUsageMode === 'search') return;
   ocrBusy = true;
   try {
