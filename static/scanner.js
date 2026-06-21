@@ -33,7 +33,14 @@ let ocrLoadState = 'idle';  // 'idle' | 'loading' | 'ready' | 'failed' — shown
 
 // ── Live diagnostic panel (temporary, on-screen, no devtools needed) ──────────
 const _dbg = {q:'?', z:'?', t:'?', qRead:'-', qErr:'-', zRead:'-', ocr:'-'};
+function _dbgEnabled() {
+  // Diagnostic panel OFF by default (clean UI). To turn it on for debugging,
+  // run in the browser console:  localStorage.setItem('familiprixScanDebug','1')
+  // then reopen the camera. Turn off:  localStorage.removeItem('familiprixScanDebug')
+  try { return localStorage.getItem('familiprixScanDebug') === '1'; } catch (_) { return false; }
+}
 function _renderDbg() {
+  if (!_dbgEnabled()) { _removeDbg(); return; }
   let el = document.getElementById('scanDbgPanel');
   if (!el) {
     el = document.createElement('div');
