@@ -1199,6 +1199,46 @@ async function startQuaggaScanner(reader, status, button) {
   quaggaOcrTimer = window.setInterval(() => {
     maybeRunOcrFallback(reader, status);
   }, 600);
+
+  // ZXing parallel decoder — reads SMALL/DENSE etiquette barcodes that Quagga
+  // misses. ZXing scans at FULL resolution (no halfSample) so thin bars survive.
+  // Gives the exact barcode (not an OCR guess). Runs every 180ms on a high-res
+  // center crop of Quagga's own video element.
+  startZXingParallel(reader);
+}
+
+let _zxingParallelReader = null;
+async function startZXingParallel(reader) {
+  const ok = await ensureZXingLoaded().catch(() => false);
+  if (!ok || !window.ZXing) return;
+  const hints = new Map();
+  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+    ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
+    ZXing.BarcodeFormat.UPC_A,  ZXing.BarcodeFormat.UPC_E,
+  ]);
+  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+  const zxReader = new ZXing.BrowserMultiFormatReader(hints);
+  const cv = document.createElement('canvas');
+  const cx = cv.getContext('2d', {willReadFrequently: true});
+
+  scanFrameTimer = window.setInterval(() => {
+    if (scanPaused || !quaggaActive) return;
+    const video = reader.querySelector('video');
+    if (!video || !video.videoWidth) return;
+    // Full-resolution center crop (80% w × 50% h) — keeps small bars sharp.
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const sx = Math.floor(vw * 0.10), sy = Math.floor(vh * 0.25);
+    const sw = Math.floor(vw * 0.80), sh = Math.floor(vh * 0.50);
+    cv.width = sw; cv.height = sh;
+    cx.filter = 'grayscale(1) contrast(1.5)';
+    cx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+    try {
+      const r = zxReader.decodeFromCanvas(cv);
+      if (r && validateRetailBarcode(r.getText())) {
+        onDecodedCode(r.getText(), true);   // full-res + checksum → trustworthy
+      }
+    } catch (_) { /* no code this frame */ }
+  }, 180);
 }
 
 // ── Stop camera ───────────────────────────────────────────────────────────────
@@ -1206,7 +1246,8 @@ async function stopCamera() {
   const {status, button, video, reader} = getCameraDom();
   scanPaused = false;
   lastOcrCandidate = '';
-  window.clearTimeout(scanFrameTimer);
+  ocrHistory = [];
+  window.clearInterval(scanFrameTimer);   // ZXing parallel decoder interval
   scanFrameTimer = null;
   window.clearInterval(quaggaOcrTimer);
   quaggaOcrTimer = null;
