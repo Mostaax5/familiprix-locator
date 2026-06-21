@@ -923,8 +923,7 @@ function getQuaggaVideoElement(reader) {
 // ── Barcode validation ────────────────────────────────────────────────────────
 function validateRetailBarcode(code) {
   const digits = String(code || '').replace(/\D/g, '');
-  // Accept only 12-digit (UPC-A) and 13-digit (EAN-13) — the formats on pharmacy products.
-  // Rejecting 8-digit (EAN-8) prevents Quagga from accepting partial misreads of EAN-13 labels.
+  if (/^\d{8}$/.test(digits))  return checkEanChecksum(digits, 8);
   if (/^\d{12}$/.test(digits)) return checkEanChecksum(digits, 12);
   if (/^\d{13}$/.test(digits)) return checkEanChecksum(digits, 13);
   if (/^\d{14}$/.test(digits)) return checkEanChecksum(digits, 14);
@@ -1008,49 +1007,37 @@ async function recognizeBarcodeDigitsFromVideo(reader) {
   if (!video || !video.videoWidth || !video.videoHeight) return null;
   if (!(await ensureOcrLoaded()) || !window.Tesseract) return null;
 
-  // Crops target the digit strip immediately below the barcode lines.
-  // Quagga area is top:15%→bottom:15%, so barcode sits roughly in y:15%–85%.
-  // Human-readable digits print at the base of the bars, roughly y:65%–82%.
-  const crops = [
-    {x: 0.10, y: 0.64, w: 0.80, h: 0.18, scale: 3.0},  // tight digit strip
-    {x: 0.05, y: 0.58, w: 0.90, h: 0.28, scale: 2.2},   // wider fallback
-  ];
+  // Wide crop covering the full central 30%–80% of the frame height.
+  // The printed digits can be anywhere depending on how the user aims the camera.
+  // One wide pass is faster than multiple narrow passes.
+  const canvas = _ocrCrop(video, 0.04, 0.30, 0.92, 0.55, 2.5);
+  if (!canvas) return null;
 
-  for (const crop of crops) {
-    const canvas = _ocrCrop(video, crop.x, crop.y, crop.w, crop.h, crop.scale);
-    if (!canvas) continue;
-    const result = await window.Tesseract.recognize(canvas, 'eng', {
-      logger: () => {},
-      tessedit_char_whitelist: '0123456789'
-    });
-    const rawText = result?.data?.text || '';
-    const candidates = extractBarcodeTextCandidates(rawText);
-    // Debug log — remove once confirmed working
-    if (rawText.replace(/\s/g, '').length > 3) {
-      console.log('[OCR] raw:', rawText.trim().replace(/\n/g, ' '), '| candidate:', candidates[0] || 'none');
-    }
-    if (candidates.length) return candidates[0];
+  const result = await window.Tesseract.recognize(canvas, 'eng', {
+    logger: () => {},
+    tessedit_char_whitelist: '0123456789'
+  });
+  const rawText = result?.data?.text || '';
+  const candidates = extractBarcodeTextCandidates(rawText);
+  if (rawText.replace(/\s/g, '').length > 3) {
+    console.log('[OCR]', rawText.trim().replace(/\n/g, ' '), '→', candidates[0] || 'none');
   }
-  return null;
+  return candidates[0] || null;
 }
 
 async function maybeRunOcrFallback(reader, status) {
   if (ocrBusy || scanPaused || !quaggaActive) return;
-  if (Date.now() - quaggaStartedAt < 2000) return;
+  if (Date.now() - quaggaStartedAt < 1500) return;
   if (cameraUsageMode === 'search') return;
   ocrBusy = true;
   try {
     status.textContent = 'Lecture des chiffres...';
     const candidate = await recognizeBarcodeDigitsFromVideo(reader);
     if (candidate) {
-      if (candidate === lastOcrCandidate) {
-        // Same code found on two consecutive OCR attempts — accept it
-        lastOcrCandidate = '';
-        await onDecodedCode(candidate);
-        return;
-      }
-      // First time seeing this candidate — hold and wait for confirmation
-      lastOcrCandidate = candidate;
+      // A valid EAN/UPC checksum is proof enough — accept immediately.
+      // No need for two consecutive reads: the checksum is mathematically sound.
+      lastOcrCandidate = '';
+      await onDecodedCode(candidate);
     } else {
       lastOcrCandidate = '';
     }
@@ -1086,9 +1073,9 @@ async function startQuaggaScanner(reader, status, button) {
     locate: true,
     decoder: {
       // Only EAN/UPC — all have checksums; Code39/ITF removed (no checksum → false fires)
-      // EAN-13 and UPC-A only. Removing EAN-8 and UPC-E prevents Quagga from
-      // misreading a partial EAN-13 scan as a shorter format (e.g. 47577909 from a 13-digit label).
-      readers: ['ean_reader', 'upc_reader'],
+      // Longest formats first — Quagga tries each reader in order and stops on first match.
+      // EAN-13 before EAN-8 means a 13-digit barcode is never mis-decoded as 8 digits.
+      readers: ['ean_reader', 'upc_reader', 'ean_8_reader', 'upc_e_reader'],
       multiple: false
     }
   };
@@ -1132,7 +1119,7 @@ async function startQuaggaScanner(reader, status, button) {
   status.textContent = 'Cadrez les barres et les chiffres';
   quaggaOcrTimer = window.setInterval(() => {
     maybeRunOcrFallback(reader, status);
-  }, 1200);
+  }, 700);
 }
 
 // ── Stop camera ───────────────────────────────────────────────────────────────
