@@ -412,7 +412,7 @@ async function maybeRunOcrFallbackOnVideo(video, status) {
                || _ocrCrop(video, 0.05, 0.58, 0.90, 0.28, 2.2);
     if (!canvas) return;
     const result = await window.Tesseract.recognize(canvas, 'eng', {
-      logger: () {},
+      logger: () => {},
       tessedit_char_whitelist: '0123456789'
     });
     const rawText = result?.data?.text || '';
