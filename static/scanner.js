@@ -808,17 +808,19 @@ async function startQuaggaScanner(reader, status, button) {
       target: reader,
       constraints: {
         facingMode: 'environment',
-        width:  {min: 640, ideal: 1920},
-        height: {min: 480, ideal: 1080},
+        width:  {min: 640, ideal: 1280},
+        height: {min: 480, ideal: 720},
         advanced: [{focusMode: 'continuous'}]
       },
-      // Wider area: covers most of the frame while excluding very edges (background noise)
+      // Wide area — covers most frame, excludes very edges where shelf noise is worst
       area: {top: '15%', right: '5%', left: '5%', bottom: '15%'}
     },
-    // halfSample: false — full resolution prevents phantom barcode artifacts
-    locator: {patchSize: 'medium', halfSample: false},
+    // halfSample:true is REQUIRED on mobile — halves resolution before processing,
+    // making Quagga 4× faster. Without it iPhone CPU can't process frames fast enough.
+    // Hallucination protection comes from EAN checksum (validateRetailBarcode) + low frequency.
+    locator: {patchSize: 'medium', halfSample: true},
     numOfWorkers: 2,
-    frequency: 15,   // 15 fps — fast enough for instant reads without overloading workers
+    frequency: 10,   // 10 fps — with instant-read on first checksum pass, 10fps is plenty
     locate: true,
     decoder: {
       // Only EAN/UPC — all have checksums; Code39/ITF removed (no checksum → false fires)
