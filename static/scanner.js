@@ -923,7 +923,8 @@ function getQuaggaVideoElement(reader) {
 // ── Barcode validation ────────────────────────────────────────────────────────
 function validateRetailBarcode(code) {
   const digits = String(code || '').replace(/\D/g, '');
-  if (/^\d{8}$/.test(digits)) return checkEanChecksum(digits, 8);
+  // Accept only 12-digit (UPC-A) and 13-digit (EAN-13) — the formats on pharmacy products.
+  // Rejecting 8-digit (EAN-8) prevents Quagga from accepting partial misreads of EAN-13 labels.
   if (/^\d{12}$/.test(digits)) return checkEanChecksum(digits, 12);
   if (/^\d{13}$/.test(digits)) return checkEanChecksum(digits, 13);
   if (/^\d{14}$/.test(digits)) return checkEanChecksum(digits, 14);
@@ -1085,7 +1086,9 @@ async function startQuaggaScanner(reader, status, button) {
     locate: true,
     decoder: {
       // Only EAN/UPC — all have checksums; Code39/ITF removed (no checksum → false fires)
-      readers: ['upc_reader', 'upc_e_reader', 'ean_reader', 'ean_8_reader'],
+      // EAN-13 and UPC-A only. Removing EAN-8 and UPC-E prevents Quagga from
+      // misreading a partial EAN-13 scan as a shorter format (e.g. 47577909 from a 13-digit label).
+      readers: ['ean_reader', 'upc_reader'],
       multiple: false
     }
   };
