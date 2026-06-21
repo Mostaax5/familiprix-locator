@@ -103,14 +103,18 @@ async function startCamera() {
     }
   }
 
-  // Smart localise-then-read scanner for iPhone/Firefox:
-  //   1. Gradient detector finds where the barcode is in frame
-  //   2. Cropped region → ZXing bar-pattern decode
-  //   3. Digit strip below barcode → OCR (the numbers printed under every UPC)
+  // iPhone / Firefox: Quagga2 — the only engine proven on iPhone WebKit
   try {
-    video.style.display = 'block';
-    if (reader) { reader.style.display = 'none'; reader.innerHTML = ''; }
-    await startSmartScan(video, status, button);
+    await ensureQuaggaLoaded();
+    if (!('Quagga' in window)) {
+      status.textContent = 'Scanner non supporte';
+      showCameraHint('Quagga non charge — verifiez la connexion.');
+      return;
+    }
+    video.style.display = 'none';
+    reader.style.display = 'block';
+    reader.innerHTML = '';
+    await startQuaggaScanner(reader, status, button);
   } catch (error) {
     status.textContent = 'Camera bloquee';
     showCameraHint(error.message || 'Impossible d ouvrir la camera. Sur telephone, utilisez une adresse HTTPS.');
@@ -1073,15 +1077,11 @@ async function startQuaggaScanner(reader, status, button) {
         height: {min: 480, ideal: 720},
         advanced: [{focusMode: 'continuous'}]
       },
-      // Wide area — covers most frame, excludes very edges where shelf noise is worst
       area: {top: '15%', right: '5%', left: '5%', bottom: '15%'}
     },
-    // halfSample:true is REQUIRED on iPhone — halves resolution before processing,
-    // making Quagga 4× faster. Without it the iPhone CPU can't process frames fast enough.
-    // Artifact protection: 2 consecutive reads required + EAN checksum validation.
     locator: {patchSize: 'medium', halfSample: true},
     numOfWorkers: 2,
-    frequency: 20,   // 20 fps → 2 consecutive reads = ~100ms = instant detection
+    frequency: 20,
     locate: true,
     decoder: {
       // Only EAN/UPC — all have checksums; Code39/ITF removed (no checksum → false fires)
@@ -1284,28 +1284,27 @@ function confirmStableCameraBarcode(barcode) {
   if (!looksLikeBarcode(normalized)) return false;
   const now = Date.now();
 
-  // Debounce: don't re-accept the same code within 1500 ms
+  // Debounce: same code won't fire again for 1500ms
   if (normalized === lastAcceptedCameraBarcode && now - lastAcceptedCameraAt < 1500) {
     return false;
   }
 
-  // Require the SAME code on 2 consecutive frames for all formats.
-  // Real barcodes are stable → same code appears on frames N and N+1.
-  // halfSample artifacts are random → different "code" each frame, never matches twice.
-  // At 15 fps the 2-consecutive window is ~67ms per frame → accepted in ~130ms = instant.
-  if (normalized === cameraCandidateBarcode) {
-    cameraCandidateCount += 1;
-  } else {
-    cameraCandidateBarcode = normalized;
-    cameraCandidateCount = 1;
+  // Accept complete EAN/UPC on first clean read.
+  // The mod-10 checksum already validated in validateRetailBarcode() is sufficient
+  // protection — random halfSample artifacts almost never form a valid 13-digit EAN.
+  if (looksLikeCompleteRetailBarcode(normalized)) {
+    lastAcceptedCameraBarcode = normalized;
+    lastAcceptedCameraAt = now;
+    resetCameraCandidate();
+    return true;
   }
 
+  // Partial / non-standard codes still need 2 consecutive reads
+  if (normalized === cameraCandidateBarcode) cameraCandidateCount += 1;
+  else { cameraCandidateBarcode = normalized; cameraCandidateCount = 1; }
   window.clearTimeout(cameraCandidateTimer);
-  // Reset if no matching frame arrives within 400ms (8 frames at 20fps)
-  cameraCandidateTimer = window.setTimeout(resetCameraCandidate, 400);
-
+  cameraCandidateTimer = window.setTimeout(resetCameraCandidate, 500);
   if (cameraCandidateCount < 2) return false;
-
   lastAcceptedCameraBarcode = normalized;
   lastAcceptedCameraAt = now;
   resetCameraCandidate();
