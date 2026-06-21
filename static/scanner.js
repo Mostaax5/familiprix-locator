@@ -1122,9 +1122,10 @@ async function startQuaggaScanner(reader, status, button) {
     if (pb) { pb.style.display = ''; pb.textContent = '⏸ Pause'; pb.style.background = ''; pb.style.color = ''; pb.style.borderColor = ''; }
   }
   status.textContent = 'Cadrez les barres et les chiffres';
-  quaggaOcrTimer = window.setInterval(() => {
-    maybeRunOcrFallback(reader, status);
-  }, 700);
+  // OCR fallback intentionally DISABLED: it read digits from anywhere in the
+  // frame (price tags, lot numbers, package text) and extractBarcodeTextCandidates
+  // formed false barcodes via substring matching — producing random accepts even
+  // when no barcode was present. Only the real Quagga bar-decode is used now.
 }
 
 // ── Stop camera ───────────────────────────────────────────────────────────────
@@ -1284,21 +1285,18 @@ function confirmStableCameraBarcode(barcode) {
     return false;
   }
 
-  // Accept complete EAN/UPC on first clean read.
-  // The mod-10 checksum already validated in validateRetailBarcode() is sufficient
-  // protection — random halfSample artifacts almost never form a valid 13-digit EAN.
-  if (looksLikeCompleteRetailBarcode(normalized)) {
-    lastAcceptedCameraBarcode = normalized;
-    lastAcceptedCameraAt = now;
-    resetCameraCandidate();
-    return true;
+  // Require the SAME code on 2 consecutive Quagga decodes — for ALL formats.
+  // This is the only reliable guard against halfSample pixel artifacts: a real
+  // barcode decodes to the same digits frame after frame, while an artifact false
+  // read differs every frame and never repeats. At 20fps this confirms in ~100ms.
+  if (normalized === cameraCandidateBarcode) {
+    cameraCandidateCount += 1;
+  } else {
+    cameraCandidateBarcode = normalized;
+    cameraCandidateCount = 1;
   }
-
-  // Partial / non-standard codes still need 2 consecutive reads
-  if (normalized === cameraCandidateBarcode) cameraCandidateCount += 1;
-  else { cameraCandidateBarcode = normalized; cameraCandidateCount = 1; }
   window.clearTimeout(cameraCandidateTimer);
-  cameraCandidateTimer = window.setTimeout(resetCameraCandidate, 500);
+  cameraCandidateTimer = window.setTimeout(resetCameraCandidate, 300);
   if (cameraCandidateCount < 2) return false;
   lastAcceptedCameraBarcode = normalized;
   lastAcceptedCameraAt = now;
