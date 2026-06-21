@@ -1008,15 +1008,33 @@ function _ocrCrop(video, x, y, w, h, scale) {
   return out;
 }
 
+// Strict OCR candidate extractor — NO substring guessing.
+// Only accepts a complete digit run (or the fully-joined digits) of an exact
+// valid barcode length that passes checksum. This is what stops the random reads:
+// the printed barcode number is a clean 12/13-digit run; prices/lot numbers are
+// the wrong length and get rejected, never sliced into fake barcodes.
+function ocrBarcodeCandidate(text) {
+  const compact = String(text || '').replace(/[^0-9\s]/g, ' ');
+  // Fully-joined first: handles UPC printed as "0 74170 45887 9"
+  const joined = compact.replace(/\s+/g, '');
+  if ([8, 12, 13, 14].includes(joined.length) && validateRetailBarcode(joined)) {
+    return joined;
+  }
+  // Else any single whitespace-separated run of an exact valid length
+  for (const run of compact.split(/\s+/)) {
+    if ([8, 12, 13, 14].includes(run.length) && validateRetailBarcode(run)) return run;
+  }
+  return null;
+}
+
 async function recognizeBarcodeDigitsFromVideo(reader) {
   const video = getQuaggaVideoElement(reader);
   if (!video || !video.videoWidth || !video.videoHeight) return null;
   if (!(await ensureOcrLoaded()) || !window.Tesseract) return null;
 
-  // Wide crop covering the full central 30%–80% of the frame height.
-  // The printed digits can be anywhere depending on how the user aims the camera.
-  // One wide pass is faster than multiple narrow passes.
-  const canvas = _ocrCrop(video, 0.04, 0.30, 0.92, 0.55, 2.5);
+  // TIGHT center crop only — where the user deliberately aims the barcode.
+  // Center 70% width × center 40% height. Keeps prices/shelf text out of frame.
+  const canvas = _ocrCrop(video, 0.15, 0.32, 0.70, 0.40, 3.0);
   if (!canvas) return null;
 
   const result = await window.Tesseract.recognize(canvas, 'eng', {
@@ -1024,11 +1042,11 @@ async function recognizeBarcodeDigitsFromVideo(reader) {
     tessedit_char_whitelist: '0123456789'
   });
   const rawText = result?.data?.text || '';
-  const candidates = extractBarcodeTextCandidates(rawText);
+  const candidate = ocrBarcodeCandidate(rawText);
   if (rawText.replace(/\s/g, '').length > 3) {
-    console.log('[OCR]', rawText.trim().replace(/\n/g, ' '), '→', candidates[0] || 'none');
+    console.log('[OCR]', rawText.trim().replace(/\n/g, ' '), '→', candidate || 'none');
   }
-  return candidates[0] || null;
+  return candidate;
 }
 
 async function maybeRunOcrFallback(reader, status) {
@@ -1037,15 +1055,14 @@ async function maybeRunOcrFallback(reader, status) {
   if (cameraUsageMode === 'search') return;
   ocrBusy = true;
   try {
-    status.textContent = 'Lecture des chiffres...';
     const candidate = await recognizeBarcodeDigitsFromVideo(reader);
-    if (candidate) {
-      // A valid EAN/UPC checksum is proof enough — accept immediately.
-      // No need for two consecutive reads: the checksum is mathematically sound.
+    if (candidate && candidate === lastOcrCandidate) {
+      // Same valid number read on 2 consecutive OCR passes → trust it.
+      // (exact-length + checksum + tight crop + 2x stability = no random reads)
       lastOcrCandidate = '';
-      await onDecodedCode(candidate);
+      await onDecodedCode(candidate, true);
     } else {
-      lastOcrCandidate = '';
+      lastOcrCandidate = candidate || '';
     }
   } catch (error) {
     lastOcrCandidate = '';
@@ -1142,10 +1159,13 @@ async function startQuaggaScanner(reader, status, button) {
     if (pb) { pb.style.display = ''; pb.textContent = '⏸ Pause'; pb.style.background = ''; pb.style.color = ''; pb.style.borderColor = ''; }
   }
   status.textContent = 'Cadrez les barres et les chiffres';
-  // OCR fallback intentionally DISABLED: it read digits from anywhere in the
-  // frame (price tags, lot numbers, package text) and extractBarcodeTextCandidates
-  // formed false barcodes via substring matching — producing random accepts even
-  // when no barcode was present. Only the real Quagga bar-decode is used now.
+  // OCR fallback for small/glossy etiquette barcodes Quagga can't decode.
+  // Reads the printed digits in a TIGHT center crop, accepts only a complete
+  // exact-length checksummed number seen on 2 consecutive passes. Runs in
+  // parallel with Quagga — whichever gets a valid read first wins.
+  quaggaOcrTimer = window.setInterval(() => {
+    maybeRunOcrFallback(reader, status);
+  }, 600);
 }
 
 // ── Stop camera ───────────────────────────────────────────────────────────────
