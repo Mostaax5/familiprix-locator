@@ -12,6 +12,7 @@ function normalizeProduct(product) {
     alternative_suggestions: String(product.alternative_suggestions || '').trim(),
     barcode: String(product.barcode || '').trim(),
     product_code: String(product.product_code || '').trim(),
+    facings: Number(product.facings) > 0 ? Number(product.facings) : 1,
     aisle: String(product.aisle || '').trim(),
     side: String(product.side || 'Gauche').trim() || 'Gauche',
     section: String(product.section || '1').trim() || '1',

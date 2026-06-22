@@ -242,12 +242,17 @@ def parse_planogram_pdf():
                             if g("e").lower() == "oui": products[idx]["en_stock"] = True
                             continue
 
+                        try:
+                            facings = int(re.sub(r"\D", "", g("f")) or "1")
+                        except (ValueError, TypeError):
+                            facings = 1
                         seen[key] = len(products)
                         products.append({
                             "tablette": t_int,
                             "position": p_int,
                             "barcode":  upc,
                             "code_familiprix": g("c"),
+                            "facings":  max(1, facings),   # general info only, not placement
                             "name":     desc,
                             "is_new":   ajout,
                             "en_stock": en_stock,

@@ -132,13 +132,13 @@ def _restore_from_gist_if_empty():
                 db.execute(
                     """
                     INSERT INTO products (name, brand, description, image_url, source_url, search_terms, usage_notes,
-                        alternative_suggestions, barcode, product_code, aisle, side, section, shelf, position,
+                        alternative_suggestions, barcode, product_code, facings, aisle, side, section, shelf, position,
                         is_plano, in_stock, flipped_label, created_by, created_at, modified_by, modified_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (name, p.get("brand", ""), p.get("description", ""), p.get("image_url", ""),
                      p.get("source_url", ""), p.get("search_terms", ""), p.get("usage_notes", ""),
-                     p.get("alternative_suggestions", ""), p.get("barcode", ""), p.get("product_code", ""),
+                     p.get("alternative_suggestions", ""), p.get("barcode", ""), p.get("product_code", ""), _as_flag(p.get("facings"), 1),
                      p.get("aisle", ""), p.get("side", ""), p.get("section", "1"),
                      p.get("shelf", ""), p.get("position", ""),
                      _as_flag(p.get("is_plano"), 0), _as_flag(p.get("in_stock"), 1), _as_flag(p.get("flipped_label"), 0),
@@ -238,13 +238,13 @@ def gist_restore_now():
             db.execute(
                 """
                 INSERT INTO products (name, brand, description, image_url, source_url, search_terms, usage_notes,
-                    alternative_suggestions, barcode, product_code, aisle, side, section, shelf, position,
+                    alternative_suggestions, barcode, product_code, facings, aisle, side, section, shelf, position,
                     is_plano, in_stock, flipped_label, created_by, created_at, modified_by, modified_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (name, p.get("brand", ""), p.get("description", ""), p.get("image_url", ""),
                  p.get("source_url", ""), p.get("search_terms", ""), p.get("usage_notes", ""),
-                 p.get("alternative_suggestions", ""), p.get("barcode", ""), p.get("product_code", ""),
+                 p.get("alternative_suggestions", ""), p.get("barcode", ""), p.get("product_code", ""), _as_flag(p.get("facings"), 1),
                  p.get("aisle", ""), p.get("side", ""), p.get("section", "1"),
                  p.get("shelf", ""), p.get("position", ""),
                  _as_flag(p.get("is_plano"), 0), _as_flag(p.get("in_stock"), 1), _as_flag(p.get("flipped_label"), 0),

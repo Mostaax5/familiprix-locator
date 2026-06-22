@@ -682,6 +682,10 @@ def bulk_import_products():
         code     = str(p.get("code_familiprix", "")).strip()
         is_plano = 1 if p.get("is_plano", True) else 0
         flipped  = 1 if p.get("flipped_label", False) else 0
+        try:
+            facings = max(1, int(p.get("facings", 1) or 1))
+        except (ValueError, TypeError):
+            facings = 1
         # The pharmacy code lives in its own column (product_code), NOT in
         # search_terms, so a name/UPC search can never match it by accident.
         notes    = "[PLANO]" if is_plano else "[HORS-PLANO]"
@@ -702,21 +706,21 @@ def bulk_import_products():
                 row_id = existing["id"] if isinstance(existing, dict) else existing[0]
                 if image_url:
                     db.execute(
-                        "UPDATE products SET name=?, barcode=?, product_code=?, search_terms=?, is_plano=?, in_stock=?, flipped_label=?, image_url=?, modified_by=?, modified_at=? WHERE id=?",
-                        (name, barcode, code, notes, is_plano, in_stock, flipped, image_url, username, now, row_id)
+                        "UPDATE products SET name=?, barcode=?, product_code=?, facings=?, search_terms=?, is_plano=?, in_stock=?, flipped_label=?, image_url=?, modified_by=?, modified_at=? WHERE id=?",
+                        (name, barcode, code, facings, notes, is_plano, in_stock, flipped, image_url, username, now, row_id)
                     )
                 else:
                     db.execute(
-                        "UPDATE products SET name=?, barcode=?, product_code=?, search_terms=?, is_plano=?, in_stock=?, flipped_label=?, modified_by=?, modified_at=? WHERE id=?",
-                        (name, barcode, code, notes, is_plano, in_stock, flipped, username, now, row_id)
+                        "UPDATE products SET name=?, barcode=?, product_code=?, facings=?, search_terms=?, is_plano=?, in_stock=?, flipped_label=?, modified_by=?, modified_at=? WHERE id=?",
+                        (name, barcode, code, facings, notes, is_plano, in_stock, flipped, username, now, row_id)
                     )
             else:
                 db.execute(
                     """INSERT INTO products
-                       (name, barcode, product_code, aisle, side, section, shelf, position,
+                       (name, barcode, product_code, facings, aisle, side, section, shelf, position,
                         search_terms, is_plano, in_stock, flipped_label, image_url, created_by, created_at, modified_by, modified_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (name, barcode, code, aisle, side, section_s, shelf_s, position_s,
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (name, barcode, code, facings, aisle, side, section_s, shelf_s, position_s,
                      notes, is_plano, in_stock, flipped, image_url, username, now, username, now)
                 )
             imported += 1

@@ -243,6 +243,9 @@ def init_postgres_db(db):
     # Kept separate from barcode so a UPC search never matches it by accident.
     db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS product_code TEXT DEFAULT ''")
     db.execute("CREATE INDEX IF NOT EXISTS idx_products_product_code ON products(product_code)")
+    # Façades from the planogram = how many positions a product spreads across.
+    # Saved for general info only; NOT used for placement (one product / position).
+    db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS facings INTEGER DEFAULT 1")
 
     db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS max_section TEXT NOT NULL DEFAULT '1'")
     db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS config_json TEXT NOT NULL DEFAULT ''")
@@ -387,6 +390,10 @@ def init_sqlite_db(db):
     if "product_code" not in existing_columns:
         db.execute("ALTER TABLE products ADD COLUMN product_code TEXT DEFAULT ''")
     db.execute("CREATE INDEX IF NOT EXISTS idx_products_product_code ON products(product_code)")
+    # Façades from the planogram (positions a product spreads across) — saved for
+    # general info only; NOT used for placement.
+    if "facings" not in existing_columns:
+        db.execute("ALTER TABLE products ADD COLUMN facings INTEGER DEFAULT 1")
 
     layout_columns = {
         row["name"] for row in db.execute("PRAGMA table_info(aisle_layouts)").fetchall()

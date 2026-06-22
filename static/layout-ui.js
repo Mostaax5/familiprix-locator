@@ -730,6 +730,7 @@ function productCard(p, showDelete=true, showAiButton=true) {
       ${stockRow}
       ${p.barcode ? `<div class="meta-row"><span class="meta-label">Code-barres</span><span class="barcode-text">${esc(p.barcode)}</span></div>` : ''}
       ${p.product_code ? `<div class="meta-row"><span class="meta-label">Code pharmacie</span><span class="barcode-text">${esc(p.product_code)}</span></div>` : ''}
+      ${p.facings > 1 ? `<div class="meta-row"><span class="meta-label">Façades</span><span>${esc(p.facings)} positions</span></div>` : ''}
       ${p.last_change_by ? `<div class="meta-row"><span class="meta-label">Modifié par</span><span>${esc(p.last_change_by)}</span></div>` : ''}
       ${p.description ? `<div class="desc-text">${esc(p.description)}</div>` : ''}
       ${p.usage_notes ? `<div class="desc-text">${esc(p.usage_notes)}</div>` : ''}
