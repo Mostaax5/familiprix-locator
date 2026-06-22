@@ -41,12 +41,12 @@
     <div class="shell-copy" id="installHint">Sur mobile: ouvrez le site puis ajoutez-le a l ecran d accueil pour un acces rapide.</div>
     <div class="auth-grid">
       <div class="field">
-        <label class="label" for="editorName">Nom sur cet appareil</label>
+        <label class="label" for="editorName">Nom sur cet appareil (optionnel)</label>
         <input id="editorName" type="text" placeholder="Ex: Amine"/>
       </div>
       <button class="btn btn-inline" onclick="saveEditorName()">Nommer</button>
     </div>
-    <div id="editorSessionInfo" class="inline-note">Aucun mot de passe. Si vous entrez un nom, il sera garde sur cet appareil pour suivre qui a change quoi.</div>
+    <div id="editorSessionInfo" class="inline-note">Optionnel — jamais obligatoire. Si vous mettez un nom, il sert à savoir qui a modifié quoi et à étiqueter les données pour l'IA. Vous pouvez l'ignorer.</div>
     <div id="backendStatusInfo" class="inline-note">Verification de la base partagee...</div>
   </div>
 </div>
@@ -331,6 +331,20 @@
     <button id="fetchImagesBtn" class="btn btn-outline" style="margin-top:8px" onclick="fetchMissingImages()">📷 Récupérer les images manquantes</button>
     <div id="missingImagesMsg" style="min-height:18px;font-size:13px;margin-top:6px;color:#64748b"></div>
   </div>
+
+  <details class="card" ontoggle="if(this.open)loadRemovedProducts()">
+    <summary class="details-summary">🗄 Produits retirés (historique)</summary>
+    <div class="details-body">
+      <div class="section-note">Tout produit supprimé est conservé ici — pour retrouver de quel produit il s'agissait et où il était.</div>
+      <div class="scan-tools" style="margin-top:8px">
+        <div class="field">
+          <input type="text" id="removedSearch" placeholder="Chercher par nom ou code-barres…" oninput="loadRemovedProducts()"/>
+        </div>
+        <button class="btn btn-outline btn-inline" onclick="loadRemovedProducts()">↻</button>
+      </div>
+      <div id="removedList" style="margin-top:8px"></div>
+    </div>
+  </details>
 
   <div class="card">
     <div class="section-title">Sauvegarde de la base</div>

@@ -1936,4 +1936,25 @@ async function fetchMissingImages() {
   if (msg) msg.textContent = total ? `✅ ${total} image(s) récupérée(s).` : 'Aucune nouvelle image trouvée.';
 }
 
-window.AppLayout = { renderMapEditor, loadMapEditor, refreshPlanUi, createAisleLayout, saveAisleLayout, refreshProductsCache, refreshLayoutsCache, loadPlanogramHistory, fetchMissingImages, updateMissingImagesUi };
+async function loadRemovedProducts() {
+  const box = document.getElementById('removedList');
+  if (!box) return;
+  const q = (document.getElementById('removedSearch')?.value || '').trim();
+  try {
+    const {res, data} = await apiFetch(`/api/products/removed${q ? '?q=' + encodeURIComponent(q) : ''}`);
+    if (!res.ok || !Array.isArray(data) || !data.length) {
+      box.innerHTML = '<div class="small" style="color:#94a3b8">Aucun produit retiré.</div>';
+      return;
+    }
+    box.innerHTML = data.map(r => `
+      <div style="padding:7px 0;border-bottom:1px solid #f1f5f9">
+        <div style="font-weight:600;font-size:13px">${esc(r.name || '—')}</div>
+        <div style="font-size:11px;color:#94a3b8;font-family:monospace">${esc(r.barcode || '—')}</div>
+        <div style="font-size:11px;color:#64748b">Était: ${esc(r.last_location || '—')} · retiré ${esc((r.removed_at||'').replace('T',' ').slice(0,16))}${r.removed_by ? ' · ' + esc(r.removed_by) : ''}</div>
+      </div>`).join('');
+  } catch (e) {
+    box.innerHTML = '<div class="small" style="color:#c8102e">Impossible de charger l historique.</div>';
+  }
+}
+
+window.AppLayout = { renderMapEditor, loadMapEditor, refreshPlanUi, createAisleLayout, saveAisleLayout, refreshProductsCache, refreshLayoutsCache, loadPlanogramHistory, fetchMissingImages, updateMissingImagesUi, loadRemovedProducts };
