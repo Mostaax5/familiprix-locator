@@ -143,6 +143,19 @@ async function apiGenerateClientHelp(payload) {
   }
 }
 
+async function apiSetProductStock(id, inStock) {
+  try {
+    const {res, data} = await apiFetch(`/api/products/${id}/stock`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: JSON.stringify({in_stock: !!inStock})
+    });
+    return res.ok ? data : {success: false, error: data.error || 'Erreur.'};
+  } catch (error) {
+    return {success: false, error: 'Impossible de changer le statut.'};
+  }
+}
+
 async function apiGetSystemInfo() {
   const {res, data} = await apiFetch('/api/system/info');
   if (!res.ok) throw new Error('system-info');

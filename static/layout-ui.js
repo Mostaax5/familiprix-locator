@@ -693,18 +693,28 @@ function productCard(p, showDelete=true, showAiButton=true) {
     `Tablette ${esc(p.shelf)}`,
     `Pos. ${esc(p.position)}`
   ];
-  return `<div class="card">
+  const outOfStock = p.in_stock === 0;
+  const planoBadge = p.is_plano ? `<span style="display:inline-block;background:#eef2ff;color:#4338ca;border-radius:6px;padding:1px 7px;font-size:10px;font-weight:700;margin-right:4px">📋 PLANO</span>` : `<span style="display:inline-block;background:#f1f5f9;color:#64748b;border-radius:6px;padding:1px 7px;font-size:10px;font-weight:700;margin-right:4px">HORS-PLANO</span>`;
+  const stockRow = (p.id ? `<div class="tool-row" style="margin-top:6px;align-items:center;gap:8px">
+      ${outOfStock
+        ? `<span style="color:#c8102e;font-size:12px;font-weight:700">⚠ RUPTURE${p.is_plano ? ' — retirer l étiquette plano' : ''}</span>
+           <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="toggleProductStock(${p.id},true)">Remettre en stock</button>`
+        : `<button class="btn btn-outline btn-inline" style="font-size:12px;color:#c8102e;border-color:#f1b8c2" onclick="toggleProductStock(${p.id},false)">⚠ Marquer rupture</button>`}
+    </div>` : '');
+  return `<div class="card"${outOfStock ? ' style="border-left:4px solid #c8102e"' : ''}>
     ${showDelete ? `<button class="delete-btn" onclick="deleteProduct(${p.id})" title="Supprimer">✕</button>` : ''}
     ${isHomeBrand(p.brand) ? `<div class="home-badge">★ Marque maison Familiprix</div>` : ''}
     <div class="product-layout">
       ${p.image_url ? `<img class="product-thumb" src="${esc(p.image_url)}" alt="Image produit">` : ''}
       <div class="product-info">
+        <div style="margin-bottom:3px">${planoBadge}</div>
         <div class="name">${esc(p.name)}</div>
         ${p.brand ? `<div class="product-brand">${esc(p.brand)}</div>` : ''}
         <div class="location">${locationParts.join('<span class="loc-sep"> · </span>')}</div>
       </div>
     </div>
     <div class="product-footer">
+      ${stockRow}
       ${p.barcode ? `<div class="meta-row"><span class="meta-label">Code-barres</span><span class="barcode-text">${esc(p.barcode)}</span></div>` : ''}
       ${p.last_change_by ? `<div class="meta-row"><span class="meta-label">Modifié par</span><span>${esc(p.last_change_by)}</span></div>` : ''}
       ${p.description ? `<div class="desc-text">${esc(p.description)}</div>` : ''}
@@ -714,6 +724,18 @@ function productCard(p, showDelete=true, showAiButton=true) {
       ${showAiButton && p.id && backendInfo.ai_enabled ? `<div class="tool-row"><button class="btn btn-outline btn-inline" onclick="enrichStoredProductWithAi(${p.id})">Generer aide client (IA)</button></div>` : ''}
     </div>
   </div>`;
+}
+
+async function toggleProductStock(productId, inStock) {
+  if (!requireEditorSession('changer le statut de stock')) return;
+  const data = await apiSetProductStock(productId, inStock);
+  if (data.success !== false && data.product) {
+    upsertCachedProduct(normalizeProduct(data.product));
+    // Re-render whatever view is visible
+    if (document.getElementById('search')?.classList.contains('active')) doSearch();
+    else if (document.getElementById('add')?.classList.contains('active')) refreshPlanUi();
+    else if (document.getElementById('scan')?.classList.contains('active')) refreshRayonList();
+  }
 }
 
 async function enrichStoredProductWithAi(productId) {

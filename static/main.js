@@ -16,6 +16,8 @@ function normalizeProduct(product) {
     section: String(product.section || '1').trim() || '1',
     shelf: String(product.shelf || '').trim(),
     position: String(product.position || '').trim(),
+    is_plano: Number(product.is_plano) ? 1 : 0,
+    in_stock: (product.in_stock === 0 || product.in_stock === '0') ? 0 : 1,
     modified_by: String(product.modified_by || '').trim(),
     modified_at: String(product.modified_at || '').trim(),
     created_by: String(product.created_by || '').trim(),
