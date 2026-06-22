@@ -1835,25 +1835,62 @@ function planoAddLine() {
   updatePlanoPreview();
 }
 
+// Mirror of the server's plan_planogram_flow: lay each plano shelf (= lines that
+// share a plano tablette) into the plan's EXISTING tablettes starting at
+// (startSection, startTablette), rolling into the next section when one is full.
+// Tablette COUNT per section is the plan's and never changes here. Returns a map
+// from product index → {section, shelf, position}, plus the set of overflow rows.
+function computePlanoFlow(config, side, startSection, startTablette, tabStart, tabEnd, skipNS) {
+  const out = { byIdx: {}, overflow: new Set(), placed: 0 };
+  const sections = ((config && config.sides && config.sides[side]) ? config.sides[side].sections : []) || [];
+  const slots = [];
+  for (let si = Math.max(0, startSection - 1); si < sections.length; si++) {
+    const shelfCount = ((sections[si] || {}).shelves || []).length;
+    const firstT = (si === startSection - 1) ? (startTablette - 1) : 0;
+    for (let ti = Math.max(0, firstT); ti < shelfCount; ti++) slots.push([si, ti]);
+  }
+  const byTab = new Map();
+  (planoData.products || []).forEach((p, idx) => {
+    if (p.tablette < tabStart || p.tablette > tabEnd) return;
+    if (skipNS && !p.en_stock) return;
+    if (!byTab.has(p.tablette)) byTab.set(p.tablette, []);
+    byTab.get(p.tablette).push(idx);
+  });
+  [...byTab.keys()].sort((a, b) => a - b).forEach((t, i) => {
+    const idxs = byTab.get(t).slice().sort((a, b) => (planoData.products[a].position || 0) - (planoData.products[b].position || 0));
+    if (i >= slots.length) { idxs.forEach(idx => out.overflow.add(idx)); return; }
+    const [si, ti] = slots[i];
+    idxs.forEach(idx => { out.byIdx[idx] = { section: si + 1, shelf: ti + 1, position: planoData.products[idx].position }; out.placed++; });
+  });
+  return out;
+}
+
 function updatePlanoPreview() {
   if (!planoData) return;
-  const aisle    = document.getElementById('planoAisle').value;
-  const side     = document.getElementById('planoSide').value;
-  const section  = document.getElementById('planoSection').value || '1';
-  const tabStart = parseInt(document.getElementById('planoTabStart').value) || 1;
-  const tabEnd   = parseInt(document.getElementById('planoTabEnd').value)   || 99;
-  const offset   = parseInt(document.getElementById('planoShelfOffset').value) || 0;
-  const skipNS   = document.getElementById('planoSkipNonStock').checked;
-  const preview  = document.getElementById('planoPreview');
+  const aisle        = document.getElementById('planoAisle').value;
+  const side         = document.getElementById('planoSide').value;
+  const startSection = parseInt(document.getElementById('planoSection').value) || 1;
+  const startTab     = parseInt(document.getElementById('planoStartTablette').value) || 1;
+  const tabStart     = parseInt(document.getElementById('planoTabStart').value) || 1;
+  const tabEnd       = parseInt(document.getElementById('planoTabEnd').value)   || 99;
+  const skipNS       = document.getElementById('planoSkipNonStock').checked;
+  const preview      = document.getElementById('planoPreview');
+
+  const layout = (typeof mapLayouts !== 'undefined' ? mapLayouts : []).find(l => String(l.aisle) === String(aisle));
+  const config = layout ? layout.config : null;
+  const flow = computePlanoFlow(config, side, startSection, startTab, tabStart, tabEnd, skipNS);
 
   // Editable rows — each maps to its real index in planoData.products.
   const rows = planoData.products.map((p, idx) => {
     if (p.tablette < tabStart || p.tablette > tabEnd) return '';
     if (skipNS && !p.en_stock) return '';
     const isPlano = p.is_plano !== false;
-    const storeShelf = p.tablette + offset;
-    return `<div style="display:flex;align-items:center;gap:6px;padding:6px 4px;border-bottom:1px solid #f1f5f9;flex-wrap:wrap">
-      <input type="number" value="${esc(p.tablette)}" title="Tablette" style="width:42px;padding:3px;font-size:12px;text-align:center"
+    const place = flow.byIdx[idx];
+    const dest = place
+      ? `→ Allée ${esc(aisle)} · ${esc(sideDisplayLabel(side))} · S${esc(place.section)} · T${esc(place.shelf)} · P${esc(place.position)}`
+      : `⚠ Hors plan — aucune tablette libre (le nombre de tablettes n'est pas modifié). Ajoutez des tablettes au plan ou changez le départ.`;
+    return `<div style="display:flex;align-items:center;gap:6px;padding:6px 4px;border-bottom:1px solid #f1f5f9;flex-wrap:wrap${place ? '' : ';background:#fff5f5'}">
+      <input type="number" value="${esc(p.tablette)}" title="Tablette (plano)" style="width:42px;padding:3px;font-size:12px;text-align:center"
              onchange="planoSet(${idx},'tablette',this.value)">
       <input type="number" value="${esc(p.position)}" title="Position" style="width:42px;padding:3px;font-size:12px;text-align:center"
              onchange="planoSet(${idx},'position',this.value)">
@@ -1874,18 +1911,21 @@ function updatePlanoPreview() {
               style="font-size:10px;font-weight:700;border:none;border-radius:6px;padding:3px 7px;cursor:pointer;${p.flipped_label?'background:#fef3c7;color:#92400e':'background:#f1f5f9;color:#94a3b8'}">🔄 ${p.flipped_label?'FLIPPÉE':'flip?'}</button>` : ''}
       <button title="Retirer cette ligne" onclick="planoRemoveLine(${idx})"
               style="border:1px solid #f1b8c2;color:#c8102e;background:#fff;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px">✕</button>
-      <div style="flex-basis:100%;font-size:10px;color:#94a3b8;padding-left:2px">→ Allée ${esc(aisle)} · ${esc(sideDisplayLabel(side))} · S${esc(section)} · T${esc(storeShelf)} · P${esc(p.position)}</div>
+      <div style="flex-basis:100%;font-size:10px;color:${place ? '#94a3b8' : '#c8102e'};padding-left:2px">${dest}</div>
     </div>`;
   }).filter(Boolean).join('');
 
-  const count = planoData.products.filter(p => p.tablette >= tabStart && p.tablette <= tabEnd && !(skipNS && !p.en_stock)).length;
+  const overCount = flow.overflow.size;
+  const overNote = overCount
+    ? `<span style="font-size:11px;color:#c8102e;font-weight:700">${overCount} produit(s) hors plan</span>`
+    : '';
 
   preview.innerHTML = `
-    <div style="font-size:11px;color:#64748b;padding:4px 4px 6px">Modifiez tablette/position, changez Plano↔Hors, marquez Rupture, retirez ou ajoutez des lignes avant d'importer.</div>
+    <div style="font-size:11px;color:#64748b;padding:4px 4px 6px">Le plano remplit les tablettes de la section de départ, puis continue dans les sections suivantes. Le nombre de tablettes du plan ne change pas — seul le nombre de positions par tablette s'ajuste.</div>
     ${rows || '<div style="padding:10px;font-size:12px;color:#64748b">Aucun produit dans cette sélection.</div>'}
-    <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 4px;border-top:1px solid #e2e8f0;margin-top:4px">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 4px;border-top:1px solid #e2e8f0;margin-top:4px;flex-wrap:wrap">
       <button class="btn btn-outline btn-inline" style="font-size:12px;width:auto;margin:0" onclick="planoAddLine()">➕ Ajouter une ligne</button>
-      <span style="font-size:12px;font-weight:700;color:#1e293b">${count} produit(s) à importer</span>
+      <span style="font-size:12px;font-weight:700;color:#1e293b">${flow.placed} produit(s) placé(s) ${overNote}</span>
     </div>`;
 }
 
@@ -1893,13 +1933,13 @@ async function importPlanogram() {
   if (!planoData) return;
   const aisle   = document.getElementById('planoAisle').value;
   if (!aisle) { document.getElementById('planoImportMsg').textContent = 'Choisissez une allée.'; return; }
-  const side     = document.getElementById('planoSide').value;
-  const section  = document.getElementById('planoSection').value || '1';
-  const tabStart = parseInt(document.getElementById('planoTabStart').value)    || 1;
-  const tabEnd   = parseInt(document.getElementById('planoTabEnd').value)      || 99;
-  const offset   = parseInt(document.getElementById('planoShelfOffset').value) || 0;
-  const replace  = document.getElementById('planoReplace').checked;
-  const skipNS   = document.getElementById('planoSkipNonStock').checked;
+  const side       = document.getElementById('planoSide').value;
+  const startSec   = parseInt(document.getElementById('planoSection').value)        || 1;
+  const startTab   = parseInt(document.getElementById('planoStartTablette').value)  || 1;
+  const tabStart   = parseInt(document.getElementById('planoTabStart').value)       || 1;
+  const tabEnd     = parseInt(document.getElementById('planoTabEnd').value)         || 99;
+  const replace    = document.getElementById('planoReplace').checked;
+  const skipNS     = document.getElementById('planoSkipNonStock').checked;
 
   const btn = document.getElementById('planoImportBtn');
   btn.disabled = true; btn.textContent = 'Importation…';
@@ -1911,8 +1951,9 @@ async function importPlanogram() {
       method: 'POST',
       headers: {'Content-Type':'application/json', ...getEditorHeaders()},
       body: JSON.stringify({
-        aisle, side, section,
-        shelf_offset:   offset,
+        aisle, side,
+        start_section:  startSec,
+        start_tablette: startTab,
         tablette_start: tabStart,
         tablette_end:   tabEnd,
         replace_existing: replace,
@@ -1923,8 +1964,9 @@ async function importPlanogram() {
       })
     });
     if (res.ok && data.success) {
-      const errTxt = data.errors > 0 ? `, ${data.errors} erreur(s)` : '';
-      msg.innerHTML = `✅ <strong>${data.imported}</strong> importé(s), ${data.skipped} ignoré(s)${errTxt}. Les photos manquantes sont récupérées automatiquement.`;
+      const errTxt  = data.errors > 0 ? `, ${data.errors} erreur(s)` : '';
+      const overTxt = data.overflow > 0 ? ` ⚠ ${data.overflow} produit(s) hors plan (pas assez de tablettes — le nombre de tablettes n'est pas modifié).` : '';
+      msg.innerHTML = `✅ <strong>${data.imported}</strong> importé(s), ${data.skipped} ignoré(s)${errTxt}.${overTxt} Les photos manquantes sont récupérées automatiquement.`;
       msg.style.color = '#16a34a';
       refreshProductsCache();
       loadPlanogramHistory();

@@ -566,6 +566,49 @@ def set_flipped_label(product_id):
     return jsonify({"success": True, "product": row_to_product(product)})
 
 
+def plan_planogram_flow(config, side, start_section, start_tablette, lines):
+    """Flow plano lines across the côté's EXISTING sections, starting at
+    (start_section, start_tablette). The number of tablettes per section is the
+    plan's and is never changed; only the number of positions on a tablette is
+    grown to fit the plano. A plano "shelf" = all lines sharing a plano tablette;
+    shelves are laid into store tablettes in order, rolling into the next section
+    when one is full.
+
+    `lines` = [{"tablette": int, "position": int, "p": <payload>}, ...].
+    Returns (placements, overflow_shelf_count) and grows position counts in
+    `config` in place. Each placement = (section_no, shelf_no, position_no, line)."""
+    sections = ((config.get("sides", {}) or {}).get(side, {}) or {}).get("sections", [])
+    # Ordered store tablette slots from the start point onward (count per section fixed).
+    slots = []
+    for si in range(max(0, start_section - 1), len(sections)):
+        shelf_count = len(sections[si].get("shelves", []))
+        first_t = (start_tablette - 1) if si == (start_section - 1) else 0
+        for ti in range(max(0, first_t), shelf_count):
+            slots.append((si, ti))
+
+    # Group plano lines into shelves by their plano tablette, in ascending order.
+    by_tablette = {}
+    for ln in lines:
+        by_tablette.setdefault(ln["tablette"], []).append(ln)
+
+    placements = []
+    overflow = 0
+    for idx, ptab in enumerate(sorted(by_tablette.keys())):
+        shelf_lines = sorted(by_tablette[ptab], key=lambda l: l["position"])
+        if idx >= len(slots):
+            overflow += 1
+            continue
+        si, ti = slots[idx]
+        max_pos = max((l["position"] for l in shelf_lines), default=0)
+        # Grow positions to fit the plano — never shrink, so existing products
+        # on a longer tablette are never orphaned.
+        if max_pos > sections[si]["shelves"][ti]:
+            sections[si]["shelves"][ti] = max_pos
+        for ln in shelf_lines:
+            placements.append((si + 1, ti + 1, ln["position"], ln))
+    return placements, overflow
+
+
 @products_bp.route("/api/products/bulk-import", methods=["POST"])
 def bulk_import_products():
     username, error = require_editor()
@@ -575,8 +618,8 @@ def bulk_import_products():
     data           = request.get_json() or {}
     aisle          = str(data.get("aisle", "")).strip()
     side           = str(data.get("side", "Droite")).strip()
-    section        = str(data.get("section", "1")).strip()
-    shelf_offset   = int(data.get("shelf_offset", 0))
+    start_section  = max(1, int(data.get("start_section", data.get("section", 1)) or 1))
+    start_tablette = max(1, int(data.get("start_tablette", 1) or 1))
     tablette_start = int(data.get("tablette_start", 1))
     tablette_end   = int(data.get("tablette_end", 99))
     replace        = bool(data.get("replace_existing", False))
@@ -586,11 +629,20 @@ def bulk_import_products():
     if not aisle:
         return jsonify({"success": False, "error": "Allée requise."}), 400
 
+    from routes.layout import get_layout_row, normalize_layout_config, layout_metrics
     db = get_db()
-    now = utc_now_iso()
-    imported = skipped = errors = 0
-    image_barcodes = []   # barcodes still missing an image → fetched in background
+    row = get_layout_row(db, aisle)
+    if not row:
+        return jsonify({"success": False, "error": f"L'allée {aisle} n'existe pas dans le plan. Créez d'abord l'allée."}), 400
+    config = normalize_layout_config(row["config_json"], row["max_section"], row["max_shelf"], row["max_position"])
+    sections = ((config.get("sides", {}) or {}).get(side, {}) or {}).get("sections", [])
+    if not sections:
+        return jsonify({"success": False, "error": "Ce côté n'a aucune section dans le plan."}), 400
 
+    # Build the filtered plano lines (keep each row's full payload).
+    now = utc_now_iso()
+    errors = 0
+    lines = []
     for p in products:
         try:
             tab = int(p.get("tablette", 0))
@@ -598,39 +650,39 @@ def bulk_import_products():
         except (ValueError, TypeError):
             errors += 1
             continue
-
         if not (tablette_start <= tab <= tablette_end):
             continue
         if skip_ns and not p.get("en_stock", True):
             continue
+        if not str(p.get("name", "")).strip():
+            errors += 1
+            continue
+        lines.append({"tablette": tab, "position": pos, "p": p})
 
-        shelf    = str(tab + shelf_offset)
-        position = str(pos)
+    placements, overflow = plan_planogram_flow(config, side, start_section, start_tablette, lines)
+
+    imported = skipped = 0
+    image_barcodes = []   # barcodes still missing an image → fetched in background
+    for (sec_no, shelf_no, pos_no, ln) in placements:
+        p = ln["p"]
+        section_s, shelf_s, position_s = str(sec_no), str(shelf_no), str(pos_no)
         name     = str(p.get("name", "")).strip()
         barcode  = str(p.get("barcode", "")).strip()
         code     = str(p.get("code_familiprix", "")).strip()
         is_plano = 1 if p.get("is_plano", True) else 0
         flipped  = 1 if p.get("flipped_label", False) else 0
-        tag      = "[PLANO]" if is_plano else "[HORS-PLANO]"
         # The pharmacy code lives in its own column (product_code), NOT in
         # search_terms, so a name/UPC search can never match it by accident.
-        notes    = tag
-
-        if not name:
-            errors += 1
-            continue
-
+        notes    = "[PLANO]" if is_plano else "[HORS-PLANO]"
+        in_stock = 0 if not p.get("en_stock", True) else 1
         try:
             existing = db.execute(
                 "SELECT id FROM products WHERE aisle=? AND side=? AND section=? AND shelf=? AND position=?",
-                (aisle, side, section, shelf, position)
+                (aisle, side, section_s, shelf_s, position_s)
             ).fetchone()
-
             if existing and not replace:
                 skipped += 1
                 continue
-
-            in_stock = 0 if not p.get("en_stock", True) else 1
             # Plano rows carry no image — reuse one already stored for this barcode.
             image_url = find_existing_image_for_barcode(db, barcode)
             if not image_url and barcode:
@@ -653,12 +705,25 @@ def bulk_import_products():
                        (name, barcode, product_code, aisle, side, section, shelf, position,
                         search_terms, is_plano, in_stock, flipped_label, image_url, created_by, created_at, modified_by, modified_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (name, barcode, code, aisle, side, section, shelf, position,
+                    (name, barcode, code, aisle, side, section_s, shelf_s, position_s,
                      notes, is_plano, in_stock, flipped, image_url, username, now, username, now)
                 )
             imported += 1
         except Exception:
             errors += 1
+
+    skipped += overflow   # plano shelves past the end of the plan (tablettes never added)
+
+    # Persist the plan with positions grown to fit the plano (tablette count is
+    # unchanged — only the number of positions on a tablette can grow).
+    try:
+        ms, msh, mp = layout_metrics(config)
+        db.execute(
+            "UPDATE aisle_layouts SET config_json=?, max_section=?, max_shelf=?, max_position=?, modified_by=?, modified_at=? WHERE aisle=?",
+            (json.dumps(config), ms, msh, mp, username, now, aisle),
+        )
+    except Exception:
+        pass
 
     # Record this import in the planogram history.
     try:
@@ -671,14 +736,16 @@ def bulk_import_products():
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (now, store, username,
              str(plano.get("name", "")), str(plano.get("number", "")), str(plano.get("version", "")),
-             aisle, side, section, str(tablette_start), str(tablette_end), imported, skipped),
+             aisle, side, str(start_section), str(tablette_start), str(tablette_end), imported, skipped),
         )
-        db.commit()
     except Exception:
         pass
+    db.commit()
 
+    from routes.gist import _schedule_gist_backup
+    _schedule_gist_backup(db)
     schedule_image_fill(image_barcodes)   # fetch missing plano pictures automatically
-    return jsonify({"success": True, "imported": imported, "skipped": skipped, "errors": errors})
+    return jsonify({"success": True, "imported": imported, "skipped": skipped, "errors": errors, "overflow": overflow})
 
 
 @products_bp.route("/api/planograms/history", methods=["GET"])
