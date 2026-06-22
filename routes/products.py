@@ -516,7 +516,9 @@ def bulk_import_products():
         name     = str(p.get("name", "")).strip()
         barcode  = str(p.get("barcode", "")).strip()
         code     = str(p.get("code_familiprix", "")).strip()
-        notes    = f"[PLANO] {code}" if code else "[PLANO]"
+        is_plano = 1 if p.get("is_plano", True) else 0
+        tag      = "[PLANO]" if is_plano else "[HORS-PLANO]"
+        notes    = f"{tag} {code}".strip()
 
         if not name:
             errors += 1
@@ -539,22 +541,22 @@ def bulk_import_products():
                 row_id = existing["id"] if isinstance(existing, dict) else existing[0]
                 if image_url:
                     db.execute(
-                        "UPDATE products SET name=?, barcode=?, search_terms=?, is_plano=1, in_stock=?, image_url=?, modified_by=?, modified_at=? WHERE id=?",
-                        (name, barcode, notes, in_stock, image_url, username, now, row_id)
+                        "UPDATE products SET name=?, barcode=?, search_terms=?, is_plano=?, in_stock=?, image_url=?, modified_by=?, modified_at=? WHERE id=?",
+                        (name, barcode, notes, is_plano, in_stock, image_url, username, now, row_id)
                     )
                 else:
                     db.execute(
-                        "UPDATE products SET name=?, barcode=?, search_terms=?, is_plano=1, in_stock=?, modified_by=?, modified_at=? WHERE id=?",
-                        (name, barcode, notes, in_stock, username, now, row_id)
+                        "UPDATE products SET name=?, barcode=?, search_terms=?, is_plano=?, in_stock=?, modified_by=?, modified_at=? WHERE id=?",
+                        (name, barcode, notes, is_plano, in_stock, username, now, row_id)
                     )
             else:
                 db.execute(
                     """INSERT INTO products
                        (name, barcode, aisle, side, section, shelf, position,
                         search_terms, is_plano, in_stock, image_url, created_by, created_at, modified_by, modified_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (name, barcode, aisle, side, section, shelf, position,
-                     notes, in_stock, image_url, username, now, username, now)
+                     notes, is_plano, in_stock, image_url, username, now, username, now)
                 )
             imported += 1
         except Exception:

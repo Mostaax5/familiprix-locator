@@ -1767,6 +1767,8 @@ async function parsePlanogramPDF(input) {
       return;
     }
     planoData = data;
+    // Every parsed line is a plano product by default (editable in the preview).
+    (planoData.products || []).forEach(p => { if (p.is_plano === undefined) p.is_plano = true; });
     const tabs = Object.keys(data.tablettes).map(Number).sort((a,b)=>a-b);
     document.getElementById('planoTabStart').value = tabs[0] || 1;
     document.getElementById('planoTabEnd').value   = tabs[tabs.length-1] || 8;
@@ -1783,6 +1785,34 @@ async function parsePlanogramPDF(input) {
   }
 }
 
+// Mutate a plano line then re-render (editable preview).
+function planoSet(idx, field, value) {
+  if (!planoData || !planoData.products[idx]) return;
+  const p = planoData.products[idx];
+  if (field === 'tablette' || field === 'position') p[field] = Math.max(0, parseInt(value) || 0);
+  else if (field === 'name') p.name = value;
+  updatePlanoPreview();
+}
+function planoToggle(idx, field) {
+  if (!planoData || !planoData.products[idx]) return;
+  const p = planoData.products[idx];
+  if (field === 'is_plano') p.is_plano = (p.is_plano === false);  // default true → false
+  else if (field === 'en_stock') p.en_stock = !p.en_stock;
+  updatePlanoPreview();
+}
+function planoRemoveLine(idx) {
+  if (!planoData || !planoData.products[idx]) return;
+  planoData.products.splice(idx, 1);
+  updatePlanoPreview();
+}
+function planoAddLine() {
+  if (!planoData) return;
+  const tab = parseInt(document.getElementById('planoTabStart').value) || 1;
+  planoData.products.push({tablette: tab, position: 1, barcode: '', code_familiprix: '',
+                           name: 'Nouveau produit', is_new: false, en_stock: true, is_plano: false});
+  updatePlanoPreview();
+}
+
 function updatePlanoPreview() {
   if (!planoData) return;
   const aisle    = document.getElementById('planoAisle').value;
@@ -1792,44 +1822,42 @@ function updatePlanoPreview() {
   const tabEnd   = parseInt(document.getElementById('planoTabEnd').value)   || 99;
   const offset   = parseInt(document.getElementById('planoShelfOffset').value) || 0;
   const skipNS   = document.getElementById('planoSkipNonStock').checked;
+  const preview  = document.getElementById('planoPreview');
 
-  const filtered = planoData.products.filter(p =>
-    p.tablette >= tabStart && p.tablette <= tabEnd &&
-    !(skipNS && !p.en_stock)
-  );
-
-  const preview = document.getElementById('planoPreview');
-  if (!filtered.length) {
-    preview.innerHTML = '<div style="padding:10px;font-size:12px;color:#64748b">Aucun produit dans cette sélection.</div>';
-    return;
-  }
-
-  const rows = filtered.slice(0, 20).map(p => {
+  // Editable rows — each maps to its real index in planoData.products.
+  const rows = planoData.products.map((p, idx) => {
+    if (p.tablette < tabStart || p.tablette > tabEnd) return '';
+    if (skipNS && !p.en_stock) return '';
+    const isPlano = p.is_plano !== false;
     const storeShelf = p.tablette + offset;
-    const nsTag  = !p.en_stock ? '<span style="color:#dc2626;font-size:10px;margin-left:3px">NON LIVRÉ</span>' : '';
-    const newTag = p.is_new   ? '<span style="color:#2563eb;font-size:10px;margin-left:3px">NOUVEAU</span>' : '';
-    return `<tr style="border-bottom:1px solid #f1f5f9">
-      <td style="padding:4px 8px;color:#64748b;font-size:11px;white-space:nowrap">T${p.tablette} P${p.position}</td>
-      <td style="padding:4px 8px;font-size:11px;color:#475569;white-space:nowrap">→ A${aisle} ${side} S${section} T${storeShelf} P${p.position}</td>
-      <td style="padding:4px 8px;font-size:11px">${p.name}${newTag}${nsTag}</td>
-    </tr>`;
-  }).join('');
+    return `<div style="display:flex;align-items:center;gap:6px;padding:6px 4px;border-bottom:1px solid #f1f5f9;flex-wrap:wrap">
+      <input type="number" value="${esc(p.tablette)}" title="Tablette" style="width:42px;padding:3px;font-size:12px;text-align:center"
+             onchange="planoSet(${idx},'tablette',this.value)">
+      <input type="number" value="${esc(p.position)}" title="Position" style="width:42px;padding:3px;font-size:12px;text-align:center"
+             onchange="planoSet(${idx},'position',this.value)">
+      <input type="text" value="${esc(p.name)}" title="Nom" style="flex:1;min-width:120px;padding:3px 6px;font-size:12px"
+             onchange="planoSet(${idx},'name',this.value)">
+      <button title="${isPlano ? 'Plano — cliquer pour Hors-plano' : 'Hors-plano — cliquer pour Plano'}"
+              onclick="planoToggle(${idx},'is_plano')"
+              style="font-size:10px;font-weight:700;border:none;border-radius:6px;padding:3px 7px;cursor:pointer;${isPlano?'background:#eef2ff;color:#4338ca':'background:#f1f5f9;color:#64748b'}">${isPlano?'📋 PLANO':'HORS'}</button>
+      <button title="${p.en_stock ? 'En stock — cliquer pour rupture' : 'Rupture — cliquer pour en stock'}"
+              onclick="planoToggle(${idx},'en_stock')"
+              style="font-size:10px;font-weight:700;border:none;border-radius:6px;padding:3px 7px;cursor:pointer;${p.en_stock?'background:#dcfce7;color:#15803d':'background:#fee2e2;color:#c8102e'}">${p.en_stock?'STOCK':'RUPTURE'}</button>
+      <button title="Retirer cette ligne" onclick="planoRemoveLine(${idx})"
+              style="border:1px solid #f1b8c2;color:#c8102e;background:#fff;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px">✕</button>
+      <div style="flex-basis:100%;font-size:10px;color:#94a3b8;padding-left:2px">→ Allée ${esc(aisle)} · ${esc(side)} · S${esc(section)} · T${esc(storeShelf)} · P${esc(p.position)}</div>
+    </div>`;
+  }).filter(Boolean).join('');
 
-  const more = filtered.length > 20
-    ? `<div style="padding:6px 8px;font-size:11px;color:#64748b">… et ${filtered.length-20} autres</div>`
-    : '';
+  const count = planoData.products.filter(p => p.tablette >= tabStart && p.tablette <= tabEnd && !(skipNS && !p.en_stock)).length;
 
-  preview.innerHTML = `<table style="width:100%;border-collapse:collapse">
-    <thead><tr style="background:#f8fafc">
-      <th style="padding:4px 8px;text-align:left;font-size:11px;color:#64748b;white-space:nowrap">Plano</th>
-      <th style="padding:4px 8px;text-align:left;font-size:11px;color:#64748b;white-space:nowrap">Magasin</th>
-      <th style="padding:4px 8px;text-align:left;font-size:11px;color:#64748b">Produit</th>
-    </tr></thead>
-    <tbody>${rows}</tbody>
-  </table>${more}
-  <div style="padding:6px 8px;font-size:12px;font-weight:600;color:#1e293b;background:#f8fafc;border-top:1px solid #e2e8f0">
-    Total: <strong>${filtered.length}</strong> produit(s) à importer
-  </div>`;
+  preview.innerHTML = `
+    <div style="font-size:11px;color:#64748b;padding:4px 4px 6px">Modifiez tablette/position, changez Plano↔Hors, marquez Rupture, retirez ou ajoutez des lignes avant d'importer.</div>
+    ${rows || '<div style="padding:10px;font-size:12px;color:#64748b">Aucun produit dans cette sélection.</div>'}
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 4px;border-top:1px solid #e2e8f0;margin-top:4px">
+      <button class="btn btn-outline btn-inline" style="font-size:12px;width:auto;margin:0" onclick="planoAddLine()">➕ Ajouter une ligne</button>
+      <span style="font-size:12px;font-weight:700;color:#1e293b">${count} produit(s) à importer</span>
+    </div>`;
 }
 
 async function importPlanogram() {
