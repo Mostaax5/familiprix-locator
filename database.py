@@ -188,6 +188,25 @@ def init_postgres_db(db):
         )
     """)
 
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS planogram_imports (
+            id             BIGSERIAL PRIMARY KEY,
+            created_at     TEXT DEFAULT '',
+            store          TEXT DEFAULT '',
+            employee       TEXT DEFAULT '',
+            plano_name     TEXT DEFAULT '',
+            plano_number   TEXT DEFAULT '',
+            plano_version  TEXT DEFAULT '',
+            aisle          TEXT DEFAULT '',
+            side           TEXT DEFAULT '',
+            section        TEXT DEFAULT '',
+            tablette_start TEXT DEFAULT '',
+            tablette_end   TEXT DEFAULT '',
+            imported       INTEGER DEFAULT 0,
+            skipped        INTEGER DEFAULT 0
+        )
+    """)
+
     db.execute("CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_products_location ON products(aisle, side, section, shelf, position)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_products_name_brand ON products(name, brand)")
@@ -272,6 +291,25 @@ def init_sqlite_db(db):
             input_tokens  INTEGER DEFAULT 0,
             output_tokens INTEGER DEFAULT 0,
             cost_usd      TEXT DEFAULT '0'
+        )
+    """)
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS planogram_imports (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at     TEXT DEFAULT '',
+            store          TEXT DEFAULT '',
+            employee       TEXT DEFAULT '',
+            plano_name     TEXT DEFAULT '',
+            plano_number   TEXT DEFAULT '',
+            plano_version  TEXT DEFAULT '',
+            aisle          TEXT DEFAULT '',
+            side           TEXT DEFAULT '',
+            section        TEXT DEFAULT '',
+            tablette_start TEXT DEFAULT '',
+            tablette_end   TEXT DEFAULT '',
+            imported       INTEGER DEFAULT 0,
+            skipped        INTEGER DEFAULT 0
         )
     """)
 

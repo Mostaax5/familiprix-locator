@@ -162,6 +162,7 @@ def parse_planogram_pdf():
 
     products = []
     seen = {}
+    plano_meta = {"name": "", "number": "", "version": ""}
 
     def _clean(val):
         return str(val or "").strip()
@@ -175,6 +176,18 @@ def parse_planogram_pdf():
 
     try:
         with pdfplumber.open(_io.BytesIO(f.read())) as pdf:
+            # Plano identity from the cover page text (best-effort).
+            try:
+                head = pdf.pages[0].extract_text() or ""
+                m = re.search(r"PLANOGRAMME\s*:\s*([^\n]+)", head, re.IGNORECASE)
+                if m: plano_meta["name"] = m.group(1).strip()[:120]
+                m = re.search(r"Plano\s*#\s*([0-9]+)", head, re.IGNORECASE)
+                if m: plano_meta["number"] = m.group(1).strip()
+                m = re.search(r"Version\s*#\s*([A-Za-z0-9]+)", head, re.IGNORECASE)
+                if m: plano_meta["version"] = m.group(1).strip()
+            except Exception:
+                pass
+
             for page in pdf.pages:
                 for table in (page.extract_tables() or []):
                     current_col = None
@@ -248,4 +261,5 @@ def parse_planogram_pdf():
         t = str(p["tablette"])
         tablettes[t] = tablettes.get(t, 0) + 1
 
-    return jsonify({"success": True, "products": products, "count": len(products), "tablettes": tablettes})
+    return jsonify({"success": True, "products": products, "count": len(products),
+                    "tablettes": tablettes, "plano": plano_meta})

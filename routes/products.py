@@ -490,5 +490,28 @@ def bulk_import_products():
         except Exception:
             errors += 1
 
-    db.commit()
+    # Record this import in the planogram history.
+    try:
+        plano = data.get("plano") or {}
+        store = str(data.get("store", "")).strip()
+        db.execute(
+            """INSERT INTO planogram_imports
+               (created_at, store, employee, plano_name, plano_number, plano_version,
+                aisle, side, section, tablette_start, tablette_end, imported, skipped)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (now, store, username,
+             str(plano.get("name", "")), str(plano.get("number", "")), str(plano.get("version", "")),
+             aisle, side, section, str(tablette_start), str(tablette_end), imported, skipped),
+        )
+        db.commit()
+    except Exception:
+        pass
+
     return jsonify({"success": True, "imported": imported, "skipped": skipped, "errors": errors})
+
+
+@products_bp.route("/api/planograms/history", methods=["GET"])
+def planogram_history():
+    db = get_db()
+    rows = db.execute("SELECT * FROM planogram_imports ORDER BY id DESC").fetchall()
+    return jsonify([dict(r) for r in rows])
