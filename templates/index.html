@@ -317,6 +317,15 @@
   </div>
 
   <div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <div class="section-title" style="margin:0">Historique des planogrammes</div>
+      <button class="btn btn-outline btn-inline" style="font-size:11px;padding:3px 10px;width:auto;margin:0" onclick="loadPlanogramHistory()">↻</button>
+    </div>
+    <div class="section-note">Tous les planogrammes importés, du plus récent au plus ancien.</div>
+    <div id="planoHistory" style="margin-top:8px"><div class="small" style="color:#94a3b8">Chargement…</div></div>
+  </div>
+
+  <div class="card">
     <div class="section-title">Sauvegarde de la base</div>
     <div class="section-note">Telechargez une copie complete du magasin (produits + plan) pour la partager ou la garder. Importez un fichier de sauvegarde pour restaurer ou fusionner les donnees.</div>
     <div class="tool-row">

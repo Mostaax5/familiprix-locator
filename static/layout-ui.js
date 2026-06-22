@@ -1004,6 +1004,7 @@ function setPlanAisleTrees(aisle, open) {
 async function loadMapEditor(forceServer=false) {
   await Promise.allSettled([refreshProductsCache(forceServer), refreshLayoutsCache(forceServer)]);
   refreshPlanUi();
+  loadPlanogramHistory();
 }
 
 function getEditableLayout(aisle) {
@@ -1850,7 +1851,9 @@ async function importPlanogram() {
         tablette_end:   tabEnd,
         replace_existing: replace,
         skip_non_stock:   skipNS,
-        products: planoData.products
+        products: planoData.products,
+        plano: planoData.plano || {},
+        store: (typeof getCurrentStoreName === 'function') ? getCurrentStoreName() : ''
       })
     });
     if (res.ok && data.success) {
@@ -1858,6 +1861,7 @@ async function importPlanogram() {
       msg.innerHTML = `✅ <strong>${data.imported}</strong> importé(s), ${data.skipped} ignoré(s)${errTxt}.`;
       msg.style.color = '#16a34a';
       refreshProductsCache();
+      loadPlanogramHistory();
     } else {
       msg.textContent = data.error || 'Erreur lors de l importation.';
       msg.style.color = '#c8102e';
@@ -1868,4 +1872,29 @@ async function importPlanogram() {
   btn.disabled = false; btn.textContent = 'Importer dans le plan';
 }
 
-window.AppLayout = { renderMapEditor, loadMapEditor, refreshPlanUi, createAisleLayout, saveAisleLayout, refreshProductsCache, refreshLayoutsCache };
+async function loadPlanogramHistory() {
+  const box = document.getElementById('planoHistory');
+  if (!box) return;
+  try {
+    const {res, data} = await apiFetch('/api/planograms/history');
+    if (!res.ok || !Array.isArray(data) || !data.length) {
+      box.innerHTML = '<div class="small" style="color:#94a3b8">Aucun planogramme importé pour le moment.</div>';
+      return;
+    }
+    box.innerHTML = data.map(h => {
+      const title = [h.plano_name, h.plano_number ? `#${h.plano_number}` : '', h.plano_version ? `(${h.plano_version})` : '']
+        .filter(Boolean).join(' ') || 'Planogramme';
+      const when = (h.created_at || '').replace('T', ' ').slice(0, 16);
+      const loc = `Allée ${esc(h.aisle)} · ${esc(sideStaffLabel(h.side))} · S${esc(h.section)} · T${esc(h.tablette_start)}–${esc(h.tablette_end)}`;
+      return `<div style="padding:8px 0;border-bottom:1px solid #f1f5f9">
+        <div style="font-weight:600;font-size:13px">📋 ${esc(title)}</div>
+        <div style="font-size:11px;color:#64748b">${loc}</div>
+        <div style="font-size:11px;color:#94a3b8">${esc(when)} · ${esc(h.employee || '—')}${h.store ? ' · ' + esc(h.store) : ''} · ${h.imported} importé(s), ${h.skipped} ignoré(s)</div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    box.innerHTML = '<div class="small" style="color:#c8102e">Impossible de charger l historique.</div>';
+  }
+}
+
+window.AppLayout = { renderMapEditor, loadMapEditor, refreshPlanUi, createAisleLayout, saveAisleLayout, refreshProductsCache, refreshLayoutsCache, loadPlanogramHistory };
