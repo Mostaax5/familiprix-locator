@@ -550,3 +550,57 @@ def planogram_history():
     db = get_db()
     rows = db.execute("SELECT * FROM planogram_imports ORDER BY id DESC").fetchall()
     return jsonify([dict(r) for r in rows])
+
+
+@products_bp.route("/api/products/missing-images/count", methods=["GET"])
+def missing_images_count():
+    db = get_db()
+    row = db.execute(
+        "SELECT COUNT(DISTINCT barcode) AS n FROM products "
+        "WHERE TRIM(COALESCE(barcode,'')) <> '' AND TRIM(COALESCE(image_url,'')) = ''"
+    ).fetchone()
+    n = row["n"] if isinstance(row, dict) else row[0]
+    return jsonify({"count": int(n or 0)})
+
+
+@products_bp.route("/api/products/fetch-missing-images", methods=["POST"])
+def fetch_missing_images():
+    """Fill missing product images, a small batch per call (online lookups are
+    slow). Returns updated + remaining so the UI can run it again until done."""
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json() or {}
+    limit = min(max(int(data.get("limit", 6)), 1), 10)
+    db = get_db()
+    rows = db.execute(
+        "SELECT DISTINCT barcode FROM products "
+        "WHERE TRIM(COALESCE(barcode,'')) <> '' AND TRIM(COALESCE(image_url,'')) = '' "
+        "ORDER BY barcode LIMIT ?",
+        (limit,)
+    ).fetchall()
+    barcodes = [(r["barcode"] if isinstance(r, dict) else r[0]) for r in rows]
+
+    from routes.ai import lookup_product_online
+    now = utc_now_iso()
+    updated = 0
+    for bc in barcodes:
+        img = find_existing_image_for_barcode(db, bc)
+        if not img:
+            product = lookup_product_online(bc)
+            img = str((product or {}).get("image_url", "")).strip()
+        if img:
+            res = db.execute(
+                "UPDATE products SET image_url=?, modified_by=?, modified_at=? "
+                "WHERE barcode=? AND TRIM(COALESCE(image_url,'')) = ''",
+                (img, username, now, bc)
+            )
+            updated += res.rowcount or 0
+    db.commit()
+
+    remaining_row = db.execute(
+        "SELECT COUNT(DISTINCT barcode) AS n FROM products "
+        "WHERE TRIM(COALESCE(barcode,'')) <> '' AND TRIM(COALESCE(image_url,'')) = ''"
+    ).fetchone()
+    remaining = remaining_row["n"] if isinstance(remaining_row, dict) else remaining_row[0]
+    return jsonify({"success": True, "updated": updated, "processed": len(barcodes), "remaining": int(remaining or 0)})

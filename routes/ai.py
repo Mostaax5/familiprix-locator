@@ -931,21 +931,17 @@ def extract_openai_output_text(payload):
     return ""
 
 
-# ── Routes ─────────────────────────────────────────────────────────────────────
-
-@ai_bp.route("/api/products/lookup/<barcode>", methods=["GET"])
-def lookup_barcode(barcode):
-    barcode = barcode.strip()
+def lookup_product_online(barcode):
+    """Best-match product lookup across all sources. Returns a product dict or None.
+    Reused by the lookup route and the image backfill."""
+    barcode = str(barcode or "").strip()
     if not barcode:
-        return jsonify({"found": False, "error": "Code-barres manquant"}), 400
-
+        return None
     barcode_candidates = build_barcode_candidates(barcode)
     GOOD_ENOUGH = 24   # score at which we're confident and can stop early
-
     best, best_score = None, 0
 
-    # Phase 1 — fast structured APIs (UPC Item DB, EAN Search, Open*Facts).
-    # Gather ALL results and keep the highest-quality one (not the fastest).
+    # Phase 1 — fast structured APIs; keep the highest-quality, not the fastest.
     json_tasks = []
     for candidate in barcode_candidates:
         json_tasks.append(lambda bc=candidate: lookup_upcitemdb(bc))
@@ -956,8 +952,7 @@ def lookup_barcode(barcode):
     if s1 > best_score:
         best, best_score = p1, s1
 
-    # Phase 2 — Familiprix's own catalog (very accurate for these products) +
-    # generic barcode databases. Only if we're not already confident.
+    # Phase 2 — Familiprix catalog + generic barcode databases, if not confident.
     if best_score < GOOD_ENOUGH:
         tasks = []
         for candidate in barcode_candidates:
@@ -981,8 +976,18 @@ def lookup_barcode(barcode):
         if s3 > best_score:
             best, best_score = p3, s3
 
-    if best:
-        return jsonify({"found": True, "product": best})
+    return best
+
+
+# ── Routes ─────────────────────────────────────────────────────────────────────
+
+@ai_bp.route("/api/products/lookup/<barcode>", methods=["GET"])
+def lookup_barcode(barcode):
+    if not barcode.strip():
+        return jsonify({"found": False, "error": "Code-barres manquant"}), 400
+    product = lookup_product_online(barcode)
+    if product:
+        return jsonify({"found": True, "product": product})
     return jsonify({"found": False, "error": "Aucun produit trouve en ligne"})
 
 

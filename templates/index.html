@@ -326,6 +326,13 @@
   </div>
 
   <div class="card">
+    <div class="section-title">Images des produits</div>
+    <div class="section-note">Récupère en ligne les photos manquantes (surtout après un import de planogramme) pour que clients et employés voient à quoi ressemble le produit.</div>
+    <button id="fetchImagesBtn" class="btn btn-outline" style="margin-top:8px" onclick="fetchMissingImages()">📷 Récupérer les images manquantes</button>
+    <div id="missingImagesMsg" style="min-height:18px;font-size:13px;margin-top:6px;color:#64748b"></div>
+  </div>
+
+  <div class="card">
     <div class="section-title">Sauvegarde de la base</div>
     <div class="section-note">Telechargez une copie complete du magasin (produits + plan) pour la partager ou la garder. Importez un fichier de sauvegarde pour restaurer ou fusionner les donnees.</div>
     <div class="tool-row">

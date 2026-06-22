@@ -1005,6 +1005,7 @@ async function loadMapEditor(forceServer=false) {
   await Promise.allSettled([refreshProductsCache(forceServer), refreshLayoutsCache(forceServer)]);
   refreshPlanUi();
   loadPlanogramHistory();
+  updateMissingImagesUi();
 }
 
 function getEditableLayout(aisle) {
@@ -1862,6 +1863,7 @@ async function importPlanogram() {
       msg.style.color = '#16a34a';
       refreshProductsCache();
       loadPlanogramHistory();
+      updateMissingImagesUi();
     } else {
       msg.textContent = data.error || 'Erreur lors de l importation.';
       msg.style.color = '#c8102e';
@@ -1897,4 +1899,41 @@ async function loadPlanogramHistory() {
   }
 }
 
-window.AppLayout = { renderMapEditor, loadMapEditor, refreshPlanUi, createAisleLayout, saveAisleLayout, refreshProductsCache, refreshLayoutsCache, loadPlanogramHistory };
+async function updateMissingImagesUi() {
+  const btn = document.getElementById('fetchImagesBtn');
+  if (!btn) return;
+  try {
+    const {res, data} = await apiFetch('/api/products/missing-images/count');
+    const n = res.ok ? (data.count || 0) : 0;
+    btn.textContent = n ? `📷 Récupérer les images manquantes (${n})` : '📷 Toutes les images sont présentes';
+    btn.disabled = !n;
+  } catch (_) {}
+}
+
+async function fetchMissingImages() {
+  if (!requireEditorSession('récupérer les images')) return;
+  const btn = document.getElementById('fetchImagesBtn');
+  const msg = document.getElementById('missingImagesMsg');
+  if (btn) btn.disabled = true;
+  let total = 0;
+  for (let i = 0; i < 60; i++) {            // bounded loop; small batch per call
+    let data;
+    try {
+      const r = await apiFetch('/api/products/fetch-missing-images', {
+        method: 'POST', headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+        body: JSON.stringify({limit: 6})
+      });
+      data = r.data;
+      if (!r.res.ok || !data.success) break;
+    } catch (_) { break; }
+    total += data.updated || 0;
+    if (msg) msg.textContent = `📷 ${total} image(s) récupérée(s) — ${data.remaining} restante(s)…`;
+    if (data.remaining === 0 || data.updated === 0) break;  // done or no more fillable
+  }
+  await refreshProductsCache(true);
+  refreshPlanUi();
+  await updateMissingImagesUi();
+  if (msg) msg.textContent = total ? `✅ ${total} image(s) récupérée(s).` : 'Aucune nouvelle image trouvée.';
+}
+
+window.AppLayout = { renderMapEditor, loadMapEditor, refreshPlanUi, createAisleLayout, saveAisleLayout, refreshProductsCache, refreshLayoutsCache, loadPlanogramHistory, fetchMissingImages, updateMissingImagesUi };
