@@ -391,6 +391,27 @@ def delete_product(product_id):
     return jsonify({"success": True, "message": f'Produit supprimé par {username}: {product["name"]}'})
 
 
+@products_bp.route("/api/products/<int:product_id>/stock", methods=["POST"])
+def set_product_stock(product_id):
+    """Flip a product in/out of stock. Out-of-stock plano products are the ones
+    whose étiquette must be flipped (price tag removed / replaced)."""
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json() or {}
+    in_stock = 1 if data.get("in_stock", True) else 0
+    db = get_db()
+    result = db.execute(
+        "UPDATE products SET in_stock=?, modified_by=?, modified_at=? WHERE id=?",
+        (in_stock, username, utc_now_iso(), product_id)
+    )
+    if result.rowcount == 0:
+        return jsonify({"error": "Produit non trouvé."}), 404
+    db.commit()
+    product = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
+    return jsonify({"success": True, "product": row_to_product(product)})
+
+
 @products_bp.route("/api/products/bulk-import", methods=["POST"])
 def bulk_import_products():
     username, error = require_editor()
@@ -449,20 +470,21 @@ def bulk_import_products():
                 skipped += 1
                 continue
 
+            in_stock = 0 if not p.get("en_stock", True) else 1
             if existing:
                 row_id = existing["id"] if isinstance(existing, dict) else existing[0]
                 db.execute(
-                    "UPDATE products SET name=?, barcode=?, search_terms=?, modified_by=?, modified_at=? WHERE id=?",
-                    (name, barcode, notes, username, now, row_id)
+                    "UPDATE products SET name=?, barcode=?, search_terms=?, is_plano=1, in_stock=?, modified_by=?, modified_at=? WHERE id=?",
+                    (name, barcode, notes, in_stock, username, now, row_id)
                 )
             else:
                 db.execute(
                     """INSERT INTO products
                        (name, barcode, aisle, side, section, shelf, position,
-                        search_terms, created_by, created_at, modified_by, modified_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        search_terms, is_plano, in_stock, created_by, created_at, modified_by, modified_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)""",
                     (name, barcode, aisle, side, section, shelf, position,
-                     notes, username, now, username, now)
+                     notes, in_stock, username, now, username, now)
                 )
             imported += 1
         except Exception:
