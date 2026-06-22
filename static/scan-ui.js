@@ -336,14 +336,6 @@ async function generateLookupAssist() {
   renderLookupAssistPreview();
 }
 
-async function confirmExistingLocation() {
-  // kept for backward compat — now moves to rayon context
-  if (!requireEditorSession('confirmer un emplacement')) return;
-  if (!currentScanProduct) return;
-  const pos = nextRayonPosition();
-  await moveProductToCurrentRayon(currentScanProduct.id, pos);
-}
-
 async function confirmNewProduct() {
   if (!requireEditorSession('ajouter un produit')) return;
   const barcode = document.getElementById('scanInput').value.trim();

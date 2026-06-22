@@ -60,8 +60,4 @@ const SEARCH_STOPWORDS = new Set([
   'with','without','y'
 ]);
 
-function presentoirSideValue(presName, facadeName) {
-  return `${presName} - ${facadeName}`;
-}
-
 window.AppConfig = { STORAGE_KEYS, LOCK_HASH, LOCK_TTL_MS, LOCKED_TABS, SEARCH_STOPWORDS };

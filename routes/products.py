@@ -132,22 +132,6 @@ def find_product_at_position(db, aisle, side, section, shelf, position, exclude_
     return db.execute(query, tuple(params)).fetchone()
 
 
-def find_product_by_barcode(db, barcode, exclude_id=None):
-    if not str(barcode or "").strip():
-        return None
-    for candidate in build_barcode_candidates(barcode):
-        query = "SELECT id, name, aisle, side, section, shelf, position FROM products WHERE barcode=?"
-        params = [candidate]
-        if exclude_id is not None:
-            query += " AND id<>?"
-            params.append(int(exclude_id))
-        query += " ORDER BY id LIMIT 1"
-        row = db.execute(query, tuple(params)).fetchone()
-        if row:
-            return row
-    return None
-
-
 def integrity_conflict_message(exc):
     text = str(exc).lower()
     if "barcode" in text:

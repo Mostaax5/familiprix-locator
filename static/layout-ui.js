@@ -1,14 +1,4 @@
 // ── Layout config helpers ─────────────────────────────────────────────────────
-function canonicalSide(facing, viewedSide) {
-  if (facing === 'Arriere') return viewedSide === 'Gauche' ? 'Droite' : 'Gauche';
-  return viewedSide;
-}
-
-function viewedSideFromCanonical(facing, storedSide) {
-  if (facing === 'Arriere') return storedSide === 'Gauche' ? 'Droite' : 'Gauche';
-  return storedSide;
-}
-
 function defaultLayoutConfig(maxSection=0, maxShelf=0, maxPosition=0) {
   const sCount = Math.max(0, Number(maxSection) || 0);
   const shCount = Math.max(0, Number(maxShelf) || 0);
@@ -275,11 +265,7 @@ async function refreshLayoutsCache(force=false) {
   return mapLayouts;
 }
 
-// ── Cursor UI ─────────────────────────────────────────────────────────────────
-function facingLabel(value) {
-  return value === 'Arriere' ? 'depuis l autre bout' : 'depuis le debut';
-}
-
+// ── Cursor (used by the Plan-tab "point de départ" editor) ────────────────────
 function aiProviderLabel() {
   return backendInfo.ai_provider_label || 'IA';
 }
@@ -289,7 +275,9 @@ function cursorLabel() {
 }
 
 function updateCursorUi() {
-  document.getElementById('cursorText').textContent = cursorLabel();
+  // #cursorText was removed when the scan tab moved to the rayon picker.
+  const el = document.getElementById('cursorText');
+  if (el) el.textContent = cursorLabel();
   localStorage.setItem(STORAGE_KEYS.cursor, JSON.stringify(cursor));
 }
 
@@ -300,55 +288,6 @@ function loadCursor() {
     catch (e) { localStorage.removeItem(STORAGE_KEYS.cursor); }
   }
   updateCursorUi();
-}
-
-// ── Cursor navigation ─────────────────────────────────────────────────────────
-function advanceCursor() {
-  const slots = getAllScanSlots();
-  if (!slots.length) { updateCursorUi(); return; }
-  const currentIndex = slots.findIndex(slot => (
-    Number(slot.aisle) === Number(cursor.aisle) &&
-    slot.side === cursor.side &&
-    Number(slot.section) === Number(cursor.section) &&
-    Number(slot.shelf) === Number(cursor.shelf) &&
-    Number(slot.position) === Number(cursor.position)
-  ));
-  if (currentIndex >= 0 && slots[currentIndex + 1]) setCursorFromSlot(slots[currentIndex + 1]);
-  else {
-    const next = slots.find(slot => compareSlotLocations(slot, cursor) > 0);
-    if (next) setCursorFromSlot(next);
-    else setCursorFromSlot(slots[0]);
-  }
-  updateCursorUi();
-  renderScanPathPreview();
-}
-
-function rewindCursor() {
-  const slots = getAllScanSlots();
-  if (!slots.length) return;
-  const currentIndex = slots.findIndex(slot => (
-    Number(slot.aisle) === Number(cursor.aisle) &&
-    slot.side === cursor.side &&
-    Number(slot.section) === Number(cursor.section) &&
-    Number(slot.shelf) === Number(cursor.shelf) &&
-    Number(slot.position) === Number(cursor.position)
-  ));
-  if (currentIndex <= 0) return;
-  setCursorFromSlot(slots[currentIndex - 1]);
-  updateCursorUi();
-  persistScanDraft();
-  document.getElementById('scanResult').innerHTML = '';
-  document.getElementById('scanInput').value = '';
-  lastLookedUpBarcode = '';
-  activeLookupBarcode = '';
-}
-
-function skipPosition() {
-  document.getElementById('scanResult').innerHTML = '';
-  document.getElementById('scanInput').value = '';
-  lastLookedUpBarcode = '';
-  activeLookupBarcode = '';
-  advanceCursor();
 }
 
 // ── Draft persistence ─────────────────────────────────────────────────────────
@@ -1090,38 +1029,6 @@ function setSideSectionCount(aisle, side, rawValue) {
   refreshPlanUi();
 }
 
-function setSectionShelfCount(aisle, side, sectionIndex, rawValue) {
-  const layout = getMutableLayout(aisle);
-  if (!layout) return;
-  const section = layout.config.sides[side].sections[sectionIndex];
-  if (!section) return;
-  const count = Math.max(0, Number(rawValue) || 0);
-  const shelves = section.shelves;
-  const currentCount = shelves.length;
-  const fallbackValue = shelves[shelves.length - 1] ?? 0;
-  const nextConfig = normalizeLayoutConfig({
-    sides: {
-      ...layout.config.sides,
-      [side]: {
-        sections: layout.config.sides[side].sections.map((item, index) => index === sectionIndex
-          ? {shelves: [...item.shelves.slice(0, count), ...Array.from({length: Math.max(0, count - item.shelves.length)}, () => fallbackValue)]}
-          : item)
-      }
-    }
-  }, layout.max_section, layout.max_shelf, layout.max_position);
-  if (count < currentCount && !confirmLayoutReduction(aisle, nextConfig, `Reduire le nombre de tablettes de la section ${sectionIndex + 1} a ${count}`)) {
-    refreshPlanUi(); return;
-  }
-  while (shelves.length < count) shelves.push(fallbackValue);
-  shelves.length = count;
-  if (!section.labels) section.labels = [];
-  while (section.labels.length < count) section.labels.push('');
-  section.labels.length = count;
-  syncLayoutRecord(layout);
-  markLayoutDirty(aisle);
-  refreshPlanUi();
-}
-
 function setShelfLabel(aisle, side, sectionIndex, shelfIndex, value) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
@@ -1644,16 +1551,6 @@ function setPresentoirShelfPositions(aisle, presIndex, facadeIndex, shelfIndex, 
   if (!layout) return;
   const facade = layout.config.presentoirs?.[presIndex]?.facades?.[facadeIndex];
   if (facade) { facade.shelves[shelfIndex] = Math.max(0, parseInt(rawValue) || 0); markLayoutDirty(aisle); refreshPlanUi(); }
-}
-
-function setPresentoirShelfLabel(aisle, presIndex, facadeIndex, shelfIndex, value) {
-  const layout = getMutableLayout(aisle);
-  if (!layout) return;
-  const facade = layout.config.presentoirs?.[presIndex]?.facades?.[facadeIndex];
-  if (!facade) return;
-  _fixFixture(facade);
-  facade.labels[shelfIndex] = value.trim();
-  markLayoutDirty(aisle); refreshPlanUi();
 }
 
 function _facadeShelfGrid(aisle, sideName, fk, shelves, labels) {
