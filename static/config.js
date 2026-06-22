@@ -21,8 +21,20 @@ const STORAGE_KEYS = {
   scanDraft: 'familiprixScanDraft',
   addDraft: 'familiprixAddDraft',
   clientDraft: 'familiprixClientDraft',
-  editorSession: 'familiprixEditorSession'
+  editorSession: 'familiprixEditorSession',
+  store: 'familiprixStore'
 };
+
+// Known stores. Add new ones here as they come online. `pass` is a simple
+// "right store" confirmation code (not security) — currently '0'.
+const STORES = [
+  {
+    id: 'richelieu',
+    name: 'Familiprix Richelieu',
+    address: '1111 Chemin des Patriotes, Richelieu, Quebec J3L 4W6',
+    pass: '0'
+  }
+];
 
 // SHA-256 of the access password (one-way hash — the password is NOT recoverable
 // from this source, unlike the old base64 which was trivially reversible).
@@ -62,4 +74,4 @@ const SEARCH_STOPWORDS = new Set([
   'with','without','y'
 ]);
 
-window.AppConfig = { STORAGE_KEYS, LOCK_HASH, LOCK_TTL_MS, LOCKED_TABS, SEARCH_STOPWORDS };
+window.AppConfig = { STORAGE_KEYS, LOCK_HASH, LOCK_TTL_MS, LOCKED_TABS, SEARCH_STOPWORDS, STORES };

@@ -111,12 +111,18 @@ async function apiLookupOnline(barcode, signal) {
   }
 }
 
+// Tag AI requests with the current store so training logs are grouped per location.
+function _withStore(payload) {
+  const store = (typeof getCurrentStoreName === 'function') ? getCurrentStoreName() : '';
+  return {...payload, store};
+}
+
 async function apiGenerateProductAssist(payload) {
   try {
     const {res, data} = await apiFetch('/api/products/assist', {
       method: 'POST',
       headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-      body: JSON.stringify(payload)
+      body: JSON.stringify(_withStore(payload))
     });
     return res.ok ? data : {success: false, error: data.error || 'Aide client indisponible pour le moment.'};
   } catch (error) {
@@ -129,7 +135,7 @@ async function apiGenerateClientHelp(payload) {
     const {res, data} = await apiFetch('/api/client/help', {
       method: 'POST',
       headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-      body: JSON.stringify(payload)
+      body: JSON.stringify(_withStore(payload))
     });
     return res.ok ? data : {success: false, error: data.error || 'Reponse client indisponible pour le moment.'};
   } catch (error) {

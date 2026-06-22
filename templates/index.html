@@ -34,6 +34,10 @@
       <div class="shell-title" id="appModeLabel">Mode web</div>
       <div class="small" id="networkStatus"><span class="status-dot"></span>En ligne</div>
     </div>
+    <div class="shell-top" style="margin-top:6px">
+      <div class="small">🏪 <strong id="storeLabel">Aucun magasin sélectionné</strong></div>
+      <button class="btn btn-outline btn-inline" style="font-size:11px;padding:3px 10px;width:auto;margin:0" onclick="showStoreModal()">Changer</button>
+    </div>
     <div class="shell-copy" id="installHint">Sur mobile: ouvrez le site puis ajoutez-le a l ecran d accueil pour un acces rapide.</div>
     <div class="auth-grid">
       <div class="field">
@@ -374,6 +378,7 @@
 <script src="/static/scanner.js"></script>
 <script src="/static/api.js"></script>
 <script src="/static/config.js"></script>
+<script src="/static/store.js"></script>
 <script src="/static/lock.js"></script>
 <script src="/static/search.js"></script>
 <script src="/static/gist-ui.js"></script>
@@ -381,6 +386,23 @@
 <script src="/static/scan-ui.js"></script>
 <script src="/static/layout-ui.js"></script>
 <script src="/static/main.js"></script>
+<!-- ── STORE SELECTION MODAL ── -->
+<div id="storeModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2100;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:18px;padding:30px 22px 22px;width:min(380px,92vw);box-shadow:0 12px 40px rgba(0,0,0,.35)">
+    <div style="font-size:34px;text-align:center;margin-bottom:8px">🏪</div>
+    <div style="font-weight:700;font-size:17px;text-align:center;margin-bottom:4px;color:#1e293b">Sélectionnez votre magasin</div>
+    <div style="font-size:13px;color:#64748b;text-align:center;margin-bottom:18px;line-height:1.4">Confirmez le bon magasin avant de commencer.</div>
+    <label class="label">Magasin</label>
+    <select id="storeSelect" style="margin-bottom:12px"></select>
+    <label class="label">Code du magasin</label>
+    <input type="password" id="storePassword" inputmode="numeric" placeholder="Code"
+      style="width:100%;padding:11px 14px;border:2px solid #e2e8f0;border-radius:9px;font-size:16px;box-sizing:border-box;margin-bottom:6px;outline:none"
+      onkeydown="if(event.key==='Enter')confirmStore()">
+    <div id="storeError" style="color:#c8102e;font-size:12px;height:16px;margin-bottom:10px;font-weight:600"></div>
+    <button onclick="confirmStore()" style="width:100%;padding:13px;background:#c8102e;color:#fff;border:none;border-radius:9px;font-weight:700;font-size:15px;cursor:pointer;touch-action:manipulation">Confirmer</button>
+  </div>
+</div>
+
 <!-- ── LOCK MODAL ── -->
 <div id="lockModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2000;align-items:center;justify-content:center">
   <div style="background:#fff;border-radius:18px;padding:32px 24px 24px;width:min(340px,90vw);box-shadow:0 12px 40px rgba(0,0,0,.35);text-align:center">

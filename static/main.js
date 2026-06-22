@@ -187,6 +187,7 @@ async function bootApp() {
   updateAppShellState();
   updateNetworkStatus();
   updateLockUi();
+  ensureStoreSelected();
   const savedTab = localStorage.getItem(STORAGE_KEYS.activeTab);
   const validTabs = ['scan','search','client','add'];
   const preferred = (savedTab && validTabs.includes(savedTab)) ? savedTab : 'scan';

@@ -7,11 +7,31 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, Response
 from database import get_db
 from auth import require_editor, utc_now_iso
 
 ai_bp = Blueprint("ai", __name__)
+
+
+def log_ai_interaction(kind, question, context, response):
+    """Persist every AI Q&A as a training example, tagged with store + time.
+    Never raises — logging must not break the user-facing response."""
+    try:
+        prov = configured_ai_provider()
+        store = str((request.get_json(silent=True) or {}).get("store", "")).strip()
+        db = get_db()
+        db.execute(
+            """INSERT INTO ai_logs (created_at, kind, provider, model, question, context_json, response_json, store)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (utc_now_iso(), kind, prov["name"], prov["model"], str(question or ""),
+             json.dumps(context, ensure_ascii=False) if context is not None else "",
+             json.dumps(response, ensure_ascii=False) if response is not None else "",
+             store),
+        )
+        db.commit()
+    except Exception:
+        pass
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -930,6 +950,9 @@ def assist_product():
     assist = generate_product_assist_payload(name, brand, description, barcode)
     if not assist:
         return jsonify({"success": False, "error": "Impossible de generer l aide client pour le moment."}), 502
+    log_ai_interaction("product_assist",
+                       {"name": name, "brand": brand, "description": description, "barcode": barcode},
+                       None, assist)
     return jsonify({"success": True, "assist": assist})
 
 
@@ -969,4 +992,35 @@ def client_help():
     advice = generate_client_help_payload(question, matched_products)
     if not advice:
         return jsonify({"success": False, "error": "Impossible de generer la reponse client pour le moment."}), 502
+    log_ai_interaction("client_help", question, matched_products, advice)
     return jsonify({"success": True, "advice": advice})
+
+
+# ── AI training-data export (free local store) ───────────────────────────────
+@ai_bp.route("/api/ai/logs/export", methods=["GET"])
+def export_ai_logs():
+    db = get_db()
+    rows = db.execute("SELECT * FROM ai_logs ORDER BY id").fetchall()
+    lines = []
+    for r in rows:
+        d = dict(r)
+        lines.append(json.dumps({
+            "kind":       d.get("kind", ""),
+            "question":   d.get("question", ""),
+            "context":    d.get("context_json", ""),
+            "response":   d.get("response_json", ""),
+            "store":      d.get("store", ""),
+            "model":      d.get("model", ""),
+            "created_at": d.get("created_at", ""),
+        }, ensure_ascii=False))
+    body = "\n".join(lines)
+    return Response(body, mimetype="application/jsonl",
+                    headers={"Content-Disposition": 'attachment; filename="familiprix-ai-training.jsonl"'})
+
+
+@ai_bp.route("/api/ai/logs/count", methods=["GET"])
+def count_ai_logs():
+    db = get_db()
+    row = db.execute("SELECT COUNT(*) AS n FROM ai_logs").fetchone()
+    n = row["n"] if isinstance(row, dict) else row[0]
+    return jsonify({"count": int(n or 0)})

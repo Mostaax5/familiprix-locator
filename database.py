@@ -170,6 +170,23 @@ def init_postgres_db(db):
         )
     """)
 
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS ai_logs (
+            id            BIGSERIAL PRIMARY KEY,
+            created_at    TEXT DEFAULT '',
+            kind          TEXT DEFAULT '',
+            provider      TEXT DEFAULT '',
+            model         TEXT DEFAULT '',
+            question      TEXT DEFAULT '',
+            context_json  TEXT DEFAULT '',
+            response_json TEXT DEFAULT '',
+            store         TEXT DEFAULT '',
+            input_tokens  INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            cost_usd      TEXT DEFAULT '0'
+        )
+    """)
+
     db.execute("CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_products_location ON products(aisle, side, section, shelf, position)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_products_name_brand ON products(name, brand)")
@@ -234,6 +251,23 @@ def init_sqlite_db(db):
             enabled      INTEGER NOT NULL DEFAULT 1,
             modified_by  TEXT DEFAULT '',
             modified_at  TEXT DEFAULT ''
+        )
+    """)
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS ai_logs (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at    TEXT DEFAULT '',
+            kind          TEXT DEFAULT '',
+            provider      TEXT DEFAULT '',
+            model         TEXT DEFAULT '',
+            question      TEXT DEFAULT '',
+            context_json  TEXT DEFAULT '',
+            response_json TEXT DEFAULT '',
+            store         TEXT DEFAULT '',
+            input_tokens  INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            cost_usd      TEXT DEFAULT '0'
         )
     """)
 
