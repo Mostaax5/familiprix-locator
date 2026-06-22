@@ -85,11 +85,10 @@ function getEditorHeaders() {
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
 async function switchTab(tab) {
+  // Locked sections (Scan, Plan) require the password and a non-expired session.
+  // The 4h timer is fixed from unlock time — NOT refreshed on use — so the
+  // session truly expires 4h after the password was entered.
   if (LOCKED_TABS.has(tab) && !isUnlocked()) { showLockModal(tab); return; }
-  // Refresh 4h session timer on each access to a locked section
-  if (LOCKED_TABS.has(tab) && isUnlocked()) {
-    localStorage.setItem('familiprixSessionAt', String(Date.now()));
-  }
   if (scannerStream || html5Scanner) await stopCamera();
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
@@ -200,5 +199,15 @@ async function bootApp() {
 bootApp().then(() => {
   ensureQuaggaLoaded();
 });
+
+// Enforce session expiry even with no navigation: every 30s, if the session has
+// expired while the user sits on a locked tab, re-lock the UI and leave the tab.
+window.setInterval(() => {
+  const activeTab = localStorage.getItem(STORAGE_KEYS.activeTab);
+  if (LOCKED_TABS.has(activeTab) && !isUnlocked()) {
+    updateLockUi();
+    switchTab('search');
+  }
+}, 30000);
 
 window.AppMain = { switchTab, bootApp };

@@ -1,10 +1,18 @@
 // ── Lock / unlock ─────────────────────────────────────────────────────────────
 let _pendingLockedTab = null;
 
+// SHA-256 of a string, hex — Web Crypto (available on HTTPS and localhost).
+async function _sha256Hex(str) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Locked unless: session marker === the password hash AND set < 4h ago.
+// Expired or tampered sessions are cleared and treated as locked.
 function isUnlocked() {
   if (localStorage.getItem('familiprixSession') !== LOCK_HASH) return false;
-  const unlockedAt = parseInt(localStorage.getItem('familiprixSessionAt') || '0');
-  if (Date.now() - unlockedAt > LOCK_TTL_MS) {
+  const unlockedAt = parseInt(localStorage.getItem('familiprixSessionAt') || '0', 10);
+  if (!unlockedAt || Date.now() - unlockedAt > LOCK_TTL_MS) {
     localStorage.removeItem('familiprixSession');
     localStorage.removeItem('familiprixSessionAt');
     return false;
@@ -40,11 +48,18 @@ function closeLockModal() {
   _pendingLockedTab = null;
 }
 
-function unlockApp() {
+async function unlockApp() {
   const inp = document.getElementById('lockPasswordInput');
   const err = document.getElementById('lockError');
   if (!inp) return;
-  if (btoa(inp.value) === LOCK_HASH) {
+  let entered = '';
+  try {
+    entered = await _sha256Hex(inp.value);
+  } catch (_) {
+    if (err) err.textContent = "Sécurité indisponible (utilisez HTTPS).";
+    return;
+  }
+  if (entered === LOCK_HASH) {
     localStorage.setItem('familiprixSession', LOCK_HASH);
     localStorage.setItem('familiprixSessionAt', String(Date.now()));
     const pending = _pendingLockedTab;
