@@ -124,6 +124,22 @@ def row_to_product(product):
     return item
 
 
+def archive_and_delete_product(db, product, username, now=None):
+    """Soft delete: archive the full product (so we can still say what it was and
+    where it used to be), then remove it from the active plan."""
+    now = now or utc_now_iso()
+    pdict = dict(product)
+    last_loc = (f"Allée {pdict.get('aisle','')} {side_display_label(pdict.get('side',''))} "
+                f"S{pdict.get('section','')} T{pdict.get('shelf','')} P{pdict.get('position','')}").strip()
+    db.execute(
+        """INSERT INTO removed_products (removed_at, removed_by, barcode, name, last_location, product_json)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (now, username, str(pdict.get("barcode", "")), str(pdict.get("name", "")),
+         last_loc, json.dumps(pdict, ensure_ascii=False, default=str))
+    )
+    db.execute("DELETE FROM products WHERE id=?", (pdict.get("id"),))
+
+
 def find_product_at_position(db, aisle, side, section, shelf, position, exclude_id=None):
     query = "SELECT * FROM products WHERE aisle=? AND side=? AND section=? AND shelf=? AND position=?"
     params = [aisle, side, section, shelf, position]
@@ -487,16 +503,7 @@ def delete_product(product_id):
     # Soft delete: archive the full product so we can still answer questions
     # about it later (which product it was, where it used to be), then remove it
     # from the active plan (frees its slot).
-    pdict = dict(product)
-    last_loc = (f"Allée {pdict.get('aisle','')} {side_display_label(pdict.get('side',''))} "
-                f"S{pdict.get('section','')} T{pdict.get('shelf','')} P{pdict.get('position','')}").strip()
-    db.execute(
-        """INSERT INTO removed_products (removed_at, removed_by, barcode, name, last_location, product_json)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (utc_now_iso(), username, str(pdict.get("barcode", "")), str(pdict.get("name", "")),
-         last_loc, json.dumps(pdict, ensure_ascii=False, default=str))
-    )
-    db.execute("DELETE FROM products WHERE id=?", (product_id,))
+    archive_and_delete_product(db, product, username)
     db.commit()
     from routes.gist import _schedule_gist_backup
     _schedule_gist_backup(db)
@@ -566,16 +573,20 @@ def set_flipped_label(product_id):
     return jsonify({"success": True, "product": row_to_product(product)})
 
 
-def plan_planogram_flow(config, side, start_section, start_tablette, lines):
+def plan_planogram_flow(config, side, start_section, start_tablette, lines, shrink=False):
     """Flow plano lines across the côté's EXISTING sections, starting at
     (start_section, start_tablette). The number of tablettes per section is the
     plan's and is never changed; only the number of positions on a tablette is
-    grown to fit the plano. A plano "shelf" = all lines sharing a plano tablette;
-    shelves are laid into store tablettes in order, rolling into the next section
-    when one is full.
+    adjusted to fit the plano. A plano "shelf" = all lines sharing a plano
+    tablette; shelves are laid into store tablettes in order, rolling into the
+    next section when one is full.
+
+    Positions follow the plano: a tablette grows to fit, and when `shrink` is on
+    it also shrinks to the plano's count (the import then archives any product
+    that falls past the new end). When `shrink` is off, positions only grow.
 
     `lines` = [{"tablette": int, "position": int, "p": <payload>}, ...].
-    Returns (placements, overflow_shelf_count) and grows position counts in
+    Returns (placements, overflow_shelf_count) and adjusts position counts in
     `config` in place. Each placement = (section_no, shelf_no, position_no, line)."""
     sections = ((config.get("sides", {}) or {}).get(side, {}) or {}).get("sections", [])
     # Ordered store tablette slots from the start point onward (count per section fixed).
@@ -600,9 +611,9 @@ def plan_planogram_flow(config, side, start_section, start_tablette, lines):
             continue
         si, ti = slots[idx]
         max_pos = max((l["position"] for l in shelf_lines), default=0)
-        # Grow positions to fit the plano — never shrink, so existing products
-        # on a longer tablette are never orphaned.
-        if max_pos > sections[si]["shelves"][ti]:
+        # Positions follow the plano: always grow to fit; shrink to the plano's
+        # count too when shrink is on (import archives anything past the new end).
+        if shrink or max_pos > sections[si]["shelves"][ti]:
             sections[si]["shelves"][ti] = max_pos
         for ln in shelf_lines:
             placements.append((si + 1, ti + 1, ln["position"], ln))
@@ -659,7 +670,7 @@ def bulk_import_products():
             continue
         lines.append({"tablette": tab, "position": pos, "p": p})
 
-    placements, overflow = plan_planogram_flow(config, side, start_section, start_tablette, lines)
+    placements, overflow = plan_planogram_flow(config, side, start_section, start_tablette, lines, shrink=replace)
 
     imported = skipped = 0
     image_barcodes = []   # barcodes still missing an image → fetched in background
@@ -714,8 +725,29 @@ def bulk_import_products():
 
     skipped += overflow   # plano shelves past the end of the plan (tablettes never added)
 
-    # Persist the plan with positions grown to fit the plano (tablette count is
-    # unchanged — only the number of positions on a tablette can grow).
+    # When replacing, positions follow the plano exactly — so a tablette that
+    # shrank now has products sitting past its new end. Archive them (kept in the
+    # database, recoverable) so the plan stays consistent with the plano.
+    pruned = 0
+    if replace:
+        touched = {}
+        for (sec_no, shelf_no, pos_no, _ln) in placements:
+            key = (str(sec_no), str(shelf_no))
+            touched[key] = max(touched.get(key, 0), pos_no)
+        for (sec_s, shelf_s), new_max in touched.items():
+            for r in db.execute(
+                "SELECT * FROM products WHERE aisle=? AND side=? AND section=? AND shelf=?",
+                (aisle, side, sec_s, shelf_s)
+            ).fetchall():
+                try:
+                    if int(str(dict(r).get("position", "0"))) > new_max:
+                        archive_and_delete_product(db, r, username, now)
+                        pruned += 1
+                except (TypeError, ValueError):
+                    continue
+
+    # Persist the plan with positions adjusted to the plano (tablette count is
+    # unchanged — only the number of positions on a tablette changes).
     try:
         ms, msh, mp = layout_metrics(config)
         db.execute(
@@ -745,7 +777,8 @@ def bulk_import_products():
     from routes.gist import _schedule_gist_backup
     _schedule_gist_backup(db)
     schedule_image_fill(image_barcodes)   # fetch missing plano pictures automatically
-    return jsonify({"success": True, "imported": imported, "skipped": skipped, "errors": errors, "overflow": overflow})
+    return jsonify({"success": True, "imported": imported, "skipped": skipped,
+                    "errors": errors, "overflow": overflow, "pruned": pruned})
 
 
 @products_bp.route("/api/planograms/history", methods=["GET"])
