@@ -239,6 +239,10 @@ def init_postgres_db(db):
     db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS in_stock INTEGER DEFAULT 1")
     db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS linked_position TEXT DEFAULT ''")
     db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS flipped_label INTEGER DEFAULT 0")
+    # Familiprix/pharmacy internal code (the shorter "Code" column in planograms).
+    # Kept separate from barcode so a UPC search never matches it by accident.
+    db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS product_code TEXT DEFAULT ''")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_products_product_code ON products(product_code)")
 
     db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS max_section TEXT NOT NULL DEFAULT '1'")
     db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS config_json TEXT NOT NULL DEFAULT ''")
@@ -378,6 +382,11 @@ def init_sqlite_db(db):
         db.execute("ALTER TABLE products ADD COLUMN linked_position TEXT DEFAULT ''")
     if "flipped_label" not in existing_columns:
         db.execute("ALTER TABLE products ADD COLUMN flipped_label INTEGER DEFAULT 0")
+    # Familiprix/pharmacy internal code (the shorter "Code" column in planograms),
+    # kept separate from barcode so a UPC search never matches it by accident.
+    if "product_code" not in existing_columns:
+        db.execute("ALTER TABLE products ADD COLUMN product_code TEXT DEFAULT ''")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_products_product_code ON products(product_code)")
 
     layout_columns = {
         row["name"] for row in db.execute("PRAGMA table_info(aisle_layouts)").fetchall()

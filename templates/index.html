@@ -166,7 +166,13 @@
   <div class="scan-tools">
     <div class="field">
       <label class="label" for="searchInput">Recherche</label>
-      <input type="text" id="searchInput" placeholder="Nom, code-barres ou 4 derniers chiffres..." oninput="scheduleSearch()"/>
+      <div style="display:flex;gap:6px;align-items:stretch">
+        <select id="searchField" onchange="onSearchFieldChange()" title="Choisir le champ de recherche" style="flex:0 0 auto;width:auto;font-size:13px">
+          <option value="">Nom / Code-barres</option>
+          <option value="code">Code pharmacie</option>
+        </select>
+        <input type="text" id="searchInput" placeholder="Nom, code-barres ou 4 derniers chiffres..." oninput="scheduleSearch()" style="flex:1 1 auto;min-width:0"/>
+      </div>
     </div>
     <button class="btn btn-outline btn-inline" onclick="clearSearchInput()">Effacer</button>
   </div>

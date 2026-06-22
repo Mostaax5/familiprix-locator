@@ -13,10 +13,11 @@ async function apiGetProducts() {
   return Array.isArray(data) ? data.map(normalizeProduct) : [];
 }
 
-async function apiSearchProducts(query) {
+async function apiSearchProducts(query, field='') {
   const trimmed = String(query || '').trim();
   if (!trimmed) return [];
-  const {res, data} = await apiFetch(`/api/products/search?q=${encodeURIComponent(trimmed)}&limit=40`);
+  const fieldParam = field ? `&field=${encodeURIComponent(field)}` : '';
+  const {res, data} = await apiFetch(`/api/products/search?q=${encodeURIComponent(trimmed)}&limit=40${fieldParam}`);
   if (!res.ok) throw new Error('search-fetch');
   return Array.isArray(data) ? data.map(normalizeProduct) : [];
 }

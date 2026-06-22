@@ -17,6 +17,16 @@ _GIST_FILENAME = "familiprix-backup.json"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+def _as_flag(value, default):
+    """Coerce a backed-up 0/1 flag to int, tolerating missing/blank values."""
+    if value in ("", None):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _build_backup_payload(db):
     products = [dict(p) for p in db.execute("SELECT * FROM products ORDER BY aisle, side, section, shelf, position").fetchall()]
     layouts  = [dict(r) for r in db.execute("SELECT * FROM aisle_layouts ORDER BY aisle").fetchall()]
@@ -122,15 +132,16 @@ def _restore_from_gist_if_empty():
                 db.execute(
                     """
                     INSERT INTO products (name, brand, description, image_url, source_url, search_terms, usage_notes,
-                        alternative_suggestions, barcode, aisle, side, section, shelf, position,
-                        created_by, created_at, modified_by, modified_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        alternative_suggestions, barcode, product_code, aisle, side, section, shelf, position,
+                        is_plano, in_stock, flipped_label, created_by, created_at, modified_by, modified_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (name, p.get("brand", ""), p.get("description", ""), p.get("image_url", ""),
                      p.get("source_url", ""), p.get("search_terms", ""), p.get("usage_notes", ""),
-                     p.get("alternative_suggestions", ""), p.get("barcode", ""),
+                     p.get("alternative_suggestions", ""), p.get("barcode", ""), p.get("product_code", ""),
                      p.get("aisle", ""), p.get("side", ""), p.get("section", "1"),
                      p.get("shelf", ""), p.get("position", ""),
+                     _as_flag(p.get("is_plano"), 0), _as_flag(p.get("in_stock"), 1), _as_flag(p.get("flipped_label"), 0),
                      "gist-restore", p.get("created_at", now), "gist-restore", now),
                 )
                 imported += 1
@@ -227,15 +238,16 @@ def gist_restore_now():
             db.execute(
                 """
                 INSERT INTO products (name, brand, description, image_url, source_url, search_terms, usage_notes,
-                    alternative_suggestions, barcode, aisle, side, section, shelf, position,
-                    created_by, created_at, modified_by, modified_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    alternative_suggestions, barcode, product_code, aisle, side, section, shelf, position,
+                    is_plano, in_stock, flipped_label, created_by, created_at, modified_by, modified_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (name, p.get("brand", ""), p.get("description", ""), p.get("image_url", ""),
                  p.get("source_url", ""), p.get("search_terms", ""), p.get("usage_notes", ""),
-                 p.get("alternative_suggestions", ""), p.get("barcode", ""),
+                 p.get("alternative_suggestions", ""), p.get("barcode", ""), p.get("product_code", ""),
                  p.get("aisle", ""), p.get("side", ""), p.get("section", "1"),
                  p.get("shelf", ""), p.get("position", ""),
+                 _as_flag(p.get("is_plano"), 0), _as_flag(p.get("in_stock"), 1), _as_flag(p.get("flipped_label"), 0),
                  username, p.get("created_at", now), username, now),
             )
             imported_products += 1

@@ -92,6 +92,42 @@ function searchProductsFromCache(query, limit=40) {
   return ranked.slice(0, limit).map(item => item.product);
 }
 
+// Search strictly on the Familiprix/pharmacy code — never on barcode or name —
+// so this "Code" mode can never be confused with a UPC search.
+function searchProductsByCodeFromCache(query, limit=40) {
+  const needle = normalizedDigits(query) || normalizeSearchText(query);
+  if (!needle) return [];
+  const ranked = [];
+  for (const product of allProductsCache) {
+    const code = String(product.product_code || '').trim();
+    if (!code) continue;
+    const haystack = normalizedDigits(code) || normalizeSearchText(code);
+    if (!haystack) continue;
+    let score = 0;
+    if (haystack === needle) score = 1000;
+    else if (haystack.startsWith(needle)) score = 700;
+    else if (haystack.includes(needle)) score = 400;
+    if (score) ranked.push({score, product});
+  }
+  ranked.sort((a, b) => (b.score - a.score) || String(a.product.name || '').localeCompare(String(b.product.name || '')));
+  return ranked.slice(0, limit).map(item => item.product);
+}
+
+// Which field the search box targets: '' = name/brand/UPC (default), 'code' = pharmacy code.
+function getSearchField() {
+  return document.getElementById('searchField')?.value || '';
+}
+
+function onSearchFieldChange() {
+  const input = document.getElementById('searchInput');
+  if (input) {
+    input.placeholder = getSearchField() === 'code'
+      ? 'Code pharmacie (ex: 123456)…'
+      : 'Nom, code-barres ou 4 derniers chiffres...';
+  }
+  doSearch();
+}
+
 // ── Search tab ────────────────────────────────────────────────────────────────
 function filterByHomeBrand(brand) {
   const products = allProductsCache.filter(p => brand ? p.brand?.toLowerCase().startsWith(brand.toLowerCase()) : isHomeBrand(p.brand));
@@ -121,6 +157,25 @@ function scheduleSearch() {
 async function doSearchValue(q) {
   const div = document.getElementById('searchResults');
   if (!q) { div.innerHTML = ''; return; }
+
+  // Explicit "Code" mode: match only the pharmacy code, never barcode/name.
+  if (getSearchField() === 'code') {
+    const cachedByCode = searchProductsByCodeFromCache(q, 40);
+    if (cachedByCode.length || allProductsCache.length) {
+      div.innerHTML = cachedByCode.length
+        ? groupAndRenderSearchResults(cachedByCode)
+        : '<div class="empty">Aucun produit avec ce code.</div>';
+      return;
+    }
+    try {
+      const data = await apiSearchProducts(q, 'code');
+      div.innerHTML = data.length ? groupAndRenderSearchResults(data) : '<div class="empty">Aucun produit avec ce code.</div>';
+    } catch (e) {
+      div.innerHTML = '<div class="msg error">Impossible de rechercher pour le moment.</div>';
+    }
+    return;
+  }
+
   if (looksLikeCompleteRetailBarcode(q)) {
     // Show ALL locations for this barcode from cache
     const byCodes = build_barcode_candidates_js(q);
@@ -196,4 +251,4 @@ function productCardMultiLocation(entries) {
   </div>`;
 }
 
-window.AppSearch = { doSearch, doSearchValue, filterByHomeBrand, scheduleSearch };
+window.AppSearch = { doSearch, doSearchValue, filterByHomeBrand, scheduleSearch, onSearchFieldChange };

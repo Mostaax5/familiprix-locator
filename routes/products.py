@@ -277,6 +277,34 @@ def rank_products_for_query(products, query, limit=60):
     return items[:limit] if limit else items
 
 
+def rank_products_by_code(products, query, limit=60):
+    """Search strictly on the Familiprix/pharmacy code — never on barcode or
+    name — so this is the explicit "Code" mode and cannot be confused with a UPC."""
+    needle = normalized_digits(query) or normalize_search_text(query)
+    if not needle:
+        return []
+    ranked = []
+    for product in products:
+        code = str(product.get("product_code", "")).strip()
+        if not code:
+            continue
+        haystack = normalized_digits(code) or normalize_search_text(code)
+        if not haystack:
+            continue
+        if haystack == needle:
+            score = 1000
+        elif haystack.startswith(needle):
+            score = 700
+        elif needle in haystack:
+            score = 400
+        else:
+            continue
+        ranked.append((score, product))
+    ranked.sort(key=lambda item: (-item[0], location_sort_key(item[1])))
+    items = [product for _, product in ranked]
+    return items[:limit] if limit else items
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @products_bp.route("/api/products", methods=["GET"])
@@ -292,10 +320,14 @@ def search_products():
     query = request.args.get("q", "").strip()
     if not query:
         return jsonify([])
+    field = (request.args.get("field") or "").strip().lower()
     limit = min(max(clamp_non_negative_int(request.args.get("limit", "60"), 60), 1), 120)
     db = get_db()
     products = [row_to_product(p) for p in db.execute("SELECT * FROM products").fetchall()]
-    items = rank_products_for_query(products, query, limit=limit)
+    if field == "code":
+        items = rank_products_by_code(products, query, limit=limit)
+    else:
+        items = rank_products_for_query(products, query, limit=limit)
     return jsonify(items)
 
 
@@ -326,6 +358,7 @@ def add_product():
     usage_notes = data.get("usage_notes", "").strip()
     alternative_suggestions = data.get("alternative_suggestions", "").strip()
     barcode  = data.get("barcode", "").strip()
+    product_code = data.get("product_code", "").strip()
     aisle    = data.get("aisle", "").strip()
     side     = data.get("side", "").strip()
     section  = data.get("section", "").strip() or "1"
@@ -350,11 +383,11 @@ def add_product():
     try:
         cursor = db.execute(
             """
-            INSERT INTO products (name, brand, description, image_url, source_url, search_terms, usage_notes, alternative_suggestions, barcode, aisle, side, section, shelf, position, created_by, created_at, modified_by, modified_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO products (name, brand, description, image_url, source_url, search_terms, usage_notes, alternative_suggestions, barcode, product_code, aisle, side, section, shelf, position, created_by, created_at, modified_by, modified_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (name, brand, description, image_url, source_url, search_terms, usage_notes,
-             alternative_suggestions, barcode, aisle, side, section, shelf, position,
+             alternative_suggestions, barcode, product_code, aisle, side, section, shelf, position,
              username, utc_now_iso(), username, utc_now_iso())
         )
     except DatabaseIntegrityError as exc:
@@ -416,7 +449,7 @@ def update_product(product_id):
 
     try:
         result = db.execute(
-            "UPDATE products SET name=?, brand=?, description=?, image_url=?, source_url=?, search_terms=?, usage_notes=?, alternative_suggestions=?, barcode=?, aisle=?, side=?, section=?, shelf=?, position=?, modified_by=?, modified_at=? WHERE id=?",
+            "UPDATE products SET name=?, brand=?, description=?, image_url=?, source_url=?, search_terms=?, usage_notes=?, alternative_suggestions=?, barcode=?, product_code=?, aisle=?, side=?, section=?, shelf=?, position=?, modified_by=?, modified_at=? WHERE id=?",
             (
                 data["name"],
                 data.get("brand", existing["brand"]),
@@ -427,6 +460,7 @@ def update_product(product_id):
                 data.get("usage_notes", existing["usage_notes"]),
                 data.get("alternative_suggestions", existing["alternative_suggestions"]),
                 data.get("barcode", existing["barcode"]),
+                data.get("product_code", existing["product_code"]),
                 data["aisle"], data["side"], data.get("section", "1"),
                 data["shelf"], data["position"],
                 username, utc_now_iso(), product_id,
@@ -578,7 +612,9 @@ def bulk_import_products():
         is_plano = 1 if p.get("is_plano", True) else 0
         flipped  = 1 if p.get("flipped_label", False) else 0
         tag      = "[PLANO]" if is_plano else "[HORS-PLANO]"
-        notes    = f"{tag} {code}".strip()
+        # The pharmacy code lives in its own column (product_code), NOT in
+        # search_terms, so a name/UPC search can never match it by accident.
+        notes    = tag
 
         if not name:
             errors += 1
@@ -603,21 +639,21 @@ def bulk_import_products():
                 row_id = existing["id"] if isinstance(existing, dict) else existing[0]
                 if image_url:
                     db.execute(
-                        "UPDATE products SET name=?, barcode=?, search_terms=?, is_plano=?, in_stock=?, flipped_label=?, image_url=?, modified_by=?, modified_at=? WHERE id=?",
-                        (name, barcode, notes, is_plano, in_stock, flipped, image_url, username, now, row_id)
+                        "UPDATE products SET name=?, barcode=?, product_code=?, search_terms=?, is_plano=?, in_stock=?, flipped_label=?, image_url=?, modified_by=?, modified_at=? WHERE id=?",
+                        (name, barcode, code, notes, is_plano, in_stock, flipped, image_url, username, now, row_id)
                     )
                 else:
                     db.execute(
-                        "UPDATE products SET name=?, barcode=?, search_terms=?, is_plano=?, in_stock=?, flipped_label=?, modified_by=?, modified_at=? WHERE id=?",
-                        (name, barcode, notes, is_plano, in_stock, flipped, username, now, row_id)
+                        "UPDATE products SET name=?, barcode=?, product_code=?, search_terms=?, is_plano=?, in_stock=?, flipped_label=?, modified_by=?, modified_at=? WHERE id=?",
+                        (name, barcode, code, notes, is_plano, in_stock, flipped, username, now, row_id)
                     )
             else:
                 db.execute(
                     """INSERT INTO products
-                       (name, barcode, aisle, side, section, shelf, position,
+                       (name, barcode, product_code, aisle, side, section, shelf, position,
                         search_terms, is_plano, in_stock, flipped_label, image_url, created_by, created_at, modified_by, modified_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (name, barcode, aisle, side, section, shelf, position,
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (name, barcode, code, aisle, side, section, shelf, position,
                      notes, is_plano, in_stock, flipped, image_url, username, now, username, now)
                 )
             imported += 1

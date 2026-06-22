@@ -101,6 +101,7 @@ async function addProductToCurrentRayon(productId, position) {
     image_url: existing.image_url || '', source_url: existing.source_url || '',
     search_terms: existing.search_terms || '', usage_notes: existing.usage_notes || '',
     alternative_suggestions: existing.alternative_suggestions || '', barcode: existing.barcode || '',
+    product_code: existing.product_code || '',
     aisle: rayonCtx.aisle, side: rayonCtx.side, section: rayonCtx.section || '1',
     shelf: rayonCtx.shelf, position
   };

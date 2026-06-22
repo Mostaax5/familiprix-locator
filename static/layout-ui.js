@@ -729,6 +729,7 @@ function productCard(p, showDelete=true, showAiButton=true) {
     <div class="product-footer">
       ${stockRow}
       ${p.barcode ? `<div class="meta-row"><span class="meta-label">Code-barres</span><span class="barcode-text">${esc(p.barcode)}</span></div>` : ''}
+      ${p.product_code ? `<div class="meta-row"><span class="meta-label">Code pharmacie</span><span class="barcode-text">${esc(p.product_code)}</span></div>` : ''}
       ${p.last_change_by ? `<div class="meta-row"><span class="meta-label">Modifié par</span><span>${esc(p.last_change_by)}</span></div>` : ''}
       ${p.description ? `<div class="desc-text">${esc(p.description)}</div>` : ''}
       ${p.usage_notes ? `<div class="desc-text">${esc(p.usage_notes)}</div>` : ''}
@@ -811,7 +812,7 @@ function renderShelfProductList(aisle, side, section, shelf, positions) {
           <span class="plan-product-name">${esc(p.name)}${p.brand ? ` <span class="plan-product-brand">${esc(p.brand)}</span>` : ''}</span>
           <button title="Retirer ce produit" onclick="deleteProduct(${p.id})" style="margin-left:auto;flex-shrink:0;border:1px solid #f1b8c2;color:#c8102e;background:#fff;border-radius:5px;padding:2px 7px;cursor:pointer;font-size:11px">✕</button>
         </div>
-        <div class="plan-product-row2">${p.barcode ? esc(p.barcode) : '—'}</div>
+        <div class="plan-product-row2">${p.barcode ? esc(p.barcode) : '—'}${p.product_code ? ` · code ${esc(p.product_code)}` : ''}</div>
       </div>`).join('')}
       ${!filled ? `<div class="plan-product-item"><span class="plan-slot-empty">Scannez les produits via le Scan tab</span></div>` : ''}
     </div>`;
@@ -836,7 +837,7 @@ function renderShelfProductList(aisle, side, section, shelf, positions) {
             <button title="Retirer ce produit" style="background:#fff;border:1px solid #f1b8c2;color:#c8102e;border-radius:6px;cursor:pointer;padding:4px 9px;font-size:13px;line-height:1" onclick="deleteProduct(${p.id})">✕</button>
           </span>
         </div>
-        <div class="plan-product-row2">${p.barcode ? esc(p.barcode) : '—'}</div>
+        <div class="plan-product-row2">${p.barcode ? esc(p.barcode) : '—'}${p.product_code ? ` · code ${esc(p.product_code)}` : ''}</div>
       </div>`;
     } else {
       html += `<div class="plan-product-item">
@@ -1809,6 +1810,7 @@ function planoSet(idx, field, value) {
   const p = planoData.products[idx];
   if (field === 'tablette' || field === 'position') p[field] = Math.max(0, parseInt(value) || 0);
   else if (field === 'name') p.name = value;
+  else if (field === 'code') p.code_familiprix = value;
   updatePlanoPreview();
 }
 function planoToggle(idx, field) {
@@ -1856,6 +1858,8 @@ function updatePlanoPreview() {
              onchange="planoSet(${idx},'position',this.value)">
       <input type="text" value="${esc(p.name)}" title="Nom" style="flex:1;min-width:120px;padding:3px 6px;font-size:12px"
              onchange="planoSet(${idx},'name',this.value)">
+      <input type="text" value="${esc(p.code_familiprix || '')}" title="Code pharmacie" placeholder="code" style="width:64px;padding:3px;font-size:12px;text-align:center"
+             onchange="planoSet(${idx},'code',this.value)">
       <button title="${isPlano ? 'Plano — cliquer pour Hors-plano' : 'Hors-plano — cliquer pour Plano'}"
               onclick="planoToggle(${idx},'is_plano')"
               style="font-size:10px;font-weight:700;border:none;border-radius:6px;padding:3px 7px;cursor:pointer;${isPlano?'background:#eef2ff;color:#4338ca':'background:#f1f5f9;color:#64748b'}">${isPlano?'📋 PLANO':'HORS'}</button>
