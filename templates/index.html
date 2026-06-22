@@ -54,7 +54,7 @@
   <div class="card">
     <div class="section-title">📍 Tablette en cours</div>
     <div class="section-note">Indiquez sur quelle tablette vous êtes. Scannez ensuite les produits un à un — chaque produit s'ajoute à la position suivante sur cette tablette. Changez la tablette dès que vous changez de tablette ou d'allée.</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;align-items:flex-end;margin-top:8px">
+    <div class="rayon-grid" style="margin-top:8px">
       <div class="field">
         <label class="label">Allée</label>
         <input type="text" id="rayonAisle" placeholder="Ex: 3" inputmode="numeric" autocomplete="off" oninput="updateRayonSideOptions();updateRayonCtx()"/>
@@ -303,7 +303,7 @@
         </label>
       </div>
 
-      <div id="planoPreview" style="margin-top:12px;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;max-height:260px;overflow-y:auto"></div>
+      <div id="planoPreview" style="margin-top:12px;border:1px solid #e2e8f0;border-radius:8px;max-height:260px;overflow:auto"></div>
 
       <div class="tool-row" style="margin-top:10px">
         <button id="planoImportBtn" class="btn" onclick="importPlanogram()">Importer dans le plan</button>

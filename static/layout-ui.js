@@ -900,7 +900,7 @@ function renderMapEditor() {
                     <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addAccrocheToSection('${esc(layout.aisle)}','${side}',${sectionIndex})">📎 Accroche</button>
                     <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="startScanFromSection('${esc(layout.aisle)}','${side}',${sectionIndex})">▶ Scanner ici</button>
                   </div>
-                  <div style="display:flex;gap:6px;margin-bottom:10px;align-items:center">
+                  <div style="display:flex;gap:6px;margin-bottom:10px;align-items:center;flex-wrap:wrap">
                     <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${esc(layout.aisle)}','${side}',${sectionIndex},-1)">↑ Monter</button>
                     <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${esc(layout.aisle)}','${side}',${sectionIndex},1)">↓ Descendre</button>
                     <button class="btn btn-outline btn-inline" style="font-size:12px;color:#c8102e;border-color:#f1b8c2;margin-left:auto" onclick="removeSection('${esc(layout.aisle)}','${side}',${sectionIndex})">✕ Supprimer section</button>
