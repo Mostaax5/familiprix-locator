@@ -325,26 +325,6 @@
     <div id="planoHistory" style="margin-top:8px"><div class="small" style="color:#94a3b8">Chargement…</div></div>
   </div>
 
-  <div class="card">
-    <div class="section-title">Images des produits</div>
-    <div class="section-note">Récupère en ligne les photos manquantes (surtout après un import de planogramme) pour que clients et employés voient à quoi ressemble le produit.</div>
-    <button id="fetchImagesBtn" class="btn btn-outline" style="margin-top:8px" onclick="fetchMissingImages()">📷 Récupérer les images manquantes</button>
-    <div id="missingImagesMsg" style="min-height:18px;font-size:13px;margin-top:6px;color:#64748b"></div>
-  </div>
-
-  <details class="card" ontoggle="if(this.open)loadRemovedProducts()">
-    <summary class="details-summary">🗄 Produits retirés (historique)</summary>
-    <div class="details-body">
-      <div class="section-note">Tout produit supprimé est conservé ici — pour retrouver de quel produit il s'agissait et où il était.</div>
-      <div class="scan-tools" style="margin-top:8px">
-        <div class="field">
-          <input type="text" id="removedSearch" placeholder="Chercher par nom ou code-barres…" oninput="loadRemovedProducts()"/>
-        </div>
-        <button class="btn btn-outline btn-inline" onclick="loadRemovedProducts()">↻</button>
-      </div>
-      <div id="removedList" style="margin-top:8px"></div>
-    </div>
-  </details>
 
   <div class="card">
     <div class="section-title">Sauvegarde de la base</div>

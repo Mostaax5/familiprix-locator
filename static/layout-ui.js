@@ -1032,7 +1032,6 @@ async function loadMapEditor(forceServer=false) {
   await Promise.allSettled([refreshProductsCache(forceServer), refreshLayoutsCache(forceServer)]);
   refreshPlanUi();
   loadPlanogramHistory();
-  updateMissingImagesUi();
 }
 
 function getEditableLayout(aisle) {
@@ -1918,11 +1917,10 @@ async function importPlanogram() {
     });
     if (res.ok && data.success) {
       const errTxt = data.errors > 0 ? `, ${data.errors} erreur(s)` : '';
-      msg.innerHTML = `✅ <strong>${data.imported}</strong> importé(s), ${data.skipped} ignoré(s)${errTxt}.`;
+      msg.innerHTML = `✅ <strong>${data.imported}</strong> importé(s), ${data.skipped} ignoré(s)${errTxt}. Les photos manquantes sont récupérées automatiquement.`;
       msg.style.color = '#16a34a';
       refreshProductsCache();
       loadPlanogramHistory();
-      updateMissingImagesUi();
     } else {
       msg.textContent = data.error || 'Erreur lors de l importation.';
       msg.style.color = '#c8102e';
@@ -1958,62 +1956,4 @@ async function loadPlanogramHistory() {
   }
 }
 
-async function updateMissingImagesUi() {
-  const btn = document.getElementById('fetchImagesBtn');
-  if (!btn) return;
-  try {
-    const {res, data} = await apiFetch('/api/products/missing-images/count');
-    const n = res.ok ? (data.count || 0) : 0;
-    btn.textContent = n ? `📷 Récupérer les images manquantes (${n})` : '📷 Toutes les images sont présentes';
-    btn.disabled = !n;
-  } catch (_) {}
-}
-
-async function fetchMissingImages() {
-  if (!requireEditorSession('récupérer les images')) return;
-  const btn = document.getElementById('fetchImagesBtn');
-  const msg = document.getElementById('missingImagesMsg');
-  if (btn) btn.disabled = true;
-  let total = 0;
-  for (let i = 0; i < 60; i++) {            // bounded loop; small batch per call
-    let data;
-    try {
-      const r = await apiFetch('/api/products/fetch-missing-images', {
-        method: 'POST', headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-        body: JSON.stringify({limit: 6})
-      });
-      data = r.data;
-      if (!r.res.ok || !data.success) break;
-    } catch (_) { break; }
-    total += data.updated || 0;
-    if (msg) msg.textContent = `📷 ${total} image(s) récupérée(s) — ${data.remaining} restante(s)…`;
-    if (data.remaining === 0 || data.updated === 0) break;  // done or no more fillable
-  }
-  await refreshProductsCache(true);
-  refreshPlanUi();
-  await updateMissingImagesUi();
-  if (msg) msg.textContent = total ? `✅ ${total} image(s) récupérée(s).` : 'Aucune nouvelle image trouvée.';
-}
-
-async function loadRemovedProducts() {
-  const box = document.getElementById('removedList');
-  if (!box) return;
-  const q = (document.getElementById('removedSearch')?.value || '').trim();
-  try {
-    const {res, data} = await apiFetch(`/api/products/removed${q ? '?q=' + encodeURIComponent(q) : ''}`);
-    if (!res.ok || !Array.isArray(data) || !data.length) {
-      box.innerHTML = '<div class="small" style="color:#94a3b8">Aucun produit retiré.</div>';
-      return;
-    }
-    box.innerHTML = data.map(r => `
-      <div style="padding:7px 0;border-bottom:1px solid #f1f5f9">
-        <div style="font-weight:600;font-size:13px">${esc(r.name || '—')}</div>
-        <div style="font-size:11px;color:#94a3b8;font-family:monospace">${esc(r.barcode || '—')}</div>
-        <div style="font-size:11px;color:#64748b">Était: ${esc(r.last_location || '—')} · retiré ${esc((r.removed_at||'').replace('T',' ').slice(0,16))}${r.removed_by ? ' · ' + esc(r.removed_by) : ''}</div>
-      </div>`).join('');
-  } catch (e) {
-    box.innerHTML = '<div class="small" style="color:#c8102e">Impossible de charger l historique.</div>';
-  }
-}
-
-window.AppLayout = { renderMapEditor, loadMapEditor, refreshPlanUi, createAisleLayout, saveAisleLayout, refreshProductsCache, refreshLayoutsCache, loadPlanogramHistory, fetchMissingImages, updateMissingImagesUi, loadRemovedProducts };
+window.AppLayout = { renderMapEditor, loadMapEditor, refreshPlanUi, createAisleLayout, saveAisleLayout, refreshProductsCache, refreshLayoutsCache, loadPlanogramHistory };

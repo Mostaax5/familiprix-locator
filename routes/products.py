@@ -151,6 +151,42 @@ def find_existing_image_for_barcode(db, barcode, exclude_id=None):
     return ""
 
 
+def schedule_image_fill(barcodes):
+    """Fetch missing product images online in a background thread — fully
+    automatic, no user action. Mirrors the gist-backup threading pattern."""
+    import threading
+    codes = [str(b).strip() for b in (barcodes or []) if str(b or "").strip()]
+    codes = list(dict.fromkeys(codes))
+    if not codes:
+        return
+
+    def worker():
+        from database import connect_db
+        from routes.ai import lookup_product_online
+        db = connect_db()
+        try:
+            for bc in codes:
+                try:
+                    # already has an image for this barcode? reuse it; else look up online
+                    img = find_existing_image_for_barcode(db, bc)
+                    if not img:
+                        product = lookup_product_online(bc)
+                        img = str((product or {}).get("image_url", "")).strip()
+                    if img:
+                        db.execute(
+                            "UPDATE products SET image_url=? WHERE barcode=? AND TRIM(COALESCE(image_url,'')) = ''",
+                            (img, bc)
+                        )
+                        db.commit()
+                except Exception:
+                    pass
+        finally:
+            try: db.close()
+            except Exception: pass
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def integrity_conflict_message(exc):
     text = str(exc).lower()
     if "barcode" in text:
@@ -328,6 +364,8 @@ def add_product():
     product = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
     from routes.gist import _schedule_gist_backup
     _schedule_gist_backup(db)
+    if not image_url and barcode:
+        schedule_image_fill([barcode])   # fetch a picture online in the background
     return jsonify({
         "success": True,
         "message": f'"{name}" ajoute avec succes!',
@@ -517,6 +555,7 @@ def bulk_import_products():
     db = get_db()
     now = utc_now_iso()
     imported = skipped = errors = 0
+    image_barcodes = []   # barcodes still missing an image → fetched in background
 
     for p in products:
         try:
@@ -558,6 +597,8 @@ def bulk_import_products():
             in_stock = 0 if not p.get("en_stock", True) else 1
             # Plano rows carry no image — reuse one already stored for this barcode.
             image_url = find_existing_image_for_barcode(db, barcode)
+            if not image_url and barcode:
+                image_barcodes.append(barcode)   # fetch online in background
             if existing:
                 row_id = existing["id"] if isinstance(existing, dict) else existing[0]
                 if image_url:
@@ -600,6 +641,7 @@ def bulk_import_products():
     except Exception:
         pass
 
+    schedule_image_fill(image_barcodes)   # fetch missing plano pictures automatically
     return jsonify({"success": True, "imported": imported, "skipped": skipped, "errors": errors})
 
 
@@ -610,55 +652,20 @@ def planogram_history():
     return jsonify([dict(r) for r in rows])
 
 
-@products_bp.route("/api/products/missing-images/count", methods=["GET"])
-def missing_images_count():
-    db = get_db()
-    row = db.execute(
-        "SELECT COUNT(DISTINCT barcode) AS n FROM products "
-        "WHERE TRIM(COALESCE(barcode,'')) <> '' AND TRIM(COALESCE(image_url,'')) = ''"
-    ).fetchone()
-    n = row["n"] if isinstance(row, dict) else row[0]
-    return jsonify({"count": int(n or 0)})
-
-
-@products_bp.route("/api/products/fetch-missing-images", methods=["POST"])
-def fetch_missing_images():
-    """Fill missing product images, a small batch per call (online lookups are
-    slow). Returns updated + remaining so the UI can run it again until done."""
-    username, error = require_editor()
-    if error:
-        return error
-    data = request.get_json() or {}
-    limit = min(max(int(data.get("limit", 6)), 1), 10)
-    db = get_db()
-    rows = db.execute(
-        "SELECT DISTINCT barcode FROM products "
-        "WHERE TRIM(COALESCE(barcode,'')) <> '' AND TRIM(COALESCE(image_url,'')) = '' "
-        "ORDER BY barcode LIMIT ?",
-        (limit,)
-    ).fetchall()
-    barcodes = [(r["barcode"] if isinstance(r, dict) else r[0]) for r in rows]
-
-    from routes.ai import lookup_product_online
-    now = utc_now_iso()
-    updated = 0
-    for bc in barcodes:
-        img = find_existing_image_for_barcode(db, bc)
-        if not img:
-            product = lookup_product_online(bc)
-            img = str((product or {}).get("image_url", "")).strip()
-        if img:
-            res = db.execute(
-                "UPDATE products SET image_url=?, modified_by=?, modified_at=? "
-                "WHERE barcode=? AND TRIM(COALESCE(image_url,'')) = ''",
-                (img, username, now, bc)
-            )
-            updated += res.rowcount or 0
-    db.commit()
-
-    remaining_row = db.execute(
-        "SELECT COUNT(DISTINCT barcode) AS n FROM products "
-        "WHERE TRIM(COALESCE(barcode,'')) <> '' AND TRIM(COALESCE(image_url,'')) = ''"
-    ).fetchone()
-    remaining = remaining_row["n"] if isinstance(remaining_row, dict) else remaining_row[0]
-    return jsonify({"success": True, "updated": updated, "processed": len(barcodes), "remaining": int(remaining or 0)})
+def schedule_backfill_missing():
+    """At startup, automatically fetch any still-missing product images in the
+    background — no button, no user action."""
+    try:
+        from database import connect_db
+        db = connect_db()
+        try:
+            rows = db.execute(
+                "SELECT DISTINCT barcode FROM products "
+                "WHERE TRIM(COALESCE(barcode,'')) <> '' AND TRIM(COALESCE(image_url,'')) = ''"
+            ).fetchall()
+            codes = [(r["barcode"] if isinstance(r, dict) else r[0]) for r in rows]
+        finally:
+            db.close()
+        schedule_image_fill(codes)
+    except Exception:
+        pass
