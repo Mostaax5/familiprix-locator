@@ -1347,7 +1347,7 @@ function addSection(aisle, side) {
   refreshPlanUi();
 }
 
-function removeSection(aisle, side, sectionIndex) {
+async function removeSection(aisle, side, sectionIndex) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
   const sections = layout.config.sides[side].sections;
@@ -1355,10 +1355,14 @@ function removeSection(aisle, side, sectionIndex) {
     String(p.aisle) === String(aisle) && p.side === side && String(p.section) === String(sectionIndex + 1)
   );
   if (hasProducts && !confirm(`La section ${sectionIndex + 1} contient des produits. Supprimer quand même ?`)) return;
+  // Server deletes that section's products and shifts higher sections down by 1,
+  // keeping product numbering aligned with the config. Bail if it fails.
+  if (!await _swapCall(aisle, 'remove-section', {side, section: String(sectionIndex + 1)})) {
+    document.getElementById('addMsg').innerHTML = '<div class="msg error">Suppression impossible.</div>';
+    return;
+  }
   sections.splice(sectionIndex, 1);
-  syncLayoutRecord(layout);
-  markLayoutDirty(aisle);
-  refreshPlanUi();
+  await saveAisleLayout(aisle);   // persist config so DB + plan stay consistent
 }
 
 function addShelf(aisle, side, sectionIndex) {
@@ -1375,7 +1379,7 @@ function addShelf(aisle, side, sectionIndex) {
   refreshPlanUi();
 }
 
-function removeShelf(aisle, side, sectionIndex, shelfIndex) {
+async function removeShelf(aisle, side, sectionIndex, shelfIndex) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
   const section = layout.config.sides[side].sections[sectionIndex];
@@ -1385,11 +1389,15 @@ function removeShelf(aisle, side, sectionIndex, shelfIndex) {
     String(p.section) === String(sectionIndex + 1) && String(p.shelf) === String(shelfIndex + 1)
   );
   if (hasProducts && !confirm(`La tablette ${shelfIndex + 1} contient des produits. Supprimer quand même ?`)) return;
+  // Server deletes that shelf's products and shifts higher shelves (in this
+  // section) down by 1. Bail if it fails so config and DB don't diverge.
+  if (!await _swapCall(aisle, 'remove-shelf', {side, section: String(sectionIndex + 1), shelf: String(shelfIndex + 1)})) {
+    document.getElementById('addMsg').innerHTML = '<div class="msg error">Suppression impossible.</div>';
+    return;
+  }
   section.shelves.splice(shelfIndex, 1);
   if (section.labels) section.labels.splice(shelfIndex, 1);
-  syncLayoutRecord(layout);
-  markLayoutDirty(aisle);
-  refreshPlanUi();
+  await saveAisleLayout(aisle);
 }
 
 async function _swapCall(aisle, endpoint, body) {
@@ -1406,13 +1414,13 @@ async function moveSection(aisle, side, sectionIndex, direction) {
   const sections = layout.config.sides[side].sections;
   const target = sectionIndex + direction;
   if (target < 0 || target >= sections.length) return;
-  // Single server call — 3 SQL statements regardless of product count
-  await _swapCall(aisle, 'swap-sections', {side, section_a: String(sectionIndex+1), section_b: String(target+1)});
+  // Server swaps the products of the two sections (3 SQL statements).
+  if (!await _swapCall(aisle, 'swap-sections', {side, section_a: String(sectionIndex+1), section_b: String(target+1)})) {
+    document.getElementById('addMsg').innerHTML = '<div class="msg error">Déplacement impossible.</div>';
+    return;
+  }
   [sections[sectionIndex], sections[target]] = [sections[target], sections[sectionIndex]];
-  syncLayoutRecord(layout);
-  markLayoutDirty(aisle);
-  await refreshProductsCache(true);
-  refreshPlanUi();
+  await saveAisleLayout(aisle);   // persist config in the same step → no desync on refresh
 }
 
 async function moveShelf(aisle, side, sectionIndex, shelfIndex, direction) {
@@ -1422,13 +1430,13 @@ async function moveShelf(aisle, side, sectionIndex, shelfIndex, direction) {
   if (!section) return;
   const target = shelfIndex + direction;
   if (target < 0 || target >= section.shelves.length) return;
-  await _swapCall(aisle, 'swap-shelves', {side, section: String(sectionIndex+1), shelf_a: String(shelfIndex+1), shelf_b: String(target+1)});
+  if (!await _swapCall(aisle, 'swap-shelves', {side, section: String(sectionIndex+1), shelf_a: String(shelfIndex+1), shelf_b: String(target+1)})) {
+    document.getElementById('addMsg').innerHTML = '<div class="msg error">Déplacement impossible.</div>';
+    return;
+  }
   [section.shelves[shelfIndex], section.shelves[target]] = [section.shelves[target], section.shelves[shelfIndex]];
   if (section.labels) [section.labels[shelfIndex], section.labels[target]] = [section.labels[target], section.labels[shelfIndex]];
-  syncLayoutRecord(layout);
-  markLayoutDirty(aisle);
-  await refreshProductsCache(true);
-  refreshPlanUi();
+  await saveAisleLayout(aisle);
 }
 
 async function swapPositions(aisle, side, section, shelf, posA, posB) {

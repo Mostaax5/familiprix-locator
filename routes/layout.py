@@ -343,3 +343,66 @@ def swap_positions_route(aisle):
     db.execute("UPDATE products SET position=?,        modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=? AND shelf=? AND position=?", (pos_b, username, now, aisle, side, section, shelf, "__sw__"))
     db.commit()
     return jsonify({"success": True})
+
+
+def _renumber_after_remove(db, username, now, aisle, side, field, removed, section=None):
+    """Delete products at `field`==removed, then shift every higher `field` down by 1
+    so product numbering stays aligned with the config after a middle removal.
+    `field` is 'section' or 'shelf'; for 'shelf', scope to a single section."""
+    where = "aisle=? AND side=?"
+    params = [aisle, side]
+    if field == "shelf":
+        where += " AND section=?"
+        params.append(section)
+    # 1. delete products in the removed section/shelf
+    db.execute(f"DELETE FROM products WHERE {where} AND {field}=?", tuple(params + [str(removed)]))
+    # 2. shift every higher number down by one. Process in ASCENDING order so each
+    #    lower target slot is vacated before the next product shifts into it —
+    #    otherwise the unique (aisle,side,section,shelf,position) index would clash.
+    rows = db.execute(f"SELECT id, {field} FROM products WHERE {where}", tuple(params)).fetchall()
+    shiftable = []
+    for r in rows:
+        val = r[field] if isinstance(r, dict) else r[1]
+        rid = r["id"] if isinstance(r, dict) else r[0]
+        try:
+            n = int(val)
+        except (TypeError, ValueError):
+            continue
+        if n > int(removed):
+            shiftable.append((n, rid))
+    for n, rid in sorted(shiftable):   # ascending → no slot collision
+        db.execute(f"UPDATE products SET {field}=?, modified_by=?, modified_at=? WHERE id=?",
+                   (str(n - 1), username, now, rid))
+
+
+@layout_bp.route("/api/layout/aisles/<aisle>/remove-section", methods=["POST"])
+def remove_section(aisle):
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json() or {}
+    side    = str(data.get("side", "")).strip()
+    section = str(data.get("section", "")).strip()
+    if not side or not section:
+        return jsonify({"success": False, "error": "Paramètres invalides."}), 400
+    db = get_db()
+    _renumber_after_remove(db, username, utc_now_iso(), aisle, side, "section", section)
+    db.commit()
+    return jsonify({"success": True})
+
+
+@layout_bp.route("/api/layout/aisles/<aisle>/remove-shelf", methods=["POST"])
+def remove_shelf(aisle):
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json() or {}
+    side    = str(data.get("side", "")).strip()
+    section = str(data.get("section", "1")).strip()
+    shelf   = str(data.get("shelf", "")).strip()
+    if not side or not shelf:
+        return jsonify({"success": False, "error": "Paramètres invalides."}), 400
+    db = get_db()
+    _renumber_after_remove(db, username, utc_now_iso(), aisle, side, "shelf", shelf, section=section)
+    db.commit()
+    return jsonify({"success": True})
