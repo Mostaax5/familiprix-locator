@@ -999,6 +999,19 @@ def client_help():
     return jsonify({"success": True, "advice": advice})
 
 
+@ai_bp.route("/api/ai/feedback", methods=["POST"])
+def ai_feedback():
+    """Optional, non-blocking thumbs feedback on an AI answer. Stored as its own
+    training row (kind='feedback') so we never need to mutate an existing log."""
+    data = request.get_json() or {}
+    question = str(data.get("question", "")).strip()
+    rating = str(data.get("rating", "")).strip()  # 'up' | 'down'
+    if rating not in ("up", "down"):
+        return jsonify({"success": False}), 400
+    log_ai_interaction("feedback", question, None, {"rating": rating})
+    return jsonify({"success": True})
+
+
 # ── AI training-data export (free local store) ───────────────────────────────
 @ai_bp.route("/api/ai/logs/export", methods=["GET"])
 def export_ai_logs():

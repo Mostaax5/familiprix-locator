@@ -61,8 +61,27 @@ function renderClientAdvice(advice, hasStoreProducts) {
         </div>` : ''}
       ${advice.pharmacist_referral ? `<div class="msg error" style="margin-top:12px">Orienter vers le pharmacien. ${esc(advice.pharmacist_reason || '')}</div>` : ''}
       ${!advice.pharmacist_referral && advice.pharmacist_reason ? `<div class="msg info" style="margin-top:12px">${esc(advice.pharmacist_reason)}</div>` : ''}
+      <div id="aiFeedbackRow" style="margin-top:12px;display:flex;align-items:center;gap:8px;color:#94a3b8;font-size:12px">
+        <span>Utile ?</span>
+        <button class="btn btn-outline btn-inline" style="font-size:13px;padding:3px 10px;width:auto;margin:0" onclick="sendAiFeedback('up')">👍</button>
+        <button class="btn btn-outline btn-inline" style="font-size:13px;padding:3px 10px;width:auto;margin:0" onclick="sendAiFeedback('down')">👎</button>
+      </div>
     </div>
   `;
+}
+
+// Optional, non-blocking. Ignoring it costs nothing; tapping it just records
+// a training signal. Never interrupts the workflow.
+async function sendAiFeedback(rating) {
+  const row = document.getElementById('aiFeedbackRow');
+  if (row) row.innerHTML = '<span style="color:#16a34a;font-size:12px">Merci 🙏</span>';
+  try {
+    await apiFetch('/api/ai/feedback', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: JSON.stringify({question: getClientQuestion(), rating, store: (typeof getCurrentStoreName==='function'?getCurrentStoreName():'')})
+    });
+  } catch (_) {}
 }
 
 function runClientSearch(showEmptyMessage=true) {
