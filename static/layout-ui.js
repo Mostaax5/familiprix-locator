@@ -809,6 +809,7 @@ function renderShelfProductList(aisle, side, section, shelf, positions) {
       ${products.map(p => `<div class="plan-product-item">
         <div class="plan-product-row1">
           <span class="plan-product-name">${esc(p.name)}${p.brand ? ` <span class="plan-product-brand">${esc(p.brand)}</span>` : ''}</span>
+          <button title="Retirer ce produit" onclick="deleteProduct(${p.id})" style="margin-left:auto;flex-shrink:0;border:1px solid #f1b8c2;color:#c8102e;background:#fff;border-radius:5px;padding:2px 7px;cursor:pointer;font-size:11px">✕</button>
         </div>
         <div class="plan-product-row2">${p.barcode ? esc(p.barcode) : '—'}</div>
       </div>`).join('')}
@@ -832,6 +833,7 @@ function renderShelfProductList(aisle, side, section, shelf, positions) {
           <span style="display:flex;gap:4px;margin-left:auto;flex-shrink:0">
             <button title="Échanger avec la position précédente" style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;padding:4px 9px;font-size:14px;line-height:1;${canUp?'':'opacity:.25;cursor:default'}" onclick="swapPositions(${swapArgs},${pos},${pos-1})" ${canUp?'':'disabled'}>↑</button>
             <button title="Échanger avec la position suivante" style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;padding:4px 9px;font-size:14px;line-height:1;${canDown?'':'opacity:.25;cursor:default'}" onclick="swapPositions(${swapArgs},${pos},${pos+1})" ${canDown?'':'disabled'}>↓</button>
+            <button title="Retirer ce produit" style="background:#fff;border:1px solid #f1b8c2;color:#c8102e;border-radius:6px;cursor:pointer;padding:4px 9px;font-size:13px;line-height:1" onclick="deleteProduct(${p.id})">✕</button>
           </span>
         </div>
         <div class="plan-product-row2">${p.barcode ? esc(p.barcode) : '—'}</div>
@@ -970,10 +972,11 @@ function renderMapEditor() {
                             ? `<span style="font-size:10px;color:#8b5cf6;font-weight:700">LIBRE · ${shelfFilled} prod.</span>
                                <button title="Définir un nombre fixe de positions" style="background:none;border:1px solid #a78bfa;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
                                        onclick="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},prompt('Nombre de positions fixes ?','8')||0)">→ Positions fixes</button>`
-                            : `<input type="number" min="1" value="${positions}" title="Positions"
+                            : `<button title="Retirer une position" style="background:none;border:1px solid #e2e8f0;border-radius:5px;cursor:pointer;font-size:14px;padding:1px 8px;line-height:1.3;${positions<=1?'opacity:.3;cursor:default':''}" onclick="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},${positions-1})" ${positions<=1?'disabled':''}>➖</button>
+                               <input type="number" min="1" value="${positions}" title="Positions"
                                      style="width:46px;padding:2px 4px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px;text-align:center"
                                      onchange="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},this.value)"/>
-                               <span style="font-size:10px;color:#94a3b8">pos</span>
+                               <button title="Ajouter une position" style="background:none;border:1px solid #e2e8f0;border-radius:5px;cursor:pointer;font-size:14px;padding:1px 8px;line-height:1.3" onclick="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},${positions+1})">➕</button>
                                <span style="font-size:11px;color:#64748b">${shelfFilled} prod.</span>
                                <button title="Passer en mode libre (cosmétiques, présentoirs...)" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
                                        onclick="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},0)">📦 Libre</button>`
