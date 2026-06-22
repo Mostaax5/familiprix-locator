@@ -508,8 +508,10 @@ function renderScanPathPreview() {
 }
 
 function buildUniformSections(sectionCount, shelfCount, positionCount) {
+  const sc = Math.max(0, Number(shelfCount) || 0);
   return Array.from({length: Math.max(0, Number(sectionCount) || 0)}, () => ({
-    shelves: Array.from({length: Math.max(0, Number(shelfCount) || 0)}, () => Math.max(0, Number(positionCount) || 0))
+    shelves: Array.from({length: sc}, () => Math.max(0, Number(positionCount) || 0)),
+    labels:  Array.from({length: sc}, () => '')
   }));
 }
 
@@ -519,8 +521,14 @@ function applySideTemplate(aisle, side) {
   const sectionCount = document.getElementById(`sideTemplateSections-${aisle}-${side}`).value;
   const shelfCount = document.getElementById(`sideTemplateShelves-${aisle}-${side}`).value;
   const positionCount = document.getElementById(`sideTemplatePositions-${aisle}-${side}`).value;
+  const newSections = buildUniformSections(sectionCount, shelfCount, positionCount);
+  // Preserve accroche labels where the shelf still exists — accroches stay.
+  const oldSections = layout.config.sides[side]?.sections || [];
+  newSections.forEach((sec, si) => {
+    sec.labels = sec.shelves.map((_, shi) => (oldSections[si] && oldSections[si].labels && oldSections[si].labels[shi]) || '');
+  });
   const nextConfig = normalizeLayoutConfig({
-    sides: {...layout.config.sides, [side]: {sections: buildUniformSections(sectionCount, shelfCount, positionCount)}}
+    sides: {...layout.config.sides, [side]: {sections: newSections}}
   }, layout.max_section, layout.max_shelf, layout.max_position);
   if (!confirmLayoutReduction(aisle, nextConfig, `Appliquer ce modele uniforme au cote ${side}`)) return;
   layout.config = nextConfig;
@@ -805,9 +813,9 @@ function renderShelfProductList(aisle, side, section, shelf, positions) {
         <div class="plan-product-row1">
           <span class="plan-pos-badge">${pos}</span>
           <span class="plan-product-name">${esc(p.name)}${p.brand ? ` <span class="plan-product-brand">${esc(p.brand)}</span>` : ''}</span>
-          <span style="display:flex;gap:2px;margin-left:auto;flex-shrink:0">
-            <button title="Monter" style="background:none;border:1px solid #e2e8f0;border-radius:3px;cursor:pointer;padding:0 5px;font-size:11px;line-height:1.6;${canUp?'':'opacity:.25;cursor:default'}" onclick="swapPositions(${swapArgs},${pos},${pos-1})" ${canUp?'':'disabled'}>↑</button>
-            <button title="Descendre" style="background:none;border:1px solid #e2e8f0;border-radius:3px;cursor:pointer;padding:0 5px;font-size:11px;line-height:1.6;${canDown?'':'opacity:.25;cursor:default'}" onclick="swapPositions(${swapArgs},${pos},${pos+1})" ${canDown?'':'disabled'}>↓</button>
+          <span style="display:flex;gap:4px;margin-left:auto;flex-shrink:0">
+            <button title="Échanger avec la position précédente" style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;padding:4px 9px;font-size:14px;line-height:1;${canUp?'':'opacity:.25;cursor:default'}" onclick="swapPositions(${swapArgs},${pos},${pos-1})" ${canUp?'':'disabled'}>↑</button>
+            <button title="Échanger avec la position suivante" style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;padding:4px 9px;font-size:14px;line-height:1;${canDown?'':'opacity:.25;cursor:default'}" onclick="swapPositions(${swapArgs},${pos},${pos+1})" ${canDown?'':'disabled'}>↓</button>
           </span>
         </div>
         <div class="plan-product-row2">${p.barcode ? esc(p.barcode) : '—'}</div>
