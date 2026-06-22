@@ -237,6 +237,7 @@ def init_postgres_db(db):
     db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS created_at TEXT DEFAULT ''")
     db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS is_plano INTEGER DEFAULT 0")
     db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS in_stock INTEGER DEFAULT 1")
+    db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS linked_position TEXT DEFAULT ''")
 
     db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS max_section TEXT NOT NULL DEFAULT '1'")
     db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS config_json TEXT NOT NULL DEFAULT ''")
@@ -372,6 +373,8 @@ def init_sqlite_db(db):
         db.execute("ALTER TABLE products ADD COLUMN is_plano INTEGER DEFAULT 0")
     if "in_stock" not in existing_columns:
         db.execute("ALTER TABLE products ADD COLUMN in_stock INTEGER DEFAULT 1")
+    if "linked_position" not in existing_columns:
+        db.execute("ALTER TABLE products ADD COLUMN linked_position TEXT DEFAULT ''")
 
     layout_columns = {
         row["name"] for row in db.execute("PRAGMA table_info(aisle_layouts)").fetchall()
