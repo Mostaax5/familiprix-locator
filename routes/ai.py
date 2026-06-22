@@ -135,9 +135,53 @@ def build_barcode_candidates(barcode):
     return _bbc(barcode)
 
 
-def first_lookup_result(tasks, max_workers=4):
+# Score a lookup result by how trustworthy/complete it is, so we can pick the
+# BEST result across all sources instead of whichever replied first.
+_SOURCE_TRUST = {
+    "familiprix": 9, "open beauty facts": 8, "open drug facts": 8,
+    "open products facts": 8, "open food facts": 7, "upc item db": 5,
+    "barcode lookup": 4, "go upc": 4, "ean search": 3,
+}
+_PLACEHOLDER_BITS = ("unknown", "not found", "no title", "n/a", "untitled")
+
+
+def _product_quality_score(p):
+    if not p:
+        return 0
+    name = str(p.get("name", "")).strip()
+    if len(name) < 3:
+        return 0
+    low = name.lower()
+    score = 10
+    # name informativeness
+    if len(name) >= 6:  score += 5
+    if len(name) >= 12: score += 4
+    if " " in name:     score += 3            # multi-word names are real product names
+    # the name shouldn't just be the barcode digits or a placeholder
+    if any(b in low for b in _PLACEHOLDER_BITS):
+        score -= 10
+    name_digits = re.sub(r"\D", "", name)
+    bc_digits = re.sub(r"\D", "", str(p.get("barcode", "")))
+    if name_digits and bc_digits and name_digits in bc_digits:
+        score -= 8
+    # completeness
+    if str(p.get("brand", "")).strip():       score += 6
+    if str(p.get("image_url", "")).strip():   score += 5
+    if str(p.get("description", "")).strip(): score += 3
+    # source reliability
+    src = str(p.get("source", "")).lower()
+    for key, weight in _SOURCE_TRUST.items():
+        if key in src:
+            score += weight
+            break
+    return score
+
+
+def best_lookup_result(tasks, max_workers=8):
+    """Run all tasks, return (best_product, best_score) by quality score."""
+    best, best_score = None, 0
     if not tasks:
-        return None
+        return None, 0
     with ThreadPoolExecutor(max_workers=min(max_workers, len(tasks))) as executor:
         futures = [executor.submit(task) for task in tasks]
         for future in as_completed(futures):
@@ -145,11 +189,10 @@ def first_lookup_result(tasks, max_workers=4):
                 result = future.result()
             except Exception:
                 result = None
-            if result:
-                for pending in futures:
-                    pending.cancel()
-                return result
-    return None
+            s = _product_quality_score(result)
+            if s > best_score:
+                best, best_score = result, s
+    return best, best_score
 
 
 def fetch_text(url):
@@ -897,45 +940,49 @@ def lookup_barcode(barcode):
         return jsonify({"found": False, "error": "Code-barres manquant"}), 400
 
     barcode_candidates = build_barcode_candidates(barcode)
+    GOOD_ENOUGH = 24   # score at which we're confident and can stop early
 
+    best, best_score = None, 0
+
+    # Phase 1 — fast structured APIs (UPC Item DB, EAN Search, Open*Facts).
+    # Gather ALL results and keep the highest-quality one (not the fastest).
     json_tasks = []
     for candidate in barcode_candidates:
         json_tasks.append(lambda bc=candidate: lookup_upcitemdb(bc))
         json_tasks.append(lambda bc=candidate: lookup_ean_search(bc))
-    for candidate in barcode_candidates:
         for source_name, base_url in PRODUCT_LOOKUP_SOURCES:
             json_tasks.append(lambda bc=candidate, sn=source_name, su=base_url: lookup_open_facts_product(sn, su, bc))
-    product = first_lookup_result(json_tasks, max_workers=12)
-    if product:
-        return jsonify({"found": True, "product": product})
+    p1, s1 = best_lookup_result(json_tasks, max_workers=12)
+    if s1 > best_score:
+        best, best_score = p1, s1
 
-    familiprix_tasks = [
-        lambda bc=candidate, bcs=barcode_candidates: lookup_familiprix_product(bc, bcs)
-        for candidate in barcode_candidates
-    ]
-    product = first_lookup_result(familiprix_tasks, max_workers=len(familiprix_tasks))
-    if product:
-        return jsonify({"found": True, "product": product})
+    # Phase 2 — Familiprix's own catalog (very accurate for these products) +
+    # generic barcode databases. Only if we're not already confident.
+    if best_score < GOOD_ENOUGH:
+        tasks = []
+        for candidate in barcode_candidates:
+            tasks.append(lambda bc=candidate, bcs=barcode_candidates: lookup_familiprix_product(bc, bcs))
+            tasks.append(lambda bc=candidate: lookup_barcodelookup(bc))
+            tasks.append(lambda bc=candidate: lookup_go_upc(bc))
+        p2, s2 = best_lookup_result(tasks, max_workers=8)
+        if s2 > best_score:
+            best, best_score = p2, s2
 
-    scraper_tasks = []
-    for candidate in barcode_candidates:
-        scraper_tasks.append(lambda bc=candidate: lookup_barcodelookup(bc))
-        scraper_tasks.append(lambda bc=candidate: lookup_go_upc(bc))
-    product = first_lookup_result(scraper_tasks, max_workers=4)
-    if product:
-        return jsonify({"found": True, "product": product})
+    # Phase 3 — other pharmacy site scrapers, last resort.
+    if best_score < GOOD_ENOUGH:
+        pharmacy_tasks = []
+        for candidate in barcode_candidates:
+            for source_name, source_base_url in PHARMACY_LOOKUP_SOURCES:
+                pharmacy_tasks.append(
+                    lambda bc=candidate, sn=source_name, su=source_base_url, bcs=barcode_candidates:
+                    lookup_generic_pharmacy_product(sn, su, bc, bcs)
+                )
+        p3, s3 = best_lookup_result(pharmacy_tasks, max_workers=6)
+        if s3 > best_score:
+            best, best_score = p3, s3
 
-    pharmacy_tasks = []
-    for candidate in barcode_candidates:
-        for source_name, source_base_url in PHARMACY_LOOKUP_SOURCES:
-            pharmacy_tasks.append(
-                lambda bc=candidate, sn=source_name, su=source_base_url, bcs=barcode_candidates:
-                lookup_generic_pharmacy_product(sn, su, bc, bcs)
-            )
-    product = first_lookup_result(pharmacy_tasks, max_workers=4)
-    if product:
-        return jsonify({"found": True, "product": product})
-
+    if best:
+        return jsonify({"found": True, "product": best})
     return jsonify({"found": False, "error": "Aucun produit trouve en ligne"})
 
 
