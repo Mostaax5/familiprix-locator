@@ -181,6 +181,7 @@ def init_postgres_db(db):
             context_json  TEXT DEFAULT '',
             response_json TEXT DEFAULT '',
             store         TEXT DEFAULT '',
+            employee      TEXT DEFAULT '',
             input_tokens  INTEGER DEFAULT 0,
             output_tokens INTEGER DEFAULT 0,
             cost_usd      TEXT DEFAULT '0'
@@ -265,6 +266,7 @@ def init_sqlite_db(db):
             context_json  TEXT DEFAULT '',
             response_json TEXT DEFAULT '',
             store         TEXT DEFAULT '',
+            employee      TEXT DEFAULT '',
             input_tokens  INTEGER DEFAULT 0,
             output_tokens INTEGER DEFAULT 0,
             cost_usd      TEXT DEFAULT '0'

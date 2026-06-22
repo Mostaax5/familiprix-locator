@@ -15,19 +15,22 @@ ai_bp = Blueprint("ai", __name__)
 
 
 def log_ai_interaction(kind, question, context, response):
-    """Persist every AI Q&A as a training example, tagged with store + time.
-    Never raises — logging must not break the user-facing response."""
+    """Persist every AI Q&A as a training example, tagged with store, employee
+    (auto from device name — never prompted) and time. Never raises — logging
+    must not break the user-facing response."""
     try:
         prov = configured_ai_provider()
-        store = str((request.get_json(silent=True) or {}).get("store", "")).strip()
+        body = request.get_json(silent=True) or {}
+        store = str(body.get("store", "")).strip()
+        employee = (request.headers.get("X-User-Name") or body.get("_username") or "").strip()
         db = get_db()
         db.execute(
-            """INSERT INTO ai_logs (created_at, kind, provider, model, question, context_json, response_json, store)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO ai_logs (created_at, kind, provider, model, question, context_json, response_json, store, employee)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (utc_now_iso(), kind, prov["name"], prov["model"], str(question or ""),
              json.dumps(context, ensure_ascii=False) if context is not None else "",
              json.dumps(response, ensure_ascii=False) if response is not None else "",
-             store),
+             store, employee),
         )
         db.commit()
     except Exception:
@@ -1010,6 +1013,7 @@ def export_ai_logs():
             "context":    d.get("context_json", ""),
             "response":   d.get("response_json", ""),
             "store":      d.get("store", ""),
+            "employee":   d.get("employee", ""),
             "model":      d.get("model", ""),
             "created_at": d.get("created_at", ""),
         }, ensure_ascii=False))
