@@ -189,6 +189,18 @@ def init_postgres_db(db):
     """)
 
     db.execute("""
+        CREATE TABLE IF NOT EXISTS removed_products (
+            id            BIGSERIAL PRIMARY KEY,
+            removed_at    TEXT DEFAULT '',
+            removed_by    TEXT DEFAULT '',
+            barcode       TEXT DEFAULT '',
+            name          TEXT DEFAULT '',
+            last_location TEXT DEFAULT '',
+            product_json  TEXT DEFAULT ''
+        )
+    """)
+
+    db.execute("""
         CREATE TABLE IF NOT EXISTS planogram_imports (
             id             BIGSERIAL PRIMARY KEY,
             created_at     TEXT DEFAULT '',
@@ -291,6 +303,18 @@ def init_sqlite_db(db):
             input_tokens  INTEGER DEFAULT 0,
             output_tokens INTEGER DEFAULT 0,
             cost_usd      TEXT DEFAULT '0'
+        )
+    """)
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS removed_products (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            removed_at    TEXT DEFAULT '',
+            removed_by    TEXT DEFAULT '',
+            barcode       TEXT DEFAULT '',
+            name          TEXT DEFAULT '',
+            last_location TEXT DEFAULT '',
+            product_json  TEXT DEFAULT ''
         )
     """)
 

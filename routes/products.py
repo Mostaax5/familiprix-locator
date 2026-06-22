@@ -1,4 +1,5 @@
 import re
+import json
 import unicodedata
 from flask import Blueprint, request, jsonify
 from database import get_db, DatabaseIntegrityError
@@ -408,14 +409,48 @@ def delete_product(product_id):
     if error:
         return error
     db = get_db()
-    product = db.execute("SELECT name FROM products WHERE id=?", (product_id,)).fetchone()
+    product = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
     if not product:
         return jsonify({"error": "Produit non trouve."}), 404
+    # Soft delete: archive the full product so we can still answer questions
+    # about it later (which product it was, where it used to be), then remove it
+    # from the active plan (frees its slot).
+    pdict = dict(product)
+    last_loc = (f"Allée {pdict.get('aisle','')} {pdict.get('side','')} "
+                f"S{pdict.get('section','')} T{pdict.get('shelf','')} P{pdict.get('position','')}").strip()
+    db.execute(
+        """INSERT INTO removed_products (removed_at, removed_by, barcode, name, last_location, product_json)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (utc_now_iso(), username, str(pdict.get("barcode", "")), str(pdict.get("name", "")),
+         last_loc, json.dumps(pdict, ensure_ascii=False, default=str))
+    )
     db.execute("DELETE FROM products WHERE id=?", (product_id,))
     db.commit()
     from routes.gist import _schedule_gist_backup
     _schedule_gist_backup(db)
-    return jsonify({"success": True, "message": f'Produit supprimé par {username}: {product["name"]}'})
+    return jsonify({"success": True, "message": f'Produit retiré par {username}: {product["name"]} (conservé dans l historique)'})
+
+
+@products_bp.route("/api/products/removed", methods=["GET"])
+def removed_products_list():
+    """Archive of removed products — searchable so a question about an old
+    product can still be answered (what it was, where it used to be)."""
+    db = get_db()
+    q = (request.args.get("q") or "").strip().lower()
+    rows = db.execute("SELECT * FROM removed_products ORDER BY id DESC LIMIT 500").fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        if q:
+            hay = f"{d.get('name','')} {d.get('barcode','')}".lower()
+            if q not in hay:
+                continue
+        out.append({
+            "id": d.get("id"), "name": d.get("name", ""), "barcode": d.get("barcode", ""),
+            "last_location": d.get("last_location", ""), "removed_at": d.get("removed_at", ""),
+            "removed_by": d.get("removed_by", ""),
+        })
+    return jsonify(out)
 
 
 @products_bp.route("/api/products/<int:product_id>/stock", methods=["POST"])
