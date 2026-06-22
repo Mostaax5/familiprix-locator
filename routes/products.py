@@ -132,6 +132,24 @@ def find_product_at_position(db, aisle, side, section, shelf, position, exclude_
     return db.execute(query, tuple(params)).fetchone()
 
 
+def find_existing_image_for_barcode(db, barcode, exclude_id=None):
+    """Return an image already stored for this barcode (any location), so we
+    never lose a product picture when re-adding / moving / re-importing it."""
+    if not str(barcode or "").strip():
+        return ""
+    for candidate in build_barcode_candidates(barcode):
+        q = "SELECT image_url FROM products WHERE barcode=? AND TRIM(COALESCE(image_url,'')) <> ''"
+        params = [candidate]
+        if exclude_id is not None:
+            q += " AND id<>?"
+            params.append(int(exclude_id))
+        q += " ORDER BY id LIMIT 1"
+        row = db.execute(q, tuple(params)).fetchone()
+        if row:
+            return (row["image_url"] if isinstance(row, dict) else row[0]) or ""
+    return ""
+
+
 def integrity_conflict_message(exc):
     text = str(exc).lower()
     if "barcode" in text:
@@ -281,6 +299,8 @@ def add_product():
         return jsonify({"error": "Champs obligatoires manquants"}), 400
 
     db = get_db()
+    if not image_url:
+        image_url = find_existing_image_for_barcode(db, barcode)
     is_valid_slot, slot_error = validate_layout_slot(db, aisle, side, section, shelf, position)
     if not is_valid_slot:
         return jsonify({"error": slot_error}), 400
@@ -348,6 +368,13 @@ def update_product(product_id):
             "error": f'Position deja occupee par "{occupied["name"]}" (code {occupied["barcode"] or "sans code"}).'
         }), 409
 
+    # Never blank an image: keep the new one, else the existing one, else any
+    # image already known for this barcode.
+    new_barcode = str(data.get("barcode", existing["barcode"]) or "").strip()
+    resolved_image = (str(data.get("image_url", "")).strip()
+                      or str(existing["image_url"] or "").strip()
+                      or find_existing_image_for_barcode(db, new_barcode, exclude_id=product_id))
+
     try:
         result = db.execute(
             "UPDATE products SET name=?, brand=?, description=?, image_url=?, source_url=?, search_terms=?, usage_notes=?, alternative_suggestions=?, barcode=?, aisle=?, side=?, section=?, shelf=?, position=?, modified_by=?, modified_at=? WHERE id=?",
@@ -355,7 +382,7 @@ def update_product(product_id):
                 data["name"],
                 data.get("brand", existing["brand"]),
                 data.get("description", existing["description"]),
-                data.get("image_url", existing["image_url"]),
+                resolved_image,
                 data.get("source_url", existing["source_url"]),
                 data.get("search_terms", existing["search_terms"]),
                 data.get("usage_notes", existing["usage_notes"]),
@@ -471,20 +498,28 @@ def bulk_import_products():
                 continue
 
             in_stock = 0 if not p.get("en_stock", True) else 1
+            # Plano rows carry no image — reuse one already stored for this barcode.
+            image_url = find_existing_image_for_barcode(db, barcode)
             if existing:
                 row_id = existing["id"] if isinstance(existing, dict) else existing[0]
-                db.execute(
-                    "UPDATE products SET name=?, barcode=?, search_terms=?, is_plano=1, in_stock=?, modified_by=?, modified_at=? WHERE id=?",
-                    (name, barcode, notes, in_stock, username, now, row_id)
-                )
+                if image_url:
+                    db.execute(
+                        "UPDATE products SET name=?, barcode=?, search_terms=?, is_plano=1, in_stock=?, image_url=?, modified_by=?, modified_at=? WHERE id=?",
+                        (name, barcode, notes, in_stock, image_url, username, now, row_id)
+                    )
+                else:
+                    db.execute(
+                        "UPDATE products SET name=?, barcode=?, search_terms=?, is_plano=1, in_stock=?, modified_by=?, modified_at=? WHERE id=?",
+                        (name, barcode, notes, in_stock, username, now, row_id)
+                    )
             else:
                 db.execute(
                     """INSERT INTO products
                        (name, barcode, aisle, side, section, shelf, position,
-                        search_terms, is_plano, in_stock, created_by, created_at, modified_by, modified_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)""",
+                        search_terms, is_plano, in_stock, image_url, created_by, created_at, modified_by, modified_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)""",
                     (name, barcode, aisle, side, section, shelf, position,
-                     notes, in_stock, username, now, username, now)
+                     notes, in_stock, image_url, username, now, username, now)
                 )
             imported += 1
         except Exception:
