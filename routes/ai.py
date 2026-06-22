@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from flask import Blueprint, request, jsonify, Response
 from database import get_db
-from auth import require_editor, utc_now_iso
+from auth import require_editor, utc_now_iso, side_display_label
 
 ai_bp = Blueprint("ai", __name__)
 
@@ -670,7 +670,7 @@ def product_context_for_client_help(product):
         "name":     str(product.get("name", "")).strip(),
         "brand":    str(product.get("brand", "")).strip(),
         "notes":    str(product.get("usage_notes", "") or product.get("description", "")).strip(),
-        "location": f"Allee {str(product.get('aisle','')).strip()} {str(product.get('side','')).strip()} T{str(product.get('shelf','')).strip()}",
+        "location": f"Allée {str(product.get('aisle','')).strip()} {side_display_label(product.get('side',''))} T{str(product.get('shelf','')).strip()}",
     }
 
 

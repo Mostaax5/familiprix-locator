@@ -79,7 +79,7 @@ async function apiCreateLayoutAisle(payload) {
     headers: {'Content-Type':'application/json', ...getEditorHeaders()},
     body: JSON.stringify(payload)
   });
-  return res.ok ? data : {success: false, error: data.error || 'Erreur de creation d allee.'};
+  return res.ok ? data : {success: false, error: data.error || 'Erreur de creation d allée.'};
 }
 
 async function apiUpdateLayoutAisle(aisle, payload) {
@@ -88,7 +88,7 @@ async function apiUpdateLayoutAisle(aisle, payload) {
     headers: {'Content-Type':'application/json', ...getEditorHeaders()},
     body: JSON.stringify(payload)
   });
-  return res.ok ? data : {success: false, error: data.error || 'Erreur de mise a jour d allee.'};
+  return res.ok ? data : {success: false, error: data.error || 'Erreur de mise a jour d allée.'};
 }
 
 async function apiDeleteLayoutAisle(aisle) {
@@ -97,9 +97,9 @@ async function apiDeleteLayoutAisle(aisle) {
       method: 'DELETE',
       headers: getEditorHeaders()
     });
-    return res.ok ? data : {success: false, error: data.error || 'Erreur de suppression d allee.'};
+    return res.ok ? data : {success: false, error: data.error || 'Erreur de suppression d allée.'};
   } catch (error) {
-    return {success: false, error: 'Impossible de supprimer l allee pour le moment.'};
+    return {success: false, error: 'Impossible de supprimer l allée pour le moment.'};
   }
 }
 

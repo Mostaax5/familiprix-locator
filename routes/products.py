@@ -3,7 +3,7 @@ import json
 import unicodedata
 from flask import Blueprint, request, jsonify
 from database import get_db, DatabaseIntegrityError
-from auth import require_editor, utc_now_iso
+from auth import require_editor, utc_now_iso, side_display_label
 from routes.layout import validate_layout_slot, aisle_sort_key
 
 products_bp = Blueprint("products", __name__)
@@ -488,7 +488,7 @@ def delete_product(product_id):
     # about it later (which product it was, where it used to be), then remove it
     # from the active plan (frees its slot).
     pdict = dict(product)
-    last_loc = (f"Allée {pdict.get('aisle','')} {pdict.get('side','')} "
+    last_loc = (f"Allée {pdict.get('aisle','')} {side_display_label(pdict.get('side',''))} "
                 f"S{pdict.get('section','')} T{pdict.get('shelf','')} P{pdict.get('position','')}").strip()
     db.execute(
         """INSERT INTO removed_products (removed_at, removed_by, barcode, name, last_location, product_json)
@@ -584,7 +584,7 @@ def bulk_import_products():
     products       = data.get("products", [])
 
     if not aisle:
-        return jsonify({"success": False, "error": "Allee requise."}), 400
+        return jsonify({"success": False, "error": "Allée requise."}), 400
 
     db = get_db()
     now = utc_now_iso()

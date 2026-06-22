@@ -228,9 +228,8 @@ function groupAndRenderSearchResults(products) {
 function productCardMultiLocation(entries) {
   const primary = entries[0];
   const locBadges = entries.map(p => {
-    const sd = p.side === 'Gauche' ? 'G' : p.side === 'Droite' ? 'D' : esc(p.side || '');
     return `<span style="display:inline-block;background:#fff0f0;color:#c8102e;border-radius:12px;padding:3px 9px;font-size:11px;font-weight:600;margin:2px">
-      A${esc(p.aisle)} ${sd} S${esc(p.section||'1')} T${esc(p.shelf)} P${esc(p.position)}
+      Allée ${esc(p.aisle)} · ${esc(sideDisplayLabel(p.side))} · S${esc(p.section||'1')} T${esc(p.shelf)} P${esc(p.position)}
     </span>`;
   }).join('');
   return `<div class="card">

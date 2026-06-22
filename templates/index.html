@@ -206,24 +206,24 @@
 <!-- ── PLAN TAB ── -->
 <div id="add" class="section content">
   <div class="card">
-    <div class="section-title">Point de depart du scan</div>
-    <div class="section-note">Choisissez ici le vrai point de depart du scan. La vue sert seulement a savoir de quel bout de l allee vous la regardez, pour inverser gauche et droite correctement. Le menu "Slot exact" permet de choisir directement n importe quelle position valide.</div>
+    <div class="section-title">Point de départ du scan</div>
+    <div class="section-note">Choisissez ici le vrai point de départ du scan. La vue sert seulement à savoir de quel bout de l'allée vous la regardez, pour inverser le Côté A et le Côté B correctement. Le menu « Slot exact » permet de choisir directement n'importe quelle position valide.</div>
     <div class="row2">
       <div class="field">
-        <label class="label" for="planScanAisle">Allee</label>
+        <label class="label" for="planScanAisle">Allée</label>
         <select id="planScanAisle" onchange="updatePlanStartSelectors()"></select>
       </div>
       <div class="field">
         <label class="label" for="planScanFacing">Vue</label>
         <select id="planScanFacing" onchange="updatePlanStartSelectors('facing')">
-          <option value="Avant">Depuis le debut de l allee</option>
-          <option value="Arriere">Depuis l autre bout de l allee</option>
+          <option value="Avant">Depuis le début de l'allée</option>
+          <option value="Arriere">Depuis l'autre bout de l'allée</option>
         </select>
       </div>
     </div>
     <div class="row3">
       <div class="field">
-        <label class="label" for="planScanSide">Cote</label>
+        <label class="label" for="planScanSide">Côté</label>
         <select id="planScanSide" onchange="updatePlanStartSelectors('side')"></select>
       </div>
       <div class="field">
@@ -279,8 +279,8 @@
         <div class="field">
           <label class="label">Côté</label>
           <select id="planoSide" onchange="updatePlanoPreview()">
-            <option value="Gauche">Gauche</option>
-            <option value="Droite">Droite</option>
+            <option value="Gauche">Côté A</option>
+            <option value="Droite">Côté B</option>
           </select>
         </div>
         <div class="field">
@@ -361,10 +361,10 @@
 
   <div class="card">
     <div class="section-title">Plan du magasin</div>
-    <div class="section-note">Le plan du magasin genere directement la liste des slots du scan. Le scanner n invente jamais de coordonnees.</div>
+    <div class="section-note">Le plan du magasin génère directement la liste des slots du scan. Le scanner n'invente jamais de coordonnées.</div>
     <div class="row3">
       <div class="field">
-        <label class="label" for="mapAisle">Nouvelle allee</label>
+        <label class="label" for="mapAisle">Nouvelle allée</label>
         <input type="number" id="mapAisle" min="1" placeholder="Ex: 9"/>
       </div>
       <div class="field">
@@ -376,16 +376,16 @@
         <input type="number" id="mapRightSections" min="0" value="0"/>
       </div>
       <div class="field">
-        <label class="label" for="mapInitialShelves">Tablettes de depart par section</label>
+        <label class="label" for="mapInitialShelves">Tablettes de départ par section</label>
         <input type="number" id="mapInitialShelves" min="0" value="0"/>
       </div>
       <div class="field">
-        <label class="label" for="mapInitialPositions">Positions de depart par tablette</label>
+        <label class="label" for="mapInitialPositions">Positions de départ par tablette</label>
         <input type="number" id="mapInitialPositions" min="0" value="0"/>
       </div>
     </div>
-    <div class="inline-note">Choisissez d abord le nombre de sections a gauche et a droite. Ensuite, dans chaque allee, vous reglerez chaque section, chaque tablette, puis chaque nombre de positions separement.</div>
-    <button class="btn" onclick="createAisleLayout()">Ajouter cette allee</button>
+    <div class="inline-note">Choisissez d'abord le nombre de sections du Côté A et du Côté B. Ensuite, dans chaque allée, vous réglerez chaque section, chaque tablette, puis chaque nombre de positions séparément.</div>
+    <button class="btn" onclick="createAisleLayout()">Ajouter cette allée</button>
     <div id="addMsg"></div>
   </div>
   <div id="mapContent"></div>

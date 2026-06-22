@@ -48,11 +48,15 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// The internal side value stays 'Gauche'/'Droite' (DB + layout config keys),
+// but it is NEVER shown to users — everything displays "Côté A"/"Côté B".
 function sideDisplayLabel(side) {
   return side === 'Gauche' ? 'Côté A' : side === 'Droite' ? 'Côté B' : String(side || '');
 }
+// Back-compat alias: some call sites used a separate "staff" label that used to
+// show the raw side. Côté A/B is now the only label shown anywhere.
 function sideStaffLabel(side) {
-  return String(side || '');
+  return sideDisplayLabel(side);
 }
 
 function isHomeBrand(brand) {

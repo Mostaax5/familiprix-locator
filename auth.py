@@ -7,6 +7,13 @@ def utc_now_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def side_display_label(side):
+    """The internal side value stays 'Gauche'/'Droite' (DB + layout keys) but is
+    never shown to users — every display uses 'Côté A' / 'Côté B'."""
+    cleaned = str(side or "").strip()
+    return {"Gauche": "Côté A", "Droite": "Côté B"}.get(cleaned, cleaned)
+
+
 def auth_payload_from_request():
     data = request.get_json(silent=True) or {}
     username = (

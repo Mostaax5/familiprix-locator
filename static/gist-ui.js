@@ -39,7 +39,7 @@ async function gistRestoreNow() {
   try {
     const {res, data} = await apiFetch('/api/gist/restore', {method: 'POST', headers: getEditorHeaders()});
     if (!res.ok || !data.success) throw new Error(data.error || 'Echec');
-    if (msg) { msg.className = 'msg success'; msg.textContent = `Restauration terminee: ${data.imported_products} produit(s) et ${data.imported_layouts} allee(s) importes.`; }
+    if (msg) { msg.className = 'msg success'; msg.textContent = `Restauration terminee: ${data.imported_products} produit(s) et ${data.imported_layouts} allée(s) importes.`; }
     await refreshProductsCache(true);
     await refreshLayoutsCache(true);
     renderMapEditor();

@@ -271,7 +271,7 @@ function aiProviderLabel() {
 }
 
 function cursorLabel() {
-  return `Allee ${cursor.aisle} - ${sideDisplayLabel(cursor.side)} - Section ${cursor.section} - Tablette ${cursor.shelf} - Pos. ${cursor.position}`;
+  return `Allée ${cursor.aisle} - ${sideDisplayLabel(cursor.side)} - Section ${cursor.section} - Tablette ${cursor.shelf} - Pos. ${cursor.position}`;
 }
 
 function updateCursorUi() {
@@ -486,7 +486,7 @@ function renderScanPathPreview() {
   if (!div) return;
   const slots = getAllScanSlots();
   if (!slots.length) {
-    div.innerHTML = '<div class="empty" style="padding:1rem 0">Aucun slot de scan pour le moment. Commencez par creer une allee dans le plan.</div>';
+    div.innerHTML = '<div class="empty" style="padding:1rem 0">Aucun slot de scan pour le moment. Commencez par creer une allée dans le plan.</div>';
     return;
   }
   const previewSelection = getPlanPreviewSelection();
@@ -501,7 +501,7 @@ function renderScanPathPreview() {
   const preview = Array.from({length: Math.min(12, slots.length)}, (_, offset) => slots[(startIndex + offset) % slots.length]);
   const isOnPlanTab = document.getElementById('add')?.classList.contains('active');
   div.innerHTML = `
-    <div class="small">${isOnPlanTab ? 'Depart selectionne' : 'Position actuelle'}: <strong>${esc(`Allee ${previewSelection.aisle} - ${sideDisplayLabel(previewSelection.side)} - Section ${previewSelection.section} - Tablette ${previewSelection.shelf} - Pos. ${previewSelection.position}`)}</strong></div>
+    <div class="small">${isOnPlanTab ? 'Depart selectionne' : 'Position actuelle'}: <strong>${esc(`Allée ${previewSelection.aisle} - ${sideDisplayLabel(previewSelection.side)} - Section ${previewSelection.section} - Tablette ${previewSelection.shelf} - Pos. ${previewSelection.position}`)}</strong></div>
     <div class="small">Total de slots dans le plan: <strong>${slots.length}</strong></div>
     <div class="slot-preview">${preview.map((slot, index) => `<span class="slot-chip ${index === 0 ? 'active' : ''}">${index === 0 ? 'Maintenant' : `Puis ${index}`} ${esc(slotLabel(slot))}</span>`).join('')}</div>
   `;
@@ -530,7 +530,7 @@ function applySideTemplate(aisle, side) {
   const nextConfig = normalizeLayoutConfig({
     sides: {...layout.config.sides, [side]: {sections: newSections}}
   }, layout.max_section, layout.max_shelf, layout.max_position);
-  if (!confirmLayoutReduction(aisle, nextConfig, `Appliquer ce modele uniforme au cote ${side}`)) return;
+  if (!confirmLayoutReduction(aisle, nextConfig, `Appliquer ce modèle uniforme au ${sideDisplayLabel(side)}`)) return;
   layout.config = nextConfig;
   syncLayoutRecord(layout);
   markLayoutDirty(aisle);
@@ -879,7 +879,7 @@ function renderMapEditor() {
         const dirty = dirtyLayoutAisles.has(String(layout.aisle));
         return `<details class="tree-node plan-aisle-node" id="${aisleNodeId}" data-node-id="${aisleNodeId}"${detailsOpenAttr(aisleNodeId)}>
         <summary>
-          <span>Allee ${esc(layout.aisle)}</span>
+          <span>Allée ${esc(layout.aisle)}</span>
           <span class="tree-meta">${layout.product_count || 0} produit${Number(layout.product_count || 0) !== 1 ? 's' : ''} · ${slotCount} slots${aisleHomeBrands.length ? ` · <span style="color:#c8102e">★${aisleHomeBrands.length} maison</span>` : ''}${dirty ? ' · <span style="color:#d97706">non sauvegarde</span>' : ''}</span>
         </summary>
         <div class="tree-body">
@@ -1012,7 +1012,7 @@ function renderMapEditor() {
         </div>
       </details>`;
       }).join('')
-    : '<div class="empty">Aucune allee configuree.</div>';
+    : '<div class="empty">Aucune allée configuree.</div>';
   if (!msgDiv.textContent) msgDiv.innerHTML = '';
 }
 
@@ -1070,7 +1070,7 @@ function setSideSectionCount(aisle, side, rawValue) {
       }
     }
   }, layout.max_section, layout.max_shelf, layout.max_position);
-  if (count < currentCount && !confirmLayoutReduction(aisle, nextConfig, `Reduire le nombre de sections du cote ${side} a ${count}`)) {
+  if (count < currentCount && !confirmLayoutReduction(aisle, nextConfig, `Réduire le nombre de sections du ${sideDisplayLabel(side)} à ${count}`)) {
     refreshPlanUi(); return;
   }
   while (sections.length < count) sections.push({shelves: fallbackShelves.slice()});
@@ -1224,7 +1224,7 @@ async function saveAisleLayout(aisle) {
   const msgDiv = document.getElementById('addMsg');
   msgDiv.className = data.success ? 'msg success' : 'msg error';
   msgDiv.textContent = data.success
-    ? `Allee ${aisle} sauvee.${Number(data.removed_products || 0) ? ` ${data.removed_products} produit(s) supprime(s) car hors structure.` : ''}`
+    ? `Allée ${aisle} sauvee.${Number(data.removed_products || 0) ? ` ${data.removed_products} produit(s) supprime(s) car hors structure.` : ''}`
     : (data.error || 'Sauvegarde impossible.');
   if (data.success) {
     clearLayoutDirty(aisle);
@@ -1250,7 +1250,7 @@ function applyAisleLayoutToCursor(aisle) {
   updateCursorUi();
   planStartDraft = getCursorSelection();
   renderPlanStartEditor();
-  document.getElementById('addMsg').innerHTML = `<div class="msg success">${buildSlotsFromConfig(aisle, config || defaultLayoutConfig()).length ? `Le scan utilisera maintenant l allee ${esc(aisle)}.` : `L allee ${esc(aisle)} n a aucune position de scan pour le moment.`}</div>`;
+  document.getElementById('addMsg').innerHTML = `<div class="msg success">${buildSlotsFromConfig(aisle, config || defaultLayoutConfig()).length ? `Le scan utilisera maintenant l allée ${esc(aisle)}.` : `L allée ${esc(aisle)} n a aucune position de scan pour le moment.`}</div>`;
 }
 
 async function removeAisleLayout(aisle) {
@@ -1258,8 +1258,8 @@ async function removeAisleLayout(aisle) {
   const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
   const productCount = Number(layout?.product_count || 0);
   const question = productCount
-    ? `Supprimer l allee ${aisle} ?\n\nCela supprimera aussi ${productCount} produit(s) qui sont dans cette allee.`
-    : `Supprimer l allee ${aisle} ?`;
+    ? `Supprimer l allée ${aisle} ?\n\nCela supprimera aussi ${productCount} produit(s) qui sont dans cette allée.`
+    : `Supprimer l allée ${aisle} ?`;
   if (!confirm(question)) return;
   let data = null;
   try { data = await apiDeleteLayoutAisle(aisle); }
@@ -1268,8 +1268,8 @@ async function removeAisleLayout(aisle) {
   const success = Boolean(data && data.success);
   msgDiv.className = success ? 'msg success' : 'msg error';
   msgDiv.textContent = success
-    ? (data.message || `Allee ${aisle} retiree.`)
-    : ((data && data.error) || `Impossible de supprimer l allee ${aisle}.`);
+    ? (data.message || `Allée ${aisle} retiree.`)
+    : ((data && data.error) || `Impossible de supprimer l allée ${aisle}.`);
   if (success) {
     mapLayouts = mapLayouts.filter(item => String(item.aisle) !== String(aisle));
     clearLayoutDirty(aisle);
@@ -1339,7 +1339,7 @@ async function importDatabase(input) {
   }
   const products = (payload.products || []).length;
   const layouts = (payload.aisle_layouts || []).length;
-  if (!confirm(`Importer ${products} produit(s) et ${layouts} allee(s) dans la base? Les positions existantes seront mises a jour.`)) return;
+  if (!confirm(`Importer ${products} produit(s) et ${layouts} allée(s) dans la base? Les positions existantes seront mises a jour.`)) return;
   if (msg) { msg.className = 'msg info'; msg.textContent = 'Import en cours...'; }
   try {
     const {res, data} = await apiFetch('/api/import', {
@@ -1348,7 +1348,7 @@ async function importDatabase(input) {
       body: JSON.stringify(payload)
     });
     if (!res.ok || !data.success) throw new Error(data.error || 'Import echoue');
-    if (msg) { msg.className = 'msg success'; msg.textContent = `Import termine: ${data.imported_products} produit(s) et ${data.imported_layouts} allee(s) importes. ${data.skipped_products ? data.skipped_products + ' ignore(s).' : ''}`; }
+    if (msg) { msg.className = 'msg success'; msg.textContent = `Import termine: ${data.imported_products} produit(s) et ${data.imported_layouts} allée(s) importes. ${data.skipped_products ? data.skipped_products + ' ignore(s).' : ''}`; }
     await refreshProductsCache(true);
     await refreshLayoutsCache(true);
     renderMapEditor();
@@ -1372,7 +1372,7 @@ async function resetDatabase(wipeLayouts) {
     if (!res.ok || !data.success) throw new Error(data.error || 'Erreur');
     if (msg) {
       msg.className = 'msg success';
-      msg.textContent = `Base nettoyee: ${data.deleted_products} produit(s) supprime(s)${wipeLayouts ? `, ${data.deleted_layouts} allee(s) supprimee(s)` : ''}.`;
+      msg.textContent = `Base nettoyee: ${data.deleted_products} produit(s) supprime(s)${wipeLayouts ? `, ${data.deleted_layouts} allée(s) supprimee(s)` : ''}.`;
     }
     await refreshProductsCache(true);
     if (wipeLayouts) { await refreshLayoutsCache(true); renderMapEditor(); }
@@ -1810,6 +1810,7 @@ function planoSet(idx, field, value) {
   const p = planoData.products[idx];
   if (field === 'tablette' || field === 'position') p[field] = Math.max(0, parseInt(value) || 0);
   else if (field === 'name') p.name = value;
+  else if (field === 'barcode') p.barcode = String(value || '').replace(/\s+/g, '');
   else if (field === 'code') p.code_familiprix = value;
   updatePlanoPreview();
 }
@@ -1858,7 +1859,9 @@ function updatePlanoPreview() {
              onchange="planoSet(${idx},'position',this.value)">
       <input type="text" value="${esc(p.name)}" title="Nom" style="flex:1;min-width:120px;padding:3px 6px;font-size:12px"
              onchange="planoSet(${idx},'name',this.value)">
-      <input type="text" value="${esc(p.code_familiprix || '')}" title="Code pharmacie" placeholder="code" style="width:64px;padding:3px;font-size:12px;text-align:center"
+      <input type="text" value="${esc(p.barcode || '')}" title="Code-barres (UPC)" placeholder="UPC" style="width:104px;padding:3px;font-size:12px;text-align:center;font-family:monospace"
+             onchange="planoSet(${idx},'barcode',this.value)">
+      <input type="text" value="${esc(p.code_familiprix || '')}" title="Code pharmacie" placeholder="code" style="width:60px;padding:3px;font-size:12px;text-align:center;color:#64748b"
              onchange="planoSet(${idx},'code',this.value)">
       <button title="${isPlano ? 'Plano — cliquer pour Hors-plano' : 'Hors-plano — cliquer pour Plano'}"
               onclick="planoToggle(${idx},'is_plano')"
@@ -1871,7 +1874,7 @@ function updatePlanoPreview() {
               style="font-size:10px;font-weight:700;border:none;border-radius:6px;padding:3px 7px;cursor:pointer;${p.flipped_label?'background:#fef3c7;color:#92400e':'background:#f1f5f9;color:#94a3b8'}">🔄 ${p.flipped_label?'FLIPPÉE':'flip?'}</button>` : ''}
       <button title="Retirer cette ligne" onclick="planoRemoveLine(${idx})"
               style="border:1px solid #f1b8c2;color:#c8102e;background:#fff;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px">✕</button>
-      <div style="flex-basis:100%;font-size:10px;color:#94a3b8;padding-left:2px">→ Allée ${esc(aisle)} · ${esc(side)} · S${esc(section)} · T${esc(storeShelf)} · P${esc(p.position)}</div>
+      <div style="flex-basis:100%;font-size:10px;color:#94a3b8;padding-left:2px">→ Allée ${esc(aisle)} · ${esc(sideDisplayLabel(side))} · S${esc(section)} · T${esc(storeShelf)} · P${esc(p.position)}</div>
     </div>`;
   }).filter(Boolean).join('');
 
