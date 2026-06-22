@@ -474,6 +474,26 @@ def set_product_stock(product_id):
     return jsonify({"success": True, "product": row_to_product(product)})
 
 
+@products_bp.route("/api/products/<int:product_id>/flipped-label", methods=["POST"])
+def set_flipped_label(product_id):
+    """Mark whether a (hors-plano) product has a plano étiquette flipped under it."""
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json() or {}
+    flipped = 1 if data.get("flipped", False) else 0
+    db = get_db()
+    result = db.execute(
+        "UPDATE products SET flipped_label=?, modified_by=?, modified_at=? WHERE id=?",
+        (flipped, username, utc_now_iso(), product_id)
+    )
+    if result.rowcount == 0:
+        return jsonify({"error": "Produit non trouvé."}), 404
+    db.commit()
+    product = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
+    return jsonify({"success": True, "product": row_to_product(product)})
+
+
 @products_bp.route("/api/products/bulk-import", methods=["POST"])
 def bulk_import_products():
     username, error = require_editor()
@@ -517,6 +537,7 @@ def bulk_import_products():
         barcode  = str(p.get("barcode", "")).strip()
         code     = str(p.get("code_familiprix", "")).strip()
         is_plano = 1 if p.get("is_plano", True) else 0
+        flipped  = 1 if p.get("flipped_label", False) else 0
         tag      = "[PLANO]" if is_plano else "[HORS-PLANO]"
         notes    = f"{tag} {code}".strip()
 
@@ -541,22 +562,22 @@ def bulk_import_products():
                 row_id = existing["id"] if isinstance(existing, dict) else existing[0]
                 if image_url:
                     db.execute(
-                        "UPDATE products SET name=?, barcode=?, search_terms=?, is_plano=?, in_stock=?, image_url=?, modified_by=?, modified_at=? WHERE id=?",
-                        (name, barcode, notes, is_plano, in_stock, image_url, username, now, row_id)
+                        "UPDATE products SET name=?, barcode=?, search_terms=?, is_plano=?, in_stock=?, flipped_label=?, image_url=?, modified_by=?, modified_at=? WHERE id=?",
+                        (name, barcode, notes, is_plano, in_stock, flipped, image_url, username, now, row_id)
                     )
                 else:
                     db.execute(
-                        "UPDATE products SET name=?, barcode=?, search_terms=?, is_plano=?, in_stock=?, modified_by=?, modified_at=? WHERE id=?",
-                        (name, barcode, notes, is_plano, in_stock, username, now, row_id)
+                        "UPDATE products SET name=?, barcode=?, search_terms=?, is_plano=?, in_stock=?, flipped_label=?, modified_by=?, modified_at=? WHERE id=?",
+                        (name, barcode, notes, is_plano, in_stock, flipped, username, now, row_id)
                     )
             else:
                 db.execute(
                     """INSERT INTO products
                        (name, barcode, aisle, side, section, shelf, position,
-                        search_terms, is_plano, in_stock, image_url, created_by, created_at, modified_by, modified_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        search_terms, is_plano, in_stock, flipped_label, image_url, created_by, created_at, modified_by, modified_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (name, barcode, aisle, side, section, shelf, position,
-                     notes, is_plano, in_stock, image_url, username, now, username, now)
+                     notes, is_plano, in_stock, flipped, image_url, username, now, username, now)
                 )
             imported += 1
         except Exception:

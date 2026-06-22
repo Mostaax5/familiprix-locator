@@ -156,6 +156,19 @@ async function apiSetProductStock(id, inStock) {
   }
 }
 
+async function apiSetFlippedLabel(id, flipped) {
+  try {
+    const {res, data} = await apiFetch(`/api/products/${id}/flipped-label`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: JSON.stringify({flipped: !!flipped})
+    });
+    return res.ok ? data : {success: false, error: data.error || 'Erreur.'};
+  } catch (error) {
+    return {success: false, error: 'Impossible de changer l étiquette.'};
+  }
+}
+
 async function apiGetSystemInfo() {
   const {res, data} = await apiFetch('/api/system/info');
   if (!res.ok) throw new Error('system-info');

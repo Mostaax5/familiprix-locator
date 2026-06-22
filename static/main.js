@@ -19,6 +19,7 @@ function normalizeProduct(product) {
     is_plano: Number(product.is_plano) ? 1 : 0,
     in_stock: (product.in_stock === 0 || product.in_stock === '0') ? 0 : 1,
     linked_position: String(product.linked_position || '').trim(),
+    flipped_label: Number(product.flipped_label) ? 1 : 0,
     modified_by: String(product.modified_by || '').trim(),
     modified_at: String(product.modified_at || '').trim(),
     created_by: String(product.created_by || '').trim(),

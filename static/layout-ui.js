@@ -702,13 +702,18 @@ function productCard(p, showDelete=true, showAiButton=true) {
     `Pos. ${esc(p.position)}`
   ];
   const outOfStock = p.in_stock === 0;
+  const flipped = p.flipped_label === 1;
   const planoBadge = p.is_plano ? `<span style="display:inline-block;background:#eef2ff;color:#4338ca;border-radius:6px;padding:1px 7px;font-size:10px;font-weight:700;margin-right:4px">📋 PLANO</span>` : `<span style="display:inline-block;background:#f1f5f9;color:#64748b;border-radius:6px;padding:1px 7px;font-size:10px;font-weight:700;margin-right:4px">HORS-PLANO</span>`;
+  // For hors-plano products: option to say a plano étiquette is flipped underneath.
+  const flippedRow = (p.id && !p.is_plano) ? `<div class="tool-row" style="margin-top:6px;align-items:center;gap:8px">
+      <button class="btn btn-outline btn-inline" style="font-size:12px;${flipped?'background:#fef3c7;border-color:#fbbf24;color:#92400e':''}" onclick="toggleFlippedLabel(${p.id},${flipped?'false':'true'})">🔄 Étiquette plano flippée dessous : ${flipped?'OUI':'non'}</button>
+    </div>` : '';
   const stockRow = (p.id ? `<div class="tool-row" style="margin-top:6px;align-items:center;gap:8px">
       ${outOfStock
         ? `<span style="color:#c8102e;font-size:12px;font-weight:700">⚠ RUPTURE${p.is_plano ? ' — retirer l étiquette plano' : ''}</span>
            <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="toggleProductStock(${p.id},true)">Remettre en stock</button>`
         : `<button class="btn btn-outline btn-inline" style="font-size:12px;color:#c8102e;border-color:#f1b8c2" onclick="toggleProductStock(${p.id},false)">⚠ Marquer rupture</button>`}
-    </div>` : '');
+    </div>${flippedRow}` : '');
   return `<div class="card"${outOfStock ? ' style="border-left:4px solid #c8102e"' : ''}>
     ${showDelete ? `<button class="delete-btn" onclick="deleteProduct(${p.id})" title="Supprimer">✕</button>` : ''}
     ${isHomeBrand(p.brand) ? `<div class="home-badge">★ Marque maison Familiprix</div>` : ''}
@@ -740,6 +745,17 @@ async function toggleProductStock(productId, inStock) {
   if (data.success !== false && data.product) {
     upsertCachedProduct(normalizeProduct(data.product));
     // Re-render whatever view is visible
+    if (document.getElementById('search')?.classList.contains('active')) doSearch();
+    else if (document.getElementById('add')?.classList.contains('active')) refreshPlanUi();
+    else if (document.getElementById('scan')?.classList.contains('active')) refreshRayonList();
+  }
+}
+
+async function toggleFlippedLabel(productId, flipped) {
+  if (!requireEditorSession('changer l étiquette')) return;
+  const data = await apiSetFlippedLabel(productId, flipped);
+  if (data.success !== false && data.product) {
+    upsertCachedProduct(normalizeProduct(data.product));
     if (document.getElementById('search')?.classList.contains('active')) doSearch();
     else if (document.getElementById('add')?.classList.contains('active')) refreshPlanUi();
     else if (document.getElementById('scan')?.classList.contains('active')) refreshRayonList();
@@ -1798,6 +1814,7 @@ function planoToggle(idx, field) {
   const p = planoData.products[idx];
   if (field === 'is_plano') p.is_plano = (p.is_plano === false);  // default true → false
   else if (field === 'en_stock') p.en_stock = !p.en_stock;
+  else if (field === 'flipped_label') p.flipped_label = !p.flipped_label;
   updatePlanoPreview();
 }
 function planoRemoveLine(idx) {
@@ -1843,6 +1860,9 @@ function updatePlanoPreview() {
       <button title="${p.en_stock ? 'En stock — cliquer pour rupture' : 'Rupture — cliquer pour en stock'}"
               onclick="planoToggle(${idx},'en_stock')"
               style="font-size:10px;font-weight:700;border:none;border-radius:6px;padding:3px 7px;cursor:pointer;${p.en_stock?'background:#dcfce7;color:#15803d':'background:#fee2e2;color:#c8102e'}">${p.en_stock?'STOCK':'RUPTURE'}</button>
+      ${!isPlano ? `<button title="Étiquette plano flippée en dessous"
+              onclick="planoToggle(${idx},'flipped_label')"
+              style="font-size:10px;font-weight:700;border:none;border-radius:6px;padding:3px 7px;cursor:pointer;${p.flipped_label?'background:#fef3c7;color:#92400e':'background:#f1f5f9;color:#94a3b8'}">🔄 ${p.flipped_label?'FLIPPÉE':'flip?'}</button>` : ''}
       <button title="Retirer cette ligne" onclick="planoRemoveLine(${idx})"
               style="border:1px solid #f1b8c2;color:#c8102e;background:#fff;border-radius:6px;padding:3px 7px;cursor:pointer;font-size:11px">✕</button>
       <div style="flex-basis:100%;font-size:10px;color:#94a3b8;padding-left:2px">→ Allée ${esc(aisle)} · ${esc(side)} · S${esc(section)} · T${esc(storeShelf)} · P${esc(p.position)}</div>
