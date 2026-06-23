@@ -82,8 +82,42 @@ function normalizeLayoutConfig(config, maxSection=0, maxShelf=0, maxPosition=0) 
   return base;
 }
 
+// Per-aisle / per-side / home-brand product counts, built once per cache
+// version and reused. Layout-only edits (e.g. +/- a position) don't touch the
+// product cache, so repeated plan renders reuse these without rescanning.
+let _planCountsVersion = -1;
+let _planCounts = null;
+function planSummaryCounts() {
+  if (_planCounts === null || _planCountsVersion !== lastProductsRefreshAt) {
+    const aisle = new Map(), home = new Map(), side = new Map();
+    for (const p of allProductsCache) {
+      const a = String(p.aisle);
+      aisle.set(a, (aisle.get(a) || 0) + 1);
+      if (isHomeBrand(p.brand)) home.set(a, (home.get(a) || 0) + 1);
+      const k = a + '|' + p.side;
+      side.set(k, (side.get(k) || 0) + 1);
+    }
+    _planCounts = {aisle, home, side};
+    _planCountsVersion = lastProductsRefreshAt;
+  }
+  return _planCounts;
+}
+
 function countProductsInAisle(aisle) {
-  return allProductsCache.filter(p => String(p.aisle) === String(aisle)).length;
+  return planSummaryCounts().aisle.get(String(aisle)) || 0;
+}
+
+// Count scannable slots without allocating a slot object for each one (matches
+// buildSlotsFromConfig with no side filter: façades + both sides, no présentoirs).
+function countSlotsFromConfig(config) {
+  let n = 0;
+  const sum = fx => { for (const c of (fx?.shelves || [])) n += Math.max(0, Number(c) || 0); };
+  sum(config.facade_a);
+  for (const sideName of ['Gauche', 'Droite']) {
+    for (const sec of (config.sides?.[sideName]?.sections || [])) sum(sec);
+  }
+  sum(config.facade_b);
+  return n;
 }
 
 function sortMapLayouts() {
@@ -177,10 +211,14 @@ function getAllScanSlots() {
     max_shelf: String(cursor.maxShelf),
     max_position: String(cursor.maxPosition)
   }]).slice().sort((a, b) => Number(a.aisle) - Number(b.aisle) || String(a.aisle).localeCompare(String(b.aisle)));
-  return layouts.flatMap(layout => buildSlotsFromConfig(
-    layout.aisle,
-    normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position)
-  ));
+  return layouts.flatMap(layout => {
+    // Reuse the already-normalized config (the common case) instead of a fresh
+    // deep rebuild every call; slot building only reads numeric shelf counts.
+    const cfg = (layout.config && layout.config.sides && layout.config.facade_a)
+      ? layout.config
+      : normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position);
+    return buildSlotsFromConfig(layout.aisle, cfg);
+  });
 }
 
 function syncCursorLimitsForAisle(aisle) {
@@ -894,27 +932,17 @@ function renderMapEditor() {
   captureOpenPlanNodesFromDom();
   const msgDiv = document.getElementById('addMsg');
   const div = document.getElementById('mapContent');
-  // Summary counts in ONE pass over the cache instead of re-filtering the whole
-  // product list once per aisle and twice per side.
-  const homeByAisle = new Map();
-  const prodByAisleSide = new Map();
-  for (const p of allProductsCache) {
-    const a = String(p.aisle);
-    if (isHomeBrand(p.brand)) homeByAisle.set(a, (homeByAisle.get(a) || 0) + 1);
-    const k = a + '|' + p.side;
-    prodByAisleSide.set(k, (prodByAisleSide.get(k) || 0) + 1);
-  }
+  const counts = planSummaryCounts();   // memoized per cache version (no rescan on layout-only edits)
   div.innerHTML = mapLayouts.length
     ? `<div class="tool-row" style="margin-bottom:12px">
         <button class="btn btn-outline btn-inline" onclick="setAllPlanTrees(true)">Ouvrir tout</button>
         <button class="btn btn-outline btn-inline" onclick="setAllPlanTrees(false)">Fermer tout</button>
       </div>` + mapLayouts.map(layout => {
-        syncLayoutRecord(layout);
-        const config = normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position);
-        const aisleSlots = buildSlotsFromConfig(layout.aisle, config);
-        const slotCount = aisleSlots.length;
+        syncLayoutRecord(layout);          // normalizes layout.config + refreshes metrics/count (count is memoized)
+        const config = layout.config;       // already normalized above — skip a 2nd deep rebuild
+        const slotCount = countSlotsFromConfig(config);   // no per-slot object allocation
         const aisleNodeId = `planAisle-${layout.aisle}`;
-        const homeCount = homeByAisle.get(String(layout.aisle)) || 0;
+        const homeCount = counts.home.get(String(layout.aisle)) || 0;
         const dirty = dirtyLayoutAisles.has(String(layout.aisle));
         return `<details class="tree-node plan-aisle-node" id="${aisleNodeId}" data-node-id="${aisleNodeId}"${detailsOpenAttr(aisleNodeId)}>
         <summary>
@@ -935,7 +963,7 @@ function renderMapEditor() {
           const sections = config.sides[side].sections;
           const sideNodeId = `planSide-${layout.aisle}-${side}`;
           const sideLabel = sideDisplayLabel(side);
-          const sideCount = prodByAisleSide.get(String(layout.aisle) + '|' + side) || 0;
+          const sideCount = counts.side.get(String(layout.aisle) + '|' + side) || 0;
           return `<details class="tree-node plan-side" data-node-id="${sideNodeId}"${detailsOpenAttr(sideNodeId)}>
             <summary>
               <span>${sideLabel}</span>
