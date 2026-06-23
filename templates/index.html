@@ -333,6 +333,19 @@
 
 
   <div class="card">
+    <div class="section-title">Catalogue de référence</div>
+    <div class="section-note">Base de produits reconnus par code-barres. Plus elle est grande, plus un produit scanné est identifié instantanément et gratuitement. Elle grandit toute seule à chaque scan ; vous pouvez aussi la pré-remplir avec des produits vendus au Canada.</div>
+    <div class="tool-row" style="align-items:center;gap:8px">
+      <span id="referenceCount" style="font-weight:800;color:#c8102e">…</span>
+      <button class="btn btn-outline btn-inline" style="font-size:11px;padding:3px 10px;width:auto;margin:0" onclick="loadReferenceCount()" title="Rafraîchir">↻</button>
+    </div>
+    <div class="tool-row" style="margin-top:8px">
+      <button class="btn btn-inline" id="seedReferenceBtn" onclick="seedReference()">⬇ Remplir avec les produits du Canada</button>
+    </div>
+    <div id="referenceMsg" class="small" style="margin-top:6px;color:#64748b"></div>
+  </div>
+
+  <div class="card">
     <div class="section-title">Sauvegarde de la base</div>
     <div class="section-note">Telechargez une copie complete du magasin (produits + plan) pour la partager ou la garder. Importez un fichier de sauvegarde pour restaurer ou fusionner les données.</div>
     <div class="tool-row">

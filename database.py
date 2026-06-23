@@ -247,6 +247,22 @@ def init_postgres_db(db):
     # Saved for général info only; NOT used for placement (one product / position).
     db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS facings INTEGER DEFAULT 1")
 
+    # Reference catalog: every product identified by barcode (online lookup, cache
+    # or seed). Checked first on lookup so known UPCs resolve instantly & free, and
+    # grows toward "everything we ever scan". Separate from `products` (the plan).
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS product_reference (
+            barcode     TEXT PRIMARY KEY,
+            name        TEXT DEFAULT '',
+            brand       TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            image_url   TEXT DEFAULT '',
+            source      TEXT DEFAULT '',
+            source_url  TEXT DEFAULT '',
+            updated_at  TEXT DEFAULT ''
+        )
+    """)
+
     db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS max_section TEXT NOT NULL DEFAULT '1'")
     db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS config_json TEXT NOT NULL DEFAULT ''")
 
@@ -394,6 +410,20 @@ def init_sqlite_db(db):
     # général info only; NOT used for placement.
     if "facings" not in existing_columns:
         db.execute("ALTER TABLE products ADD COLUMN facings INTEGER DEFAULT 1")
+
+    # Reference catalog (see postgres init for rationale): known products by barcode.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS product_reference (
+            barcode     TEXT PRIMARY KEY,
+            name        TEXT DEFAULT '',
+            brand       TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            image_url   TEXT DEFAULT '',
+            source      TEXT DEFAULT '',
+            source_url  TEXT DEFAULT '',
+            updated_at  TEXT DEFAULT ''
+        )
+    """)
 
     layout_columns = {
         row["name"] for row in db.execute("PRAGMA table_info(aisle_layouts)").fetchall()

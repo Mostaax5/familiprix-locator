@@ -985,14 +985,127 @@ def extract_openai_output_text(payload):
     return ""
 
 
+# ── Reference catalog (local, growing product database) ─────────────────────────
+
+def _reference_upsert(db, product):
+    """Insert/update one product in the reference catalog using a given db."""
+    barcode = normalized_digits(product.get("barcode", ""))
+    name = str(product.get("name", "")).strip()
+    if not barcode or len(name) < 3:
+        return False
+    db.execute(
+        """INSERT INTO product_reference (barcode, name, brand, description, image_url, source, source_url, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(barcode) DO UPDATE SET
+               name=excluded.name, brand=excluded.brand, description=excluded.description,
+               image_url=excluded.image_url, source=excluded.source,
+               source_url=excluded.source_url, updated_at=excluded.updated_at""",
+        (barcode, name, str(product.get("brand", "")), str(product.get("description", "")),
+         str(product.get("image_url", "")), str(product.get("source", "")).replace(" · cache", ""),
+         str(product.get("source_url", "")), utc_now_iso()),
+    )
+    return True
+
+
+def reference_lookup(barcode):
+    """Return a product from the local reference catalog, or None. Instant & free."""
+    from database import connect_db
+    db = connect_db()
+    try:
+        for cand in build_barcode_candidates(barcode):
+            row = db.execute("SELECT * FROM product_reference WHERE barcode=?", (cand,)).fetchone()
+            if row:
+                d = dict(row)
+                if str(d.get("name", "")).strip():
+                    return {"name": d.get("name", ""), "brand": d.get("brand", ""),
+                            "description": d.get("description", ""), "barcode": d.get("barcode", ""),
+                            "source": (d.get("source", "") or "catalogue") + " · cache",
+                            "source_url": d.get("source_url", ""), "image_url": d.get("image_url", "")}
+    except Exception:
+        return None
+    finally:
+        try: db.close()
+        except Exception: pass
+    return None
+
+
+def reference_save(product):
+    """Cache a found product so the next lookup of this barcode is instant & free."""
+    if not product:
+        return
+    from database import connect_db
+    db = connect_db()
+    try:
+        if _reference_upsert(db, product):
+            db.commit()
+    except Exception:
+        pass
+    finally:
+        try: db.close()
+        except Exception: pass
+
+
+def reference_count():
+    from database import connect_db
+    db = connect_db()
+    try:
+        row = db.execute("SELECT COUNT(*) AS c FROM product_reference").fetchone()
+        return int(dict(row).get("c", 0)) if row else 0
+    except Exception:
+        return 0
+    finally:
+        try: db.close()
+        except Exception: pass
+
+
+def _seed_reference_worker(jobs, pages, page_size):
+    """Background: page open Canadian product databases and fill the catalog."""
+    from database import connect_db
+    db = connect_db()
+    total = 0
+    try:
+        for domain, source_name in jobs:
+            for page in range(1, pages + 1):
+                params = urlencode({
+                    "action": "process", "tagtype_0": "countries",
+                    "tag_contains_0": "contains", "tag_0": "canada", "json": 1,
+                    "page_size": page_size, "page": page,
+                    "fields": "code,product_name_fr,product_name,brands,image_front_url",
+                })
+                data = _fetch_json(f"{domain}/cgi/search.pl?{params}", timeout=20)
+                products = (data or {}).get("products") if isinstance(data, dict) else None
+                if not products:
+                    break
+                for p in products:
+                    name = first_present(p, ["product_name_fr", "product_name"])
+                    if _reference_upsert(db, {
+                        "barcode": p.get("code", ""), "name": name,
+                        "brand": first_present(p, ["brands"]), "description": "",
+                        "image_url": p.get("image_front_url", ""), "source": source_name, "source_url": "",
+                    }):
+                        total += 1
+                db.commit()
+                time.sleep(0.4)   # be polite to the public API
+    except Exception as exc:
+        print(f"[Reference] seed error: {exc}")
+    finally:
+        try: db.close()
+        except Exception: pass
+    print(f"[Reference] seed done: +{total} produits au catalogue")
+
+
 def lookup_product_online(barcode):
-    """Best-match product lookup across all sources. Returns a product dict or None.
-    Reused by the lookup route and the image backfill."""
+    """Best-match product lookup. Checks the local reference catalog first, then
+    all online sources; caches what it finds. Returns a product dict or None."""
     barcode = str(barcode or "").strip()
     if not barcode:
         return None
-    barcode_candidates = build_barcode_candidates(barcode)
     GOOD_ENOUGH = 24   # score at which we're confident and can stop early
+    # Phase 0 — local reference catalog: instant, free, offline for known UPCs.
+    cached = reference_lookup(barcode)
+    if cached and _product_quality_score(cached) >= GOOD_ENOUGH:
+        return cached
+    barcode_candidates = build_barcode_candidates(barcode)
     best, best_score = None, 0
 
     # Phase 1 — fast structured APIs; keep the highest-quality, not the fastest.
@@ -1032,7 +1145,12 @@ def lookup_product_online(barcode):
         if s3 > best_score:
             best, best_score = p3, s3
 
-    return best
+    # Cache the best find so this UPC is instant & free next time. Fall back to a
+    # thin cached entry if nothing better was found online.
+    if best:
+        reference_save(best)
+        return best
+    return cached
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -1046,6 +1164,37 @@ def lookup_barcode(barcode):
         enrich_lookup_product_with_ai(product)
         return jsonify({"found": True, "product": product})
     return jsonify({"found": False, "error": "Aucun produit trouve en ligne"})
+
+
+@ai_bp.route("/api/reference/count", methods=["GET"])
+def reference_count_route():
+    return jsonify({"count": reference_count()})
+
+
+@ai_bp.route("/api/reference/seed", methods=["POST"])
+def reference_seed_route():
+    """Fill the local reference catalog from the open Canadian product databases
+    (free, no key) in the background, so most scanned UPCs resolve instantly."""
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json() or {}
+    pages = min(max(int(data.get("pages", 15) or 15), 1), 60)
+    domains = {
+        "food":   ("https://world.openfoodfacts.org",    "Open Food Facts"),
+        "beauty": ("https://world.openbeautyfacts.org",  "Open Beauty Facts"),
+        "drug":   ("https://world.opendrugfacts.org",    "Open Drug Facts"),
+        "products": ("https://world.openproductsfacts.org", "Open Products Facts"),
+    }
+    requested = data.get("sources") or ["food", "beauty", "drug", "products"]
+    jobs = [domains[s] for s in requested if s in domains]
+    if not jobs:
+        return jsonify({"success": False, "error": "Aucune source valide."}), 400
+    import threading
+    threading.Thread(target=lambda: _seed_reference_worker(jobs, pages, 100), daemon=True).start()
+    return jsonify({"success": True, "started": True,
+                    "message": f"Remplissage du catalogue en arrière-plan : {pages} pages × {len(jobs)} source(s). "
+                               "Le catalogue grandit progressivement (revenez voir le total dans quelques minutes)."})
 
 
 def enrich_lookup_product_with_ai(product):

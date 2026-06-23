@@ -1160,6 +1160,36 @@ async function loadMapEditor(forceServer=false) {
   await Promise.allSettled([refreshProductsCache(forceServer), refreshLayoutsCache(forceServer)]);
   refreshPlanUi();
   loadPlanogramHistory();
+  loadReferenceCount();
+}
+
+async function loadReferenceCount() {
+  const el = document.getElementById('referenceCount');
+  if (!el) return;
+  try {
+    const {res, data} = await apiFetch('/api/reference/count');
+    el.textContent = res.ok ? `${Number(data.count || 0).toLocaleString('fr-CA')} produits au catalogue` : '—';
+  } catch (e) { el.textContent = '—'; }
+}
+
+async function seedReference() {
+  if (!requireEditorSession('remplir le catalogue')) return;
+  const btn = document.getElementById('seedReferenceBtn');
+  const msg = document.getElementById('referenceMsg');
+  if (btn) btn.disabled = true;
+  if (msg) { msg.style.color = '#64748b'; msg.textContent = 'Démarrage du remplissage…'; }
+  try {
+    const {res, data} = await apiFetch('/api/reference/seed', {
+      method: 'POST', headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: JSON.stringify({pages: 25})
+    });
+    if (res.ok && data.success) {
+      if (msg) { msg.style.color = '#16a34a'; msg.textContent = data.message || 'Remplissage en cours en arrière-plan.'; }
+      let n = 0;                                   // poll the total as it grows
+      const iv = window.setInterval(() => { loadReferenceCount(); if (++n >= 12) window.clearInterval(iv); }, 5000);
+    } else if (msg) { msg.style.color = '#c8102e'; msg.textContent = (data && data.error) || 'Impossible de démarrer.'; }
+  } catch (e) { if (msg) { msg.style.color = '#c8102e'; msg.textContent = 'Erreur réseau.'; } }
+  if (btn) btn.disabled = false;
 }
 
 function getEditableLayout(aisle) {

@@ -4,7 +4,7 @@ from database import close_db, get_backend_summary, get_db, init_db
 from auth import utc_now_iso
 from routes.products import products_bp, first_column, schedule_backfill_missing
 from routes.layout import layout_bp
-from routes.ai import ai_bp, configured_ai_provider
+from routes.ai import ai_bp, configured_ai_provider, reference_count
 from routes.gist import gist_bp, _restore_from_gist_if_empty
 from routes.import_export import import_export_bp
 
@@ -72,6 +72,7 @@ def get_system_info():
         "ai_provider_label": ai_provider["label"],
         "duplicate_slots": int(first_column(duplicate_slots) or 0),
         "duplicate_barcodes": int(first_column(duplicate_barcodes) or 0),
+        "reference_count": reference_count(),
     })
 
 
