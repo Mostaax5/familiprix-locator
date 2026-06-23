@@ -63,6 +63,76 @@ function nextRayonPosition() {
   return taken.length ? String(Math.max(...taken) + 1) : '1';
 }
 
+// Number of fixed positions on the current tablette (0 = mode libre / illimité).
+function rayonShelfPositionCount() {
+  const {aisle, side, section, shelf} = rayonCtx;
+  const config = getAisleLayoutConfig(aisle);
+  const ti = parseInt(shelf) - 1;
+  if (side === 'Gauche' || side === 'Droite')
+    return Number(config?.sides?.[side]?.sections?.[parseInt(section) - 1]?.shelves?.[ti]) || 0;
+  if (side === 'Façade A') return Number(config?.facade_a?.shelves?.[ti]) || 0;
+  if (side === 'Façade B') return Number(config?.facade_b?.shelves?.[ti]) || 0;
+  for (const pres of (config?.presentoirs || []))
+    for (const f of (pres.facades || []))
+      if (side === `${pres.name} - ${f.name}`) return Number(f.shelves?.[ti]) || 0;
+  return 0;
+}
+
+// The next tablette to scan after the current one is full, following the plan:
+// next tablette in the section, then next section, then (Côté A → Côté B).
+// Returns {side, section, shelf} or null at the end of the plan.
+function nextRayonShelf() {
+  const {aisle, side, section, shelf} = rayonCtx;
+  const config = getAisleLayoutConfig(aisle);
+  const ti = parseInt(shelf) - 1;
+  if (side === 'Gauche' || side === 'Droite') {
+    const sections = config?.sides?.[side]?.sections || [];
+    const si = parseInt(section) - 1;
+    if (sections[si] && ti + 1 < sections[si].shelves.length)
+      return {side, section: String(si + 1), shelf: String(ti + 2)};
+    for (let ns = si + 1; ns < sections.length; ns++)
+      if ((sections[ns].shelves || []).length) return {side, section: String(ns + 1), shelf: '1'};
+    if (side === 'Gauche') {                 // roll over to Côté B
+      const right = config?.sides?.Droite?.sections || [];
+      for (let ns = 0; ns < right.length; ns++)
+        if ((right[ns].shelves || []).length) return {side: 'Droite', section: String(ns + 1), shelf: '1'};
+    }
+    return null;
+  }
+  // Flat fixtures (façade / présentoir): just advance to the next tablette.
+  let shelves = [];
+  if (side === 'Façade A') shelves = config?.facade_a?.shelves || [];
+  else if (side === 'Façade B') shelves = config?.facade_b?.shelves || [];
+  else for (const pres of (config?.presentoirs || []))
+    for (const f of (pres.facades || []))
+      if (side === `${pres.name} - ${f.name}`) shelves = f.shelves || [];
+  if (ti + 1 < shelves.length) return {side, section: '1', shelf: String(ti + 2)};
+  return null;
+}
+
+// After a scan fills the LAST position of a fixed-count tablette, jump the rayon
+// to the next tablette/section automatically so mapping flows without manual
+// changes. No-op on libre shelves or at the end of the plan. Returns true if it
+// moved (and then it has refreshed the badge/list).
+function maybeAdvanceRayon(filledPos) {
+  const count = rayonShelfPositionCount();
+  if (count <= 0) return false;                          // libre = unlimited, stay
+  if ((parseInt(filledPos) || 0) < count) return false;  // tablette not full yet
+  const next = nextRayonShelf();
+  if (!next) return false;                               // end of plan — stay put
+  if (next.side !== rayonCtx.side) {
+    const s = document.getElementById('rayonSide');
+    if (s) s.value = next.side;
+  }
+  const secEl = document.getElementById('rayonSection'); if (secEl) secEl.value = next.section;
+  const shEl  = document.getElementById('rayonShelf');   if (shEl)  shEl.value  = next.shelf;
+  updateRayonCtx();   // syncs rayonCtx, badge and list to the new tablette
+  const res = document.getElementById('scanResult');
+  if (res) res.insertAdjacentHTML('beforeend',
+    `<div class="msg info" style="margin-top:6px">➡ Tablette pleine — passage à <strong>${esc(rayonLabel().split(' — ').slice(1).join(' — '))}</strong></div>`);
+  return true;
+}
+
 function refreshRayonList() {
   const {aisle, side, section, shelf} = rayonCtx;
   if (!aisle || !shelf) return;

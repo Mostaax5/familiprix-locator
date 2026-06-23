@@ -123,6 +123,12 @@ async function startCamera() {
     return;
   }
 
+  // Never stack a second camera/decoder on top of a running one — leaked
+  // Quagga/ZXing/native loops pile up and overheat the device.
+  if (scannerStream || html5Scanner || quaggaActive || nativeScanActive || zxingActive) {
+    await stopCamera();
+  }
+
   resetCameraCandidate();
 
   // Native BarcodeDetector: hardware-accelerated, works on iOS 17.4+ AND Android Chrome

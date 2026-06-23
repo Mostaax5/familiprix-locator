@@ -99,7 +99,10 @@ async function switchTab(tab) {
   // The 4h timer is fixed from unlock time — NOT refreshed on use — so the
   // session truly expires 4h after the password was entered.
   if (LOCKED_TABS.has(tab) && !isUnlocked()) { showLockModal(tab); return; }
-  if (scannerStream || html5Scanner) await stopCamera();
+  // Stop the camera/decoders when leaving — MUST include quaggaActive: Quagga
+  // runs its own stream (scannerStream stays null), so without this it keeps
+  // decoding video forever in the background and overheats the device.
+  if (scannerStream || html5Scanner || quaggaActive) await stopCamera();
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.getElementById(tab).classList.add('active');
@@ -156,12 +159,14 @@ document.getElementById('clientQuestion').addEventListener('input', persistClien
 window.addEventListener('online', updateNetworkStatus);
 window.addEventListener('offline', updateNetworkStatus);
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && (scannerStream || html5Scanner)) stopCamera();
+  // Include quaggaActive — Quagga has no scannerStream, so otherwise it keeps
+  // running (and draining/heating the phone) while the app is backgrounded.
+  if (document.hidden && (scannerStream || html5Scanner || quaggaActive)) stopCamera();
 });
 window.addEventListener('pageshow', () => { updateAppShellState(); updateNetworkStatus(); });
 window.addEventListener('pagehide', () => {
   persistScanDraft(); persistAddDraft(); persistClientDraft();
-  if (scannerStream || html5Scanner) stopCamera();
+  if (scannerStream || html5Scanner || quaggaActive) stopCamera();
 });
 
 async function bootApp() {
