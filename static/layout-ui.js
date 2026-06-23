@@ -90,14 +90,19 @@ let _planCounts = null;
 function planSummaryCounts() {
   if (_planCounts === null || _planCountsVersion !== lastProductsRefreshAt) {
     const aisle = new Map(), home = new Map(), side = new Map();
+    const section = new Map(), sectionHome = new Map();   // keyed aisle|side|sectionNumber
     for (const p of allProductsCache) {
       const a = String(p.aisle);
+      const isHome = isHomeBrand(p.brand);
       aisle.set(a, (aisle.get(a) || 0) + 1);
-      if (isHomeBrand(p.brand)) home.set(a, (home.get(a) || 0) + 1);
-      const k = a + '|' + p.side;
-      side.set(k, (side.get(k) || 0) + 1);
+      if (isHome) home.set(a, (home.get(a) || 0) + 1);
+      const sk = a + '|' + p.side;
+      side.set(sk, (side.get(sk) || 0) + 1);
+      const ck = sk + '|' + String(p.section);
+      section.set(ck, (section.get(ck) || 0) + 1);
+      if (isHome) sectionHome.set(ck, (sectionHome.get(ck) || 0) + 1);
     }
-    _planCounts = {aisle, home, side};
+    _planCounts = {aisle, home, side, section, sectionHome};
     _planCountsVersion = lastProductsRefreshAt;
   }
   return _planCounts;
@@ -572,7 +577,7 @@ function applySideTemplate(aisle, side) {
   layout.config = nextConfig;
   syncLayoutRecord(layout);
   markLayoutDirty(aisle);
-  refreshPlanUi();
+  rerenderSide(aisle, side);   // whole side rebuilt from the template
 }
 
 function renderPlanStartEditor() {
@@ -979,8 +984,112 @@ function rerenderShelfCard(aisle, side, sectionIndex, shelfIndex) {
   if (!layout || !section || !el) { refreshPlanUi(); return; }
   const positions = Number(section.shelves[shelfIndex]) || 0;
   el.outerHTML = renderShelfCard(aisle, side, sectionIndex, shelfIndex, positions, (section.labels || [])[shelfIndex] || '');
+  _updateAisleSlotTotal(aisle);
+}
+
+// Keeps the aisle summary's "X slots" number in sync after a targeted update,
+// without rebuilding the whole summary.
+function _updateAisleSlotTotal(aisle) {
+  const layout = mapLayouts.find(l => String(l.aisle) === String(aisle));
   const slotEl = document.getElementById(`aisleSlots-${aisle}`);
-  if (slotEl) slotEl.textContent = String(countSlotsFromConfig(layout.config));
+  if (layout && slotEl) slotEl.textContent = String(countSlotsFromConfig(layout.config));
+}
+
+// One section (its summary + action buttons + shelf grid). Extracted so adding
+// a tablette/accroche re-renders just this section, not the whole tree.
+function renderSection(aisle, side, sectionIndex, section) {
+  const counts = planSummaryCounts();
+  const ck = `${aisle}|${side}|${sectionIndex + 1}`;
+  const sectionProducts = counts.section.get(ck) || 0;
+  const sectionHome = counts.sectionHome.get(ck) || 0;
+  const sectionNodeId = `planSection-${aisle}-${side}-${sectionIndex}`;
+  return `<details class="tree-node plan-section" data-node-id="${sectionNodeId}"${detailsOpenAttr(sectionNodeId)}>
+    <summary>
+      <span>Section ${sectionIndex + 1}</span>
+      <span class="tree-meta">${sectionProducts} prod. · ${section.shelves.length} T${sectionHome ? ` · <span style="color:#c8102e">★${sectionHome}</span>` : ''}</span>
+    </summary>
+    <div class="tree-body">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 6px">
+        <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addShelf('${esc(aisle)}','${side}',${sectionIndex})">➕ Tablette</button>
+        <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addAccrocheToSection('${esc(aisle)}','${side}',${sectionIndex})">📎 Accroche</button>
+        <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="startScanFromSection('${esc(aisle)}','${side}',${sectionIndex})">▶ Scanner ici</button>
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:10px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${esc(aisle)}','${side}',${sectionIndex},-1)">↑ Monter</button>
+        <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${esc(aisle)}','${side}',${sectionIndex},1)">↓ Descendre</button>
+        <button class="btn btn-outline btn-inline" style="font-size:12px;color:#c8102e;border-color:#f1b8c2;margin-left:auto" onclick="removeSection('${esc(aisle)}','${side}',${sectionIndex})">✕ Supprimer section</button>
+      </div>
+      ${section.shelves.length ? '' : `<div class="small" style="padding:4px 0;color:#94a3b8">Aucune tablette — cliquez ➕ Tablette ci-dessus.</div>`}
+      <div class="plan-shelf-grid">
+        ${section.shelves.map((positions, shelfIndex) =>
+          renderShelfCard(aisle, side, sectionIndex, shelfIndex, positions, (section.labels || [])[shelfIndex] || '')
+        ).join('')}
+      </div>
+    </div>
+  </details>`;
+}
+
+// One side (Côté A/B): its structure controls + all its sections. Extracted so
+// adding a section / applying a template re-renders just this side.
+function renderSide(aisle, side, config) {
+  const sections = config.sides[side].sections;
+  const sideNodeId = `planSide-${aisle}-${side}`;
+  const sideLabel = sideDisplayLabel(side);
+  const sideCount = planSummaryCounts().side.get(`${aisle}|${side}`) || 0;
+  return `<details class="tree-node plan-side" data-node-id="${sideNodeId}"${detailsOpenAttr(sideNodeId)}>
+    <summary>
+      <span>${sideLabel}</span>
+      <span class="tree-meta">${sections.length} section${sections.length !== 1 ? 's' : ''} · ${sideCount} produit${sideCount !== 1 ? 's' : ''}</span>
+    </summary>
+    <div class="tree-body">
+      <details class="struct-details">
+        <summary class="struct-toggle">⚙ Modifier la structure de ${sideLabel}</summary>
+        <div style="margin-top:10px">
+          <div class="row3">
+            <div class="field">
+              <label class="label" for="sideTemplateSections-${aisle}-${side}">Sections</label>
+              <input id="sideTemplateSections-${aisle}-${side}" type="number" min="0" value="${sections.length}"/>
+            </div>
+            <div class="field">
+              <label class="label" for="sideTemplateShelves-${aisle}-${side}">Tablettes / section</label>
+              <input id="sideTemplateShelves-${aisle}-${side}" type="number" min="0" value="${sections[0]?.shelves?.length ?? 0}"/>
+            </div>
+            <div class="field">
+              <label class="label" for="sideTemplatePositions-${aisle}-${side}">Positions / tablette</label>
+              <input id="sideTemplatePositions-${aisle}-${side}" type="number" min="0" value="${sections[0]?.shelves?.[0] ?? 0}"/>
+            </div>
+          </div>
+          <button class="btn btn-outline btn-inline" style="margin-top:8px" onclick="applySideTemplate('${esc(aisle)}','${side}')">Appliquer modèle uniforme a ${sideLabel}</button>
+          <div class="field" style="margin-top:8px">
+            <label class="label" for="sectionCount-${aisle}-${side}">Nombre de sections</label>
+            <input id="sectionCount-${aisle}-${side}" type="number" min="0" value="${sections.length}" onchange="setSideSectionCount('${esc(aisle)}','${side}', this.value)"/>
+          </div>
+        </div>
+      </details>
+      ${sections.length ? '' : `<div class="small" style="padding:8px 0">Aucune section sur ${sideLabel}.</div>`}
+      ${sections.map((section, sectionIndex) => renderSection(aisle, side, sectionIndex, section)).join('')}
+      <button class="btn btn-outline btn-inline" style="margin-top:8px;font-size:12px;width:100%" onclick="addSection('${esc(aisle)}','${side}')">➕ Ajouter une section</button>
+    </div>
+  </details>`;
+}
+
+function rerenderSection(aisle, side, sectionIndex) {
+  const layout = mapLayouts.find(l => String(l.aisle) === String(aisle));
+  const section = layout && layout.config && layout.config.sides[side] && layout.config.sides[side].sections[sectionIndex];
+  const el = document.querySelector(`#mapContent [data-node-id="planSection-${aisle}-${side}-${sectionIndex}"]`);
+  if (!layout || !section || !el) { refreshPlanUi(); return; }
+  captureOpenPlanNodesFromDom();
+  el.outerHTML = renderSection(aisle, side, sectionIndex, section);
+  _updateAisleSlotTotal(aisle);
+}
+
+function rerenderSide(aisle, side) {
+  const layout = mapLayouts.find(l => String(l.aisle) === String(aisle));
+  const el = document.querySelector(`#mapContent [data-node-id="planSide-${aisle}-${side}"]`);
+  if (!layout || !layout.config || !el) { refreshPlanUi(); return; }
+  captureOpenPlanNodesFromDom();
+  el.outerHTML = renderSide(aisle, side, layout.config);
+  _updateAisleSlotTotal(aisle);
 }
 
 function renderMapEditor() {
@@ -1014,81 +1123,7 @@ function renderMapEditor() {
         </div>
         ${layout.modified_by ? `<div class="small" style="margin-top:6px">Modifie par: ${esc(layout.modified_by)}</div>` : ''}
         <div class="plan-sides">
-        ${['Gauche','Droite'].map(side => {
-          const sections = config.sides[side].sections;
-          const sideNodeId = `planSide-${layout.aisle}-${side}`;
-          const sideLabel = sideDisplayLabel(side);
-          const sideCount = counts.side.get(String(layout.aisle) + '|' + side) || 0;
-          return `<details class="tree-node plan-side" data-node-id="${sideNodeId}"${detailsOpenAttr(sideNodeId)}>
-            <summary>
-              <span>${sideLabel}</span>
-              <span class="tree-meta">${sections.length} section${sections.length !== 1 ? 's' : ''} · ${sideCount} produit${sideCount !== 1 ? 's' : ''}</span>
-            </summary>
-            <div class="tree-body">
-              <details class="struct-details">
-                <summary class="struct-toggle">⚙ Modifier la structure de ${sideLabel}</summary>
-                <div style="margin-top:10px">
-                  <div class="row3">
-                    <div class="field">
-                      <label class="label" for="sideTemplateSections-${layout.aisle}-${side}">Sections</label>
-                      <input id="sideTemplateSections-${layout.aisle}-${side}" type="number" min="0" value="${sections.length}"/>
-                    </div>
-                    <div class="field">
-                      <label class="label" for="sideTemplateShelves-${layout.aisle}-${side}">Tablettes / section</label>
-                      <input id="sideTemplateShelves-${layout.aisle}-${side}" type="number" min="0" value="${sections[0]?.shelves?.length ?? 0}"/>
-                    </div>
-                    <div class="field">
-                      <label class="label" for="sideTemplatePositions-${layout.aisle}-${side}">Positions / tablette</label>
-                      <input id="sideTemplatePositions-${layout.aisle}-${side}" type="number" min="0" value="${sections[0]?.shelves?.[0] ?? 0}"/>
-                    </div>
-                  </div>
-                  <button class="btn btn-outline btn-inline" style="margin-top:8px" onclick="applySideTemplate('${esc(layout.aisle)}','${side}')">Appliquer modèle uniforme a ${sideLabel}</button>
-                  <div class="field" style="margin-top:8px">
-                    <label class="label" for="sectionCount-${layout.aisle}-${side}">Nombre de sections</label>
-                    <input id="sectionCount-${layout.aisle}-${side}" type="number" min="0" value="${sections.length}" onchange="setSideSectionCount('${esc(layout.aisle)}','${side}', this.value)"/>
-                  </div>
-                </div>
-              </details>
-              ${sections.length ? '' : `<div class="small" style="padding:8px 0">Aucune section sur ${sideLabel}.</div>`}
-              ${sections.map((section, sectionIndex) => {
-                const sectionNodeId = `planSection-${layout.aisle}-${side}-${sectionIndex}`;
-                const sectionHomeBrands = allProductsCache.filter(p =>
-                  String(p.aisle) === String(layout.aisle) && p.side === side &&
-                  String(p.section) === String(sectionIndex + 1) && isHomeBrand(p.brand)
-                );
-                const sectionProducts = allProductsCache.filter(p =>
-                  String(p.aisle) === String(layout.aisle) && p.side === side &&
-                  String(p.section) === String(sectionIndex + 1)
-                );
-                return `<details class="tree-node plan-section" data-node-id="${sectionNodeId}"${detailsOpenAttr(sectionNodeId)}>
-                <summary>
-                  <span>Section ${sectionIndex + 1}</span>
-                  <span class="tree-meta">${sectionProducts.length} prod. · ${section.shelves.length} T${sectionHomeBrands.length ? ` · <span style="color:#c8102e">★${sectionHomeBrands.length}</span>` : ''}</span>
-                </summary>
-                <div class="tree-body">
-                  <div style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 6px">
-                    <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addShelf('${esc(layout.aisle)}','${side}',${sectionIndex})">➕ Tablette</button>
-                    <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addAccrocheToSection('${esc(layout.aisle)}','${side}',${sectionIndex})">📎 Accroche</button>
-                    <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="startScanFromSection('${esc(layout.aisle)}','${side}',${sectionIndex})">▶ Scanner ici</button>
-                  </div>
-                  <div style="display:flex;gap:6px;margin-bottom:10px;align-items:center;flex-wrap:wrap">
-                    <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${esc(layout.aisle)}','${side}',${sectionIndex},-1)">↑ Monter</button>
-                    <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${esc(layout.aisle)}','${side}',${sectionIndex},1)">↓ Descendre</button>
-                    <button class="btn btn-outline btn-inline" style="font-size:12px;color:#c8102e;border-color:#f1b8c2;margin-left:auto" onclick="removeSection('${esc(layout.aisle)}','${side}',${sectionIndex})">✕ Supprimer section</button>
-                  </div>
-                  ${section.shelves.length ? '' : `<div class="small" style="padding:4px 0;color:#94a3b8">Aucune tablette — cliquez ➕ Tablette ci-dessus.</div>`}
-                  <div class="plan-shelf-grid">
-                    ${section.shelves.map((positions, shelfIndex) =>
-                      renderShelfCard(layout.aisle, side, sectionIndex, shelfIndex, positions, (section.labels || [])[shelfIndex] || '')
-                    ).join('')}
-                  </div>
-                </div>
-              </details>`;
-              }).join('')}
-              <button class="btn btn-outline btn-inline" style="margin-top:8px;font-size:12px;width:100%" onclick="addSection('${esc(layout.aisle)}','${side}')">➕ Ajouter une section</button>
-            </div>
-          </details>`;
-        }).join('')}
+        ${['Gauche','Droite'].map(side => renderSide(layout.aisle, side, config)).join('')}
         </div>
         ${renderFacadesSection(layout.aisle, config)}
         ${renderPresentoirSection(layout.aisle, config)}
@@ -1160,7 +1195,7 @@ function setSideSectionCount(aisle, side, rawValue) {
   sections.length = count;
   syncLayoutRecord(layout);
   markLayoutDirty(aisle);
-  refreshPlanUi();
+  rerenderSide(aisle, side);   // section count changed on this side only
 }
 
 function setShelfLabel(aisle, side, sectionIndex, shelfIndex, value) {
@@ -1191,7 +1226,7 @@ function addAccrocheToSection(aisle, side, sectionIndex) {
   section.labels[section.shelves.length - 1] = 'Accroche';
   syncLayoutRecord(layout);
   markLayoutDirty(aisle);
-  refreshPlanUi();
+  rerenderSection(aisle, side, sectionIndex);   // only this section changed
 }
 
 function _isLibreShelf(aisle, side, section, shelf) {
@@ -1482,7 +1517,7 @@ function addSection(aisle, side) {
   });
   syncLayoutRecord(layout);
   markLayoutDirty(aisle);
-  refreshPlanUi();
+  rerenderSide(aisle, side);   // a section was added to this side
 }
 
 async function removeSection(aisle, side, sectionIndex) {
@@ -1514,7 +1549,7 @@ function addShelf(aisle, side, sectionIndex) {
   section.labels.push('');
   syncLayoutRecord(layout);
   markLayoutDirty(aisle);
-  refreshPlanUi();
+  rerenderSection(aisle, side, sectionIndex);   // only this section changed
 }
 
 async function removeShelf(aisle, side, sectionIndex, shelfIndex) {
