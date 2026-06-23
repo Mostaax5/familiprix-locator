@@ -641,10 +641,19 @@ function ensureCursorStillValid() {
   }
 }
 
+// Coalesce bursts of mutations (rapid +/- taps, a loop of edits) into a single
+// rebuild on the next frame instead of N synchronous full rebuilds — far less
+// CPU/heat. renderMapEditor() is still called directly for one-off renders.
+let _planUiPending = false;
 function refreshPlanUi() {
-  ensureCursorStillValid();
-  renderMapEditor();
-  renderPlanStartEditor();
+  if (_planUiPending) return;
+  _planUiPending = true;
+  window.requestAnimationFrame(() => {
+    _planUiPending = false;
+    ensureCursorStillValid();
+    renderMapEditor();
+    renderPlanStartEditor();
+  });
 }
 
 function captureOpenPlanNodesFromDom() {
@@ -885,6 +894,16 @@ function renderMapEditor() {
   captureOpenPlanNodesFromDom();
   const msgDiv = document.getElementById('addMsg');
   const div = document.getElementById('mapContent');
+  // Summary counts in ONE pass over the cache instead of re-filtering the whole
+  // product list once per aisle and twice per side.
+  const homeByAisle = new Map();
+  const prodByAisleSide = new Map();
+  for (const p of allProductsCache) {
+    const a = String(p.aisle);
+    if (isHomeBrand(p.brand)) homeByAisle.set(a, (homeByAisle.get(a) || 0) + 1);
+    const k = a + '|' + p.side;
+    prodByAisleSide.set(k, (prodByAisleSide.get(k) || 0) + 1);
+  }
   div.innerHTML = mapLayouts.length
     ? `<div class="tool-row" style="margin-bottom:12px">
         <button class="btn btn-outline btn-inline" onclick="setAllPlanTrees(true)">Ouvrir tout</button>
@@ -895,12 +914,12 @@ function renderMapEditor() {
         const aisleSlots = buildSlotsFromConfig(layout.aisle, config);
         const slotCount = aisleSlots.length;
         const aisleNodeId = `planAisle-${layout.aisle}`;
-        const aisleHomeBrands = allProductsCache.filter(p => String(p.aisle) === String(layout.aisle) && isHomeBrand(p.brand));
+        const homeCount = homeByAisle.get(String(layout.aisle)) || 0;
         const dirty = dirtyLayoutAisles.has(String(layout.aisle));
         return `<details class="tree-node plan-aisle-node" id="${aisleNodeId}" data-node-id="${aisleNodeId}"${detailsOpenAttr(aisleNodeId)}>
         <summary>
           <span>Allée ${esc(layout.aisle)}</span>
-          <span class="tree-meta">${layout.product_count || 0} produit${Number(layout.product_count || 0) !== 1 ? 's' : ''} · ${slotCount} slots${aisleHomeBrands.length ? ` · <span style="color:#c8102e">★${aisleHomeBrands.length} maison</span>` : ''}${dirty ? ' · <span style="color:#d97706">non sauvegarde</span>' : ''}</span>
+          <span class="tree-meta">${layout.product_count || 0} produit${Number(layout.product_count || 0) !== 1 ? 's' : ''} · ${slotCount} slots${homeCount ? ` · <span style="color:#c8102e">★${homeCount} maison</span>` : ''}${dirty ? ' · <span style="color:#d97706">non sauvegardé</span>' : ''}</span>
         </summary>
         <div class="tree-body">
         <div class="plan-actions" style="margin-top:8px">
@@ -916,11 +935,11 @@ function renderMapEditor() {
           const sections = config.sides[side].sections;
           const sideNodeId = `planSide-${layout.aisle}-${side}`;
           const sideLabel = sideDisplayLabel(side);
-          const sideProducts = allProductsCache.filter(p => String(p.aisle) === String(layout.aisle) && p.side === side);
+          const sideCount = prodByAisleSide.get(String(layout.aisle) + '|' + side) || 0;
           return `<details class="tree-node plan-side" data-node-id="${sideNodeId}"${detailsOpenAttr(sideNodeId)}>
             <summary>
               <span>${sideLabel}</span>
-              <span class="tree-meta">${sections.length} section${sections.length !== 1 ? 's' : ''} · ${sideProducts.length} produit${sideProducts.length !== 1 ? 's' : ''}</span>
+              <span class="tree-meta">${sections.length} section${sections.length !== 1 ? 's' : ''} · ${sideCount} produit${sideCount !== 1 ? 's' : ''}</span>
             </summary>
             <div class="tree-body">
               <details class="struct-details">

@@ -674,6 +674,24 @@ def bulk_import_products():
 
     imported = skipped = 0
     image_barcodes = []   # barcodes still missing an image → fetched in background
+
+    # Prefetch once instead of querying per product (an import is 100+ rows):
+    #  - existing slot → product id (for this aisle+side)
+    #  - any image already stored for a barcode, to reuse it without re-querying
+    existing_slots = {}
+    for r in db.execute(
+        "SELECT id, section, shelf, position FROM products WHERE aisle=? AND side=?", (aisle, side)
+    ).fetchall():
+        d = dict(r)
+        existing_slots[(str(d["section"]), str(d["shelf"]), str(d["position"]))] = d["id"]
+    image_by_barcode = {}
+    for r in db.execute(
+        "SELECT barcode, image_url FROM products "
+        "WHERE TRIM(COALESCE(image_url,'')) <> '' AND TRIM(COALESCE(barcode,'')) <> ''"
+    ).fetchall():
+        d = dict(r)
+        image_by_barcode.setdefault(str(d["barcode"]).strip(), d["image_url"])
+
     for (sec_no, shelf_no, pos_no, ln) in placements:
         p = ln["p"]
         section_s, shelf_s, position_s = str(sec_no), str(shelf_no), str(pos_no)
@@ -691,19 +709,19 @@ def bulk_import_products():
         notes    = "[PLANO]" if is_plano else "[HORS-PLANO]"
         in_stock = 0 if not p.get("en_stock", True) else 1
         try:
-            existing = db.execute(
-                "SELECT id FROM products WHERE aisle=? AND side=? AND section=? AND shelf=? AND position=?",
-                (aisle, side, section_s, shelf_s, position_s)
-            ).fetchone()
-            if existing and not replace:
+            row_id = existing_slots.get((section_s, shelf_s, position_s))
+            if row_id is not None and not replace:
                 skipped += 1
                 continue
             # Plano rows carry no image — reuse one already stored for this barcode.
-            image_url = find_existing_image_for_barcode(db, barcode)
+            image_url = ""
+            for cand in build_barcode_candidates(barcode):
+                if cand in image_by_barcode:
+                    image_url = image_by_barcode[cand]
+                    break
             if not image_url and barcode:
                 image_barcodes.append(barcode)   # fetch online in background
-            if existing:
-                row_id = existing["id"] if isinstance(existing, dict) else existing[0]
+            if row_id is not None:
                 if image_url:
                     db.execute(
                         "UPDATE products SET name=?, barcode=?, product_code=?, facings=?, search_terms=?, is_plano=?, in_stock=?, flipped_label=?, image_url=?, modified_by=?, modified_at=? WHERE id=?",
