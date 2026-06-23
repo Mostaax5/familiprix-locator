@@ -850,9 +850,9 @@ async function enrichStoredProductWithAi(productId) {
     searchDiv.insertAdjacentHTML('afterbegin', `<div class="msg error">${esc(saveResult.error || 'Sauvegarde impossible.')}</div>`);
     return;
   }
-  await refreshProductsCache(true);
+  if (saveResult.product) upsertCachedProduct(normalizeProduct(saveResult.product));  // local update, no full refetch
   await doSearch();
-  searchDiv.insertAdjacentHTML('afterbegin', '<div class="msg success">Aide client ajoutee au produit.</div>');
+  searchDiv.insertAdjacentHTML('afterbegin', '<div class="msg success">Aide client ajoutée au produit.</div>');
 }
 
 // ── Plan editor ───────────────────────────────────────────────────────────────
@@ -1420,10 +1420,16 @@ async function deleteProduct(id) {
     if (target) target.innerHTML = `<div class="msg error">${esc(data.error || 'Suppression impossible.')}</div>`;
     return;
   }
-  removeCachedProduct(id);
-  await doSearch();
-  await loadMapEditor();
-  document.getElementById('searchResults').insertAdjacentHTML('afterbegin', `<div class="msg success">${esc(data.message || 'Produit supprime.')}</div>`);
+  removeCachedProduct(id);   // local cache update — no server refetch
+  // Refresh only the view the user is on. (Was: doSearch + loadMapEditor, which
+  // rebuilt the whole plan AND did a planogram-history network fetch on every
+  // single delete — a real heat source when cleaning up many products.)
+  if (document.getElementById('add')?.classList.contains('active')) refreshPlanUi();
+  else if (document.getElementById('scan')?.classList.contains('active')) refreshRayonList();
+  else doSearch();
+  const sr = document.getElementById('searchResults');
+  if (sr && document.getElementById('search')?.classList.contains('active'))
+    sr.insertAdjacentHTML('afterbegin', `<div class="msg success">${esc(data.message || 'Produit supprimé.')}</div>`);
 }
 
 // ── Database management ───────────────────────────────────────────────────────
@@ -1622,9 +1628,20 @@ async function moveShelf(aisle, side, sectionIndex, shelfIndex, direction) {
 }
 
 async function swapPositions(aisle, side, section, shelf, posA, posB) {
-  await _swapCall(aisle, 'swap-positions', {side, section: String(section), shelf: String(shelf), position_a: String(posA), position_b: String(posB)});
-  await refreshProductsCache(true);
-  refreshPlanUi();
+  const ok = await _swapCall(aisle, 'swap-positions', {side, section: String(section), shelf: String(shelf), position_a: String(posA), position_b: String(posB)});
+  if (!ok) { const m = document.getElementById('addMsg'); if (m) m.innerHTML = '<div class="msg error">Échange impossible.</div>'; return; }
+  // Mirror the server swap in the local cache instead of re-downloading the whole
+  // catalog: just exchange the two products' position values, then re-render only
+  // this shelf card.
+  const at = pos => allProductsCache.find(p =>
+    String(p.aisle) === String(aisle) && p.side === side &&
+    String(p.section || '1') === String(section) && String(p.shelf) === String(shelf) &&
+    String(p.position) === String(pos));
+  const a = at(posA), b = at(posB);
+  if (a) a.position = String(posB);
+  if (b) b.position = String(posA);
+  lastProductsRefreshAt = Date.now();   // invalidate memoized shelf/count indexes
+  rerenderShelfCard(aisle, side, parseInt(section) - 1, parseInt(shelf) - 1);
 }
 
 // ── Façade & Présentoir management ────────────────────────────────────────────
