@@ -108,7 +108,9 @@ async function addProductToCurrentRayon(productId, position) {
   const data = await apiAddProduct(payload);
   if (data.success !== false && !data.error) {
     if (data.product) upsertCachedProduct(normalizeProduct(data.product));
-    await refreshProductsCache(true);
+    // The server already returned the updated row (upserted above) — no need to
+    // re-download the whole product list. This keeps rapid scanning instant and
+    // cool on phones; the periodic soft refresh resyncs anything else.
     finishConfirmed(`"${existing.name}" ajouté à ${rayonLabel()} — Pos. ${position}.`);
   } else {
     document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur d’ajout.')}</div>`;
@@ -127,7 +129,9 @@ async function moveProductToCurrentRayon(productId, position) {
   const data = await apiUpdateProduct(payload);
   if (data.success !== false && !data.error) {
     if (data.product) upsertCachedProduct(normalizeProduct(data.product));
-    await refreshProductsCache(true);
+    // The server already returned the updated row (upserted above) — no need to
+    // re-download the whole product list. This keeps rapid scanning instant and
+    // cool on phones; the periodic soft refresh resyncs anything else.
     finishConfirmed(`"${existing.name}" déplacé à ${rayonLabel()} — Pos. ${position}.`);
   } else {
     document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur de déplacement.')}</div>`;
@@ -361,7 +365,9 @@ async function confirmNewProduct() {
   });
   if (data.success !== false && !data.error) {
     if (data.product) upsertCachedProduct(normalizeProduct(data.product));
-    await refreshProductsCache(true);
+    // The server already returned the updated row (upserted above) — no need to
+    // re-download the whole product list. This keeps rapid scanning instant and
+    // cool on phones; the periodic soft refresh resyncs anything else.
     finishConfirmed(`"${name}" enregistré à ${rayonLabel()} — Pos. ${pos}.`, brand);
   } else {
     document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur pendant l’ajout.')}</div>`;
@@ -386,7 +392,9 @@ async function confirmUnknownProduct() {
   });
   if (data.success !== false && !data.error) {
     if (data.product) upsertCachedProduct(normalizeProduct(data.product));
-    await refreshProductsCache(true);
+    // The server already returned the updated row (upserted above) — no need to
+    // re-download the whole product list. This keeps rapid scanning instant and
+    // cool on phones; the periodic soft refresh resyncs anything else.
     finishConfirmed(`"${placeholderName}" ajouté à ${rayonLabel()} — Pos. ${pos}.`);
   } else {
     document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur pendant l’ajout.')}</div>`;

@@ -795,11 +795,30 @@ async function enrichStoredProductWithAi(productId) {
 }
 
 // ── Plan editor ───────────────────────────────────────────────────────────────
+
+// Products grouped by exact shelf, built once per cache version. Rendering a
+// plan asks for dozens of shelves; without this each shelf scanned the whole
+// product list (O(shelves × products)). The index auto-rebuilds whenever the
+// cache changes (lastProductsRefreshAt moves on every upsert/remove/refresh).
+let _shelfIndexVersion = -1;
+let _shelfIndex = null;
+function productsAtShelf(aisle, side, section, shelf) {
+  if (_shelfIndex === null || _shelfIndexVersion !== lastProductsRefreshAt) {
+    _shelfIndex = new Map();
+    for (const p of allProductsCache) {
+      const k = `${p.aisle}|${p.side}|${p.section}|${p.shelf}`;
+      let arr = _shelfIndex.get(k);
+      if (!arr) { arr = []; _shelfIndex.set(k, arr); }
+      arr.push(p);
+    }
+    _shelfIndexVersion = lastProductsRefreshAt;
+  }
+  return _shelfIndex.get(`${aisle}|${side}|${section}|${shelf}`) || [];
+}
+
 function renderShelfProductList(aisle, side, section, shelf, positions) {
-  const products = allProductsCache.filter(p =>
-    String(p.aisle) === String(aisle) && p.side === side &&
-    String(p.section) === String(section) && String(p.shelf) === String(shelf)
-  ).sort((a, b) => Number(a.position) - Number(b.position));
+  const products = productsAtShelf(String(aisle), side, String(section), String(shelf))
+    .slice().sort((a, b) => Number(a.position) - Number(b.position));
   const filled = products.length;
   const total = Number(positions) || 0;
   if (!total && !filled) return '';
