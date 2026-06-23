@@ -72,6 +72,11 @@ _AI_RATE_LIMIT  = int(os.environ.get("AI_RATE_LIMIT",  "30"))
 _AI_RATE_WINDOW = int(os.environ.get("AI_RATE_WINDOW", "3600"))
 _ai_rate_buckets: dict = defaultdict(list)
 
+# Auto AI-enrich of online UPC lookups is OFF by default so it can NEVER cost
+# anything unexpectedly. Turn it on with AI_AUTO_ENRICH=1 on Render only if you
+# want thin product descriptions filled automatically (a few cents per thousand).
+_AI_AUTO_ENRICH = os.environ.get("AI_AUTO_ENRICH", "").strip().lower() in {"1", "true", "yes", "on"}
+
 _SIMPLE_ANSWERS = {
     "heure":         "Pour les heures d’ouverture, consultez votre succursale Familiprix locale ou familiprix.com.",
     "ouvert":        "Pour les heures d’ouverture, consultez votre succursale Familiprix locale ou familiprix.com.",
@@ -1047,9 +1052,10 @@ def enrich_lookup_product_with_ai(product):
     """When a UPC is found online with a real name but a thin description, fill
     description/keywords/usage automatically via the AI — so a product is usable
     for client help even when the source only gives a name, with no manual step.
-    Never raises; only runs when the AI is configured and we have a real name."""
+    Never raises; only runs when explicitly enabled (AI_AUTO_ENRICH=1), the AI is
+    configured, and we have a real name. OFF by default → no cost."""
     try:
-        if not configured_ai_provider()["name"]:
+        if not _AI_AUTO_ENRICH or not configured_ai_provider()["name"]:
             return
         name = str(product.get("name", "")).strip()
         if len(name) < 3:
