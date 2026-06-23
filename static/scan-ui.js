@@ -12,7 +12,7 @@ function updateRayonSideOptions() {
   if ((config?.facade_a?.shelves || []).length > 0) html += '<option value="Façade A">🔲 Façade A</option>';
   if ((config?.facade_b?.shelves || []).length > 0) html += '<option value="Façade B">🔲 Façade B</option>';
   // Présentoirs — each façade is selectable
-  (config?.présentoirs || []).forEach(p => {
+  (config?.presentoirs || []).forEach(p => {
     (p.facades || []).forEach(f => {
       const sv = `${p.name} - ${f.name}`;
       html += `<option value="${esc(sv)}">📦 ${esc(p.name)} · ${esc(f.name)}</option>`;

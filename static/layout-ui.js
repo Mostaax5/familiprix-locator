@@ -11,7 +11,7 @@ function defaultLayoutConfig(maxSection=0, maxShelf=0, maxPosition=0) {
     sides: {Gauche: {sections: makeSections()}, Droite: {sections: makeSections()}},
     facade_a: {shelves: [], labels: []},   // end cap at entrance of aisle
     facade_b: {shelves: [], labels: []},   // end cap at far end of aisle
-    présentoirs: [],                       // freestanding displays in corridor
+    presentoirs: [],                       // freestanding displays in corridor
   };
 }
 
@@ -66,7 +66,7 @@ function normalizeLayoutConfig(config, maxSection=0, maxShelf=0, maxPosition=0) 
     const rawL = Array.isArray(f?.labels) ? f.labels : [];
     return {name: fname, shelves: sh, labels: sh.map((_, i) => String(rawL[i]||''))};
   };
-  base.présentoirs = (Array.isArray(source.présentoirs) ? source.présentoirs : [])
+  base.presentoirs = (Array.isArray(source.presentoirs) ? source.presentoirs : [])
     .map(p => {
       if (!p || typeof p !== 'object') return null;
       const name = String(p.name || 'Présentoir').trim() || 'Présentoir';
@@ -141,7 +141,7 @@ function buildSlotsFromConfig(aisle, config, sideFilter=null) {
   });
   addFixture('Façade B', config.facade_b);
   // Présentoirs: standalone — each façade is a separate side, only when filtering
-  (config.présentoirs || []).forEach(pres => {
+  (config.presentoirs || []).forEach(pres => {
     (pres.facades || []).forEach(facade => {
       const sideName = `${pres.name} - ${facade.name}`;
       if (sideFilter && sideName !== sideFilter) return;
@@ -157,7 +157,7 @@ function buildSlotsFromConfig(aisle, config, sideFilter=null) {
 }
 
 function compareSlotLocations(a, b) {
-  // Façade A → Côté A → Côté B → Façade B → (présentoirs excluded from scan)
+  // Façade A → Côté A → Côté B → Façade B → (presentoirs excluded from scan)
   const sideOrder = {'Façade A': 0, 'Gauche': 1, 'Droite': 2, 'Façade B': 3};
   const checks = [
     (Number(a.aisle) || 0) - (Number(b.aisle) || 0),
@@ -980,7 +980,7 @@ function renderMapEditor() {
                                      onchange="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},this.value)"/>
                                <button title="Ajouter une position" style="background:none;border:1px solid #e2e8f0;border-radius:5px;cursor:pointer;font-size:14px;padding:1px 8px;line-height:1.3" onclick="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},${positions+1})">➕</button>
                                <span style="font-size:11px;color:#64748b">${shelfFilled} prod.</span>
-                               <button title="Passer en mode libre (cosmétiques, présentoirs...)" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
+                               <button title="Passer en mode libre (cosmétiques, presentoirs...)" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
                                        onclick="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},0)">📦 Libre</button>`
                           }
                           <button onclick="removeShelf('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex})" style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5" title="Supprimer cette tablette">✕ Suppr.</button>
@@ -1089,8 +1089,10 @@ function setShelfLabel(aisle, side, sectionIndex, shelfIndex, value) {
   if (!section.labels) section.labels = section.shelves.map(() => '');
   while (section.labels.length < section.shelves.length) section.labels.push('');
   section.labels[shelfIndex] = value.trim();
+  // Typed live (oninput): only capture the value + mark dirty. Do NOT rebuild
+  // the whole plan tree on every keystroke — that pegged the CPU and heated the
+  // phone (and fought the cursor). The input already shows what was typed.
   markLayoutDirty(aisle);
-  refreshPlanUi();
 }
 
 function addAccrocheToSection(aisle, side, sectionIndex) {
@@ -1120,7 +1122,7 @@ function _isLibreShelf(aisle, side, section, shelf) {
   }
   if (side === 'Façade A') return (config?.facade_a?.shelves?.[ti] ?? -1) === 0;
   if (side === 'Façade B') return (config?.facade_b?.shelves?.[ti] ?? -1) === 0;
-  for (const pres of (config?.présentoirs || [])) {
+  for (const pres of (config?.presentoirs || [])) {
     for (const f of (pres.facades || [])) {
       if (side === `${pres.name} - ${f.name}`) return (f.shelves?.[ti] ?? -1) === 0;
     }
@@ -1137,7 +1139,7 @@ function getShelfLabel(aisle, side, section, shelf) {
   if (side === 'Façade A') return config?.facade_a?.labels?.[ti] || '';
   if (side === 'Façade B') return config?.facade_b?.labels?.[ti] || '';
   // Présentoir façade: side = "{pres.name} - {facade.name}"
-  for (const pres of (config?.présentoirs || [])) {
+  for (const pres of (config?.presentoirs || [])) {
     for (const f of (pres.facades || [])) {
       if (side === `${pres.name} - ${f.name}`) return f.labels?.[ti] || '';
     }
@@ -1533,39 +1535,39 @@ function setFacadeShelfLabel(aisle, facadeKey, shelfIndex, value) {
   if (!layout) return;
   const fx = _fixFixture(layout.config[facadeKey]);
   fx.labels[shelfIndex] = value.trim();
-  markLayoutDirty(aisle); refreshPlanUi();
+  markLayoutDirty(aisle);   // oninput: capture only, no full rebuild (avoid heat)
 }
 
 function addPresentoir(aisle) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
-  if (!layout.config.présentoirs) layout.config.présentoirs = [];
-  const n = layout.config.présentoirs.length + 1;
-  layout.config.présentoirs.push({name: `Présentoir ${n}`, facades: [{name: 'Façade 1', shelves: [8], labels: ['']}]});
+  if (!layout.config.presentoirs) layout.config.presentoirs = [];
+  const n = layout.config.presentoirs.length + 1;
+  layout.config.presentoirs.push({name: `Présentoir ${n}`, facades: [{name: 'Façade 1', shelves: [8], labels: ['']}]});
   markLayoutDirty(aisle); refreshPlanUi();
 }
 
 function removePresentoir(aisle, presIndex) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
-  const pres = layout.config.présentoirs?.[presIndex];
+  const pres = layout.config.presentoirs?.[presIndex];
   if (!pres) return;
   if (!confirm(`Supprimer "${pres.name}" ? Les produits assignés restent en base.`)) return;
-  layout.config.présentoirs.splice(presIndex, 1);
+  layout.config.presentoirs.splice(presIndex, 1);
   markLayoutDirty(aisle); refreshPlanUi();
 }
 
 function renamePresentoir(aisle, presIndex, value) {
   const layout = getMutableLayout(aisle);
-  if (!layout || !layout.config.présentoirs?.[presIndex]) return;
-  layout.config.présentoirs[presIndex].name = value.trim() || `Présentoir ${presIndex + 1}`;
+  if (!layout || !layout.config.presentoirs?.[presIndex]) return;
+  layout.config.presentoirs[presIndex].name = value.trim() || `Présentoir ${presIndex + 1}`;
   markLayoutDirty(aisle);
 }
 
 function addPresentoirFacade(aisle, presIndex) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
-  const pres = layout.config.présentoirs?.[presIndex];
+  const pres = layout.config.presentoirs?.[presIndex];
   if (!pres) return;
   if (!pres.facades) pres.facades = [];
   const n = pres.facades.length + 1;
@@ -1576,7 +1578,7 @@ function addPresentoirFacade(aisle, presIndex) {
 function removePresentoirFacade(aisle, presIndex, facadeIndex) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
-  const pres = layout.config.présentoirs?.[presIndex];
+  const pres = layout.config.presentoirs?.[presIndex];
   if (!pres || !pres.facades?.[facadeIndex]) return;
   if (pres.facades.length === 1) { alert('Un présentoir doit avoir au moins une façade.'); return; }
   if (!confirm(`Supprimer "${pres.facades[facadeIndex].name}" ?`)) return;
@@ -1587,7 +1589,7 @@ function removePresentoirFacade(aisle, presIndex, facadeIndex) {
 function renamePresentoirFacade(aisle, presIndex, facadeIndex, value) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
-  const facade = layout.config.présentoirs?.[presIndex]?.facades?.[facadeIndex];
+  const facade = layout.config.presentoirs?.[presIndex]?.facades?.[facadeIndex];
   if (!facade) return;
   facade.name = value.trim() || `Façade ${facadeIndex + 1}`;
   markLayoutDirty(aisle);
@@ -1596,7 +1598,7 @@ function renamePresentoirFacade(aisle, presIndex, facadeIndex, value) {
 function setPresentoirShelfCount(aisle, presIndex, facadeIndex, rawValue) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
-  const facade = layout.config.présentoirs?.[presIndex]?.facades?.[facadeIndex];
+  const facade = layout.config.presentoirs?.[presIndex]?.facades?.[facadeIndex];
   if (!facade) return;
   _fixFixture(facade);
   const count = Math.max(0, parseInt(rawValue) || 0);
@@ -1609,7 +1611,7 @@ function setPresentoirShelfCount(aisle, presIndex, facadeIndex, rawValue) {
 function setPresentoirShelfPositions(aisle, presIndex, facadeIndex, shelfIndex, rawValue) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
-  const facade = layout.config.présentoirs?.[presIndex]?.facades?.[facadeIndex];
+  const facade = layout.config.presentoirs?.[presIndex]?.facades?.[facadeIndex];
   if (facade) { facade.shelves[shelfIndex] = Math.max(0, parseInt(rawValue) || 0); markLayoutDirty(aisle); refreshPlanUi(); }
 }
 
@@ -1679,9 +1681,9 @@ function renderFacadesSection(aisle, config) {
 }
 
 function renderPresentoirSection(aisle, config) {
-  const présentoirs = config.présentoirs || [];
+  const presentoirs = config.presentoirs || [];
 
-  const presHtml = présentoirs.map((pres, pi) => {
+  const presHtml = presentoirs.map((pres, pi) => {
     const presId = `planPres-${aisle}-${pi}`;
     const totalProds = allProductsCache.filter(p =>
       String(p.aisle) === String(aisle) && (pres.facades||[]).some(f => p.side === `${pres.name} - ${f.name}`)
@@ -1864,6 +1866,15 @@ function computePlanoFlow(config, side, startSection, startTablette, tabStart, t
     idxs.forEach(idx => { out.byIdx[idx] = { section: si + 1, shelf: ti + 1, position: planoData.products[idx].position }; out.placed++; });
   });
   return out;
+}
+
+// Debounced preview: typing in the config fields rebuilds the whole row list
+// (often 100+ rows). Coalesce keystrokes so we rebuild once the user pauses,
+// instead of on every character — keeps the phone cool and responsive.
+let _planoPreviewTimer = null;
+function schedulePlanoPreview() {
+  window.clearTimeout(_planoPreviewTimer);
+  _planoPreviewTimer = window.setTimeout(updatePlanoPreview, 160);
 }
 
 function updatePlanoPreview() {

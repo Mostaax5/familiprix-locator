@@ -29,7 +29,7 @@ def build_default_layout_config(max_section, max_shelf, max_position):
             "Gauche": {"sections": json.loads(json.dumps(section_template))},
             "Droite": {"sections": json.loads(json.dumps(section_template))},
         },
-        "présentoirs": [],
+        "presentoirs": [],
     }
 
 
@@ -80,7 +80,7 @@ def normalize_layout_config(config_value, max_section="1", max_shelf="5", max_po
     normalized_facade_a = norm_fixture(config.get("facade_a") if isinstance(config, dict) else None)
     normalized_facade_b = norm_fixture(config.get("facade_b") if isinstance(config, dict) else None)
 
-    raw_pres = config.get("présentoirs", []) if isinstance(config, dict) else []
+    raw_pres = config.get("presentoirs", []) if isinstance(config, dict) else []
     if not isinstance(raw_pres, list): raw_pres = []
     normalized_pres = []
     for p in raw_pres:
@@ -101,7 +101,7 @@ def normalize_layout_config(config_value, max_section="1", max_shelf="5", max_po
             facades = [{"name": "Façade 1", "shelves": fx["shelves"], "labels": fx["labels"]}]
         normalized_pres.append({"name": name, "facades": facades})
 
-    return {"sides": normalized_sides, "facade_a": normalized_facade_a, "facade_b": normalized_facade_b, "présentoirs": normalized_pres}
+    return {"sides": normalized_sides, "facade_a": normalized_facade_a, "facade_b": normalized_facade_b, "presentoirs": normalized_pres}
 
 
 def layout_metrics(config):
@@ -132,7 +132,7 @@ def _get_shelves_for_side(config, side):
         return (config.get("facade_a") or {}).get("shelves", []), False
     if side == "Façade B":
         return (config.get("facade_b") or {}).get("shelves", []), False
-    for pres in (config.get("présentoirs") or []):
+    for pres in (config.get("presentoirs") or []):
         pname = pres.get("name", "")
         for facade in (pres.get("facades") or []):
             fname = facade.get("name", "")
