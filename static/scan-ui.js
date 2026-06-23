@@ -426,9 +426,10 @@ async function confirmNewProduct() {
     name, brand, description,
     image_url: pendingLookupProduct?.image_url || '',
     source_url: pendingLookupProduct?.source_url || '',
+    // Carry the auto-enriched fields the online lookup (and AI) produced.
     search_terms: pendingLookupAssist?.search_terms || pendingLookupProduct?.search_terms || '',
-    usage_notes: pendingLookupAssist?.usage_notes || '',
-    alternative_suggestions: pendingLookupAssist?.alternative_suggestions || '',
+    usage_notes: pendingLookupAssist?.usage_notes || pendingLookupProduct?.usage_notes || '',
+    alternative_suggestions: pendingLookupAssist?.alternative_suggestions || pendingLookupProduct?.alternative_suggestions || '',
     barcode,
     aisle: rayonCtx.aisle, side: rayonCtx.side, section: rayonCtx.section || '1',
     shelf: rayonCtx.shelf, position: pos

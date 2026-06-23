@@ -53,7 +53,7 @@ PRODUCT_LOOKUP_SOURCES = [
 LOOKUP_FIELDS = [
     "code", "product_name", "product_name_fr", "product_name_en",
     "generic_name", "generic_name_fr", "brands", "quantity", "categories",
-    "url", "image_front_url",
+    "ingredients_text_fr", "ingredients_text", "labels", "url", "image_front_url",
 ]
 
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY",  "").strip()
@@ -139,8 +139,8 @@ def build_barcode_candidates(barcode):
 # BEST result across all sources instead of whichever replied first.
 _SOURCE_TRUST = {
     "familiprix": 9, "open beauty facts": 8, "open drug facts": 8,
-    "open products facts": 8, "open food facts": 7, "upc item db": 5,
-    "barcode lookup": 4, "go upc": 4, "ean search": 3,
+    "open products facts": 8, "open food facts": 7, "datakick": 6, "upc item db": 5,
+    "brocade": 5, "barcode lookup": 4, "go upc": 4, "ean search": 3,
 }
 _PLACEHOLDER_BITS = ("unknown", "not found", "no title", "n/a", "untitled")
 
@@ -539,7 +539,12 @@ def lookup_open_facts_product(source_name, base_url, barcode):
     generic_name = first_present(product, ["generic_name_fr", "generic_name"])
     quantity = first_present(product, ["quantity"])
     categories = first_present(product, ["categories"])
-    description_parts = [part for part in [generic_name, quantity, categories] if part]
+    labels = first_present(product, ["labels"])
+    ingredients = first_present(product, ["ingredients_text_fr", "ingredients_text"])
+    if ingredients and len(ingredients) > 180:
+        ingredients = ingredients[:180].rsplit(" ", 1)[0] + "…"
+    description_parts = [part for part in [generic_name, quantity, categories, labels,
+                                           (f"Ingrédients: {ingredients}" if ingredients else "")] if part]
     if not name and not brand:
         return None
     return {"name": name or brand, "brand": brand, "description": " | ".join(description_parts),
@@ -661,6 +666,50 @@ def lookup_go_upc(barcode):
     image_url = structured.get("image_url") or first_regex(html, [r'<meta property="og:image" content="([^"]+)"'])
     return {"name": name.strip(), "brand": brand or infer_brand_from_title(name), "description": description,
             "barcode": digits, "source": "Go UPC", "source_url": url, "image_url": image_url or ""}
+
+
+def _fetch_json(url, timeout=5):
+    req = Request(url, headers={"User-Agent": "FamiliprixLocator/0.1", "Accept": "application/json"})
+    try:
+        with urlopen(req, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8", errors="ignore"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError):
+        return None
+
+
+def lookup_datakick(barcode):
+    """Datakick open product database — free JSON API, no key."""
+    digits = normalized_digits(barcode)
+    if not digits:
+        return None
+    data = _fetch_json(f"https://www.datakick.org/api/items/{digits}")
+    if not isinstance(data, dict):
+        return None
+    name = str(data.get("name", "")).strip()
+    if not name or len(name) < 3:
+        return None
+    brand = str(data.get("brand_name", "") or "").strip()
+    size = str(data.get("size", "") or "").strip()
+    images = data.get("images") if isinstance(data.get("images"), list) else []
+    image_url = str((images[0] or {}).get("url", "")).strip() if images and isinstance(images[0], dict) else ""
+    return {"name": name, "brand": brand, "description": size, "barcode": digits,
+            "source": "Datakick", "source_url": f"https://www.datakick.org/gtins/{digits}", "image_url": image_url}
+
+
+def lookup_brocade(barcode):
+    """Brocade open barcode database — free JSON API, no key."""
+    digits = normalized_digits(barcode)
+    if not digits:
+        return None
+    data = _fetch_json(f"https://www.brocade.io/api/items/{digits}")
+    if not isinstance(data, dict):
+        return None
+    name = str(data.get("name", "")).strip()
+    if not name or len(name) < 3:
+        return None
+    brand = str(data.get("brand_name", "") or data.get("brand", "") or "").strip()
+    return {"name": name, "brand": brand, "description": "", "barcode": digits,
+            "source": "Brocade", "source_url": f"https://www.brocade.io/items/{digits}", "image_url": ""}
 
 
 # ── AI payload helpers ─────────────────────────────────────────────────────────
@@ -946,6 +995,8 @@ def lookup_product_online(barcode):
     for candidate in barcode_candidates:
         json_tasks.append(lambda bc=candidate: lookup_upcitemdb(bc))
         json_tasks.append(lambda bc=candidate: lookup_ean_search(bc))
+        json_tasks.append(lambda bc=candidate: lookup_datakick(bc))
+        json_tasks.append(lambda bc=candidate: lookup_brocade(bc))
         for source_name, base_url in PRODUCT_LOOKUP_SOURCES:
             json_tasks.append(lambda bc=candidate, sn=source_name, su=base_url: lookup_open_facts_product(sn, su, bc))
     p1, s1 = best_lookup_result(json_tasks, max_workers=12)
@@ -987,8 +1038,38 @@ def lookup_barcode(barcode):
         return jsonify({"found": False, "error": "Code-barres manquant"}), 400
     product = lookup_product_online(barcode)
     if product:
+        enrich_lookup_product_with_ai(product)
         return jsonify({"found": True, "product": product})
     return jsonify({"found": False, "error": "Aucun produit trouve en ligne"})
+
+
+def enrich_lookup_product_with_ai(product):
+    """When a UPC is found online with a real name but a thin description, fill
+    description/keywords/usage automatically via the AI — so a product is usable
+    for client help even when the source only gives a name, with no manual step.
+    Never raises; only runs when the AI is configured and we have a real name."""
+    try:
+        if not configured_ai_provider()["name"]:
+            return
+        name = str(product.get("name", "")).strip()
+        if len(name) < 3:
+            return
+        desc = str(product.get("description", "")).strip()
+        already = str(product.get("search_terms", "")).strip()
+        if already or len(desc) >= 60:
+            return   # already well described — don't spend an AI call
+        assist = generate_product_assist_payload(name, str(product.get("brand", "")).strip(), desc, str(product.get("barcode", "")).strip())
+        if not assist:
+            return
+        product["search_terms"] = assist.get("search_terms", "") or product.get("search_terms", "")
+        product["usage_notes"] = assist.get("usage_notes", "") or product.get("usage_notes", "")
+        product["alternative_suggestions"] = assist.get("alternative_suggestions", "") or product.get("alternative_suggestions", "")
+        if not desc and assist.get("usage_notes"):
+            product["description"] = assist["usage_notes"]
+        product["ai_enriched"] = True
+        log_ai_interaction("product_assist_auto", name, product, assist)
+    except Exception:
+        pass
 
 
 @ai_bp.route("/api/products/assist", methods=["POST"])
