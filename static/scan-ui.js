@@ -363,7 +363,7 @@ function showOnlineLookupForm(barcode) {
 
 async function hydrateOnlineLookup(barcode) {
   const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), 14000);
+  const timeoutId = window.setTimeout(() => controller.abort(), 9000);
   let lookupProduct = null;
   try {
     const lookupData = await apiLookupOnline(barcode, controller.signal);

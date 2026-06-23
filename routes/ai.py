@@ -77,6 +77,12 @@ _ai_rate_buckets: dict = defaultdict(list)
 # want thin product descriptions filled automatically (a few cents per thousand).
 _AI_AUTO_ENRICH = os.environ.get("AI_AUTO_ENRICH", "").strip().lower() in {"1", "true", "yes", "on"}
 
+# Last-resort AI web-grounded product identification, used only when every free
+# database/scraper fails. OFF by default (it costs more than the free sources).
+# Turn on with AI_DEEP_LOOKUP=1 + a GEMINI_API_KEY (use a grounding-capable model
+# like gemini-2.5-flash). It searches the web like a human would.
+_AI_DEEP_LOOKUP = os.environ.get("AI_DEEP_LOOKUP", "").strip().lower() in {"1", "true", "yes", "on"}
+
 _SIMPLE_ANSWERS = {
     "heure":         "Pour les heures d’ouverture, consultez votre succursale Familiprix locale ou familiprix.com.",
     "ouvert":        "Pour les heures d’ouverture, consultez votre succursale Familiprix locale ou familiprix.com.",
@@ -182,13 +188,16 @@ def _product_quality_score(p):
     return score
 
 
-def best_lookup_result(tasks, max_workers=8):
-    """Run all tasks, return (best_product, best_score) by quality score."""
+def best_lookup_result(tasks, max_workers=8, good_enough=None):
+    """Run all tasks, return (best_product, best_score) by quality score. Returns
+    as soon as a result reaches `good_enough` instead of waiting for the slowest
+    source (e.g. an 8s scraper timeout) — this is what makes scanning fast."""
     best, best_score = None, 0
     if not tasks:
         return None, 0
-    with ThreadPoolExecutor(max_workers=min(max_workers, len(tasks))) as executor:
-        futures = [executor.submit(task) for task in tasks]
+    executor = ThreadPoolExecutor(max_workers=min(max_workers, len(tasks)))
+    futures = [executor.submit(task) for task in tasks]
+    try:
         for future in as_completed(futures):
             try:
                 result = future.result()
@@ -197,6 +206,11 @@ def best_lookup_result(tasks, max_workers=8):
             s = _product_quality_score(result)
             if s > best_score:
                 best, best_score = result, s
+            if good_enough is not None and best_score >= good_enough:
+                break   # good enough — don't wait for slower sources
+    finally:
+        # Don't block the response on still-running network calls; abandon them.
+        executor.shutdown(wait=False, cancel_futures=True)
     return best, best_score
 
 
@@ -624,20 +638,23 @@ def lookup_barcodelookup(barcode):
         return None
     candidates = build_barcode_candidates(barcode)
     structured = extract_structured_product_data(html, candidates)
-    name = structured.get("name") or clean_html_text(first_regex(html, [
+    # Only trust the loose title/description regex when the page ACTUALLY shows
+    # this barcode — otherwise a "no results"/wrong page yields a WRONG product.
+    verified = page_mentions_barcode(html, candidates)
+    name = structured.get("name") or (clean_html_text(first_regex(html, [
         r'<h4[^>]*class="[^"]*product-name[^"]*"[^>]*>(.*?)</h4>',
         r'<h1[^>]*>(.*?)</h1>', r'<meta property="og:title" content="([^"]+)"',
-    ]))
+    ])) if verified else "")
     if not name or len(name) < 3 or "not found" in name.lower():
         return None
-    brand = structured.get("brand") or clean_html_text(first_regex(html, [
+    brand = structured.get("brand") or (clean_html_text(first_regex(html, [
         r'<span[^>]*class="[^"]*brand[^"]*"[^>]*>(.*?)</span>',
         r'<p[^>]*class="[^"]*brand[^"]*"[^>]*>(.*?)</p>',
-    ]))
-    description = structured.get("description") or clean_html_text(first_regex(html, [
+    ])) if verified else "")
+    description = structured.get("description") or (clean_html_text(first_regex(html, [
         r'<meta name="description" content="([^"]+)"', r'<meta property="og:description" content="([^"]+)"',
-    ]))
-    image_url = structured.get("image_url") or first_regex(html, [r'<meta property="og:image" content="([^"]+)"'])
+    ])) if verified else "")
+    image_url = structured.get("image_url") or (first_regex(html, [r'<meta property="og:image" content="([^"]+)"']) if verified else "")
     return {"name": name.strip(), "brand": brand or infer_brand_from_title(name), "description": description,
             "barcode": digits, "source": "Barcode Lookup", "source_url": url, "image_url": image_url or ""}
 
@@ -658,17 +675,18 @@ def lookup_go_upc(barcode):
         return None
     candidates = build_barcode_candidates(barcode)
     structured = extract_structured_product_data(html, candidates)
-    name = structured.get("name") or clean_html_text(first_regex(html, [
+    verified = page_mentions_barcode(html, candidates)   # guard the loose regex (see barcodelookup)
+    name = structured.get("name") or (clean_html_text(first_regex(html, [
         r'<h1[^>]*class="[^"]*product-name[^"]*"[^>]*>(.*?)</h1>',
         r'<h1[^>]*>(.*?)</h1>', r'<meta property="og:title" content="([^"]+)"',
-    ]))
+    ])) if verified else "")
     if not name or len(name) < 3 or "not found" in name.lower() or name.lower().startswith("barcode"):
         return None
-    brand = structured.get("brand") or clean_html_text(first_regex(html, [r'class="[^"]*brand[^"]*"[^>]*>\s*(.*?)\s*</\w+>']))
-    description = structured.get("description") or clean_html_text(first_regex(html, [
+    brand = structured.get("brand") or (clean_html_text(first_regex(html, [r'class="[^"]*brand[^"]*"[^>]*>\s*(.*?)\s*</\w+>'])) if verified else "")
+    description = structured.get("description") or (clean_html_text(first_regex(html, [
         r'<meta name="description" content="([^"]+)"', r'<meta property="og:description" content="([^"]+)"',
-    ]))
-    image_url = structured.get("image_url") or first_regex(html, [r'<meta property="og:image" content="([^"]+)"'])
+    ])) if verified else "")
+    image_url = structured.get("image_url") or (first_regex(html, [r'<meta property="og:image" content="([^"]+)"']) if verified else "")
     return {"name": name.strip(), "brand": brand or infer_brand_from_title(name), "description": description,
             "barcode": digits, "source": "Go UPC", "source_url": url, "image_url": image_url or ""}
 
@@ -1094,6 +1112,53 @@ def _seed_reference_worker(jobs, pages, page_size):
     print(f"[Reference] seed done: +{total} produits au catalogue")
 
 
+def ai_grounded_product_lookup(barcode):
+    """Identify a product from its barcode via an AI web search (Gemini grounding).
+    Opt-in (AI_DEEP_LOOKUP=1) and conservative: returns None unless the model says
+    it's confident. Never raises."""
+    digits = normalized_digits(barcode)
+    if not _AI_DEEP_LOOKUP or not GEMINI_API_KEY or not digits:
+        return None
+    prompt = (
+        "Tu identifies un produit de détail (alimentation, médicament, beauté, etc.) "
+        f"vendu au Québec/Canada à partir de son code-barres UPC/EAN: {digits}. "
+        "Cherche sur le web avant de répondre. Réponds UNIQUEMENT par un objet JSON avec "
+        "les clés name, brand, description (courte, en français) et found (true/false). "
+        "Mets found=false si tu n'es pas certain à au moins 90% — ne devine jamais."
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "tools": [{"google_search": {}}],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 300},
+    }
+    req = Request(
+        f"{GEMINI_BASE_URL}/models/{GEMINI_MODEL}:generateContent?{urlencode({'key': GEMINI_API_KEY})}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urlopen(req, timeout=18) as response:
+            raw = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+        return None
+    usage = raw.get("usageMetadata", {})
+    _log_ai_usage("gemini", usage.get("promptTokenCount", 0), usage.get("candidatesTokenCount", 0), f"deep:{digits}")
+    text = extract_gemini_output_text(raw)
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        return None
+    try:
+        d = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    name = str(d.get("name", "")).strip()
+    if not d.get("found") or len(name) < 3:
+        return None
+    return {"name": name, "brand": str(d.get("brand", "")).strip(),
+            "description": str(d.get("description", "")).strip(), "barcode": digits,
+            "source": "Recherche IA", "source_url": "", "image_url": ""}
+
+
 def lookup_product_online(barcode):
     """Best-match product lookup. Checks the local reference catalog first, then
     all online sources; caches what it finds. Returns a product dict or None."""
@@ -1117,7 +1182,7 @@ def lookup_product_online(barcode):
         json_tasks.append(lambda bc=candidate: lookup_brocade(bc))
         for source_name, base_url in PRODUCT_LOOKUP_SOURCES:
             json_tasks.append(lambda bc=candidate, sn=source_name, su=base_url: lookup_open_facts_product(sn, su, bc))
-    p1, s1 = best_lookup_result(json_tasks, max_workers=12)
+    p1, s1 = best_lookup_result(json_tasks, max_workers=12, good_enough=GOOD_ENOUGH)
     if s1 > best_score:
         best, best_score = p1, s1
 
@@ -1128,7 +1193,7 @@ def lookup_product_online(barcode):
             tasks.append(lambda bc=candidate, bcs=barcode_candidates: lookup_familiprix_product(bc, bcs))
             tasks.append(lambda bc=candidate: lookup_barcodelookup(bc))
             tasks.append(lambda bc=candidate: lookup_go_upc(bc))
-        p2, s2 = best_lookup_result(tasks, max_workers=8)
+        p2, s2 = best_lookup_result(tasks, max_workers=8, good_enough=GOOD_ENOUGH)
         if s2 > best_score:
             best, best_score = p2, s2
 
@@ -1141,9 +1206,15 @@ def lookup_product_online(barcode):
                     lambda bc=candidate, sn=source_name, su=source_base_url, bcs=barcode_candidates:
                     lookup_generic_pharmacy_product(sn, su, bc, bcs)
                 )
-        p3, s3 = best_lookup_result(pharmacy_tasks, max_workers=6)
+        p3, s3 = best_lookup_result(pharmacy_tasks, max_workers=6, good_enough=GOOD_ENOUGH)
         if s3 > best_score:
             best, best_score = p3, s3
+
+    # Phase 4 — last resort: AI web-grounded identification (opt-in, off by default).
+    if not best and not cached:
+        ai_found = ai_grounded_product_lookup(barcode)
+        if ai_found:
+            best = ai_found
 
     # Cache the best find so this UPC is instant & free next time. Fall back to a
     # thin cached entry if nothing better was found online.
