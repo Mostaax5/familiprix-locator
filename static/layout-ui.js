@@ -928,6 +928,61 @@ function renderShelfProductList(aisle, side, section, shelf, positions) {
   return html;
 }
 
+// One shelf card (a tablette). Extracted so a single position change can
+// re-render just this card instead of the whole plan tree. The id encodes its
+// coordinates so rerenderShelfCard can find and replace it.
+function renderShelfCard(aisle, side, sectionIndex, shelfIndex, positions, shelfLabel) {
+  const shelfFilled = productsAtShelf(String(aisle), side, String(sectionIndex + 1), String(shelfIndex + 1)).length;
+  const isLibre = positions === 0;
+  const shelfTitle = shelfLabel ? `${isLibre ? '📦 ' : '📎 '}${esc(shelfLabel)}` : (isLibre ? `📦 T${shelfIndex + 1} Libre` : `T${shelfIndex + 1}`);
+  const cardBg = isLibre ? 'background:#faf5ff;border-color:#a78bfa' : (shelfLabel ? 'background:#fffbf0;border-color:#fbbf24' : '');
+  return `<div class="plan-shelf-card" id="shelfcard-${esc(aisle)}|${esc(side)}|${sectionIndex}|${shelfIndex}" style="${cardBg}">
+    <div class="shelf-header" style="gap:4px">
+      <span class="shelf-title">${shelfTitle}</span>
+      ${isLibre
+        ? `<span style="font-size:10px;color:#8b5cf6;font-weight:700">LIBRE · ${shelfFilled} prod.</span>
+           <button title="Définir un nombre fixe de positions" style="background:none;border:1px solid #a78bfa;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
+                   onclick="setShelfPositionCount('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},prompt('Nombre de positions fixes ?','8')||0)">→ Positions fixes</button>`
+        : `<button title="Retirer une position" style="background:none;border:1px solid #e2e8f0;border-radius:5px;cursor:pointer;font-size:14px;padding:1px 8px;line-height:1.3;${positions<=1?'opacity:.3;cursor:default':''}" onclick="setShelfPositionCount('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},${positions-1})" ${positions<=1?'disabled':''}>➖</button>
+           <input type="number" min="1" value="${positions}" title="Positions"
+                 style="width:46px;padding:2px 4px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px;text-align:center"
+                 onchange="setShelfPositionCount('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},this.value)"/>
+           <button title="Ajouter une position" style="background:none;border:1px solid #e2e8f0;border-radius:5px;cursor:pointer;font-size:14px;padding:1px 8px;line-height:1.3" onclick="setShelfPositionCount('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},${positions+1})">➕</button>
+           <span style="font-size:11px;color:#64748b">${shelfFilled} prod.</span>
+           <button title="Passer en mode libre (cosmétiques, presentoirs...)" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
+                   onclick="setShelfPositionCount('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},0)">📦 Libre</button>`
+      }
+      <button onclick="removeShelf('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex})" style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5" title="Supprimer cette tablette">✕ Suppr.</button>
+    </div>
+    <div style="display:flex;gap:6px;padding:5px 0 4px;border-top:1px solid rgba(0,0,0,.06);margin-top:4px">
+      <button class="btn btn-outline btn-inline" style="font-size:12px;flex:1" onclick="moveShelf('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},-1)">↑ Monter</button>
+      <button class="btn btn-outline btn-inline" style="font-size:12px;flex:1" onclick="moveShelf('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},1)">↓ Descendre</button>
+    </div>
+    <details class="struct-details">
+      <summary class="struct-toggle" style="font-size:11px">⚙ Nom / étiquette</summary>
+      <div class="field" style="margin-top:6px">
+        <input type="text" value="${esc(shelfLabel)}" placeholder="Laisser vide = Tablette ${shelfIndex + 1}"
+               oninput="setShelfLabel('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},this.value)"/>
+      </div>
+    </details>
+    ${renderShelfProductList(aisle, side, sectionIndex + 1, shelfIndex + 1, positions)}
+  </div>`;
+}
+
+// Re-render only one shelf card (used by setShelfPositionCount) instead of the
+// whole tree; also refreshes the aisle's slot total. Falls back to a full
+// refresh if the card isn't in the DOM.
+function rerenderShelfCard(aisle, side, sectionIndex, shelfIndex) {
+  const layout = mapLayouts.find(l => String(l.aisle) === String(aisle));
+  const section = layout && layout.config && layout.config.sides[side] && layout.config.sides[side].sections[sectionIndex];
+  const el = document.getElementById(`shelfcard-${aisle}|${side}|${sectionIndex}|${shelfIndex}`);
+  if (!layout || !section || !el) { refreshPlanUi(); return; }
+  const positions = Number(section.shelves[shelfIndex]) || 0;
+  el.outerHTML = renderShelfCard(aisle, side, sectionIndex, shelfIndex, positions, (section.labels || [])[shelfIndex] || '');
+  const slotEl = document.getElementById(`aisleSlots-${aisle}`);
+  if (slotEl) slotEl.textContent = String(countSlotsFromConfig(layout.config));
+}
+
 function renderMapEditor() {
   captureOpenPlanNodesFromDom();
   const msgDiv = document.getElementById('addMsg');
@@ -947,7 +1002,7 @@ function renderMapEditor() {
         return `<details class="tree-node plan-aisle-node" id="${aisleNodeId}" data-node-id="${aisleNodeId}"${detailsOpenAttr(aisleNodeId)}>
         <summary>
           <span>Allée ${esc(layout.aisle)}</span>
-          <span class="tree-meta">${layout.product_count || 0} produit${Number(layout.product_count || 0) !== 1 ? 's' : ''} · ${slotCount} slots${homeCount ? ` · <span style="color:#c8102e">★${homeCount} maison</span>` : ''}${dirty ? ' · <span style="color:#d97706">non sauvegardé</span>' : ''}</span>
+          <span class="tree-meta">${layout.product_count || 0} produit${Number(layout.product_count || 0) !== 1 ? 's' : ''} · <span id="aisleSlots-${esc(layout.aisle)}">${slotCount}</span> slots${homeCount ? ` · <span style="color:#c8102e">★${homeCount} maison</span>` : ''}${dirty ? ' · <span style="color:#d97706">non sauvegardé</span>' : ''}</span>
         </summary>
         <div class="tree-body">
         <div class="plan-actions" style="margin-top:8px">
@@ -1023,48 +1078,9 @@ function renderMapEditor() {
                   </div>
                   ${section.shelves.length ? '' : `<div class="small" style="padding:4px 0;color:#94a3b8">Aucune tablette — cliquez ➕ Tablette ci-dessus.</div>`}
                   <div class="plan-shelf-grid">
-                    ${section.shelves.map((positions, shelfIndex) => {
-                      const shelfFilled = allProductsCache.filter(p =>
-                        String(p.aisle) === String(layout.aisle) && p.side === side &&
-                        String(p.section) === String(sectionIndex + 1) &&
-                        String(p.shelf) === String(shelfIndex + 1)
-                      ).length;
-                      const shelfLabel = section.labels?.[shelfIndex] || '';
-                      const isLibre = positions === 0;
-                      const shelfTitle = shelfLabel ? `${isLibre ? '📦 ' : '📎 '}${esc(shelfLabel)}` : (isLibre ? `📦 T${shelfIndex + 1} Libre` : `T${shelfIndex + 1}`);
-                      const cardBg = isLibre ? 'background:#faf5ff;border-color:#a78bfa' : (shelfLabel ? 'background:#fffbf0;border-color:#fbbf24' : '');
-                      return `<div class="plan-shelf-card" style="${cardBg}">
-                        <div class="shelf-header" style="gap:4px">
-                          <span class="shelf-title">${shelfTitle}</span>
-                          ${isLibre
-                            ? `<span style="font-size:10px;color:#8b5cf6;font-weight:700">LIBRE · ${shelfFilled} prod.</span>
-                               <button title="Définir un nombre fixe de positions" style="background:none;border:1px solid #a78bfa;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
-                                       onclick="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},prompt('Nombre de positions fixes ?','8')||0)">→ Positions fixes</button>`
-                            : `<button title="Retirer une position" style="background:none;border:1px solid #e2e8f0;border-radius:5px;cursor:pointer;font-size:14px;padding:1px 8px;line-height:1.3;${positions<=1?'opacity:.3;cursor:default':''}" onclick="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},${positions-1})" ${positions<=1?'disabled':''}>➖</button>
-                               <input type="number" min="1" value="${positions}" title="Positions"
-                                     style="width:46px;padding:2px 4px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px;text-align:center"
-                                     onchange="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},this.value)"/>
-                               <button title="Ajouter une position" style="background:none;border:1px solid #e2e8f0;border-radius:5px;cursor:pointer;font-size:14px;padding:1px 8px;line-height:1.3" onclick="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},${positions+1})">➕</button>
-                               <span style="font-size:11px;color:#64748b">${shelfFilled} prod.</span>
-                               <button title="Passer en mode libre (cosmétiques, presentoirs...)" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
-                                       onclick="setShelfPositionCount('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},0)">📦 Libre</button>`
-                          }
-                          <button onclick="removeShelf('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex})" style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5" title="Supprimer cette tablette">✕ Suppr.</button>
-                        </div>
-                        <div style="display:flex;gap:6px;padding:5px 0 4px;border-top:1px solid rgba(0,0,0,.06);margin-top:4px">
-                          <button class="btn btn-outline btn-inline" style="font-size:12px;flex:1" onclick="moveShelf('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},-1)">↑ Monter</button>
-                          <button class="btn btn-outline btn-inline" style="font-size:12px;flex:1" onclick="moveShelf('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},1)">↓ Descendre</button>
-                        </div>
-                        <details class="struct-details">
-                          <summary class="struct-toggle" style="font-size:11px">⚙ Nom / étiquette</summary>
-                          <div class="field" style="margin-top:6px">
-                            <input type="text" value="${esc(shelfLabel)}" placeholder="Laisser vide = Tablette ${shelfIndex + 1}"
-                                   oninput="setShelfLabel('${esc(layout.aisle)}','${side}',${sectionIndex},${shelfIndex},this.value)"/>
-                          </div>
-                        </details>
-                        ${renderShelfProductList(layout.aisle, side, sectionIndex + 1, shelfIndex + 1, positions)}
-                      </div>`;
-                    }).join('')}
+                    ${section.shelves.map((positions, shelfIndex) =>
+                      renderShelfCard(layout.aisle, side, sectionIndex, shelfIndex, positions, (section.labels || [])[shelfIndex] || '')
+                    ).join('')}
                   </div>
                 </div>
               </details>`;
@@ -1239,7 +1255,9 @@ function setShelfPositionCount(aisle, side, sectionIndex, shelfIndex, rawValue) 
   section.shelves[shelfIndex] = nextValue;
   syncLayoutRecord(layout);
   markLayoutDirty(aisle);
-  refreshPlanUi();
+  // Only this shelf card (and the aisle slot total) changed — re-render just
+  // that, not the entire plan tree. Big win when tapping +/- on a large plan.
+  rerenderShelfCard(aisle, side, sectionIndex, shelfIndex);
 }
 
 async function createAisleLayout() {
