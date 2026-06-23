@@ -36,25 +36,41 @@ function querySearchVariants(query) {
   return variants;
 }
 
+// Normalized search fields, computed ONCE per product and cached on the object.
+// The catalog is re-scored on every (debounced) keystroke and for each query
+// variant — without this cache that re-ran ~8 regex normalizations per product
+// every time, which pegged the CPU and heated the device while typing.
+// The cache lives on the cached product object; upsertCachedProduct rebuilds the
+// object (fresh normalizeProduct) so edits naturally invalidate it.
+function productSearchFields(product) {
+  if (!product._sf) {
+    const name = normalizeSearchText(product.name);
+    const brand = normalizeSearchText(product.brand);
+    const description = normalizeSearchText(product.description);
+    const searchTerms = normalizeSearchText(product.search_terms);
+    const usageNotes = normalizeSearchText(product.usage_notes);
+    const alternatives = normalizeSearchText(product.alternative_suggestions);
+    const barcode = normalizedDigits(product.barcode);
+    const haystack = [name, brand, description, searchTerms, usageNotes, alternatives].join(' ');
+    // non-enumerable so it never gets copied into API payloads (e.g. {...product})
+    Object.defineProperty(product, '_sf', {
+      value: {name, brand, description, searchTerms, usageNotes, alternatives, barcode, haystack},
+      enumerable: false, writable: true, configurable: true,
+    });
+  }
+  return product._sf;
+}
+
 function productSearchText(product) {
-  return normalizeSearchText([
-    product.name, product.brand, product.description,
-    product.search_terms, product.usage_notes, product.alternative_suggestions
-  ].join(' '));
+  return productSearchFields(product).haystack;
 }
 
 function scoreProductForQuery(product, query) {
   const loweredQuery = normalizeSearchText(query);
   const digitsQuery = normalizedDigits(query);
   if (!loweredQuery && !digitsQuery) return 0;
-  const barcode = normalizedDigits(product.barcode);
-  const name = normalizeSearchText(product.name);
-  const brand = normalizeSearchText(product.brand);
-  const description = normalizeSearchText(product.description);
-  const searchTerms = normalizeSearchText(product.search_terms);
-  const usageNotes = normalizeSearchText(product.usage_notes);
-  const alternatives = normalizeSearchText(product.alternative_suggestions);
-  const haystack = productSearchText(product);
+  const f = productSearchFields(product);
+  const {barcode, name, brand, description, searchTerms, usageNotes, alternatives, haystack} = f;
   let score = 0;
   if (digitsQuery && barcode) {
     if (barcode === digitsQuery) score += 1200;

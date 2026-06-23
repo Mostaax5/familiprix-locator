@@ -144,14 +144,23 @@ function markLayoutDirty(aisle) { dirtyLayoutAisles.add(String(aisle)); }
 function clearLayoutDirty(aisle) { dirtyLayoutAisles.delete(String(aisle)); }
 function hasDirtyLayouts() { return dirtyLayoutAisles.size > 0; }
 
+// Normalizing a layout config is a deep rebuild. The rayon fields call this 3×
+// per keystroke, so memoize the last result by (aisle, config-reference). When a
+// layout mutates, syncLayoutRecord swaps in a new config object → reference
+// changes → cache misses and re-normalizes once. All callers are read-only.
+let _alcAisle = null, _alcRaw = null, _alcNorm = null;
 function getAisleLayoutConfig(aisle) {
   const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
-  return normalizeLayoutConfig(layout?.config, layout?.max_section, layout?.max_shelf, layout?.max_position);
+  const raw = layout ? layout.config : null;
+  if (_alcNorm && String(aisle) === _alcAisle && raw === _alcRaw) return _alcNorm;
+  _alcNorm = normalizeLayoutConfig(raw, layout?.max_section, layout?.max_shelf, layout?.max_position);
+  _alcAisle = String(aisle);
+  _alcRaw = raw;
+  return _alcNorm;
 }
 
 function getConfiguredLayoutForAisle(aisle) {
-  const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
-  return normalizeLayoutConfig(layout?.config, layout?.max_section, layout?.max_shelf, layout?.max_position);
+  return getAisleLayoutConfig(aisle);
 }
 
 // ── Slot helpers ──────────────────────────────────────────────────────────────
