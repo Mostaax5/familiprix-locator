@@ -114,10 +114,10 @@ def init_db():
     db = connect_db()
     if db.backend == "postgres":
         init_postgres_db(db)
-        print("Base de donnees partagee prete : PostgreSQL")
+        print("Base de données partagee prete : PostgreSQL")
     else:
         init_sqlite_db(db)
-        print(f"Base de donnees prete : {DB_PATH}")
+        print(f"Base de données prete : {DB_PATH}")
     db.commit()
     ensure_best_effort_unique_indexes(db)
     db.commit()
@@ -244,7 +244,7 @@ def init_postgres_db(db):
     db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS product_code TEXT DEFAULT ''")
     db.execute("CREATE INDEX IF NOT EXISTS idx_products_product_code ON products(product_code)")
     # Façades from the planogram = how many positions a product spreads across.
-    # Saved for general info only; NOT used for placement (one product / position).
+    # Saved for général info only; NOT used for placement (one product / position).
     db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS facings INTEGER DEFAULT 1")
 
     db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS max_section TEXT NOT NULL DEFAULT '1'")
@@ -391,7 +391,7 @@ def init_sqlite_db(db):
         db.execute("ALTER TABLE products ADD COLUMN product_code TEXT DEFAULT ''")
     db.execute("CREATE INDEX IF NOT EXISTS idx_products_product_code ON products(product_code)")
     # Façades from the planogram (positions a product spreads across) — saved for
-    # general info only; NOT used for placement.
+    # général info only; NOT used for placement.
     if "facings" not in existing_columns:
         db.execute("ALTER TABLE products ADD COLUMN facings INTEGER DEFAULT 1")
 
@@ -410,7 +410,7 @@ def ensure_best_effort_unique_indexes(db):
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_products_unique_slot ON products(aisle, side, section, shelf, position)"
         )
     except DatabaseIntegrityError:
-        print("Avertissement: impossible d imposer l unicite des positions car des doublons existent deja.")
+        print("Avertissement: impossible d imposer l unicité des positions car des doublons existent déjà.")
 
     # Barcode uniqueness intentionally removed: same product can be at multiple locations.
     try:

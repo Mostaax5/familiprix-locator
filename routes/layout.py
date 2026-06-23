@@ -29,7 +29,7 @@ def build_default_layout_config(max_section, max_shelf, max_position):
             "Gauche": {"sections": json.loads(json.dumps(section_template))},
             "Droite": {"sections": json.loads(json.dumps(section_template))},
         },
-        "presentoirs": [],
+        "présentoirs": [],
     }
 
 
@@ -80,7 +80,7 @@ def normalize_layout_config(config_value, max_section="1", max_shelf="5", max_po
     normalized_facade_a = norm_fixture(config.get("facade_a") if isinstance(config, dict) else None)
     normalized_facade_b = norm_fixture(config.get("facade_b") if isinstance(config, dict) else None)
 
-    raw_pres = config.get("presentoirs", []) if isinstance(config, dict) else []
+    raw_pres = config.get("présentoirs", []) if isinstance(config, dict) else []
     if not isinstance(raw_pres, list): raw_pres = []
     normalized_pres = []
     for p in raw_pres:
@@ -101,7 +101,7 @@ def normalize_layout_config(config_value, max_section="1", max_shelf="5", max_po
             facades = [{"name": "Façade 1", "shelves": fx["shelves"], "labels": fx["labels"]}]
         normalized_pres.append({"name": name, "facades": facades})
 
-    return {"sides": normalized_sides, "facade_a": normalized_facade_a, "facade_b": normalized_facade_b, "presentoirs": normalized_pres}
+    return {"sides": normalized_sides, "facade_a": normalized_facade_a, "facade_b": normalized_facade_b, "présentoirs": normalized_pres}
 
 
 def layout_metrics(config):
@@ -132,7 +132,7 @@ def _get_shelves_for_side(config, side):
         return (config.get("facade_a") or {}).get("shelves", []), False
     if side == "Façade B":
         return (config.get("facade_b") or {}).get("shelves", []), False
-    for pres in (config.get("presentoirs") or []):
+    for pres in (config.get("présentoirs") or []):
         pname = pres.get("name", "")
         for facade in (pres.get("facades") or []):
             fname = facade.get("name", "")
@@ -172,13 +172,13 @@ def remove_products_outside_layout(db, aisle, config):
 def validate_layout_slot(db, aisle, side, section, shelf, position):
     row = get_layout_row(db, aisle)
     if not row:
-        return False, f"L allée {aisle} n existe pas dans le plan."
+        return False, f"L’allée {aisle} n’existe pas dans le plan."
     config = normalize_layout_config(row["config_json"], row["max_section"], row["max_shelf"], row["max_position"])
     if not product_fits_layout(
         {"side": side, "section": section, "shelf": shelf, "position": position},
         config,
     ):
-        return False, "Cette position n existe pas dans le plan de l allée."
+        return False, "Cette position n’existe pas dans le plan de l’allée."
     return True, ""
 
 
@@ -223,13 +223,13 @@ def create_layout_aisle():
     config = normalize_layout_config(data.get("config"), data.get("max_section", "0"), data.get("max_shelf", "0"), data.get("max_position", "0"))
     max_section, max_shelf, max_position = layout_metrics(config)
     if not aisle:
-        return jsonify({"error": "Numero d allée requis."}), 400
+        return jsonify({"error": "Numero’d allée requis."}), 400
     if not re.fullmatch(r"\d+", aisle):
-        return jsonify({"error": "Le numero d allée doit etre numerique."}), 400
+        return jsonify({"error": "Le numéro d allée doit etre numérique."}), 400
     db = get_db()
     exists = db.execute("SELECT aisle FROM aisle_layouts WHERE aisle=?", (aisle,)).fetchone()
     if exists:
-        return jsonify({"error": f"L allée {aisle} existe deja."}), 409
+        return jsonify({"error": f"L’allée {aisle} existe déjà."}), 409
     db.execute(
         """
         INSERT INTO aisle_layouts (aisle, max_section, max_shelf, max_position, config_json, enabled, modified_by, modified_at)
@@ -262,7 +262,7 @@ def update_layout_aisle(aisle):
     removed_products = remove_products_outside_layout(db, aisle, config) if result.rowcount else 0
     db.commit()
     if result.rowcount == 0:
-        return jsonify({"error": "Allée non trouvee."}), 404
+        return jsonify({"error": "Allée non trouvée."}), 404
     return jsonify({"success": True, "removed_products": removed_products})
 
 
@@ -278,8 +278,8 @@ def delete_layout_aisle(aisle):
     result = db.execute("DELETE FROM aisle_layouts WHERE aisle=?", (aisle,))
     db.commit()
     if result.rowcount == 0:
-        return jsonify({"error": "Allée non trouvee."}), 404
-    return jsonify({"success": True, "message": f"Allée {aisle} retiree par {username}. {removed_products} produit(s) supprime(s)."})
+        return jsonify({"error": "Allée non trouvée."}), 404
+    return jsonify({"success": True, "message": f"Allée {aisle} retirée par {username}. {removed_products} produit(s) supprime(s)."})
 
 
 @layout_bp.route("/api/layout/aisles/<aisle>/swap-sections", methods=["POST"])

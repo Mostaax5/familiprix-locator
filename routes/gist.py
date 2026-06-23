@@ -149,7 +149,7 @@ def _restore_from_gist_if_empty():
                 pass
         db.commit()
         db.close()
-        print(f"[Gist] Base de donnees restauree automatiquement ({imported} produits)")
+        print(f"[Gist] Base de données restauree automatiquement ({imported} produits)")
     except Exception as exc:
         print(f"[Gist] Restauration automatique echouee: {exc}")
 

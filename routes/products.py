@@ -206,8 +206,8 @@ def schedule_image_fill(barcodes):
 def integrity_conflict_message(exc):
     text = str(exc).lower()
     if "barcode" in text:
-        return "Ce code-barres existe deja ailleurs dans la base."
-    return "Cette position est deja occupee."
+        return "Ce code-barres existe déjà ailleurs dans la base."
+    return "Cette position’est déjà occupée."
 
 
 def product_search_text(product):
@@ -393,7 +393,7 @@ def add_product():
     occupied = find_product_at_position(db, aisle, side, section, shelf, position)
     if occupied:
         return jsonify({
-            "error": f'Position deja occupee par "{occupied["name"]}" (code {occupied["barcode"] or "sans code"}).'
+            "error": f'Position déjà occupée par "{occupied["name"]}" (code {occupied["barcode"] or "sans code"}).'
         }), 409
 
     try:
@@ -453,7 +453,7 @@ def update_product(product_id):
     )
     if occupied:
         return jsonify({
-            "error": f'Position deja occupee par "{occupied["name"]}" (code {occupied["barcode"] or "sans code"}).'
+            "error": f'Position déjà occupée par "{occupied["name"]}" (code {occupied["barcode"] or "sans code"}).'
         }), 409
 
     # Never blank an image: keep the new one, else the existing one, else any
@@ -507,7 +507,7 @@ def delete_product(product_id):
     db.commit()
     from routes.gist import _schedule_gist_backup
     _schedule_gist_backup(db)
-    return jsonify({"success": True, "message": f'Produit retiré par {username}: {product["name"]} (conservé dans l historique)'})
+    return jsonify({"success": True, "message": f'Produit retiré par {username}: {product["name"]} (conservé dans l’historique)'})
 
 
 @products_bp.route("/api/products/removed", methods=["GET"])

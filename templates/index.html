@@ -7,7 +7,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-title" content="Localisateur"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
-<meta name="format-detection" content="telephone=no"/>
+<meta name="format-detection" content="téléphone=no"/>
 <link rel="manifest" href="/manifest.json"/>
 <link rel="apple-touch-icon" href="/static/icon.svg"/>
 <title>FamiliPrix - Localisateur</title>
@@ -47,7 +47,7 @@
       <button class="btn btn-inline" onclick="saveEditorName()">Nommer</button>
     </div>
     <div id="editorSessionInfo" class="inline-note">Optionnel — jamais obligatoire. Si vous mettez un nom, il sert à savoir qui a modifié quoi et à étiqueter les données pour l'IA. Vous pouvez l'ignorer.</div>
-    <div id="backendStatusInfo" class="inline-note">Verification de la base partagee...</div>
+    <div id="backendStatusInfo" class="inline-note">Vérification de la base partagee...</div>
   </div>
 </div>
 
@@ -131,10 +131,10 @@
     <summary class="details-summary">📱 Compatibilite appareil</summary>
     <div class="details-body">
       <div class="device-grid">
-        <div><span class="small">Camera</span><div id="cameraSupport" class="pill">Verification...</div></div>
-        <div><span class="small">Lecteur code-barres</span><div id="scannerSupport" class="pill">Verification...</div></div>
+        <div><span class="small">Camera</span><div id="cameraSupport" class="pill">Vérification...</div></div>
+        <div><span class="small">Lecteur code-barres</span><div id="scannerSupport" class="pill">Vérification...</div></div>
       </div>
-      <div id="supportHint" class="section-note" style="margin-top:10px">Sur iPhone et Android, ouvrez l app en HTTPS pour permettre l acces camera.</div>
+      <div id="supportHint" class="section-note" style="margin-top:10px">Sur iPhone et Android, ouvrez l’app en HTTPS pour permettre l acces camera.</div>
     </div>
   </details>
 
@@ -144,7 +144,7 @@
 <div id="search" class="section content">
   <div class="card">
     <div class="section-title">Recherche rapide</div>
-    <div class="section-note">Scannez un code-barres avec la camera pour trouver directement le produit. Vous pouvez aussi chercher par nom, marque, mots-cles clients ou les 4 derniers chiffres du code.</div>
+    <div class="section-note">Scannez un code-barres avec la camera pour trouver directement le produit. Vous pouvez aussi chercher par nom, marque, mots-clés clients ou les 4 derniers chiffres du code.</div>
     <div class="card scanner" style="margin-top:10px;margin-bottom:0">
       <div class="scanner-viewport">
         <video id="searchCameraPreview" playsinline muted></video>
@@ -188,16 +188,16 @@
 <div id="client" class="section content">
   <div class="card">
     <div class="section-title">Questions client</div>
-    <div class="section-note">Ecrivez la demande du client. Le systeme cherche d abord avec vos regles et la base du magasin. Ensuite, l IA aide seulement a expliquer, comparer et dire quand il faut passer au pharmacien.</div>
+    <div class="section-note">Ecrivez la demande du client. Le système cherche d’abord avec vos règles et la base du magasin. Ensuite, l’IA aide seulement a expliquer, comparer et dire quand il faut passer au pharmacien.</div>
     <div class="field">
-      <label class="label" for="clientQuestion">Question ou mots-cles</label>
+      <label class="label" for="clientQuestion">Question ou mots-clés</label>
       <textarea id="clientQuestion" placeholder="Ex: quelque chose pour la gorge irritee, la toux seche ou le nez bouche" oninput="scheduleClientSearch()"></textarea>
     </div>
     <div class="tool-row">
       <button class="btn btn-inline" onclick="runClientSearch()">Trouver produits</button>
-      <button class="btn btn-outline btn-inline" onclick="generateClientHelp()">Reponse client (IA)</button>
+      <button class="btn btn-outline btn-inline" onclick="generateClientHelp()">Réponse client (IA)</button>
     </div>
-    <div id="clientHelpStatus" class="inline-note">Commencez par ecrire la question du client. Les produits proposes viennent d abord de la base du magasin.</div>
+    <div id="clientHelpStatus" class="inline-note">Commencez par ecrire la question du client. Les produits proposes viennent d’abord de la base du magasin.</div>
   </div>
   <div id="clientAdvice"></div>
   <div id="clientMatches"></div>
@@ -242,7 +242,7 @@
       </div>
       <div class="field">
         <label class="label">&nbsp;</label>
-        <button class="btn" onclick="savePlanScanStart()">Utiliser ce point de depart</button>
+        <button class="btn" onclick="savePlanScanStart()">Utiliser ce point de départ</button>
       </div>
     </div>
     <div class="field">
@@ -260,7 +260,7 @@
 
   <div class="card">
     <div class="section-title">Importer un planogramme PDF</div>
-    <div class="section-note">Importez le PDF de planogramme Familiprix. Choisissez l allée, le côté et la section de départ — les produits sont insérés tablette par tablette, position par position, dans l ordre du planogramme.</div>
+    <div class="section-note">Importez le PDF de planogramme Familiprix. Choisissez l’allée, le côté et la section de départ — les produits sont insérés tablette par tablette, position par position, dans l’ordre du planogramme.</div>
 
     <div class="tool-row">
       <label class="btn btn-outline btn-inline" style="cursor:pointer">
@@ -334,7 +334,7 @@
 
   <div class="card">
     <div class="section-title">Sauvegarde de la base</div>
-    <div class="section-note">Telechargez une copie complete du magasin (produits + plan) pour la partager ou la garder. Importez un fichier de sauvegarde pour restaurer ou fusionner les donnees.</div>
+    <div class="section-note">Telechargez une copie complete du magasin (produits + plan) pour la partager ou la garder. Importez un fichier de sauvegarde pour restaurer ou fusionner les données.</div>
     <div class="tool-row">
       <button class="btn btn-inline" onclick="exportDatabase()">↗ Partager / Sauvegarder la base</button>
       <label class="btn btn-outline btn-inline" style="cursor:pointer">
@@ -351,7 +351,7 @@
 
   <div class="card">
     <div class="section-title">Sauvegarde GitHub Gist</div>
-    <div id="gistStatusMsg" class="section-note">Verification...</div>
+    <div id="gistStatusMsg" class="section-note">Vérification...</div>
     <div class="tool-row" id="gistActions" style="display:none">
       <button class="btn btn-inline" onclick="gistBackupNow()">☁ Sauvegarder sur GitHub maintenant</button>
       <button class="btn btn-outline btn-inline" onclick="gistRestoreNow()">↓ Restaurer depuis GitHub</button>

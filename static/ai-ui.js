@@ -37,11 +37,11 @@ function renderClientAdvice(advice, hasStoreProducts) {
   if (!target) return;
   if (!advice) { target.innerHTML = ''; return; }
   const generalNotice = !hasStoreProducts
-    ? `<div class="msg warning" style="margin-bottom:10px;font-weight:600;">⚠ Aucun produit du magasin n a ete trouve pour cette demande. Cette reponse est basee sur des connaissances generales — verifiez l inventaire avant de conseiller.</div>`
+    ? `<div class="msg warning" style="margin-bottom:10px;font-weight:600;">⚠ Aucun produit du magasin n a ete trouve pour cette demande. Cette réponse est basee sur des connaissances generales — verifiez l inventaire avant de conseiller.</div>`
     : '';
   target.innerHTML = `
     <div class="advice-card">
-      <div class="section-title">Reponse client</div>
+      <div class="section-title">Réponse client</div>
       ${generalNotice}
       ${advice.summary ? `<div class="advice-summary">${esc(advice.summary)}</div>` : ''}
       ${advice.recommended_product_names?.length ? `
@@ -98,7 +98,7 @@ function runClientSearch(showEmptyMessage=true) {
   renderClientMatches(currentClientMatches, question);
   if (status) {
     status.textContent = currentClientMatches.length
-      ? `${currentClientMatches.length} produit(s) en stock. Cliquez "Reponse client (IA)" pour obtenir des conseils.`
+      ? `${currentClientMatches.length} produit(s) en stock. Cliquez "Réponse client (IA)" pour obtenir des conseils.`
       : 'Aucun produit en stock pour cette demande. L IA peut quand meme repondre avec des conseils generaux.';
   }
   return currentClientMatches;
@@ -109,17 +109,17 @@ async function generateClientHelp() {
   const status = document.getElementById('clientHelpStatus');
   const matches = runClientSearch(false);
   if (!question) {
-    if (status) status.textContent = 'Ecrivez d abord la question du client.';
+    if (status) status.textContent = 'Ecrivez d’abord la question du client.';
     return;
   }
   if (!backendInfo.ai_enabled) {
-    if (status) status.textContent = 'IA inactive. Ajoutez GEMINI_API_KEY sur Render pour la reponse client guidee.';
+    if (status) status.textContent = 'IA inactive. Ajoutez GEMINI_API_KEY sur Render pour la réponse client guidee.';
     renderClientAdvice(null);
     return;
   }
   if (status) {
     status.textContent = matches.length
-      ? `Generation de la reponse via ${aiProviderLabel()} (${matches.length} produit(s) en stock)...`
+      ? `Generation de la réponse via ${aiProviderLabel()} (${matches.length} produit(s) en stock)...`
       : `Aucun produit en stock. L IA va repondre avec des conseils generaux...`;
   }
   const result = await apiGenerateClientHelp({question, products: matches.slice(0, 20).map(sanitizeProductForClientAi)});
@@ -129,7 +129,7 @@ async function generateClientHelp() {
     return;
   }
   renderClientAdvice(result.advice, matches.length > 0);
-  if (status) status.textContent = `Reponse generee via ${aiProviderLabel()}. Verifiez avant de conseiller.`;
+  if (status) status.textContent = `Réponse generee via ${aiProviderLabel()}. Verifiez avant de conseiller.`;
 }
 
 window.AppAI = { runClientSearch, generateClientHelp, scheduleClientSearch };

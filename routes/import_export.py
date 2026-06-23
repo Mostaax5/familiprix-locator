@@ -152,7 +152,7 @@ def parse_planogram_pdf():
         import pdfplumber
         import io as _io
     except ImportError:
-        return jsonify({"success": False, "error": "pdfplumber n est pas installe sur ce serveur."}), 503
+        return jsonify({"success": False, "error": "pdfplumber n’est pas installe sur ce serveur."}), 503
 
     if "file" not in request.files:
         return jsonify({"success": False, "error": "Aucun fichier fourni."}), 400
@@ -252,13 +252,13 @@ def parse_planogram_pdf():
                             "position": p_int,
                             "barcode":  upc,
                             "code_familiprix": g("c"),
-                            "facings":  max(1, facings),   # general info only, not placement
+                            "facings":  max(1, facings),   # général info only, not placement
                             "name":     desc,
                             "is_new":   ajout,
                             "en_stock": en_stock,
                         })
     except Exception as exc:
-        return jsonify({"success": False, "error": f"Erreur d analyse PDF: {exc}"}), 500
+        return jsonify({"success": False, "error": f"Erreur d’analyse PDF: {exc}"}), 500
 
     products.sort(key=lambda x: (x["tablette"], x["position"]))
     tablettes = {}

@@ -11,7 +11,7 @@ function defaultLayoutConfig(maxSection=0, maxShelf=0, maxPosition=0) {
     sides: {Gauche: {sections: makeSections()}, Droite: {sections: makeSections()}},
     facade_a: {shelves: [], labels: []},   // end cap at entrance of aisle
     facade_b: {shelves: [], labels: []},   // end cap at far end of aisle
-    presentoirs: [],                       // freestanding displays in corridor
+    présentoirs: [],                       // freestanding displays in corridor
   };
 }
 
@@ -66,7 +66,7 @@ function normalizeLayoutConfig(config, maxSection=0, maxShelf=0, maxPosition=0) 
     const rawL = Array.isArray(f?.labels) ? f.labels : [];
     return {name: fname, shelves: sh, labels: sh.map((_, i) => String(rawL[i]||''))};
   };
-  base.presentoirs = (Array.isArray(source.presentoirs) ? source.presentoirs : [])
+  base.présentoirs = (Array.isArray(source.présentoirs) ? source.présentoirs : [])
     .map(p => {
       if (!p || typeof p !== 'object') return null;
       const name = String(p.name || 'Présentoir').trim() || 'Présentoir';
@@ -141,7 +141,7 @@ function buildSlotsFromConfig(aisle, config, sideFilter=null) {
   });
   addFixture('Façade B', config.facade_b);
   // Présentoirs: standalone — each façade is a separate side, only when filtering
-  (config.presentoirs || []).forEach(pres => {
+  (config.présentoirs || []).forEach(pres => {
     (pres.facades || []).forEach(facade => {
       const sideName = `${pres.name} - ${facade.name}`;
       if (sideFilter && sideName !== sideFilter) return;
@@ -356,8 +356,8 @@ function updateBackendStatusInfo() {
   }
   msgs.push(backendInfo.ai_enabled
     ? `Aide client IA active via ${aiProviderLabel()}.`
-    : 'Aide client IA inactive tant que GEMINI_API_KEY n est pas configuree.');
-  if (Number(backendInfo.duplicate_slots || 0) > 0) msgs.push(`Attention: ${backendInfo.duplicate_slots} position(s) contiennent deja plusieurs produits.`);
+    : 'Aide client IA inactive tant que GEMINI_API_KEY n’est pas configurée.');
+  if (Number(backendInfo.duplicate_slots || 0) > 0) msgs.push(`Attention: ${backendInfo.duplicate_slots} position(s) contiennent déjà plusieurs produits.`);
   if (Number(backendInfo.duplicate_barcodes || 0) > 0) msgs.push(`Attention: ${backendInfo.duplicate_barcodes} code(s)-barres sont dupliques dans la base.`);
   target.textContent = msgs.join(' ');
 }
@@ -486,7 +486,7 @@ function renderScanPathPreview() {
   if (!div) return;
   const slots = getAllScanSlots();
   if (!slots.length) {
-    div.innerHTML = '<div class="empty" style="padding:1rem 0">Aucun slot de scan pour le moment. Commencez par creer une allée dans le plan.</div>';
+    div.innerHTML = '<div class="empty" style="padding:1rem 0">Aucun slot de scan pour le moment. Commencez par créer une allée dans le plan.</div>';
     return;
   }
   const previewSelection = getPlanPreviewSelection();
@@ -736,7 +736,7 @@ function productCard(p, showDelete=true, showAiButton=true) {
       ${p.usage_notes ? `<div class="desc-text">${esc(p.usage_notes)}</div>` : ''}
       ${p.search_terms ? `<div class="meta-row"><span class="meta-label">Mots-clés</span><span class="small">${esc(p.search_terms)}</span></div>` : ''}
       ${p.alternative_suggestions ? `<div class="meta-row"><span class="meta-label">Alternatives</span><span class="small">${esc(p.alternative_suggestions)}</span></div>` : ''}
-      ${showAiButton && p.id && backendInfo.ai_enabled ? `<div class="tool-row"><button class="btn btn-outline btn-inline" onclick="enrichStoredProductWithAi(${p.id})">Generer aide client (IA)</button></div>` : ''}
+      ${showAiButton && p.id && backendInfo.ai_enabled ? `<div class="tool-row"><button class="btn btn-outline btn-inline" onclick="enrichStoredProductWithAi(${p.id})">Générer aide client (IA)</button></div>` : ''}
     </div>
   </div>`;
 }
@@ -921,7 +921,7 @@ function renderMapEditor() {
                       <input id="sideTemplatePositions-${layout.aisle}-${side}" type="number" min="0" value="${sections[0]?.shelves?.[0] ?? 0}"/>
                     </div>
                   </div>
-                  <button class="btn btn-outline btn-inline" style="margin-top:8px" onclick="applySideTemplate('${esc(layout.aisle)}','${side}')">Appliquer modele uniforme a ${sideLabel}</button>
+                  <button class="btn btn-outline btn-inline" style="margin-top:8px" onclick="applySideTemplate('${esc(layout.aisle)}','${side}')">Appliquer modèle uniforme a ${sideLabel}</button>
                   <div class="field" style="margin-top:8px">
                     <label class="label" for="sectionCount-${layout.aisle}-${side}">Nombre de sections</label>
                     <input id="sectionCount-${layout.aisle}-${side}" type="number" min="0" value="${sections.length}" onchange="setSideSectionCount('${esc(layout.aisle)}','${side}', this.value)"/>
@@ -1013,7 +1013,7 @@ function renderMapEditor() {
         </div>
       </details>`;
       }).join('')
-    : '<div class="empty">Aucune allée configuree.</div>';
+    : '<div class="empty">Aucune allée configurée.</div>';
   if (!msgDiv.textContent) msgDiv.innerHTML = '';
 }
 
@@ -1120,7 +1120,7 @@ function _isLibreShelf(aisle, side, section, shelf) {
   }
   if (side === 'Façade A') return (config?.facade_a?.shelves?.[ti] ?? -1) === 0;
   if (side === 'Façade B') return (config?.facade_b?.shelves?.[ti] ?? -1) === 0;
-  for (const pres of (config?.presentoirs || [])) {
+  for (const pres of (config?.présentoirs || [])) {
     for (const f of (pres.facades || [])) {
       if (side === `${pres.name} - ${f.name}`) return (f.shelves?.[ti] ?? -1) === 0;
     }
@@ -1137,7 +1137,7 @@ function getShelfLabel(aisle, side, section, shelf) {
   if (side === 'Façade A') return config?.facade_a?.labels?.[ti] || '';
   if (side === 'Façade B') return config?.facade_b?.labels?.[ti] || '';
   // Présentoir façade: side = "{pres.name} - {facade.name}"
-  for (const pres of (config?.presentoirs || [])) {
+  for (const pres of (config?.présentoirs || [])) {
     for (const f of (pres.facades || [])) {
       if (side === `${pres.name} - ${f.name}`) return f.labels?.[ti] || '';
     }
@@ -1251,7 +1251,7 @@ function applyAisleLayoutToCursor(aisle) {
   updateCursorUi();
   planStartDraft = getCursorSelection();
   renderPlanStartEditor();
-  document.getElementById('addMsg').innerHTML = `<div class="msg success">${buildSlotsFromConfig(aisle, config || defaultLayoutConfig()).length ? `Le scan utilisera maintenant l allée ${esc(aisle)}.` : `L allée ${esc(aisle)} n a aucune position de scan pour le moment.`}</div>`;
+  document.getElementById('addMsg').innerHTML = `<div class="msg success">${buildSlotsFromConfig(aisle, config || defaultLayoutConfig()).length ? `Le scan utilisera maintenant l’allée ${esc(aisle)}.` : `L’allée ${esc(aisle)} n’a aucune position de scan pour le moment.`}</div>`;
 }
 
 async function removeAisleLayout(aisle) {
@@ -1259,8 +1259,8 @@ async function removeAisleLayout(aisle) {
   const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
   const productCount = Number(layout?.product_count || 0);
   const question = productCount
-    ? `Supprimer l allée ${aisle} ?\n\nCela supprimera aussi ${productCount} produit(s) qui sont dans cette allée.`
-    : `Supprimer l allée ${aisle} ?`;
+    ? `Supprimer l’allée ${aisle} ?\n\nCela supprimera aussi ${productCount} produit(s) qui sont dans cette allée.`
+    : `Supprimer l’allée ${aisle} ?`;
   if (!confirm(question)) return;
   let data = null;
   try { data = await apiDeleteLayoutAisle(aisle); }
@@ -1269,8 +1269,8 @@ async function removeAisleLayout(aisle) {
   const success = Boolean(data && data.success);
   msgDiv.className = success ? 'msg success' : 'msg error';
   msgDiv.textContent = success
-    ? (data.message || `Allée ${aisle} retiree.`)
-    : ((data && data.error) || `Impossible de supprimer l allée ${aisle}.`);
+    ? (data.message || `Allée ${aisle} retirée.`)
+    : ((data && data.error) || `Impossible de supprimer l’allée ${aisle}.`);
   if (success) {
     mapLayouts = mapLayouts.filter(item => String(item.aisle) !== String(aisle));
     clearLayoutDirty(aisle);
@@ -1307,7 +1307,7 @@ async function exportDatabase() {
     const filename = `familiprix-backup-${new Date().toISOString().slice(0,10)}.json`;
     const file = new File([blob], filename, {type: 'application/json'});
     if (navigator.canShare && navigator.canShare({files: [file]})) {
-      await navigator.share({files: [file], title: 'Sauvegarde Familiprix', text: 'Base de donnees Familiprix Localisateur'});
+      await navigator.share({files: [file], title: 'Sauvegarde Familiprix', text: 'Base de données Familiprix Localisateur'});
       if (msg) { msg.className = 'msg success'; msg.textContent = 'Fichier partage avec succes.'; }
     } else {
       const url = URL.createObjectURL(blob);
@@ -1361,7 +1361,7 @@ async function importDatabase(input) {
 async function resetDatabase(wipeLayouts) {
   const msg = document.getElementById('exportImportMsg');
   const what = wipeLayouts ? 'TOUS les produits ET le plan du magasin' : 'tous les produits';
-  if (!confirm(`Effacer ${what}? Cette action est irreversible. Faites une sauvegarde d abord si necessaire.`)) return;
+  if (!confirm(`Effacer ${what}? Cette action’est irreversible. Faites une sauvegarde d’abord si nécessaire.`)) return;
   if (!confirm('Confirmation finale: effacer definitivement?')) return;
   if (msg) { msg.className = 'msg info'; msg.textContent = 'Suppression en cours...'; }
   try {
@@ -1373,7 +1373,7 @@ async function resetDatabase(wipeLayouts) {
     if (!res.ok || !data.success) throw new Error(data.error || 'Erreur');
     if (msg) {
       msg.className = 'msg success';
-      msg.textContent = `Base nettoyee: ${data.deleted_products} produit(s) supprime(s)${wipeLayouts ? `, ${data.deleted_layouts} allée(s) supprimee(s)` : ''}.`;
+      msg.textContent = `Base nettoyee: ${data.deleted_products} produit(s) supprime(s)${wipeLayouts ? `, ${data.deleted_layouts} allée(s) supprimée(s)` : ''}.`;
     }
     await refreshProductsCache(true);
     if (wipeLayouts) { await refreshLayoutsCache(true); renderMapEditor(); }
@@ -1539,33 +1539,33 @@ function setFacadeShelfLabel(aisle, facadeKey, shelfIndex, value) {
 function addPresentoir(aisle) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
-  if (!layout.config.presentoirs) layout.config.presentoirs = [];
-  const n = layout.config.presentoirs.length + 1;
-  layout.config.presentoirs.push({name: `Présentoir ${n}`, facades: [{name: 'Façade 1', shelves: [8], labels: ['']}]});
+  if (!layout.config.présentoirs) layout.config.présentoirs = [];
+  const n = layout.config.présentoirs.length + 1;
+  layout.config.présentoirs.push({name: `Présentoir ${n}`, facades: [{name: 'Façade 1', shelves: [8], labels: ['']}]});
   markLayoutDirty(aisle); refreshPlanUi();
 }
 
 function removePresentoir(aisle, presIndex) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
-  const pres = layout.config.presentoirs?.[presIndex];
+  const pres = layout.config.présentoirs?.[presIndex];
   if (!pres) return;
   if (!confirm(`Supprimer "${pres.name}" ? Les produits assignés restent en base.`)) return;
-  layout.config.presentoirs.splice(presIndex, 1);
+  layout.config.présentoirs.splice(presIndex, 1);
   markLayoutDirty(aisle); refreshPlanUi();
 }
 
 function renamePresentoir(aisle, presIndex, value) {
   const layout = getMutableLayout(aisle);
-  if (!layout || !layout.config.presentoirs?.[presIndex]) return;
-  layout.config.presentoirs[presIndex].name = value.trim() || `Présentoir ${presIndex + 1}`;
+  if (!layout || !layout.config.présentoirs?.[presIndex]) return;
+  layout.config.présentoirs[presIndex].name = value.trim() || `Présentoir ${presIndex + 1}`;
   markLayoutDirty(aisle);
 }
 
 function addPresentoirFacade(aisle, presIndex) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
-  const pres = layout.config.presentoirs?.[presIndex];
+  const pres = layout.config.présentoirs?.[presIndex];
   if (!pres) return;
   if (!pres.facades) pres.facades = [];
   const n = pres.facades.length + 1;
@@ -1576,7 +1576,7 @@ function addPresentoirFacade(aisle, presIndex) {
 function removePresentoirFacade(aisle, presIndex, facadeIndex) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
-  const pres = layout.config.presentoirs?.[presIndex];
+  const pres = layout.config.présentoirs?.[presIndex];
   if (!pres || !pres.facades?.[facadeIndex]) return;
   if (pres.facades.length === 1) { alert('Un présentoir doit avoir au moins une façade.'); return; }
   if (!confirm(`Supprimer "${pres.facades[facadeIndex].name}" ?`)) return;
@@ -1587,7 +1587,7 @@ function removePresentoirFacade(aisle, presIndex, facadeIndex) {
 function renamePresentoirFacade(aisle, presIndex, facadeIndex, value) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
-  const facade = layout.config.presentoirs?.[presIndex]?.facades?.[facadeIndex];
+  const facade = layout.config.présentoirs?.[presIndex]?.facades?.[facadeIndex];
   if (!facade) return;
   facade.name = value.trim() || `Façade ${facadeIndex + 1}`;
   markLayoutDirty(aisle);
@@ -1596,7 +1596,7 @@ function renamePresentoirFacade(aisle, presIndex, facadeIndex, value) {
 function setPresentoirShelfCount(aisle, presIndex, facadeIndex, rawValue) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
-  const facade = layout.config.presentoirs?.[presIndex]?.facades?.[facadeIndex];
+  const facade = layout.config.présentoirs?.[presIndex]?.facades?.[facadeIndex];
   if (!facade) return;
   _fixFixture(facade);
   const count = Math.max(0, parseInt(rawValue) || 0);
@@ -1609,7 +1609,7 @@ function setPresentoirShelfCount(aisle, presIndex, facadeIndex, rawValue) {
 function setPresentoirShelfPositions(aisle, presIndex, facadeIndex, shelfIndex, rawValue) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
-  const facade = layout.config.presentoirs?.[presIndex]?.facades?.[facadeIndex];
+  const facade = layout.config.présentoirs?.[presIndex]?.facades?.[facadeIndex];
   if (facade) { facade.shelves[shelfIndex] = Math.max(0, parseInt(rawValue) || 0); markLayoutDirty(aisle); refreshPlanUi(); }
 }
 
@@ -1679,9 +1679,9 @@ function renderFacadesSection(aisle, config) {
 }
 
 function renderPresentoirSection(aisle, config) {
-  const presentoirs = config.presentoirs || [];
+  const présentoirs = config.présentoirs || [];
 
-  const presHtml = presentoirs.map((pres, pi) => {
+  const presHtml = présentoirs.map((pres, pi) => {
     const presId = `planPres-${aisle}-${pi}`;
     const totalProds = allProductsCache.filter(p =>
       String(p.aisle) === String(aisle) && (pres.facades||[]).some(f => p.side === `${pres.name} - ${f.name}`)
@@ -1972,7 +1972,7 @@ async function importPlanogram() {
       refreshProductsCache();
       loadPlanogramHistory();
     } else {
-      msg.textContent = data.error || 'Erreur lors de l importation.';
+      msg.textContent = data.error || 'Erreur lors de l’importation.';
       msg.style.color = '#c8102e';
     }
   } catch(e) {
@@ -2002,7 +2002,7 @@ async function loadPlanogramHistory() {
       </div>`;
     }).join('');
   } catch (e) {
-    box.innerHTML = '<div class="small" style="color:#c8102e">Impossible de charger l historique.</div>';
+    box.innerHTML = '<div class="small" style="color:#c8102e">Impossible de charger l’historique.</div>';
   }
 }
 

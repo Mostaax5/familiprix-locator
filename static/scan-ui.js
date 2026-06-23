@@ -12,7 +12,7 @@ function updateRayonSideOptions() {
   if ((config?.facade_a?.shelves || []).length > 0) html += '<option value="Façade A">🔲 Façade A</option>';
   if ((config?.facade_b?.shelves || []).length > 0) html += '<option value="Façade B">🔲 Façade B</option>';
   // Présentoirs — each façade is selectable
-  (config?.presentoirs || []).forEach(p => {
+  (config?.présentoirs || []).forEach(p => {
     (p.facades || []).forEach(f => {
       const sv = `${p.name} - ${f.name}`;
       html += `<option value="${esc(sv)}">📦 ${esc(p.name)} · ${esc(f.name)}</option>`;
@@ -111,7 +111,7 @@ async function addProductToCurrentRayon(productId, position) {
     await refreshProductsCache(true);
     finishConfirmed(`"${existing.name}" ajouté à ${rayonLabel()} — Pos. ${position}.`);
   } else {
-    document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur d ajout.')}</div>`;
+    document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur d’ajout.')}</div>`;
   }
 }
 
@@ -151,8 +151,8 @@ function renderLookupAssistPreview() {
   if (!pendingLookupAssist) {
     preview.innerHTML = '';
     status.textContent = backendInfo.ai_enabled
-      ? `Optionnel: genere des mots-cles clients, une explication simple et des alternatives via ${aiProviderLabel()}.`
-      : 'IA non configuree sur le serveur. Ajoutez GEMINI_API_KEY sur Render.';
+      ? `Optionnel: genere des mots-clés clients, une explication simple et des alternatives via ${aiProviderLabel()}.`
+      : 'IA non configurée sur le serveur. Ajoutez GEMINI_API_KEY sur Render.';
     return;
   }
   status.textContent = 'Aide client generee. Elle sera sauvegardee avec ce produit.';
@@ -176,7 +176,7 @@ async function lookupScanFromInput(force=false, barcodeOverride='') {
   // Require rayon context
   if (!rayonCtx.aisle || !rayonCtx.shelf) {
     div.innerHTML = `<div class="msg error" style="font-weight:600">
-      Définissez d abord l Allée et la Tablette dans "Rayon en cours" ci-dessus, puis scannez.
+      Définissez d’abord l Allée et la Tablette dans "Rayon en cours" ci-dessus, puis scannez.
     </div>`;
     return;
   }
@@ -273,7 +273,7 @@ function showOnlineLookupForm(barcode) {
     </div>
     <div id="lookupSource" class="barcode-text"></div>
     <div class="tool-row">
-      <button class="btn btn-outline btn-inline" onclick="generateLookupAssist()">Generer aide client (IA)</button>
+      <button class="btn btn-outline btn-inline" onclick="generateLookupAssist()">Générer aide client (IA)</button>
       <span id="lookupAssistStatus" class="small"></span>
     </div>
     <div id="lookupAssistPreview"></div>
@@ -364,7 +364,7 @@ async function confirmNewProduct() {
     await refreshProductsCache(true);
     finishConfirmed(`"${name}" enregistré à ${rayonLabel()} — Pos. ${pos}.`, brand);
   } else {
-    document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur pendant l ajout.')}</div>`;
+    document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur pendant l’ajout.')}</div>`;
   }
 }
 
@@ -389,7 +389,7 @@ async function confirmUnknownProduct() {
     await refreshProductsCache(true);
     finishConfirmed(`"${placeholderName}" ajouté à ${rayonLabel()} — Pos. ${pos}.`);
   } else {
-    document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur pendant l ajout.')}</div>`;
+    document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur pendant l’ajout.')}</div>`;
   }
 }
 

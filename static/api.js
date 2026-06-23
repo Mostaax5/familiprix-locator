@@ -39,9 +39,9 @@ async function apiAddProduct(payload) {
       headers: {'Content-Type':'application/json', ...getEditorHeaders()},
       body: JSON.stringify(payload)
     });
-    return res.ok ? data : {success: false, error: data.error || 'Erreur serveur pendant l ajout.'};
+    return res.ok ? data : {success: false, error: data.error || 'Erreur serveur pendant l’ajout.'};
   } catch (error) {
-    return {success: false, error: 'Impossible d ajouter le produit pour le moment.'};
+    return {success: false, error: 'Impossible d’ajouter le produit pour le moment.'};
   }
 }
 
@@ -99,7 +99,7 @@ async function apiDeleteLayoutAisle(aisle) {
     });
     return res.ok ? data : {success: false, error: data.error || 'Erreur de suppression d allée.'};
   } catch (error) {
-    return {success: false, error: 'Impossible de supprimer l allée pour le moment.'};
+    return {success: false, error: 'Impossible de supprimer l’allée pour le moment.'};
   }
 }
 

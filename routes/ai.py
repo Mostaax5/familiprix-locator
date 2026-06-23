@@ -73,15 +73,15 @@ _AI_RATE_WINDOW = int(os.environ.get("AI_RATE_WINDOW", "3600"))
 _ai_rate_buckets: dict = defaultdict(list)
 
 _SIMPLE_ANSWERS = {
-    "heure":         "Pour les heures d ouverture, consultez votre succursale Familiprix locale ou familiprix.com.",
-    "ouvert":        "Pour les heures d ouverture, consultez votre succursale Familiprix locale ou familiprix.com.",
-    "ferm":          "Pour les heures d ouverture, consultez votre succursale Familiprix locale ou familiprix.com.",
+    "heure":         "Pour les heures d’ouverture, consultez votre succursale Familiprix locale ou familiprix.com.",
+    "ouvert":        "Pour les heures d’ouverture, consultez votre succursale Familiprix locale ou familiprix.com.",
+    "ferm":          "Pour les heures d’ouverture, consultez votre succursale Familiprix locale ou familiprix.com.",
     "livraison":     "La livraison varie selon les succursales. Contactez directement votre pharmacie Familiprix.",
-    "telephone":     "Le numero de telephone est affiche a l entree du magasin ou sur familiprix.com.",
-    "adresse":       "L adresse se trouve sur familiprix.com dans le localisateur de pharmacies.",
+    "telephone":     "Le numéro de téléphone est affiché à l’entrée du magasin ou sur familiprix.com.",
+    "adresse":       "L’adresse se trouve sur familiprix.com dans le localisateur de pharmacies.",
     "retour":        "La politique de retour varie. Adressez-vous au comptoir de votre succursale.",
-    "stationnement": "Renseignez-vous directement aupres de votre succursale pour le stationnement.",
-    "pharmacien":    "Pour parler a un pharmacien, presentez-vous au comptoir de la pharmacie.",
+    "stationnement": "Renseignez-vous directement auprès de votre succursale pour le stationnement.",
+    "pharmacien":    "Pour parler a un pharmacien, présentez-vous au comptoir de la pharmacie.",
 }
 
 
@@ -698,15 +698,15 @@ def generate_client_help_payload_gemini(question, products):
             "Tu aides un employe de pharmacie Familiprix au Quebec a repondre a un client. "
             "Donne toujours le meilleur conseil possible. "
             "Base-toi UNIQUEMENT sur les produits fournis dans la liste. "
-            "Ne propose jamais un produit qui n est pas dans la liste fournie. "
-            "Si un produit de la liste est de marque Biomedic ou Essentiel (marques maison Familiprix), precise-le dans ta reponse. "
-            "Si la liste est vide, donne un conseil general en pharmacie sans nommer de produits specifiques. "
+            "Ne propose jamais un produit qui n’est pas dans la liste fournie. "
+            "Si un produit de la liste est de marque Biomedic ou Essentiel (marques maison Familiprix), precise-le dans ta réponse. "
+            "Si la liste est vide, donne un conseil général en pharmacie sans nommer de produits specifiques. "
             "Ne pose pas de diagnostic. "
             "Dis clairement quand il faut orienter le client vers le pharmacien: "
             "grossesse, bebe, interaction medicamenteuse, symptomes graves, douleur importante, "
-            "difficulte respiratoire, fievre elevee, duree inhabituelle ou doute medical. "
+            "difficulte respiratoire, fievre élevée, duree inhabituelle ou doute medical. "
             "Dans recommended_product_names, mets UNIQUEMENT les noms de produits presents dans la liste fournie. "
-            "Retourne uniquement un JSON en francais avec exactement les cles "
+            "Retourne uniquement un JSON en francais avec exactement les clés "
             "summary (texte), recommended_product_names (tableau), follow_up_questions (tableau), "
             f"safety_flags (tableau), pharmacist_referral (booleen) et pharmacist_reason (texte).\n\n"
             f"Question client:\n{question}\n\n"
@@ -745,13 +745,13 @@ def generate_client_help_payload_openai(question, products):
             "Tu aides un employe de pharmacie Familiprix au Quebec a repondre a un client. "
             "Donne toujours le meilleur conseil possible. "
             "Base-toi UNIQUEMENT sur les produits fournis dans la liste. "
-            "Ne propose jamais un produit qui n est pas dans la liste fournie. "
-            "Si un produit de la liste est de marque Biomedic ou Essentiel (marques maison Familiprix), precise-le dans ta reponse. "
-            "Si la liste est vide, donne un conseil general en pharmacie sans nommer de produits specifiques. "
+            "Ne propose jamais un produit qui n’est pas dans la liste fournie. "
+            "Si un produit de la liste est de marque Biomedic ou Essentiel (marques maison Familiprix), precise-le dans ta réponse. "
+            "Si la liste est vide, donne un conseil général en pharmacie sans nommer de produits specifiques. "
             "Ne pose pas de diagnostic. "
             "Dis clairement quand il faut orienter le client vers le pharmacien: "
             "grossesse, bebe, interaction medicamenteuse, symptomes graves, douleur importante, "
-            "difficulte respiratoire, fievre elevee, duree inhabituelle ou doute medical. "
+            "difficulte respiratoire, fievre élevée, duree inhabituelle ou doute medical. "
             "Dans recommended_product_names, mets UNIQUEMENT les noms de produits presents dans la liste fournie. "
             "Retourne uniquement un JSON en francais."
         ),
@@ -801,10 +801,10 @@ def generate_product_assist_payload_gemini(name, brand, description, barcode):
     prompt = {"name": name, "brand": brand, "description": description, "barcode": barcode}
     payload = {
         "contents": [{"parts": [{"text": (
-            "Tu aides les employes d une pharmacie Familiprix au Quebec. "
-            "Retourne uniquement un JSON en francais avec exactement les cles "
+            "Tu aides les employes d’une pharmacie Familiprix au Quebec. "
+            "Retourne uniquement un JSON en francais avec exactement les clés "
             "search_terms (tableau), usage_notes (texte) et alternative_suggestions (tableau). "
-            "Les mots cles doivent etre des mots que les clients utilisent, "
+            "Les mots clés doivent etre des mots que les clients utilisent, "
             "usage_notes doit etre une courte explication utile pour guider un client, "
             "et alternative_suggestions doit contenir quelques alternatives possibles. "
             f"Sois concis, concret, prudent sur le plan medical et ne donne pas de diagnostic.\n\nProduit:\n{json.dumps(prompt, ensure_ascii=False)}"
@@ -840,8 +840,8 @@ def generate_product_assist_payload_openai(name, brand, description, barcode):
         "model": OPENAI_MODEL,
         "reasoning": {"effort": "low"},
         "instructions": (
-            "Tu aides les employes d une pharmacie Familiprix au Quebec. "
-            "Retourne un JSON en francais avec des mots cles que les clients utilisent, "
+            "Tu aides les employes d’une pharmacie Familiprix au Quebec. "
+            "Retourne un JSON en francais avec des mots clés que les clients utilisent, "
             "une courte explication utile pour guider un client, et quelques alternatives possibles. "
             "Sois concis, concret, prudent sur le plan medical et ne donne pas de diagnostic."
         ),
@@ -1001,10 +1001,10 @@ def assist_product():
     if not name and not description:
         return jsonify({"success": False, "error": "Nom ou description requis."}), 400
     if not configured_ai_provider()["name"]:
-        return jsonify({"success": False, "error": "GEMINI_API_KEY n est pas configure sur le serveur."}), 503
+        return jsonify({"success": False, "error": "GEMINI_API_KEY n’est pas configure sur le serveur."}), 503
     assist = generate_product_assist_payload(name, brand, description, barcode)
     if not assist:
-        return jsonify({"success": False, "error": "Impossible de generer l aide client pour le moment."}), 502
+        return jsonify({"success": False, "error": "Impossible de générer l aide client pour le moment."}), 502
     log_ai_interaction("product_assist",
                        {"name": name, "brand": brand, "description": description, "barcode": barcode},
                        None, assist)
@@ -1030,7 +1030,7 @@ def client_help():
         }})
 
     if not configured_ai_provider()["name"]:
-        return jsonify({"success": False, "error": "GEMINI_API_KEY n est pas configure sur le serveur."}), 503
+        return jsonify({"success": False, "error": "GEMINI_API_KEY n’est pas configure sur le serveur."}), 503
 
     if not _check_ai_rate_limit():
         return jsonify({"success": False, "error": "Trop de requetes IA. Reessayez dans une heure."}), 429
@@ -1046,7 +1046,7 @@ def client_help():
 
     advice = generate_client_help_payload(question, matched_products)
     if not advice:
-        return jsonify({"success": False, "error": "Impossible de generer la reponse client pour le moment."}), 502
+        return jsonify({"success": False, "error": "Impossible de générer la réponse client pour le moment."}), 502
     log_ai_interaction("client_help", question, matched_products, advice)
     return jsonify({"success": True, "advice": advice})
 
