@@ -285,7 +285,7 @@ async function lookupScanFromInput(force=false, barcodeOverride='') {
       ${atCurrentRayon.brand ? `<div class="barcode-text">${esc(atCurrentRayon.brand)}</div>` : ''}
     </div>`;
     if (navigator.vibrate) navigator.vibrate([40, 20, 40]);
-    window.setTimeout(() => { lastLookedUpBarcode = ''; div.innerHTML = ''; }, 2500);
+    window.setTimeout(() => { lastLookedUpBarcode = ''; div.innerHTML = ''; resumeScanning(); }, 2500);
     return;
   }
 
@@ -504,11 +504,10 @@ function finishConfirmed(message, brand, filledPos) {
     updateRayonCtx(); // refresh P→N indicator in badge
   }
   window.setTimeout(() => {
-    scanPaused = false;
     resetCameraCandidate();
     const pb = document.getElementById('pauseScanButton');
     if (pb) { pb.textContent = '⏸ Pause'; pb.style.background = ''; pb.style.color = ''; pb.style.borderColor = ''; }
-    if (quaggaActive) getCameraDom().status.textContent = 'Cadrez les barres et les chiffres';
+    resumeScanning();   // confirmed → resume decoding for the next item
     focusScanInput();
   }, 1200);
 }

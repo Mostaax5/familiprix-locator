@@ -17,6 +17,7 @@ let quaggaDetectedHandler = null;
 let quaggaProcessedHandler = null;
 let quaggaOcrTimer = null;
 let quaggaStartedAt = 0;
+let scanResumeTimer = null;   // pending "resume decoding" timer (see resumeScanning)
 let ocrBusy = false;
 let quaggaLibraryPromise = null;
 let ocrLibraryPromise = null;
@@ -84,10 +85,9 @@ function toggleScanPause() {
   const btn = document.getElementById('pauseScanButton');
   const status = document.getElementById('scannerStatus');
   if (scanPaused) {
-    scanPaused = false;
     resetCameraCandidate();
+    resumeScanning();   // clears the pending safety resume + restarts the window
     if (btn) { btn.textContent = '⏸ Pause'; btn.style.background = ''; btn.style.color = ''; btn.style.borderColor = ''; }
-    if (quaggaActive) status.textContent = 'Cadrez les barres et les chiffres';
   } else {
     scanPaused = true;
     if (btn) { btn.textContent = '▶ Reprendre'; btn.style.background = '#16a34a'; btn.style.color = 'white'; btn.style.borderColor = '#16a34a'; }
@@ -1451,6 +1451,24 @@ function normalizeScannedBarcode(code) {
   return digits;
 }
 
+// Resume decoding (called when the employee confirms/adds, or the item was
+// already placed). Cancels any pending safety resume and restarts the
+// "Quagga first" window so escalation is fresh.
+function resumeScanning() {
+  window.clearTimeout(scanResumeTimer);
+  if (!quaggaActive && !scannerStream && !html5Scanner && !nativeScanActive) return;
+  scanPaused = false;
+  quaggaStartedAt = Date.now();
+  try { if (cameraUsageMode !== 'search') getCameraDom().status.textContent = 'Cadrez le code-barres'; } catch (_) {}
+}
+
+// Schedule a fallback resume so the scanner can never get stuck paused if the
+// employee walks away without confirming.
+function scheduleScanResume(ms) {
+  window.clearTimeout(scanResumeTimer);
+  scanResumeTimer = window.setTimeout(resumeScanning, ms);
+}
+
 function onDecodedCode(decodedText, instant=false) {
   const rawValue = normalizeScannedBarcode(decodedText);
   if (!rawValue || scanPaused) return;
@@ -1465,21 +1483,19 @@ function onDecodedCode(decodedText, instant=false) {
 
   if (cameraUsageMode === 'search') {
     doSearchValue(rawValue);
+    scheduleScanResume(1500);   // search has no confirm step → resume shortly
   } else {
     lookupScanFromInput(true, rawValue);
+    // Mapping: stay PAUSED while the description loads and the employee confirms,
+    // so the camera stops decoding (no heat) until they actually act. The normal
+    // resume comes from finishConfirmed / "déjà sur ce rayon"; this is only a
+    // safety net if they walk away. The Pause button shows "▶ Reprendre" so they
+    // can re-scan immediately if the result is wrong.
+    try { getCameraDom().status.textContent = '✓ Lu — confirmez pour scanner le suivant'; } catch (_) {}
+    const pb = document.getElementById('pauseScanButton');
+    if (pb) { pb.textContent = '▶ Reprendre'; pb.style.background = '#16a34a'; pb.style.color = 'white'; pb.style.borderColor = '#16a34a'; }
+    scheduleScanResume(30000);
   }
-
-  window.setTimeout(() => {
-    scanPaused = false;
-    // Restart the "Quagga first" window for the NEXT product, so the heavy
-    // fallbacks (ZXing full-res, Tesseract OCR) only wake up if Quagga can't read
-    // this next code within a couple of seconds. Keeps the device cool: on easy
-    // codes only Quagga runs.
-    quaggaStartedAt = Date.now();
-    if (scannerStream || html5Scanner) {
-      getCameraDom().status.textContent = 'Pret a scanner...';
-    }
-  }, 1200);
 }
 
 function confirmStableCameraBarcode(barcode, instant=false) {
