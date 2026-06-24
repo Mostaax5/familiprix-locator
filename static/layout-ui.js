@@ -939,11 +939,15 @@ function openMoveSection(aisle, side, sectionIndex) {
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
   overlay.innerHTML = `<div style="background:#fff;border-radius:12px;padding:18px;max-width:380px;width:100%;box-shadow:0 12px 44px rgba(0,0,0,.3)">
     <div style="font-weight:800;margin-bottom:2px">Déplacer la section ${sectionIndex + 1}</div>
-    <div class="small" style="color:#64748b;margin-bottom:10px">Depuis Allée ${esc(aisle)} · ${esc(sideDisplayLabel(side))}. Elle sera ajoutée à la fin du côté choisi, avec ses tablettes et ses produits.</div>
+    <div class="small" style="color:#64748b;margin-bottom:10px">Depuis Allée ${esc(aisle)} · ${esc(sideDisplayLabel(side))}. Choisissez l'allée, le côté et la position. Elle emporte ses tablettes et ses produits.</div>
     <div class="field"><label class="label">Allée de destination</label>
-      <select id="msAisle">${aisles.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('')}</select></div>
-    <div class="field"><label class="label">Côté</label>
-      <select id="msSide"><option value="Gauche">Côté A</option><option value="Droite">Côté B</option></select></div>
+      <select id="msAisle">${aisles.map(a => `<option value="${esc(a)}"${a === String(aisle) ? ' selected' : ''}>${esc(a)}</option>`).join('')}</select></div>
+    <div class="row2">
+      <div class="field"><label class="label">Côté</label>
+        <select id="msSide"><option value="Gauche"${side === 'Gauche' ? ' selected' : ''}>Côté A</option><option value="Droite"${side === 'Droite' ? ' selected' : ''}>Côté B</option></select></div>
+      <div class="field"><label class="label" title="Position de la section (1 = première)">Position</label>
+        <input type="number" id="msPosition" min="1" value="${sectionIndex + 1}"></div>
+    </div>
     <div id="msMsg" class="small" style="color:#c8102e;min-height:16px"></div>
     <div class="tool-row" style="margin-top:8px">
       <button class="btn btn-inline" onclick="confirmMoveSection('${esc(aisle)}','${side}',${sectionIndex})">Déplacer</button>
@@ -959,14 +963,11 @@ async function confirmMoveSection(aisle, side, sectionIndex) {
   const msg = document.getElementById('msMsg');
   const target_aisle = document.getElementById('msAisle').value;
   const target_side  = document.getElementById('msSide').value;
-  if (target_aisle === String(aisle) && target_side === side) {
-    if (msg) msg.textContent = 'Choisissez une autre allée ou un autre côté.';
-    return;
-  }
+  const target_position = document.getElementById('msPosition')?.value || '';
   try {
     const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}/move-section-to-aisle`, {
       method: 'POST', headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-      body: JSON.stringify({side, section_index: sectionIndex, target_aisle, target_side})
+      body: JSON.stringify({side, section_index: sectionIndex, target_aisle, target_side, target_position})
     });
     if (res.ok && data.success) {
       if (overlay) overlay.remove();

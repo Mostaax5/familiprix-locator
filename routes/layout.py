@@ -420,54 +420,82 @@ def _persist_aisle_config(db, aisle, config, username, now):
     )
 
 
+def _swap_two_sections(db, username, now, aisle, side, a, b):
+    """Swap the products of two sections via a temp marker (no unique-slot clash)."""
+    a, b = str(a), str(b)
+    db.execute("UPDATE products SET section='__sw__', modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=?", (username, now, aisle, side, a))
+    db.execute("UPDATE products SET section=?,        modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=?", (a, username, now, aisle, side, b))
+    db.execute("UPDATE products SET section=?,        modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=?", (b, username, now, aisle, side, "__sw__"))
+
+
+def _bubble_section(db, username, now, config, aisle, side, from_index, to_index):
+    """Move a section from from_index to to_index within a côté using adjacent
+    swaps (config + products stay in sync, no slot clash). Returns final index."""
+    sections = config["sides"][side]["sections"]
+    to_index = max(0, min(to_index, len(sections) - 1))
+    step = 1 if to_index > from_index else -1
+    i = from_index
+    while i != to_index:
+        j = i + step
+        sections[i], sections[j] = sections[j], sections[i]
+        _swap_two_sections(db, username, now, aisle, side, i + 1, j + 1)
+        i = j
+    return to_index
+
+
 @layout_bp.route("/api/layout/aisles/<aisle>/move-section-to-aisle", methods=["POST"])
 def move_section_to_aisle(aisle):
-    """Move a whole section (its shelves + all its products) to another allée,
-    appended at the end of the target côté. Source sections renumber to stay
-    aligned; products keep their tablette/position."""
+    """Move a section (shelves + products) to a chosen allée / côté / position.
+    Same côté → reorder to the chosen position; other côté/allée → move there and
+    insert at the chosen position (default: end). One request, no slot clash."""
     username, error = require_editor()
     if error:
         return error
     data = request.get_json() or {}
     side          = str(data.get("side", "")).strip()
     section_index = clamp_non_negative_int(data.get("section_index", -1), -1)
-    target_aisle  = str(data.get("target_aisle", "")).strip()
+    target_aisle  = str(data.get("target_aisle", "")).strip() or str(aisle).strip()
     target_side   = str(data.get("target_side", "")).strip() or side
+    raw_pos       = data.get("target_position")   # 1-based; blank/None = end
     if side not in ("Gauche", "Droite") or target_side not in ("Gauche", "Droite"):
         return jsonify({"success": False, "error": "Le déplacement de section ne s'applique qu'aux côtés A/B."}), 400
-    if not target_aisle or data.get("section_index") is None:
+    if data.get("section_index") is None:
         return jsonify({"success": False, "error": "Paramètres invalides."}), 400
-    if target_aisle == aisle and target_side == side:
-        return jsonify({"success": False, "error": "Même emplacement."}), 400
     db = get_db()
     src_row, tgt_row = get_layout_row(db, aisle), get_layout_row(db, target_aisle)
     if not src_row or not tgt_row:
         return jsonify({"success": False, "error": "Allée introuvable."}), 404
     src_cfg = normalize_layout_config(src_row["config_json"], src_row["max_section"], src_row["max_shelf"], src_row["max_position"])
-    tgt_cfg = normalize_layout_config(tgt_row["config_json"], tgt_row["max_section"], tgt_row["max_shelf"], tgt_row["max_position"])
     src_sections = src_cfg["sides"][side]["sections"]
     if section_index < 0 or section_index >= len(src_sections):
         return jsonify({"success": False, "error": "Section introuvable."}), 404
-
     now = utc_now_iso()
-    old_section_number = section_index + 1
+
+    # ── Same côté: just reorder to the chosen position ──────────────────────────
+    if target_aisle == str(aisle).strip() and target_side == side:
+        to_index = (clamp_non_negative_int(raw_pos, len(src_sections)) - 1) if raw_pos not in (None, "") else len(src_sections) - 1
+        final = _bubble_section(db, username, now, src_cfg, aisle, side, section_index, to_index)
+        _persist_aisle_config(db, aisle, src_cfg, username, now)
+        db.commit()
+        return jsonify({"success": True, "target_aisle": str(aisle).strip(), "target_side": side, "target_section": final + 1})
+
+    # ── Other côté / allée: move there, then insert at the chosen position ──────
+    tgt_cfg = normalize_layout_config(tgt_row["config_json"], tgt_row["max_section"], tgt_row["max_shelf"], tgt_row["max_position"])
     tgt_sections = tgt_cfg["sides"][target_side]["sections"]
-    new_section_number = len(tgt_sections) + 1
-    # 1. Append the section's structure to the target côté.
+    old_section_number = section_index + 1
+    appended_number = len(tgt_sections) + 1
     tgt_sections.append(src_sections[section_index])
-    # 2. Move all its products to the new (empty) section — no slot conflict.
     db.execute(
         "UPDATE products SET aisle=?, side=?, section=?, modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=?",
-        (target_aisle, target_side, str(new_section_number), username, now, aisle, side, str(old_section_number)),
+        (target_aisle, target_side, str(appended_number), username, now, aisle, side, str(old_section_number)),
     )
-    # 3. Remove the section from the source côté and renumber the rest. The
-    #    products were already moved out, so the delete inside removes none and
-    #    only the higher source sections shift down by one (config + products).
     src_sections.pop(section_index)
     _renumber_after_remove(db, username, now, aisle, side, "section", str(old_section_number))
-    # 4. Persist both layouts.
+    final_number = appended_number
+    if raw_pos not in (None, ""):
+        final = _bubble_section(db, username, now, tgt_cfg, target_aisle, target_side, len(tgt_sections) - 1, clamp_non_negative_int(raw_pos, appended_number) - 1)
+        final_number = final + 1
     _persist_aisle_config(db, aisle, src_cfg, username, now)
     _persist_aisle_config(db, target_aisle, tgt_cfg, username, now)
     db.commit()
-    return jsonify({"success": True, "target_aisle": target_aisle, "target_side": target_side,
-                    "target_section": new_section_number})
+    return jsonify({"success": True, "target_aisle": target_aisle, "target_side": target_side, "target_section": final_number})
