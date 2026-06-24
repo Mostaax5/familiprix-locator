@@ -877,6 +877,59 @@ function productsAtShelf(aisle, side, section, shelf) {
   return _shelfIndex.get(`${aisle}|${side}|${section}|${shelf}`) || [];
 }
 
+// Move a product to ANY allée/côté/section/tablette/position. The server
+// validates the target slot and frees the old one — works across allées.
+function openMoveProduct(id) {
+  if (!requireEditorSession('déplacer un produit')) return;
+  const p = allProductsCache.find(x => Number(x.id) === Number(id));
+  if (!p) return;
+  const aisles = mapLayouts.map(l => String(l.aisle)).sort((a, b) => Number(a) - Number(b) || a.localeCompare(b));
+  const overlay = document.createElement('div');
+  overlay.className = 'move-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
+  overlay.innerHTML = `<div style="background:#fff;border-radius:12px;padding:18px;max-width:380px;width:100%;box-shadow:0 12px 44px rgba(0,0,0,.3)">
+    <div style="font-weight:800;margin-bottom:2px">Déplacer « ${esc(p.name)} »</div>
+    <div class="small" style="color:#64748b;margin-bottom:10px">Choisissez la nouvelle allée et la position.</div>
+    <div class="field"><label class="label">Allée</label>
+      <select id="mvAisle">${aisles.map(a => `<option value="${esc(a)}"${a === String(p.aisle) ? ' selected' : ''}>${esc(a)}</option>`).join('')}</select></div>
+    <div class="field"><label class="label">Côté</label>
+      <select id="mvSide"><option value="Gauche"${p.side === 'Gauche' ? ' selected' : ''}>Côté A</option><option value="Droite"${p.side === 'Droite' ? ' selected' : ''}>Côté B</option></select></div>
+    <div class="row3">
+      <div class="field"><label class="label">Section</label><input type="number" id="mvSection" min="1" value="${esc(p.section || '1')}"></div>
+      <div class="field"><label class="label">Tablette</label><input type="number" id="mvShelf" min="1" value="${esc(p.shelf)}"></div>
+      <div class="field"><label class="label">Position</label><input type="number" id="mvPosition" min="1" value="${esc(p.position)}"></div>
+    </div>
+    <div id="mvMsg" class="small" style="color:#c8102e;min-height:16px"></div>
+    <div class="tool-row" style="margin-top:8px">
+      <button class="btn btn-inline" onclick="confirmMoveProduct(${p.id})">Déplacer</button>
+      <button class="btn btn-outline btn-inline" onclick="this.closest('.move-overlay').remove()">Annuler</button>
+    </div>
+  </div>`;
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
+async function confirmMoveProduct(id) {
+  const p = allProductsCache.find(x => Number(x.id) === Number(id));
+  if (!p) return;
+  const overlay = document.querySelector('.move-overlay');
+  const msg = document.getElementById('mvMsg');
+  const payload = {...p,
+    aisle: document.getElementById('mvAisle').value,
+    side: document.getElementById('mvSide').value,
+    section: document.getElementById('mvSection').value || '1',
+    shelf: document.getElementById('mvShelf').value,
+    position: document.getElementById('mvPosition').value};
+  const data = await apiUpdateProduct(payload);
+  if (data.success !== false && !data.error) {
+    if (data.product) upsertCachedProduct(normalizeProduct(data.product));
+    if (overlay) overlay.remove();
+    refreshPlanUi();
+  } else if (msg) {
+    msg.textContent = data.error || 'Déplacement impossible (position occupée ou hors plan ?).';
+  }
+}
+
 function renderShelfProductList(aisle, side, section, shelf, positions) {
   const products = productsAtShelf(String(aisle), side, String(section), String(shelf))
     .slice().sort((a, b) => Number(a.position) - Number(b.position));
@@ -891,7 +944,8 @@ function renderShelfProductList(aisle, side, section, shelf, positions) {
       ${products.map(p => `<div class="plan-product-item">
         <div class="plan-product-row1">
           <span class="plan-product-name">${esc(p.name)}${p.brand ? ` <span class="plan-product-brand">${esc(p.brand)}</span>` : ''}</span>
-          <button title="Retirer ce produit" onclick="deleteProduct(${p.id})" style="margin-left:auto;flex-shrink:0;border:1px solid #f1b8c2;color:#c8102e;background:#fff;border-radius:5px;padding:2px 7px;cursor:pointer;font-size:11px">✕</button>
+          <button title="Déplacer (autre allée/position)" onclick="openMoveProduct(${p.id})" style="margin-left:auto;flex-shrink:0;border:1px solid #cbd5e1;color:#334155;background:#f8fafc;border-radius:5px;padding:2px 7px;cursor:pointer;font-size:11px">⇄</button>
+          <button title="Retirer ce produit" onclick="deleteProduct(${p.id})" style="flex-shrink:0;border:1px solid #f1b8c2;color:#c8102e;background:#fff;border-radius:5px;padding:2px 7px;cursor:pointer;font-size:11px">✕</button>
         </div>
         <div class="plan-product-row2">${p.barcode ? esc(p.barcode) : '—'}${p.product_code ? ` · code ${esc(p.product_code)}` : ''}</div>
       </div>`).join('')}
@@ -915,6 +969,7 @@ function renderShelfProductList(aisle, side, section, shelf, positions) {
           <span style="display:flex;gap:4px;margin-left:auto;flex-shrink:0">
             <button title="Échanger avec la position précédente" style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;padding:4px 9px;font-size:14px;line-height:1;${canUp?'':'opacity:.25;cursor:default'}" onclick="swapPositions(${swapArgs},${pos},${pos-1})" ${canUp?'':'disabled'}>↑</button>
             <button title="Échanger avec la position suivante" style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;padding:4px 9px;font-size:14px;line-height:1;${canDown?'':'opacity:.25;cursor:default'}" onclick="swapPositions(${swapArgs},${pos},${pos+1})" ${canDown?'':'disabled'}>↓</button>
+            <button title="Déplacer (autre allée/position)" style="background:#f8fafc;border:1px solid #cbd5e1;color:#334155;border-radius:6px;cursor:pointer;padding:4px 9px;font-size:13px;line-height:1" onclick="openMoveProduct(${p.id})">⇄</button>
             <button title="Retirer ce produit" style="background:#fff;border:1px solid #f1b8c2;color:#c8102e;border-radius:6px;cursor:pointer;padding:4px 9px;font-size:13px;line-height:1" onclick="deleteProduct(${p.id})">✕</button>
           </span>
         </div>
