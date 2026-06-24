@@ -739,18 +739,21 @@ function selectNumericField(input) {
 
 function startScanFromSection(aisle, side, sectionIndex) {
   const config = getAisleLayoutConfig(aisle);
-  const slots = buildSlotsFromConfig(aisle, config, side);
-  const targetSlot = slots.find(slot => Number(slot.section) === sectionIndex + 1);
-  if (!targetSlot) {
-    document.getElementById('addMsg').innerHTML = '<div class="msg error">Aucune position dans cette section pour le moment.</div>';
+  const section = (config?.sides?.[side]?.sections || [])[sectionIndex];
+  if (!section || !(section.shelves || []).length) {
+    document.getElementById('addMsg').innerHTML = '<div class="msg error">Aucune tablette dans cette section pour le moment.</div>';
     return;
   }
-  cursor.facing = 'Avant';
-  setCursorFromSlot(targetSlot);
-  updateCursorUi();
-  planStartDraft = getCursorSelection();
-  renderPlanStartEditor();
+  // The Scan tab works off the "Rayon en cours" fields (not the plan cursor), so
+  // pre-fill those to this section's first tablette and open Scan. Position is
+  // auto (next free spot), so the user just keeps scanning.
   switchTab('scan');
+  const aEl = document.getElementById('rayonAisle'); if (aEl) aEl.value = String(aisle);
+  if (typeof updateRayonSideOptions === 'function') updateRayonSideOptions();
+  const sEl   = document.getElementById('rayonSide');    if (sEl)   sEl.value   = side;
+  const secEl = document.getElementById('rayonSection'); if (secEl) secEl.value = String(sectionIndex + 1);
+  const shEl  = document.getElementById('rayonShelf');   if (shEl)  shEl.value  = '1';
+  updateRayonCtx();
 }
 
 // ── Product card ──────────────────────────────────────────────────────────────
