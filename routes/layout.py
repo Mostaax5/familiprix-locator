@@ -406,3 +406,64 @@ def remove_shelf(aisle):
     _renumber_after_remove(db, username, utc_now_iso(), aisle, side, "shelf", shelf, section=section)
     db.commit()
     return jsonify({"success": True})
+
+
+def _persist_aisle_config(db, aisle, config, username, now):
+    max_section, max_shelf, max_position = layout_metrics(config)
+    db.execute(
+        "UPDATE aisle_layouts SET max_section=?, max_shelf=?, max_position=?, config_json=?, modified_by=?, modified_at=? WHERE aisle=?",
+        (max_section, max_shelf, max_position, json.dumps(config), username, now, str(aisle).strip()),
+    )
+
+
+@layout_bp.route("/api/layout/aisles/<aisle>/move-section-to-aisle", methods=["POST"])
+def move_section_to_aisle(aisle):
+    """Move a whole section (its shelves + all its products) to another allée,
+    appended at the end of the target côté. Source sections renumber to stay
+    aligned; products keep their tablette/position."""
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json() or {}
+    side          = str(data.get("side", "")).strip()
+    section_index = clamp_non_negative_int(data.get("section_index", -1), -1)
+    target_aisle  = str(data.get("target_aisle", "")).strip()
+    target_side   = str(data.get("target_side", "")).strip() or side
+    if side not in ("Gauche", "Droite") or target_side not in ("Gauche", "Droite"):
+        return jsonify({"success": False, "error": "Le déplacement de section ne s'applique qu'aux côtés A/B."}), 400
+    if not target_aisle or data.get("section_index") is None:
+        return jsonify({"success": False, "error": "Paramètres invalides."}), 400
+    if target_aisle == aisle and target_side == side:
+        return jsonify({"success": False, "error": "Même emplacement."}), 400
+    db = get_db()
+    src_row, tgt_row = get_layout_row(db, aisle), get_layout_row(db, target_aisle)
+    if not src_row or not tgt_row:
+        return jsonify({"success": False, "error": "Allée introuvable."}), 404
+    src_cfg = normalize_layout_config(src_row["config_json"], src_row["max_section"], src_row["max_shelf"], src_row["max_position"])
+    tgt_cfg = normalize_layout_config(tgt_row["config_json"], tgt_row["max_section"], tgt_row["max_shelf"], tgt_row["max_position"])
+    src_sections = src_cfg["sides"][side]["sections"]
+    if section_index < 0 or section_index >= len(src_sections):
+        return jsonify({"success": False, "error": "Section introuvable."}), 404
+
+    now = utc_now_iso()
+    old_section_number = section_index + 1
+    tgt_sections = tgt_cfg["sides"][target_side]["sections"]
+    new_section_number = len(tgt_sections) + 1
+    # 1. Append the section's structure to the target côté.
+    tgt_sections.append(src_sections[section_index])
+    # 2. Move all its products to the new (empty) section — no slot conflict.
+    db.execute(
+        "UPDATE products SET aisle=?, side=?, section=?, modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=?",
+        (target_aisle, target_side, str(new_section_number), username, now, aisle, side, str(old_section_number)),
+    )
+    # 3. Remove the section from the source côté and renumber the rest. The
+    #    products were already moved out, so the delete inside removes none and
+    #    only the higher source sections shift down by one (config + products).
+    src_sections.pop(section_index)
+    _renumber_after_remove(db, username, now, aisle, side, "section", str(old_section_number))
+    # 4. Persist both layouts.
+    _persist_aisle_config(db, aisle, src_cfg, username, now)
+    _persist_aisle_config(db, target_aisle, tgt_cfg, username, now)
+    db.commit()
+    return jsonify({"success": True, "target_aisle": target_aisle, "target_side": target_side,
+                    "target_section": new_section_number})

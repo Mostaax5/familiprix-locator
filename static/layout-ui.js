@@ -930,6 +930,53 @@ async function confirmMoveProduct(id) {
   }
 }
 
+// Move a whole section (tablettes + products) to another allée/côté.
+function openMoveSection(aisle, side, sectionIndex) {
+  if (!requireEditorSession('déplacer une section')) return;
+  const aisles = mapLayouts.map(l => String(l.aisle)).sort((a, b) => Number(a) - Number(b) || a.localeCompare(b));
+  const overlay = document.createElement('div');
+  overlay.className = 'move-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
+  overlay.innerHTML = `<div style="background:#fff;border-radius:12px;padding:18px;max-width:380px;width:100%;box-shadow:0 12px 44px rgba(0,0,0,.3)">
+    <div style="font-weight:800;margin-bottom:2px">Déplacer la section ${sectionIndex + 1}</div>
+    <div class="small" style="color:#64748b;margin-bottom:10px">Depuis Allée ${esc(aisle)} · ${esc(sideDisplayLabel(side))}. Elle sera ajoutée à la fin du côté choisi, avec ses tablettes et ses produits.</div>
+    <div class="field"><label class="label">Allée de destination</label>
+      <select id="msAisle">${aisles.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('')}</select></div>
+    <div class="field"><label class="label">Côté</label>
+      <select id="msSide"><option value="Gauche">Côté A</option><option value="Droite">Côté B</option></select></div>
+    <div id="msMsg" class="small" style="color:#c8102e;min-height:16px"></div>
+    <div class="tool-row" style="margin-top:8px">
+      <button class="btn btn-inline" onclick="confirmMoveSection('${esc(aisle)}','${side}',${sectionIndex})">Déplacer</button>
+      <button class="btn btn-outline btn-inline" onclick="this.closest('.move-overlay').remove()">Annuler</button>
+    </div>
+  </div>`;
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
+async function confirmMoveSection(aisle, side, sectionIndex) {
+  const overlay = document.querySelector('.move-overlay');
+  const msg = document.getElementById('msMsg');
+  const target_aisle = document.getElementById('msAisle').value;
+  const target_side  = document.getElementById('msSide').value;
+  if (target_aisle === String(aisle) && target_side === side) {
+    if (msg) msg.textContent = 'Choisissez une autre allée ou un autre côté.';
+    return;
+  }
+  try {
+    const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}/move-section-to-aisle`, {
+      method: 'POST', headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: JSON.stringify({side, section_index: sectionIndex, target_aisle, target_side})
+    });
+    if (res.ok && data.success) {
+      if (overlay) overlay.remove();
+      await refreshProductsCache(true);   // products + 2 layouts changed
+      await refreshLayoutsCache(true);
+      renderMapEditor();
+    } else if (msg) { msg.textContent = (data && data.error) || 'Déplacement impossible.'; }
+  } catch (e) { if (msg) msg.textContent = 'Erreur réseau.'; }
+}
+
 function renderShelfProductList(aisle, side, section, shelf, positions) {
   const products = productsAtShelf(String(aisle), side, String(section), String(shelf))
     .slice().sort((a, b) => Number(a.position) - Number(b.position));
@@ -1081,6 +1128,7 @@ function renderSection(aisle, side, sectionIndex, section) {
       <div style="display:flex;gap:6px;margin-bottom:10px;align-items:center;flex-wrap:wrap">
         <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${esc(aisle)}','${side}',${sectionIndex},-1)">↑ Monter</button>
         <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${esc(aisle)}','${side}',${sectionIndex},1)">↓ Descendre</button>
+        <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="openMoveSection('${esc(aisle)}','${side}',${sectionIndex})">⇄ Autre allée</button>
         <button class="btn btn-outline btn-inline" style="font-size:12px;color:#c8102e;border-color:#f1b8c2;margin-left:auto" onclick="removeSection('${esc(aisle)}','${side}',${sectionIndex})">✕ Supprimer section</button>
       </div>
       ${section.shelves.length ? '' : `<div class="small" style="padding:4px 0;color:#94a3b8">Aucune tablette — cliquez ➕ Tablette ci-dessus.</div>`}
