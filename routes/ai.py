@@ -1160,19 +1160,56 @@ def ai_grounded_product_lookup(barcode):
 
 
 def lookup_product_online(barcode):
-    """Simple, fast, accurate UPC lookup. Queries ONLY the trusted Open *Facts*
-    databases (food / beauty / drug / products) — clean JSON, great coverage for
-    basic consumer products incl. food. No slow HTML scrapers, no cache, no AI:
-    results are trustworthy and it returns in about a second. Returns a product
-    dict or None (then the employee types the name — better than a wrong guess)."""
+    """UPC lookup for a PHARMACY catalog (food, beauty, meds, vitamins, baby,
+    bandages, eye care, Familiprix house brand…). Broad coverage but fast: it
+    returns as soon as a trusted result is found (good_enough), so it doesn't wait
+    on the slow scrapers unless the fast databases miss. No cache (always fresh),
+    and the broken EAN API is not used. Returns a product dict or None."""
     barcode = str(barcode or "").strip()
     if not barcode:
         return None
+    GOOD_ENOUGH = 24
+    candidates = build_barcode_candidates(barcode)
+    best, best_score = None, 0
+
+    # Phase 1 — fast structured JSON databases: Open Facts (food / beauty / drug /
+    # general) + UPC Item DB + Datakick + Brocade. Covers most everyday products.
     tasks = []
-    for candidate in build_barcode_candidates(barcode):
-        for source_name, base_url in PRODUCT_LOOKUP_SOURCES:
-            tasks.append(lambda bc=candidate, sn=source_name, su=base_url: lookup_open_facts_product(sn, su, bc))
-    best, _ = best_lookup_result(tasks, max_workers=16, good_enough=24)
+    for bc in candidates:
+        tasks.append(lambda c=bc: lookup_upcitemdb(c))
+        tasks.append(lambda c=bc: lookup_datakick(c))
+        tasks.append(lambda c=bc: lookup_brocade(c))
+        for sn, su in PRODUCT_LOOKUP_SOURCES:
+            tasks.append(lambda c=bc, n=sn, u=su: lookup_open_facts_product(n, u, c))
+    best, best_score = best_lookup_result(tasks, max_workers=16, good_enough=GOOD_ENOUGH)
+
+    # Phase 2 — Familiprix catalog + barcode databases. The Familiprix scraper is
+    # what finds house-brand and pharmacy-specific items the open DBs don't have.
+    if best_score < GOOD_ENOUGH:
+        tasks = []
+        for bc in candidates:
+            tasks.append(lambda c=bc, cs=candidates: lookup_familiprix_product(c, cs))
+            tasks.append(lambda c=bc: lookup_barcodelookup(c))
+            tasks.append(lambda c=bc: lookup_go_upc(c))
+        p2, s2 = best_lookup_result(tasks, max_workers=8, good_enough=GOOD_ENOUGH)
+        if s2 > best_score:
+            best, best_score = p2, s2
+
+    # Phase 3 — pharmacy sites (Jean Coutu / Brunet / Pharmaprix), last resort.
+    if best_score < GOOD_ENOUGH:
+        tasks = []
+        for bc in candidates:
+            for sn, su in PHARMACY_LOOKUP_SOURCES:
+                tasks.append(lambda c=bc, n=sn, u=su, cs=candidates: lookup_generic_pharmacy_product(n, u, c, cs))
+        p3, s3 = best_lookup_result(tasks, max_workers=6, good_enough=GOOD_ENOUGH)
+        if s3 > best_score:
+            best, best_score = p3, s3
+
+    # Phase 4 — AI web-grounded identification (opt-in via AI_DEEP_LOOKUP, off by default).
+    if not best:
+        ai_found = ai_grounded_product_lookup(barcode)
+        if ai_found:
+            best = ai_found
     return best
 
 
