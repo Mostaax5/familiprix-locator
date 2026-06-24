@@ -1097,6 +1097,10 @@ async function recognizeBarcodeDigitsFromVideo(reader) {
 async function maybeRunOcrFallback(reader, status) {
   if (ocrBusy || scanPaused || !quaggaActive) return;
   if (cameraUsageMode === 'search') return;
+  // OCR (Tesseract) is by far the heaviest engine and only a last resort, so it
+  // wakes up ONLY when Quagga AND ZXing both failed to read this code for ~2.5s.
+  // The window resets after every successful scan, so easy codes never run OCR.
+  if (Date.now() - quaggaStartedAt < 2500) return;
 
   // Make the OCR engine state visible (diagnostic panel).
   if (!('Tesseract' in window)) {
@@ -1249,7 +1253,7 @@ async function startQuaggaScanner(reader, status, button) {
   // parallel with Quagga — whichever gets a valid read first wins.
   quaggaOcrTimer = window.setInterval(() => {
     maybeRunOcrFallback(reader, status);
-  }, 600);
+  }, 1500);
 
   // ZXing parallel decoder — reads SMALL/DENSE etiquette barcodes that Quagga
   // misses. ZXing scans at FULL resolution (no halfSample) so thin bars survive.
@@ -1286,6 +1290,9 @@ async function startZXingParallel(reader) {
 
   scanFrameTimer = window.setInterval(() => {
     if (scanPaused || !quaggaActive) return;
+    // Give Quagga a brief first shot, then ZXing reads hard/small codes fast.
+    // (Short window so reading stays near-instant; saves CPU between products.)
+    if (Date.now() - quaggaStartedAt < 500) return;
     const video = reader.querySelector('video');
     if (!video || !video.videoWidth) return;
     const vw = video.videoWidth, vh = video.videoHeight;
@@ -1310,7 +1317,7 @@ async function startZXingParallel(reader) {
     } finally {
       try { mfReader.reset(); } catch (_) {}   // required between decodes
     }
-  }, 200);
+  }, 250);
 }
 
 // ── Stop camera ───────────────────────────────────────────────────────────────
@@ -1464,6 +1471,11 @@ function onDecodedCode(decodedText, instant=false) {
 
   window.setTimeout(() => {
     scanPaused = false;
+    // Restart the "Quagga first" window for the NEXT product, so the heavy
+    // fallbacks (ZXing full-res, Tesseract OCR) only wake up if Quagga can't read
+    // this next code within a couple of seconds. Keeps the device cool: on easy
+    // codes only Quagga runs.
+    quaggaStartedAt = Date.now();
     if (scannerStream || html5Scanner) {
       getCameraDom().status.textContent = 'Pret a scanner...';
     }

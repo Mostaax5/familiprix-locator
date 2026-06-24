@@ -181,7 +181,7 @@ async function addProductToCurrentRayon(productId, position) {
     // The server already returned the updated row (upserted above) — no need to
     // re-download the whole product list. This keeps rapid scanning instant and
     // cool on phones; the periodic soft refresh resyncs anything else.
-    finishConfirmed(`"${existing.name}" ajouté à ${rayonLabel()} — Pos. ${position}.`);
+    finishConfirmed(`"${existing.name}" ajouté à ${rayonLabel()} — Pos. ${position}.`, '', position);
   } else {
     document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur d’ajout.')}</div>`;
   }
@@ -202,7 +202,7 @@ async function moveProductToCurrentRayon(productId, position) {
     // The server already returned the updated row (upserted above) — no need to
     // re-download the whole product list. This keeps rapid scanning instant and
     // cool on phones; the periodic soft refresh resyncs anything else.
-    finishConfirmed(`"${existing.name}" déplacé à ${rayonLabel()} — Pos. ${position}.`);
+    finishConfirmed(`"${existing.name}" déplacé à ${rayonLabel()} — Pos. ${position}.`, '', position);
   } else {
     document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur de déplacement.')}</div>`;
   }
@@ -439,7 +439,7 @@ async function confirmNewProduct() {
     // The server already returned the updated row (upserted above) — no need to
     // re-download the whole product list. This keeps rapid scanning instant and
     // cool on phones; the periodic soft refresh resyncs anything else.
-    finishConfirmed(`"${name}" enregistré à ${rayonLabel()} — Pos. ${pos}.`, brand);
+    finishConfirmed(`"${name}" enregistré à ${rayonLabel()} — Pos. ${pos}.`, brand, pos);
   } else {
     document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur pendant l’ajout.')}</div>`;
   }
@@ -466,13 +466,13 @@ async function confirmUnknownProduct() {
     // The server already returned the updated row (upserted above) — no need to
     // re-download the whole product list. This keeps rapid scanning instant and
     // cool on phones; the periodic soft refresh resyncs anything else.
-    finishConfirmed(`"${placeholderName}" ajouté à ${rayonLabel()} — Pos. ${pos}.`);
+    finishConfirmed(`"${placeholderName}" ajouté à ${rayonLabel()} — Pos. ${pos}.`, '', pos);
   } else {
     document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(data.error || 'Erreur pendant l’ajout.')}</div>`;
   }
 }
 
-function finishConfirmed(message, brand) {
+function finishConfirmed(message, brand, filledPos) {
   document.getElementById('scanInput').value = '';
   persistScanDraft();
   lastLookedUpBarcode = '';
@@ -484,8 +484,13 @@ function finishConfirmed(message, brand) {
     ? `<div class="msg warning" style="margin-top:6px">★ Marque maison — tablette 2 ou 3, positions 1-3 recommandées.</div>`
     : '';
   document.getElementById('scanResult').innerHTML = `<div class="msg success">${esc(message)}</div>${homeTip}`;
-  refreshRayonList();
-  updateRayonCtx(); // refresh P→N indicator in badge
+  // When the tablette is now full, jump to the next tablette/section automatically
+  // (it refreshes the badge/list itself). Otherwise just refresh in place.
+  const advanced = (filledPos != null) && maybeAdvanceRayon(filledPos);
+  if (!advanced) {
+    refreshRayonList();
+    updateRayonCtx(); // refresh P→N indicator in badge
+  }
   window.setTimeout(() => {
     scanPaused = false;
     resetCameraCandidate();

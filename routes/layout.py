@@ -223,9 +223,13 @@ def create_layout_aisle():
     config = normalize_layout_config(data.get("config"), data.get("max_section", "0"), data.get("max_shelf", "0"), data.get("max_position", "0"))
     max_section, max_shelf, max_position = layout_metrics(config)
     if not aisle:
-        return jsonify({"error": "Numero’d allée requis."}), 400
-    if not re.fullmatch(r"\d+", aisle):
-        return jsonify({"error": "Le numéro d allée doit etre numérique."}), 400
+        return jsonify({"error": "Numéro ou nom d'allée requis."}), 400
+    if len(aisle) > 40:
+        return jsonify({"error": "Nom d'allée trop long (40 caractères max)."}), 400
+    # Allow names (Caisse, Labo, Près du labo…) as well as numbers. No quotes or
+    # angle brackets so the name is always safe inside inline onclick handlers.
+    if not re.fullmatch(r"[A-Za-z0-9À-ÿ .\-]+", aisle):
+        return jsonify({"error": "Nom d'allée invalide : lettres, chiffres, espaces, points et tirets seulement."}), 400
     db = get_db()
     exists = db.execute("SELECT aisle FROM aisle_layouts WHERE aisle=?", (aisle,)).fetchone()
     if exists:
