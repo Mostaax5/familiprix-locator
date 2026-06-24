@@ -1160,68 +1160,20 @@ def ai_grounded_product_lookup(barcode):
 
 
 def lookup_product_online(barcode):
-    """Best-match product lookup. Checks the local reference catalog first, then
-    all online sources; caches what it finds. Returns a product dict or None."""
+    """Simple, fast, accurate UPC lookup. Queries ONLY the trusted Open *Facts*
+    databases (food / beauty / drug / products) — clean JSON, great coverage for
+    basic consumer products incl. food. No slow HTML scrapers, no cache, no AI:
+    results are trustworthy and it returns in about a second. Returns a product
+    dict or None (then the employee types the name — better than a wrong guess)."""
     barcode = str(barcode or "").strip()
     if not barcode:
         return None
-    GOOD_ENOUGH = 24   # score at which we're confident and can stop early
-    # Phase 0 — local reference catalog: instant, free, offline for known UPCs.
-    cached = reference_lookup(barcode)
-    if cached and _product_quality_score(cached) >= GOOD_ENOUGH:
-        return cached
-    barcode_candidates = build_barcode_candidates(barcode)
-    best, best_score = None, 0
-
-    # Phase 1 — fast structured APIs; keep the highest-quality, not the fastest.
-    json_tasks = []
-    for candidate in barcode_candidates:
-        json_tasks.append(lambda bc=candidate: lookup_upcitemdb(bc))
-        json_tasks.append(lambda bc=candidate: lookup_ean_search(bc))
-        json_tasks.append(lambda bc=candidate: lookup_datakick(bc))
-        json_tasks.append(lambda bc=candidate: lookup_brocade(bc))
+    tasks = []
+    for candidate in build_barcode_candidates(barcode):
         for source_name, base_url in PRODUCT_LOOKUP_SOURCES:
-            json_tasks.append(lambda bc=candidate, sn=source_name, su=base_url: lookup_open_facts_product(sn, su, bc))
-    p1, s1 = best_lookup_result(json_tasks, max_workers=12, good_enough=GOOD_ENOUGH)
-    if s1 > best_score:
-        best, best_score = p1, s1
-
-    # Phase 2 — Familiprix catalog + generic barcode databases, if not confident.
-    if best_score < GOOD_ENOUGH:
-        tasks = []
-        for candidate in barcode_candidates:
-            tasks.append(lambda bc=candidate, bcs=barcode_candidates: lookup_familiprix_product(bc, bcs))
-            tasks.append(lambda bc=candidate: lookup_barcodelookup(bc))
-            tasks.append(lambda bc=candidate: lookup_go_upc(bc))
-        p2, s2 = best_lookup_result(tasks, max_workers=8, good_enough=GOOD_ENOUGH)
-        if s2 > best_score:
-            best, best_score = p2, s2
-
-    # Phase 3 — other pharmacy site scrapers, last resort.
-    if best_score < GOOD_ENOUGH:
-        pharmacy_tasks = []
-        for candidate in barcode_candidates:
-            for source_name, source_base_url in PHARMACY_LOOKUP_SOURCES:
-                pharmacy_tasks.append(
-                    lambda bc=candidate, sn=source_name, su=source_base_url, bcs=barcode_candidates:
-                    lookup_generic_pharmacy_product(sn, su, bc, bcs)
-                )
-        p3, s3 = best_lookup_result(pharmacy_tasks, max_workers=6, good_enough=GOOD_ENOUGH)
-        if s3 > best_score:
-            best, best_score = p3, s3
-
-    # Phase 4 — last resort: AI web-grounded identification (opt-in, off by default).
-    if not best and not cached:
-        ai_found = ai_grounded_product_lookup(barcode)
-        if ai_found:
-            best = ai_found
-
-    # Cache the best find so this UPC is instant & free next time. Fall back to a
-    # thin cached entry if nothing better was found online.
-    if best:
-        reference_save(best)
-        return best
-    return cached
+            tasks.append(lambda bc=candidate, sn=source_name, su=base_url: lookup_open_facts_product(sn, su, bc))
+    best, _ = best_lookup_result(tasks, max_workers=16, good_enough=24)
+    return best
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
