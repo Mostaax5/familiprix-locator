@@ -61,7 +61,8 @@
     <div class="rayon-grid" style="margin-top:8px">
       <div class="field">
         <label class="label">Allée</label>
-        <input type="text" id="rayonAisle" placeholder="Ex: 3, Caisse, Labo" autocomplete="off" oninput="updateRayonSideOptions();updateRayonCtx()"/>
+        <input type="text" id="rayonAisle" list="rayonAisleList" placeholder="Ex: 3, Caisse, Labo" autocomplete="off" oninput="updateRayonSideOptions();updateRayonCtx()"/>
+        <datalist id="rayonAisleList"></datalist>
       </div>
       <div class="field">
         <label class="label">Côté / Façade</label>

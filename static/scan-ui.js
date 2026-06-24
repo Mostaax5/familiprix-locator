@@ -1,7 +1,19 @@
 // ── Rayon context ─────────────────────────────────────────────────────────────
 let rayonCtx = {aisle:'', side:'Gauche', section:'1', shelf:''};
 
+// Fill the allée autocomplete with every existing allée (numbers + names), so
+// the user can pick the right one instead of retyping it (and avoid typos like
+// "tet" never matching "test"). Names sort after numbers.
+function populateRayonAisleList() {
+  const dl = document.getElementById('rayonAisleList');
+  if (!dl) return;
+  const aisles = mapLayouts.map(l => String(l.aisle))
+    .sort((a, b) => (Number(a) || 1e9) - (Number(b) || 1e9) || a.localeCompare(b));
+  dl.innerHTML = aisles.map(a => `<option value="${esc(a)}"></option>`).join('');
+}
+
 function updateRayonSideOptions() {
+  populateRayonAisleList();
   const aisle = (document.getElementById('rayonAisle')?.value || '').trim();
   const select = document.getElementById('rayonSide');
   if (!select) return;

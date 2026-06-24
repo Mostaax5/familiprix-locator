@@ -122,7 +122,7 @@ async function switchTab(tab) {
       if (document.getElementById('client').classList.contains('active')) runClientSearch(false);
     });
   }
-  if (tab === 'scan') window.setTimeout(focusScanInput, 50);
+  if (tab === 'scan') { if (typeof populateRayonAisleList === 'function') populateRayonAisleList(); window.setTimeout(focusScanInput, 50); }
   if (tab === 'client') window.setTimeout(() => document.getElementById('clientQuestion')?.focus(), 50);
   if (tab === 'search') window.setTimeout(() => document.getElementById('searchInput')?.focus(), 50);
 }
