@@ -380,6 +380,11 @@ def add_product():
     section  = data.get("section", "").strip() or "1"
     shelf    = data.get("shelf", "").strip()
     position = data.get("position", "").strip()
+    is_plano = 1 if data.get("is_plano", 0) else 0
+    flipped  = 1 if data.get("flipped_label", 0) else 0
+    underneath = str(data.get("underneath_label", "")).strip()
+    if underneath:
+        flipped = 1   # an underneath plano product implies a flipped étiquette
 
     if not all([name, aisle, side, section, shelf, position]):
         return jsonify({"error": "Champs obligatoires manquants"}), 400
@@ -399,11 +404,12 @@ def add_product():
     try:
         cursor = db.execute(
             """
-            INSERT INTO products (name, brand, description, image_url, source_url, search_terms, usage_notes, alternative_suggestions, barcode, product_code, aisle, side, section, shelf, position, created_by, created_at, modified_by, modified_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO products (name, brand, description, image_url, source_url, search_terms, usage_notes, alternative_suggestions, barcode, product_code, aisle, side, section, shelf, position, is_plano, flipped_label, underneath_label, created_by, created_at, modified_by, modified_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (name, brand, description, image_url, source_url, search_terms, usage_notes,
              alternative_suggestions, barcode, product_code, aisle, side, section, shelf, position,
+             is_plano, flipped, underneath,
              username, utc_now_iso(), username, utc_now_iso())
         )
     except DatabaseIntegrityError as exc:
@@ -555,16 +561,47 @@ def set_product_stock(product_id):
 
 @products_bp.route("/api/products/<int:product_id>/flipped-label", methods=["POST"])
 def set_flipped_label(product_id):
-    """Mark whether a (hors-plano) product has a plano étiquette flipped under it."""
+    """For a hors-plano product: mark that a plano étiquette is flipped underneath,
+    and optionally record WHICH plano product it is (name/UPC). Passing an
+    underneath value also sets flipped=1; clearing the flip clears the underneath."""
     username, error = require_editor()
     if error:
         return error
     data = request.get_json() or {}
-    flipped = 1 if data.get("flipped", False) else 0
+    has_under = "underneath" in data
+    underneath = str(data.get("underneath", "")).strip()
+    flipped = 1 if (data.get("flipped", False) or underneath) else 0
+    db = get_db()
+    if has_under:
+        result = db.execute(
+            "UPDATE products SET flipped_label=?, underneath_label=?, modified_by=?, modified_at=? WHERE id=?",
+            (flipped, underneath, username, utc_now_iso(), product_id)
+        )
+    else:
+        # Toggle only; if turning the flip OFF, also clear any underneath product.
+        result = db.execute(
+            "UPDATE products SET flipped_label=?, underneath_label=CASE WHEN ?=0 THEN '' ELSE underneath_label END, modified_by=?, modified_at=? WHERE id=?",
+            (flipped, flipped, username, utc_now_iso(), product_id)
+        )
+    if result.rowcount == 0:
+        return jsonify({"error": "Produit non trouvé."}), 404
+    db.commit()
+    product = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
+    return jsonify({"success": True, "product": row_to_product(product)})
+
+
+@products_bp.route("/api/products/<int:product_id>/plano", methods=["POST"])
+def set_is_plano(product_id):
+    """Flag a product as plano or hors-plano."""
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json() or {}
+    is_plano = 1 if data.get("is_plano", False) else 0
     db = get_db()
     result = db.execute(
-        "UPDATE products SET flipped_label=?, modified_by=?, modified_at=? WHERE id=?",
-        (flipped, username, utc_now_iso(), product_id)
+        "UPDATE products SET is_plano=?, modified_by=?, modified_at=? WHERE id=?",
+        (is_plano, username, utc_now_iso(), product_id)
     )
     if result.rowcount == 0:
         return jsonify({"error": "Produit non trouvé."}), 404

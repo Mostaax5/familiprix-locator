@@ -81,11 +81,20 @@ function startScanAt(aisle, side, section, shelf) {
 function nextRayonPosition() {
   const {aisle, side, section, shelf} = rayonCtx;
   if (!aisle || !shelf) return '1';
+  // Manual override: if a start position is set, scan there (then it auto-advances).
+  const manual = (document.getElementById('rayonStartPos')?.value || '').trim();
+  if (manual && parseInt(manual) > 0) return String(parseInt(manual));
   const taken = allProductsCache
     .filter(p => String(p.aisle) === aisle && p.side === side &&
                  String(p.section || '1') === section && String(p.shelf) === shelf)
     .map(p => parseInt(p.position) || 0);
   return taken.length ? String(Math.max(...taken) + 1) : '1';
+}
+
+// Keep the manual start position flowing: after placing at N, advance it to N+1.
+function bumpRayonStartPos(filledPos) {
+  const el = document.getElementById('rayonStartPos');
+  if (el && el.value.trim()) el.value = String((parseInt(filledPos) || 0) + 1);
 }
 
 // Number of fixed positions on the current tablette (0 = mode libre / illimité).
@@ -377,6 +386,15 @@ function showOnlineLookupForm(barcode) {
       <label class="label" for="scanProductDescription">Description</label>
       <input type="text" id="scanProductDescription" value="" placeholder="Description"/>
     </div>
+    <div class="field" style="margin-top:2px">
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
+        <input type="checkbox" id="scanIsPlano" onchange="toggleScanPlanoFields()"/> 📋 Ce produit fait partie du planogramme (PLANO)
+      </label>
+    </div>
+    <div class="field" id="scanUnderneathWrap" style="margin-top:2px">
+      <label class="label" for="scanUnderneath">🔄 Produit plano caché dessous (optionnel — UPC ou nom)</label>
+      <input type="text" id="scanUnderneath" value="" placeholder="Laisser vide s'il n'y en a pas"/>
+    </div>
     <div id="lookupSource" class="barcode-text"></div>
     <div class="tool-row">
       <button class="btn btn-outline btn-inline" onclick="generateLookupAssist()">Générer aide client (IA)</button>
@@ -443,6 +461,14 @@ async function generateLookupAssist() {
   renderLookupAssistPreview();
 }
 
+// Hide the "underneath plano product" field when the item IS plano (a plano
+// product has nothing hidden under it). Shown by default (scan = hors-plano).
+function toggleScanPlanoFields() {
+  const isPlano = document.getElementById('scanIsPlano')?.checked;
+  const wrap = document.getElementById('scanUnderneathWrap');
+  if (wrap) wrap.style.display = isPlano ? 'none' : '';
+}
+
 async function confirmNewProduct() {
   if (!requireEditorSession('ajouter un produit')) return;
   const barcode = document.getElementById('scanInput').value.trim();
@@ -463,6 +489,8 @@ async function confirmNewProduct() {
     usage_notes: pendingLookupAssist?.usage_notes || pendingLookupProduct?.usage_notes || '',
     alternative_suggestions: pendingLookupAssist?.alternative_suggestions || pendingLookupProduct?.alternative_suggestions || '',
     barcode,
+    is_plano: document.getElementById('scanIsPlano')?.checked ? 1 : 0,
+    underneath_label: document.getElementById('scanUnderneath')?.value.trim() || '',
     aisle: rayonCtx.aisle, side: rayonCtx.side, section: rayonCtx.section || '1',
     shelf: rayonCtx.shelf, position: pos
   });
@@ -490,6 +518,8 @@ async function confirmUnknownProduct() {
     source_url: pendingLookupProduct?.source_url || '',
     search_terms: '', usage_notes: '', alternative_suggestions: '',
     barcode,
+    is_plano: document.getElementById('scanIsPlano')?.checked ? 1 : 0,
+    underneath_label: document.getElementById('scanUnderneath')?.value.trim() || '',
     aisle: rayonCtx.aisle, side: rayonCtx.side, section: rayonCtx.section || '1',
     shelf: rayonCtx.shelf, position: pos
   });
@@ -519,7 +549,10 @@ function finishConfirmed(message, brand, filledPos) {
   // When the tablette is now full, jump to the next tablette/section automatically
   // (it refreshes the badge/list itself). Otherwise just refresh in place.
   const advanced = (filledPos != null) && maybeAdvanceRayon(filledPos);
-  if (!advanced) {
+  if (advanced) {
+    const sp = document.getElementById('rayonStartPos'); if (sp) sp.value = '';  // new tablette → back to auto
+  } else {
+    if (filledPos != null) bumpRayonStartPos(filledPos);
     refreshRayonList();
     updateRayonCtx(); // refresh P→N indicator in badge
   }

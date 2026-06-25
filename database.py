@@ -246,6 +246,9 @@ def init_postgres_db(db):
     # Façades from the planogram = how many positions a product spreads across.
     # Saved for général info only; NOT used for placement (one product / position).
     db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS facings INTEGER DEFAULT 1")
+    # The plano product hidden underneath a hors-plano item (optional; its étiquette
+    # is flipped under the visible product). Free text: name or UPC of that product.
+    db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS underneath_label TEXT DEFAULT ''")
 
     # Reference catalog: every product identified by barcode (online lookup, cache
     # or seed). Checked first on lookup so known UPCs resolve instantly & free, and
@@ -410,6 +413,8 @@ def init_sqlite_db(db):
     # général info only; NOT used for placement.
     if "facings" not in existing_columns:
         db.execute("ALTER TABLE products ADD COLUMN facings INTEGER DEFAULT 1")
+    if "underneath_label" not in existing_columns:
+        db.execute("ALTER TABLE products ADD COLUMN underneath_label TEXT DEFAULT ''")
 
     # Reference catalog (see postgres init for rationale): known products by barcode.
     db.execute("""

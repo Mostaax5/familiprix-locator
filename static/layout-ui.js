@@ -758,10 +758,12 @@ function productCard(p, showDelete=true, showAiButton=true) {
   ];
   const outOfStock = p.in_stock === 0;
   const flipped = p.flipped_label === 1;
-  const planoBadge = p.is_plano ? `<span style="display:inline-block;background:#eef2ff;color:#4338ca;border-radius:6px;padding:1px 7px;font-size:10px;font-weight:700;margin-right:4px">📋 PLANO</span>` : `<span style="display:inline-block;background:#f1f5f9;color:#64748b;border-radius:6px;padding:1px 7px;font-size:10px;font-weight:700;margin-right:4px">HORS-PLANO</span>`;
-  // For hors-plano products: option to say a plano étiquette is flipped underneath.
-  const flippedRow = (p.id && !p.is_plano) ? `<div class="tool-row" style="margin-top:6px;align-items:center;gap:8px">
+  const planoBadge = (p.is_plano ? `<span style="display:inline-block;background:#eef2ff;color:#4338ca;border-radius:6px;padding:1px 7px;font-size:10px;font-weight:700;margin-right:4px">📋 PLANO</span>` : `<span style="display:inline-block;background:#f1f5f9;color:#64748b;border-radius:6px;padding:1px 7px;font-size:10px;font-weight:700;margin-right:4px">HORS-PLANO</span>`)
+    + (p.id ? `<button title="Basculer plano / hors-plano" onclick="toggleIsPlano(${p.id},${p.is_plano?'false':'true'})" style="background:none;border:1px solid #cbd5e1;border-radius:5px;color:#475569;cursor:pointer;font-size:9px;padding:1px 5px;font-weight:700">↔ ${p.is_plano?'hors-plano':'plano'}</button>` : '');
+  // For hors-plano products: flag a flipped plano étiquette + name the product hidden underneath.
+  const flippedRow = (p.id && !p.is_plano) ? `<div class="tool-row" style="margin-top:6px;align-items:center;gap:8px;flex-wrap:wrap">
       <button class="btn btn-outline btn-inline" style="font-size:12px;${flipped?'background:#fef3c7;border-color:#fbbf24;color:#92400e':''}" onclick="toggleFlippedLabel(${p.id},${flipped?'false':'true'})">🔄 Étiquette plano flippée dessous : ${flipped?'OUI':'non'}</button>
+      ${flipped ? `<button class="btn btn-outline btn-inline" style="font-size:12px" onclick="editUnderneath(${p.id})">${p.underneath_label ? '✎ '+esc(p.underneath_label) : '+ Produit plano dessous'}</button>` : ''}
     </div>` : '';
   const stockRow = (p.id ? `<div class="tool-row" style="margin-top:6px;align-items:center;gap:8px">
       ${outOfStock
@@ -808,14 +810,39 @@ async function toggleProductStock(productId, inStock) {
   }
 }
 
+function _reRenderActiveView() {
+  if (document.getElementById('search')?.classList.contains('active')) doSearch();
+  else if (document.getElementById('add')?.classList.contains('active')) refreshPlanUi();
+  else if (document.getElementById('scan')?.classList.contains('active')) refreshRayonList();
+}
+
 async function toggleFlippedLabel(productId, flipped) {
   if (!requireEditorSession('changer l étiquette')) return;
   const data = await apiSetFlippedLabel(productId, flipped);
   if (data.success !== false && data.product) {
     upsertCachedProduct(normalizeProduct(data.product));
-    if (document.getElementById('search')?.classList.contains('active')) doSearch();
-    else if (document.getElementById('add')?.classList.contains('active')) refreshPlanUi();
-    else if (document.getElementById('scan')?.classList.contains('active')) refreshRayonList();
+    _reRenderActiveView();
+  }
+}
+
+async function toggleIsPlano(productId, makePlano) {
+  if (!requireEditorSession('changer le statut plano')) return;
+  const data = await apiSetIsPlano(productId, makePlano);
+  if (data.success !== false && data.product) {
+    upsertCachedProduct(normalizeProduct(data.product));
+    _reRenderActiveView();
+  }
+}
+
+async function editUnderneath(productId) {
+  if (!requireEditorSession('modifier le produit plano dessous')) return;
+  const p = allProductsCache.find(x => Number(x.id) === Number(productId));
+  const val = prompt('Produit plano caché dessous (UPC ou nom). Vide = aucun :', p?.underneath_label || '');
+  if (val === null) return;
+  const data = await apiSetFlippedLabel(productId, true, val.trim());
+  if (data.success !== false && data.product) {
+    upsertCachedProduct(normalizeProduct(data.product));
+    _reRenderActiveView();
   }
 }
 

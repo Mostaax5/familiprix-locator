@@ -157,16 +157,31 @@ async function apiSetProductStock(id, inStock) {
   }
 }
 
-async function apiSetFlippedLabel(id, flipped) {
+async function apiSetFlippedLabel(id, flipped, underneath) {
   try {
+    const body = {flipped: !!flipped};
+    if (underneath !== undefined) body.underneath = String(underneath || '');
     const {res, data} = await apiFetch(`/api/products/${id}/flipped-label`, {
       method: 'POST',
       headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-      body: JSON.stringify({flipped: !!flipped})
+      body: JSON.stringify(body)
     });
     return res.ok ? data : {success: false, error: data.error || 'Erreur.'};
   } catch (error) {
     return {success: false, error: 'Impossible de changer l étiquette.'};
+  }
+}
+
+async function apiSetIsPlano(id, isPlano) {
+  try {
+    const {res, data} = await apiFetch(`/api/products/${id}/plano`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: JSON.stringify({is_plano: !!isPlano})
+    });
+    return res.ok ? data : {success: false, error: data.error || 'Erreur.'};
+  } catch (error) {
+    return {success: false, error: 'Impossible de changer le statut plano.'};
   }
 }
 
