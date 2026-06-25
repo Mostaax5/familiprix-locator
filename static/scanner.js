@@ -18,6 +18,8 @@ let quaggaProcessedHandler = null;
 let quaggaOcrTimer = null;
 let quaggaStartedAt = 0;
 let scanResumeTimer = null;   // pending "resume decoding" timer (see resumeScanning)
+let cameraIdleTimer = null;   // releases the camera after a stretch of no scanning
+const CAMERA_IDLE_MS = 25000; // stop the camera if nothing is scanned for this long
 let ocrBusy = false;
 let quaggaLibraryPromise = null;
 let ocrLibraryPromise = null;
@@ -173,8 +175,12 @@ async function startNativeScan(video, status, button, reader) {
   const stream = await navigator.mediaDevices.getUserMedia({
     video: {
       facingMode: 'environment',
-      width: {ideal: 1920, min: 640},
-      height: {ideal: 1080, min: 480},
+      // 720p @ ~15fps is plenty to read barcodes and runs MUCH cooler than the
+      // 1080p/30fps the phone was grinding on continuously (the camera pipeline
+      // itself is a big heat source over long sessions).
+      width: {ideal: 1280, min: 640},
+      height: {ideal: 720, min: 480},
+      frameRate: {ideal: 15, max: 24},
       advanced: [{focusMode: 'continuous'}]
     }
   });
@@ -198,6 +204,7 @@ async function startNativeScan(video, status, button, reader) {
   status.textContent = 'Cadrez le code-barres';
 
   nativeScanActive = true;
+  bumpCameraActivity();   // start the idle-release countdown
   updateDeviceSupport();
   const loop = async () => {
     if (!nativeScanActive) return;
@@ -363,6 +370,7 @@ async function startSmartScan(video, status, button) {
       facingMode: 'environment',
       width:  {min: 640, ideal: 1280},
       height: {min: 480, ideal: 720},
+      frameRate: {ideal: 15, max: 24},
       advanced: [{focusMode: 'continuous'}]
     }
   });
@@ -518,6 +526,7 @@ async function startZXingLiveScan(video, status, button) {
       facingMode: 'environment',
       width:  {min: 640, ideal: 1280},
       height: {min: 480, ideal: 720},
+      frameRate: {ideal: 15, max: 24},
       advanced: [{focusMode: 'continuous'}]
     }
   });
@@ -630,8 +639,12 @@ async function startZXingScan(video, status, button, reader) {
   const stream = await navigator.mediaDevices.getUserMedia({
     video: {
       facingMode: 'environment',
-      width: {ideal: 1920, min: 640},
-      height: {ideal: 1080, min: 480},
+      // 720p @ ~15fps is plenty to read barcodes and runs MUCH cooler than the
+      // 1080p/30fps the phone was grinding on continuously (the camera pipeline
+      // itself is a big heat source over long sessions).
+      width: {ideal: 1280, min: 640},
+      height: {ideal: 720, min: 480},
+      frameRate: {ideal: 15, max: 24},
       advanced: [{focusMode: 'continuous'}]
     }
   });
@@ -1176,10 +1189,11 @@ async function startQuaggaScanner(reader, status, button) {
       target: reader,
       constraints: {
         facingMode: 'environment',
-        // High capture resolution so small/dense etiquette barcodes keep enough
-        // detail even after halfSample (1920 → 960px processing = sharp thin bars).
-        width:  {min: 640, ideal: 1920},
-        height: {min: 480, ideal: 1080},
+        // 720p @ ~15fps: still sharp enough for etiquette barcodes after halfSample,
+        // but the camera pipeline runs FAR cooler than 1080p/30fps over long sessions.
+        width:  {min: 640, ideal: 1280},
+        height: {min: 480, ideal: 720},
+        frameRate: {ideal: 15, max: 24},
         advanced: [{focusMode: 'continuous'}]
       },
       area: {top: '15%', right: '5%', left: '5%', bottom: '15%'}
@@ -1235,6 +1249,7 @@ async function startQuaggaScanner(reader, status, button) {
   window.Quagga.onProcessed(quaggaProcessedHandler);
   window.Quagga.start();
   quaggaActive = true;
+  bumpCameraActivity();   // start the idle-release countdown
   quaggaStartedAt = Date.now();
   _dbg.q = '✓'; _renderDbg();
   updateDeviceSupport();
@@ -1324,6 +1339,8 @@ async function startZXingParallel(reader) {
 async function stopCamera() {
   const {status, button, video, reader} = getCameraDom();
   scanPaused = false;
+  window.clearTimeout(cameraIdleTimer);
+  window.clearTimeout(scanResumeTimer);
   lastOcrCandidate = '';
   ocrHistory = [];
   _removeDbg();
@@ -1459,6 +1476,7 @@ function resumeScanning() {
   if (!quaggaActive && !scannerStream && !html5Scanner && !nativeScanActive) return;
   scanPaused = false;
   quaggaStartedAt = Date.now();
+  bumpCameraActivity();
   try { if (cameraUsageMode !== 'search') getCameraDom().status.textContent = 'Cadrez le code-barres'; } catch (_) {}
 }
 
@@ -1469,10 +1487,27 @@ function scheduleScanResume(ms) {
   scanResumeTimer = window.setTimeout(resumeScanning, ms);
 }
 
+// Keep the camera alive only while scanning is actually happening; release it
+// after CAMERA_IDLE_MS of no scans so a camera "left open" can't cook the phone.
+function bumpCameraActivity() {
+  window.clearTimeout(cameraIdleTimer);
+  if (scannerStream || html5Scanner || quaggaActive || nativeScanActive || zxingActive) {
+    cameraIdleTimer = window.setTimeout(autoStopIdleCamera, CAMERA_IDLE_MS);
+  }
+}
+
+async function autoStopIdleCamera() {
+  if (!(scannerStream || html5Scanner || quaggaActive || nativeScanActive || zxingActive)) return;
+  const statusEl = getCameraDom().status;
+  await stopCamera();   // fully releases the sensor → zero camera heat when idle
+  if (statusEl) statusEl.textContent = '💤 Caméra en veille (anti-surchauffe) — touchez « Ouvrir caméra » pour scanner';
+}
+
 function onDecodedCode(decodedText, instant=false) {
   const rawValue = normalizeScannedBarcode(decodedText);
   if (!rawValue || scanPaused) return;
   if (!confirmStableCameraBarcode(rawValue, instant)) return;
+  bumpCameraActivity();   // a real scan = active → keep the camera alive, reset idle timer
   lastOcrCandidate = '';
   scanPaused = true;
   playBeep();
