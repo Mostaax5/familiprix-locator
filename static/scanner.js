@@ -175,12 +175,8 @@ async function startNativeScan(video, status, button, reader) {
   const stream = await navigator.mediaDevices.getUserMedia({
     video: {
       facingMode: 'environment',
-      // 720p @ ~15fps is plenty to read barcodes and runs MUCH cooler than the
-      // 1080p/30fps the phone was grinding on continuously (the camera pipeline
-      // itself is a big heat source over long sessions).
-      width: {ideal: 1280, min: 640},
-      height: {ideal: 720, min: 480},
-      frameRate: {ideal: 15, max: 24},
+      width: {ideal: 1920, min: 640},
+      height: {ideal: 1080, min: 480},
       advanced: [{focusMode: 'continuous'}]
     }
   });
@@ -370,7 +366,6 @@ async function startSmartScan(video, status, button) {
       facingMode: 'environment',
       width:  {min: 640, ideal: 1280},
       height: {min: 480, ideal: 720},
-      frameRate: {ideal: 15, max: 24},
       advanced: [{focusMode: 'continuous'}]
     }
   });
@@ -526,7 +521,6 @@ async function startZXingLiveScan(video, status, button) {
       facingMode: 'environment',
       width:  {min: 640, ideal: 1280},
       height: {min: 480, ideal: 720},
-      frameRate: {ideal: 15, max: 24},
       advanced: [{focusMode: 'continuous'}]
     }
   });
@@ -639,12 +633,8 @@ async function startZXingScan(video, status, button, reader) {
   const stream = await navigator.mediaDevices.getUserMedia({
     video: {
       facingMode: 'environment',
-      // 720p @ ~15fps is plenty to read barcodes and runs MUCH cooler than the
-      // 1080p/30fps the phone was grinding on continuously (the camera pipeline
-      // itself is a big heat source over long sessions).
-      width: {ideal: 1280, min: 640},
-      height: {ideal: 720, min: 480},
-      frameRate: {ideal: 15, max: 24},
+      width: {ideal: 1920, min: 640},
+      height: {ideal: 1080, min: 480},
       advanced: [{focusMode: 'continuous'}]
     }
   });
@@ -1189,11 +1179,10 @@ async function startQuaggaScanner(reader, status, button) {
       target: reader,
       constraints: {
         facingMode: 'environment',
-        // 720p @ ~15fps: still sharp enough for etiquette barcodes after halfSample,
-        // but the camera pipeline runs FAR cooler than 1080p/30fps over long sessions.
-        width:  {min: 640, ideal: 1280},
-        height: {min: 480, ideal: 720},
-        frameRate: {ideal: 15, max: 24},
+        // High capture resolution so small/dense etiquette barcodes keep enough
+        // detail even after halfSample (1920 → 960px processing = sharp thin bars).
+        width:  {min: 640, ideal: 1920},
+        height: {min: 480, ideal: 1080},
         advanced: [{focusMode: 'continuous'}]
       },
       area: {top: '15%', right: '5%', left: '5%', bottom: '15%'}
