@@ -65,7 +65,7 @@
         <datalist id="rayonAisleList"></datalist>
       </div>
       <div class="field">
-        <label class="label">Côté / Façade</label>
+        <label class="label">Côté / Façade / Présentoir</label>
         <select id="rayonSide" onchange="updateRayonCtx()">
           <option value="Gauche">Côté A</option>
           <option value="Droite">Côté B</option>
@@ -76,8 +76,9 @@
         <input type="number" id="rayonSection" value="1" min="1" oninput="updateRayonCtx()"/>
       </div>
       <div class="field">
-        <label class="label">Tablette</label>
-        <input type="number" id="rayonShelf" placeholder="#" min="1" oninput="updateRayonCtx()"/>
+        <label class="label" title="📎 = accroche/crochet">Tablette / Accroche</label>
+        <input type="number" id="rayonShelf" list="rayonShelfList" placeholder="#" min="1" oninput="updateRayonCtx()"/>
+        <datalist id="rayonShelfList"></datalist>
       </div>
       <div class="field">
         <label class="label" title="Laisser vide = prochaine position libre (auto)">Position de départ</label>

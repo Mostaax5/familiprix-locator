@@ -12,6 +12,34 @@ function populateRayonAisleList() {
   dl.innerHTML = aisles.map(a => `<option value="${esc(a)}"></option>`).join('');
 }
 
+// List the tablettes of the chosen côté/façade/présentoir + section in the
+// "Tablette" autocomplete, WITH their labels (📎 Accroche, custom names, 📦 Libre)
+// so accroches/crochets are visible and pickable.
+function updateRayonShelfOptions() {
+  const dl = document.getElementById('rayonShelfList');
+  if (!dl) return;
+  const aisle = (document.getElementById('rayonAisle')?.value || '').trim();
+  const side = document.getElementById('rayonSide')?.value || 'Gauche';
+  const section = (document.getElementById('rayonSection')?.value || '1').trim() || '1';
+  const config = aisle ? getAisleLayoutConfig(aisle) : null;
+  let shelves = [], labels = [];
+  if (side === 'Gauche' || side === 'Droite') {
+    const sec = config?.sides?.[side]?.sections?.[parseInt(section) - 1];
+    shelves = sec?.shelves || []; labels = sec?.labels || [];
+  } else if (side === 'Façade A') { shelves = config?.facade_a?.shelves || []; labels = config?.facade_a?.labels || []; }
+  else if (side === 'Façade B') { shelves = config?.facade_b?.shelves || []; labels = config?.facade_b?.labels || []; }
+  else {
+    for (const p of (config?.presentoirs || [])) for (const f of (p.facades || []))
+      if (side === `${p.name} - ${f.name}`) { shelves = f.shelves || []; labels = f.labels || []; }
+  }
+  dl.innerHTML = shelves.map((posCount, i) => {
+    const lbl = (labels[i] || '').trim();
+    const isLibre = Number(posCount) === 0;
+    const tag = lbl ? `${isLibre ? '📦' : '📎'} ${lbl}` : (isLibre ? '📦 Libre' : '');
+    return `<option value="${i + 1}">T${i + 1}${tag ? ' — ' + esc(tag) : ''}</option>`;
+  }).join('');
+}
+
 function updateRayonSideOptions() {
   populateRayonAisleList();
   const aisle = (document.getElementById('rayonAisle')?.value || '').trim();
@@ -39,6 +67,7 @@ function updateRayonCtx() {
   rayonCtx.side    =  document.getElementById('rayonSide')?.value    || 'Gauche';
   rayonCtx.section = (document.getElementById('rayonSection')?.value || '1').trim() || '1';
   rayonCtx.shelf   = (document.getElementById('rayonShelf')?.value   || '').trim();
+  updateRayonShelfOptions();   // refresh the tablette/accroche list for this côté+section
   const badge = document.getElementById('rayonBadge');
   if (!badge) return;
   if (rayonCtx.aisle && rayonCtx.shelf) {
@@ -206,6 +235,7 @@ async function addProductToCurrentRayon(productId, position) {
     search_terms: existing.search_terms || '', usage_notes: existing.usage_notes || '',
     alternative_suggestions: existing.alternative_suggestions || '', barcode: existing.barcode || '',
     product_code: existing.product_code || '',
+    ...readScanPlano(),   // PLANO/hors-plano + produit plano caché dessous, chosen on this screen
     aisle: rayonCtx.aisle, side: rayonCtx.side, section: rayonCtx.section || '1',
     shelf: rayonCtx.shelf, position
   };
@@ -307,6 +337,7 @@ async function lookupScanFromInput(force=false, barcodeOverride='') {
       <div style="font-size:12px;font-weight:700;color:#16a34a;margin-bottom:4px">✓ Déjà sur ce rayon — Position ${esc(atCurrentRayon.position)}</div>
       <div class="name">${esc(atCurrentRayon.name)}</div>
       ${atCurrentRayon.brand ? `<div class="barcode-text">${esc(atCurrentRayon.brand)}</div>` : ''}
+      ${scanPlanoControlsHtml()}
       <div class="btn-row" style="margin-top:8px">
         <button class="btn" onclick="addProductToCurrentRayon(${atCurrentRayon.id},'${againPos}')">+ Ajouter encore ici — Pos. ${againPos}</button>
       </div>
@@ -336,6 +367,7 @@ async function lookupScanFromInput(force=false, barcodeOverride='') {
         ${otherLocs}
       </div>
       <div class="msg info" style="margin-top:8px">Rayon cible: <strong>${esc(rayonLabel())} — Pos. ${nextPos}</strong></div>
+      ${scanPlanoControlsHtml()}
       <div class="btn-row">
         <button class="btn" onclick="addProductToCurrentRayon(${allMatches[0].id},'${nextPos}')">+ Ajouter ici aussi</button>
         <button class="btn btn-outline" onclick="moveProductToCurrentRayon(${allMatches[0].id},'${nextPos}')">Déplacer ici</button>
@@ -386,15 +418,7 @@ function showOnlineLookupForm(barcode) {
       <label class="label" for="scanProductDescription">Description</label>
       <input type="text" id="scanProductDescription" value="" placeholder="Description"/>
     </div>
-    <div class="field" style="margin-top:2px">
-      <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
-        <input type="checkbox" id="scanIsPlano" onchange="toggleScanPlanoFields()"/> 📋 Ce produit fait partie du planogramme (PLANO)
-      </label>
-    </div>
-    <div class="field" id="scanUnderneathWrap" style="margin-top:2px">
-      <label class="label" for="scanUnderneath">🔄 Produit plano caché dessous (optionnel — UPC ou nom)</label>
-      <input type="text" id="scanUnderneath" value="" placeholder="Laisser vide s'il n'y en a pas"/>
-    </div>
+    ${scanPlanoControlsHtml()}
     <div id="lookupSource" class="barcode-text"></div>
     <div class="tool-row">
       <button class="btn btn-outline btn-inline" onclick="generateLookupAssist()">Générer aide client (IA)</button>
@@ -467,6 +491,29 @@ function toggleScanPlanoFields() {
   const isPlano = document.getElementById('scanIsPlano')?.checked;
   const wrap = document.getElementById('scanUnderneathWrap');
   if (wrap) wrap.style.display = isPlano ? 'none' : '';
+}
+
+// Reusable PLANO / hors-plano + "produit plano caché dessous" controls, shown on
+// EVERY add screen (new product, found-elsewhere, already-here). Only one add
+// screen is visible at a time, so the shared ids are safe.
+function scanPlanoControlsHtml() {
+  return `<div class="field" style="margin-top:6px">
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
+        <input type="checkbox" id="scanIsPlano" onchange="toggleScanPlanoFields()"/> 📋 Fait partie du planogramme (PLANO)
+      </label>
+    </div>
+    <div class="field" id="scanUnderneathWrap" style="margin-top:2px">
+      <label class="label" for="scanUnderneath" style="font-size:12px">🔄 Produit plano caché dessous (UPC ou nom — optionnel)</label>
+      <input type="text" id="scanUnderneath" value="" placeholder="Vide s'il n'y en a pas"/>
+    </div>`;
+}
+
+// Read the plano/underneath choices from whichever add screen is showing.
+function readScanPlano() {
+  return {
+    is_plano: document.getElementById('scanIsPlano')?.checked ? 1 : 0,
+    underneath_label: document.getElementById('scanUnderneath')?.value.trim() || '',
+  };
 }
 
 async function confirmNewProduct() {
