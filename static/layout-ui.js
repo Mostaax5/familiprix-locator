@@ -744,16 +744,7 @@ function startScanFromSection(aisle, side, sectionIndex) {
     document.getElementById('addMsg').innerHTML = '<div class="msg error">Aucune tablette dans cette section pour le moment.</div>';
     return;
   }
-  // The Scan tab works off the "Rayon en cours" fields (not the plan cursor), so
-  // pre-fill those to this section's first tablette and open Scan. Position is
-  // auto (next free spot), so the user just keeps scanning.
-  switchTab('scan');
-  const aEl = document.getElementById('rayonAisle'); if (aEl) aEl.value = String(aisle);
-  if (typeof updateRayonSideOptions === 'function') updateRayonSideOptions();
-  const sEl   = document.getElementById('rayonSide');    if (sEl)   sEl.value   = side;
-  const secEl = document.getElementById('rayonSection'); if (secEl) secEl.value = String(sectionIndex + 1);
-  const shEl  = document.getElementById('rayonShelf');   if (shEl)  shEl.value  = '1';
-  updateRayonCtx();
+  startScanAt(aisle, side, sectionIndex + 1, 1);   // section's first tablette
 }
 
 // ── Product card ──────────────────────────────────────────────────────────────
@@ -986,11 +977,14 @@ function renderShelfProductList(aisle, side, section, shelf, positions) {
     .slice().sort((a, b) => Number(a.position) - Number(b.position));
   const filled = products.length;
   const total = Number(positions) || 0;
-  if (!total && !filled) return '';
+  // "Scanner ici" makes EVERY tablette directly scannable — côté sections,
+  // accroches, façades and présentoirs all render their products through here.
+  const scanBtn = `<button class="btn btn-outline btn-inline" style="font-size:11px;padding:3px 9px;margin:0 0 5px;width:100%;color:#16a34a;border-color:#16a34a" onclick="startScanAt('${esc(String(aisle))}','${esc(String(side))}','${esc(String(section))}','${esc(String(shelf))}')">▶ Scanner ici</button>`;
+  if (!total && !filled) return `<div class="plan-product-list">${scanBtn}</div>`;
 
   // Mode libre (positions = 0): show all scanned products without fixed slots
   if (!total) {
-    return `<div class="plan-product-list">
+    return `<div class="plan-product-list">${scanBtn}
       <div style="font-size:10px;color:#8b5cf6;font-weight:600;padding:3px 0 4px">📦 ${filled} produit${filled!==1?'s':''} libre${filled!==1?'s':''}</div>
       ${products.map(p => `<div class="plan-product-item">
         <div class="plan-product-row1">
@@ -1006,7 +1000,7 @@ function renderShelfProductList(aisle, side, section, shelf, positions) {
   const byPos = {};
   products.forEach(p => { byPos[Number(p.position)] = p; });
   const ae = s => esc(String(s));
-  let html = `<div class="plan-product-list">`;
+  let html = `<div class="plan-product-list">${scanBtn}`;
   for (let pos = 1; pos <= total; pos++) {
     const p = byPos[pos];
     if (p) {

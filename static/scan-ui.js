@@ -65,6 +65,19 @@ function rayonLabel() {
   return `Allée ${rayonCtx.aisle} — ${sideDisplay}${sectionPart} — Tablette ${rayonCtx.shelf}`;
 }
 
+// Open the Scan tab pre-aimed at an exact slot — works for côté sections,
+// accroches, façades and présentoirs. Position auto-starts at the next free spot.
+function startScanAt(aisle, side, section, shelf) {
+  if (typeof requireEditorSession === 'function' && !requireEditorSession('scanner')) return;
+  if (typeof switchTab === 'function') switchTab('scan');
+  const aEl = document.getElementById('rayonAisle'); if (aEl) aEl.value = String(aisle);
+  updateRayonSideOptions();   // rebuild côté/façade/présentoir options for this allée
+  const sEl  = document.getElementById('rayonSide');    if (sEl)  sEl.value  = String(side);
+  const secEl = document.getElementById('rayonSection'); if (secEl) secEl.value = String(section || '1');
+  const shEl  = document.getElementById('rayonShelf');   if (shEl)  shEl.value  = String(shelf);
+  updateRayonCtx();
+}
+
 function nextRayonPosition() {
   const {aisle, side, section, shelf} = rayonCtx;
   if (!aisle || !shelf) return '1';
@@ -278,14 +291,21 @@ async function lookupScanFromInput(force=false, barcodeOverride='') {
   );
 
   if (atCurrentRayon) {
-    // Already on this shelf — green flash
+    // Already on this shelf — but allow adding it AGAIN (a second facing/spot on
+    // the same tablette is valid). Offer a one-tap "add again" at the next spot.
+    const againPos = nextRayonPosition();
     div.innerHTML = `<div class="card" style="border-left:4px solid #16a34a;padding:12px 16px">
       <div style="font-size:12px;font-weight:700;color:#16a34a;margin-bottom:4px">✓ Déjà sur ce rayon — Position ${esc(atCurrentRayon.position)}</div>
       <div class="name">${esc(atCurrentRayon.name)}</div>
       ${atCurrentRayon.brand ? `<div class="barcode-text">${esc(atCurrentRayon.brand)}</div>` : ''}
+      <div class="btn-row" style="margin-top:8px">
+        <button class="btn" onclick="addProductToCurrentRayon(${atCurrentRayon.id},'${againPos}')">+ Ajouter encore ici — Pos. ${againPos}</button>
+      </div>
     </div>`;
     if (navigator.vibrate) navigator.vibrate([40, 20, 40]);
-    window.setTimeout(() => { lastLookedUpBarcode = ''; div.innerHTML = ''; resumeScanning(); }, 2500);
+    // Resume scanning shortly (so a stray re-scan isn't stuck), but keep the
+    // "Ajouter encore" button visible so they can add another facing anytime.
+    window.setTimeout(() => { lastLookedUpBarcode = ''; resumeScanning(); }, 2500);
     return;
   }
 
