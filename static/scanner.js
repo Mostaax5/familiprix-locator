@@ -133,37 +133,40 @@ async function startCamera() {
 
   resetCameraCandidate();
 
-  // Native BarcodeDetector: hardware-accelerated, works on iOS 17.4+ AND Android Chrome
+  // Pre-load Tesseract NOW so OCR is ready the moment it's needed as a last resort.
+  // Without this, OCR fires later but Tesseract still takes 3-5s to download,
+  // so the first several OCR cycles silently return null.
+  ensureOcrLoaded().catch(() => {});
+
+  // PRIMARY engine: Quagga + ZXing. ZXing decodes the full-resolution frame and
+  // reads small/dense etiquette UPC bars best, so it's the main reader (Quagga runs
+  // alongside as a lightweight backup). This path works on iPhone WebKit too.
+  try {
+    await ensureQuaggaLoaded();
+    if ('Quagga' in window) {
+      video.style.display = 'none';
+      reader.style.display = 'block';
+      reader.innerHTML = '';
+      await startQuaggaScanner(reader, status, button);
+      return;
+    }
+  } catch (error) {
+    console.warn('[Scanner] Quagga/ZXing path failed, trying native BarcodeDetector:', error);
+  }
+
+  // FALLBACK: OS-level BarcodeDetector (Android Chrome / supported browsers) — only
+  // used if the Quagga/ZXing libraries can't load.
   if ('BarcodeDetector' in window) {
     try {
       await startNativeScan(video, status, button, reader);
       return;
     } catch (err) {
-      console.warn('[Scanner] BarcodeDetector failed, falling to Quagga:', err);
+      console.warn('[Scanner] BarcodeDetector fallback also failed:', err);
     }
   }
 
-  // Pre-load Tesseract NOW so OCR is ready the moment Quagga needs a fallback.
-  // Without this, OCR fires at ~1.5s but Tesseract still takes 3-5s to download,
-  // so the first several OCR cycles silently return null.
-  ensureOcrLoaded().catch(() => {});
-
-  // iPhone / Firefox: Quagga2 — the only engine proven on iPhone WebKit
-  try {
-    await ensureQuaggaLoaded();
-    if (!('Quagga' in window)) {
-      status.textContent = 'Scanner non supporte';
-      showCameraHint('Quagga non charge — verifiez la connexion.');
-      return;
-    }
-    video.style.display = 'none';
-    reader.style.display = 'block';
-    reader.innerHTML = '';
-    await startQuaggaScanner(reader, status, button);
-  } catch (error) {
-    status.textContent = 'Camera bloquee';
-    showCameraHint(error.message || 'Impossible d ouvrir la camera. Sur telephone, utilisez une adresse HTTPS.');
-  }
+  status.textContent = 'Camera bloquee';
+  showCameraHint('Impossible d ouvrir la camera. Sur telephone, utilisez une adresse HTTPS, ou entrez le code manuellement.');
 }
 
 async function startNativeScan(video, status, button, reader) {
@@ -1294,9 +1297,9 @@ async function startZXingParallel(reader) {
 
   scanFrameTimer = window.setInterval(() => {
     if (scanPaused || !quaggaActive) return;
-    // Give Quagga a brief first shot, then ZXing reads hard/small codes fast.
-    // (Short window so reading stays near-instant; saves CPU between products.)
-    if (Date.now() - quaggaStartedAt < 500) return;
+    // ZXing is the PRIMARY reader: it decodes the full-resolution frame and reads
+    // small/dense etiquette UPC bars best, so it runs from the very first frame
+    // (no delay). Quagga keeps running in parallel as a lightweight backup.
     const video = reader.querySelector('video');
     if (!video || !video.videoWidth) return;
     const vw = video.videoWidth, vh = video.videoHeight;
@@ -1321,7 +1324,7 @@ async function startZXingParallel(reader) {
     } finally {
       try { mfReader.reset(); } catch (_) {}   // required between decodes
     }
-  }, 250);
+  }, 150);
 }
 
 // ── Stop camera ───────────────────────────────────────────────────────────────
@@ -1691,23 +1694,17 @@ function updateDeviceSupport() {
   cameraSupport.style.background = hasCamera && isSecure ? '#ecfdf5' : '#fef2f2';
   cameraSupport.style.color = hasCamera && isSecure ? '#065f46' : '#991b1b';
 
-  if (nativeScanActive || hasNative) {
-    scannerSupport.textContent = 'Natif (rapide)';
+  if (nativeScanActive && !zxingActive) {
+    // Native is only used as a fallback when the ZXing/Quagga libraries can't load.
+    scannerSupport.textContent = 'Natif (secours)';
     scannerSupport.style.background = '#ecfdf5';
     scannerSupport.style.color = '#065f46';
-    if (supportHint) supportHint.textContent = 'Ce navigateur utilise le scanner natif du telephone (BarcodeDetector). C est le mode le plus rapide, equivalent a Google Lens.';
-  } else if (zxingActive || hasZXing) {
-    scannerSupport.textContent = 'ZXing (bon)';
+    if (supportHint) supportHint.textContent = 'Mode de secours : scanner natif du telephone (BarcodeDetector). Utilise seulement si ZXing n a pas pu se charger.';
+  } else {
+    scannerSupport.textContent = 'ZXing (principal)';
     scannerSupport.style.background = '#fefce8';
     scannerSupport.style.color = '#854d0e';
-    if (supportHint) supportHint.textContent = 'Ce navigateur utilise ZXing. C est bon mais plus lent que le mode natif. Sur Android, utilisez Chrome pour obtenir le scanner natif.';
-  } else {
-    scannerSupport.textContent = hasNative ? 'Natif disponible' : 'ZXing / Quagga';
-    scannerSupport.style.background = '#ecfdf5';
-    scannerSupport.style.color = '#065f46';
-    if (supportHint) supportHint.textContent = hasNative
-      ? 'Scanner natif disponible. Ouvrez la camera pour l activer.'
-      : 'Sur Android, utilisez Chrome pour le scanner natif (le plus rapide). Sur iPhone, Quagga est utilise automatiquement.';
+    if (supportHint) supportHint.textContent = 'Lecteur principal : ZXing (lit le mieux les petits codes UPC d etiquette), avec Quagga en parallele. Le scanner natif sert de secours.';
   }
 
   if (!isSecure) {
