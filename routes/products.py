@@ -16,6 +16,91 @@ SEARCH_STOPWORDS = {
     "with", "without", "y",
 }
 
+# ── Intent lexicon ───────────────────────────────────────────────────────────────
+# Maps a customer's PROBLEM (symptom / need, written the way a client speaks) to the
+# product / ingredient / brand words that actually appear in product names, brands,
+# search_terms, usage_notes and descriptions. This lets a symptom query reach the
+# right products straight from the store's own data — no AI required. Triggers and
+# expansion terms are accent-free + lowercase to match normalize_search_text().
+# NOTE: keep this in sync with INTENT_LEXICON in static/search.js (same shape).
+INTENT_LEXICON = [
+    {"label": "Douleur / fièvre",
+     "triggers": ["mal de tete", "maux de tete", "tete", "migraine", "cephalee", "fievre",
+                  "douleur", "douleurs", "courbature", "courbatures", "mal de dos", "arthrite",
+                  "menstruel", "menstruelle", "regles", "crampes menstruelles"],
+     "expand": ["acetaminophene", "tylenol", "advil", "motrin", "ibuprofene", "aspirine",
+                "analgesique", "antidouleur", "naproxene", "aleve", "atasol", "tempra"]},
+    {"label": "Rhume / congestion",
+     "triggers": ["rhume", "congestion", "nez bouche", "sinus", "grippe", "decongestionnant", "mouchoir"],
+     "expand": ["decongestionnant", "rhume", "sinus", "sudafed", "otrivin", "tylenol rhume",
+                "advil rhume", "dristan", "vicks", "sirop"]},
+    {"label": "Toux / gorge",
+     "triggers": ["toux", "gorge", "mal de gorge", "expectorant", "enrouement", "extinction de voix"],
+     "expand": ["sirop", "toux", "dextromethorphane", "guaifenesine", "benylin", "buckley",
+                "pastille", "gorge", "strepsils", "halls", "fisherman"]},
+    {"label": "Allergies",
+     "triggers": ["allergie", "allergies", "urticaire", "eternuement", "rhinite", "allergique"],
+     "expand": ["antihistaminique", "allergie", "reactine", "cetirizine", "claritin",
+                "loratadine", "aerius", "benadryl", "allegra", "blexten"]},
+    {"label": "Brûlures d'estomac",
+     "triggers": ["brulure d estomac", "brulures d estomac", "reflux", "acidite", "indigestion",
+                  "aigreur", "estomac"],
+     "expand": ["antiacide", "tums", "gaviscon", "rolaids", "omeprazole", "pepto", "famotidine", "pantoloc"]},
+    {"label": "Digestion / transit",
+     "triggers": ["constipation", "diarrhee", "nausee", "ballonnement", "ballonnements", "gaz",
+                  "crampes", "mal de ventre", "digestion"],
+     "expand": ["laxatif", "metamucil", "senokot", "imodium", "gravol", "probiotique",
+                "lax a day", "restoralax", "ovol", "gaz", "pepto"]},
+    {"label": "Vitamines / suppléments",
+     "triggers": ["vitamine", "vitamines", "supplement", "supplements", "fer", "calcium",
+                  "magnesium", "multivitamine", "immunite", "fatigue", "energie"],
+     "expand": ["vitamine", "multivitamine", "centrum", "jamieson", "webber", "fer", "calcium",
+                "magnesium", "vitamine d", "vitamine c", "zinc", "omega", "probiotique"]},
+    {"label": "Soins de la peau",
+     "triggers": ["peau", "eczema", "secheresse", "hydratant", "creme", "demangeaison", "demangeaisons",
+                  "piqure", "piqures", "brulure", "coup de soleil", "acne", "psoriasis", "feu sauvage"],
+     "expand": ["creme", "hydratant", "cortisone", "cortate", "lubriderm", "aveeno", "cerave",
+                "calamine", "polysporin", "onguent", "vaseline", "abreva"]},
+    {"label": "Soins des yeux",
+     "triggers": ["yeux", "oeil", "secheresse oculaire", "conjonctivite", "larmes", "oculaire"],
+     "expand": ["gouttes", "yeux", "larmes artificielles", "visine", "systane", "collyre", "refresh"]},
+    {"label": "Bébé",
+     "triggers": ["bebe", "couche", "couches", "poussee dentaire", "colique", "coliques",
+                  "erytheme fessier", "biberon", "nourrisson"],
+     "expand": ["bebe", "couche", "pampers", "huggies", "tempra", "tylenol bebe", "penaten",
+                "creme fesses", "lingette", "ovol"]},
+    {"label": "Premiers soins",
+     "triggers": ["pansement", "coupure", "plaie", "desinfectant", "bandage", "ampoule",
+                  "echarde", "eraflure", "saignement"],
+     "expand": ["pansement", "band aid", "polysporin", "peroxyde", "alcool", "gaze",
+                "bandage", "antiseptique", "diachylon"]},
+    {"label": "Sommeil / stress",
+     "triggers": ["sommeil", "dormir", "insomnie", "stress", "anxiete", "relaxation", "nervosite"],
+     "expand": ["sommeil", "melatonine", "nytol", "sleep", "valeriane", "unisom", "tylenol nuit"]},
+]
+
+
+def intent_expansion_terms(query):
+    """Product/brand words implied by a symptom query (e.g. 'mal de tête' -> tylenol,
+    advil, analgesique). Empty when the query doesn't look like a known need."""
+    norm = normalize_search_text(query)
+    if not norm:
+        return []
+    tokens = set(norm.split())
+    terms, seen = [], set()
+    for entry in INTENT_LEXICON:
+        hit = False
+        for trigger in entry["triggers"]:
+            if (" " in trigger and trigger in norm) or (trigger in tokens):
+                hit = True
+                break
+        if hit:
+            for term in entry["expand"]:
+                if term not in seen:
+                    seen.add(term)
+                    terms.append(term)
+    return terms
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -279,16 +364,26 @@ def product_search_score(product, query):
 
 def rank_products_for_query(products, query, limit=60):
     variants = query_search_variants(query)
-    if not variants:
+    intent_terms = intent_expansion_terms(query)
+    if not variants and not intent_terms:
         return []
     ranked = []
     for product in products:
         best_score = 0
         for variant in variants:
             best_score = max(best_score, product_search_score(product, variant))
+        if intent_terms:
+            intent_hit = 0
+            for term in intent_terms:
+                intent_hit = max(intent_hit, product_search_score(product, term))
+            # Discount the symptom→category match so a direct name/brand/UPC match
+            # (450+) always wins, but the right category still surfaces.
+            best_score = max(best_score, min(intent_hit, 300))
         if best_score > 0:
             ranked.append((best_score, product))
-    ranked.sort(key=lambda item: (-item[0], location_sort_key(item[1])))
+    # Tiebreak: in-stock products before ruptures, then by location.
+    ranked.sort(key=lambda item: (-item[0], 1 if item[1].get("in_stock") == 0 else 0,
+                                   location_sort_key(item[1])))
     items = [product for _, product in ranked]
     return items[:limit] if limit else items
 

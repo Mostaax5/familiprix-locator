@@ -36,6 +36,49 @@ function querySearchVariants(query) {
   return variants;
 }
 
+// ── Intent lexicon (mirror of INTENT_LEXICON in routes/products.py) ──────────────
+// Maps a customer's problem (how a client speaks) to the product/ingredient/brand
+// words that appear in the store data, so a symptom query reaches the right products
+// with no AI. Keep in sync with the server copy.
+const INTENT_LEXICON = [
+  {triggers:['mal de tete','maux de tete','tete','migraine','cephalee','fievre','douleur','douleurs','courbature','courbatures','mal de dos','arthrite','menstruel','menstruelle','regles'],
+   expand:['acetaminophene','tylenol','advil','motrin','ibuprofene','aspirine','analgesique','antidouleur','naproxene','aleve','atasol','tempra']},
+  {triggers:['rhume','congestion','nez bouche','sinus','grippe','decongestionnant','mouchoir'],
+   expand:['decongestionnant','rhume','sinus','sudafed','otrivin','tylenol rhume','advil rhume','dristan','vicks','sirop']},
+  {triggers:['toux','gorge','mal de gorge','expectorant','enrouement'],
+   expand:['sirop','toux','dextromethorphane','guaifenesine','benylin','buckley','pastille','gorge','strepsils','halls','fisherman']},
+  {triggers:['allergie','allergies','urticaire','eternuement','rhinite','allergique'],
+   expand:['antihistaminique','allergie','reactine','cetirizine','claritin','loratadine','aerius','benadryl','allegra','blexten']},
+  {triggers:['brulure d estomac','brulures d estomac','reflux','acidite','indigestion','aigreur','estomac'],
+   expand:['antiacide','tums','gaviscon','rolaids','omeprazole','pepto','famotidine','pantoloc']},
+  {triggers:['constipation','diarrhee','nausee','ballonnement','ballonnements','gaz','crampes','mal de ventre','digestion'],
+   expand:['laxatif','metamucil','senokot','imodium','gravol','probiotique','lax a day','restoralax','ovol','gaz','pepto']},
+  {triggers:['vitamine','vitamines','supplement','supplements','fer','calcium','magnesium','multivitamine','immunite','fatigue','energie'],
+   expand:['vitamine','multivitamine','centrum','jamieson','webber','fer','calcium','magnesium','vitamine d','vitamine c','zinc','omega','probiotique']},
+  {triggers:['peau','eczema','secheresse','hydratant','creme','demangeaison','demangeaisons','piqure','piqures','brulure','coup de soleil','acne','psoriasis','feu sauvage'],
+   expand:['creme','hydratant','cortisone','cortate','lubriderm','aveeno','cerave','calamine','polysporin','onguent','vaseline','abreva']},
+  {triggers:['yeux','oeil','secheresse oculaire','conjonctivite','larmes','oculaire'],
+   expand:['gouttes','yeux','larmes artificielles','visine','systane','collyre','refresh']},
+  {triggers:['bebe','couche','couches','poussee dentaire','colique','coliques','erytheme fessier','biberon','nourrisson'],
+   expand:['bebe','couche','pampers','huggies','tempra','tylenol bebe','penaten','creme fesses','lingette','ovol']},
+  {triggers:['pansement','coupure','plaie','desinfectant','bandage','ampoule','echarde','eraflure','saignement'],
+   expand:['pansement','band aid','polysporin','peroxyde','alcool','gaze','bandage','antiseptique','diachylon']},
+  {triggers:['sommeil','dormir','insomnie','stress','anxiete','relaxation','nervosite'],
+   expand:['sommeil','melatonine','nytol','sleep','valeriane','unisom','tylenol nuit']},
+];
+
+function intentExpansionTerms(query) {
+  const norm = normalizeSearchText(query);
+  if (!norm) return [];
+  const tokens = new Set(norm.split(' '));
+  const terms = [], seen = new Set();
+  for (const entry of INTENT_LEXICON) {
+    const hit = entry.triggers.some(t => t.includes(' ') ? norm.includes(t) : tokens.has(t));
+    if (hit) for (const term of entry.expand) { if (!seen.has(term)) { seen.add(term); terms.push(term); } }
+  }
+  return terms;
+}
+
 // Normalized search fields, computed ONCE per product and cached on the object.
 // The catalog is re-scored on every (debounced) keystroke and for each query
 // variant — without this cache that re-ran ~8 regex normalizations per product
@@ -97,14 +140,25 @@ function scoreProductForQuery(product, query) {
 
 function searchProductsFromCache(query, limit=40) {
   const variants = querySearchVariants(query);
-  if (!variants.length) return [];
+  const intentTerms = intentExpansionTerms(query);
+  if (!variants.length && !intentTerms.length) return [];
   const ranked = [];
   for (const product of allProductsCache) {
     let bestScore = 0;
     for (const variant of variants) bestScore = Math.max(bestScore, scoreProductForQuery(product, variant));
+    if (intentTerms.length) {
+      let intentHit = 0;
+      for (const term of intentTerms) intentHit = Math.max(intentHit, scoreProductForQuery(product, term));
+      // Capped so a symptom→category match never outranks a direct name/UPC match.
+      bestScore = Math.max(bestScore, Math.min(intentHit, 300));
+    }
     if (bestScore > 0) ranked.push({score: bestScore, product});
   }
-  ranked.sort((a, b) => (b.score - a.score) || String(a.product.name || '').localeCompare(String(b.product.name || '')));
+  // Tiebreak: in-stock before ruptures, then by name.
+  const outOf = p => (p.in_stock === 0 ? 1 : 0);
+  ranked.sort((a, b) => (b.score - a.score)
+    || (outOf(a.product) - outOf(b.product))
+    || String(a.product.name || '').localeCompare(String(b.product.name || '')));
   return ranked.slice(0, limit).map(item => item.product);
 }
 
@@ -213,8 +267,14 @@ async function doSearchValue(q) {
   }
   const cached = searchProductsFromCache(q, 40);
   if (cached.length || allProductsCache.length) {
+    // A short digit query (last digits of a UPC) is ambiguous — several products can
+    // share the same ending. Show every match with its full code so the user can pick.
+    const shortDigits = /^\d{4,6}$/.test(q);
+    const hint = (shortDigits && cached.length > 1)
+      ? `<div class="msg info" style="margin-bottom:8px">${cached.length} produits se terminent par <b>${esc(q)}</b>. Vérifiez le code-barres complet ci-dessous pour choisir le bon.</div>`
+      : '';
     // Group results by barcode — if a barcode appears at multiple locations, merge them
-    div.innerHTML = cached.length ? groupAndRenderSearchResults(cached) : '<div class="empty">Aucun produit trouve.</div>';
+    div.innerHTML = cached.length ? (hint + groupAndRenderSearchResults(cached)) : '<div class="empty">Aucun produit trouve.</div>';
     return;
   }
   try {

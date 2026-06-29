@@ -746,6 +746,78 @@ def product_context_for_client_help(product):
     }
 
 
+_HOME_BRANDS = ("familiprix", "biomedic", "essentiel")
+
+
+def _is_home_brand(brand):
+    b = str(brand or "").strip().lower()
+    return any(b.startswith(h) for h in _HOME_BRANDS)
+
+
+def _recommendation_location(product):
+    """Full, human-readable shelf location for a recommended product."""
+    aisle   = str(product.get("aisle", "")).strip()
+    side    = side_display_label(product.get("side", ""))
+    section = str(product.get("section", "") or "1").strip()
+    shelf   = str(product.get("shelf", "")).strip()
+    position = str(product.get("position", "")).strip()
+    parts = []
+    if aisle:    parts.append(f"Allée {aisle}")
+    if side:     parts.append(side)
+    if section:  parts.append(f"Section {section}")
+    if shelf:    parts.append(f"Tablette {shelf}")
+    if position: parts.append(f"Pos. {position}")
+    return " · ".join(parts)
+
+
+def _attach_locatable_recommendations(advice, candidate_objs):
+    """Map the AI's recommended product NAMES back to REAL store products so each
+    one carries its exact shelf location. A recommendation that doesn't resolve to a
+    real candidate is dropped — we never show an employee a product they can't find.
+    The result is added as advice['recommended_products'] (structured + locatable)."""
+    from routes.products import normalize_search_text
+    if not isinstance(advice, dict):
+        return advice
+    names = advice.get("recommended_product_names") or []
+    index = []
+    for obj in candidate_objs:
+        nm = normalize_search_text(obj.get("name", ""))
+        if nm:
+            index.append((nm, obj))
+    resolved, used = [], set()
+    for raw in names:
+        target = normalize_search_text(raw)
+        if not target:
+            continue
+        match = None
+        for nm, obj in index:                       # exact name
+            if nm == target:
+                match = obj; break
+        if not match:
+            for nm, obj in index:                   # one is a prefix of the other
+                if nm.startswith(target) or target.startswith(nm):
+                    match = obj; break
+        if not match:
+            for nm, obj in index:                   # substring either direction
+                if target in nm or nm in target:
+                    match = obj; break
+        if not match:
+            continue
+        key = match.get("id") or id(match)
+        if key in used:
+            continue
+        used.add(key)
+        resolved.append({
+            "name":       str(match.get("name", "")).strip(),
+            "brand":      str(match.get("brand", "")).strip(),
+            "location":   _recommendation_location(match),
+            "barcode":    str(match.get("barcode", "")).strip(),
+            "home_brand": _is_home_brand(match.get("brand", "")),
+        })
+    advice["recommended_products"] = resolved
+    return advice
+
+
 def generate_product_assist_payload(name, brand, description, barcode):
     provider = configured_ai_provider()
     if provider["name"] == "gemini":
@@ -777,7 +849,10 @@ def generate_client_help_payload_gemini(question, products):
             "Dis clairement quand il faut orienter le client vers le pharmacien: "
             "grossesse, bebe, interaction medicamenteuse, symptomes graves, douleur importante, "
             "difficulte respiratoire, fievre élevée, duree inhabituelle ou doute medical. "
-            "Dans recommended_product_names, mets UNIQUEMENT les noms de produits presents dans la liste fournie. "
+            "Dans recommended_product_names, mets UNIQUEMENT des noms copies EXACTEMENT de la liste fournie "
+            "(copie-colle le nom tel quel, sans le reformuler), classes du plus pertinent au moins pertinent : "
+            "d'abord le meilleur produit pour ce besoin precis, puis 1 a 3 vraies alternatives de la meme categorie. "
+            "N'invente jamais un nom de produit et n'en propose aucun qui n'est pas dans la liste. "
             "Retourne uniquement un JSON en francais avec exactement les clés "
             "summary (texte), recommended_product_names (tableau), follow_up_questions (tableau), "
             f"safety_flags (tableau), pharmacist_referral (booleen) et pharmacist_reason (texte).\n\n"
@@ -824,7 +899,10 @@ def generate_client_help_payload_openai(question, products):
             "Dis clairement quand il faut orienter le client vers le pharmacien: "
             "grossesse, bebe, interaction medicamenteuse, symptomes graves, douleur importante, "
             "difficulte respiratoire, fievre élevée, duree inhabituelle ou doute medical. "
-            "Dans recommended_product_names, mets UNIQUEMENT les noms de produits presents dans la liste fournie. "
+            "Dans recommended_product_names, mets UNIQUEMENT des noms copies EXACTEMENT de la liste fournie "
+            "(copie-colle le nom tel quel, sans le reformuler), classes du plus pertinent au moins pertinent : "
+            "d'abord le meilleur produit pour ce besoin precis, puis 1 a 3 vraies alternatives de la meme categorie. "
+            "N'invente jamais un nom de produit et n'en propose aucun qui n'est pas dans la liste. "
             "Retourne uniquement un JSON en francais."
         ),
         "input": json.dumps({"question": question, "products": products}, ensure_ascii=False),
@@ -1331,18 +1409,24 @@ def client_help():
     if not _check_ai_rate_limit():
         return jsonify({"success": False, "error": "Trop de requetes IA. Reessayez dans une heure."}), 429
 
+    # Build the candidate set from REAL store products (kept whole, with locations) so
+    # every recommendation the AI returns can be mapped back to a findable shelf spot.
     raw_products = data.get("products")
     if isinstance(raw_products, list):
-        matched_products = [product_context_for_client_help(item) for item in raw_products[:15] if isinstance(item, dict)]
+        candidate_objs = [item for item in raw_products[:15] if isinstance(item, dict)]
     else:
         from routes.products import row_to_product, rank_products_for_query
         db = get_db()
         products = [row_to_product(p) for p in db.execute("SELECT * FROM products").fetchall()]
-        matched_products = [product_context_for_client_help(item) for item in rank_products_for_query(products, question, limit=15)]
+        candidate_objs = rank_products_for_query(products, question, limit=15)
+
+    matched_products = [product_context_for_client_help(item) for item in candidate_objs]
 
     advice = generate_client_help_payload(question, matched_products)
     if not advice:
         return jsonify({"success": False, "error": "Impossible de générer la réponse client pour le moment."}), 502
+    # Resolve the AI's named picks to real, locatable products (drops anything not in stock).
+    advice = _attach_locatable_recommendations(advice, candidate_objs)
     log_ai_interaction("client_help", question, matched_products, advice)
     return jsonify({"success": True, "advice": advice})
 

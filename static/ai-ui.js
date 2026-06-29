@@ -44,11 +44,21 @@ function renderClientAdvice(advice, hasStoreProducts) {
       <div class="section-title">Réponse client</div>
       ${generalNotice}
       ${advice.summary ? `<div class="advice-summary">${esc(advice.summary)}</div>` : ''}
-      ${advice.recommended_product_names?.length ? `
+      ${advice.recommended_products?.length ? `
+        <div class="advice-section">
+          <span class="advice-label">Produits recommandes (en magasin)</span>
+          <div class="advice-list">${advice.recommended_products.map(p => `
+            <div class="advice-item advice-item-product">
+              <div style="font-weight:600">${esc(p.name)}${p.home_brand ? ' <span style="color:#c8102e">★</span>' : ''}</div>
+              ${p.brand ? `<div class="small" style="color:#64748b">${esc(p.brand)}</div>` : ''}
+              ${p.location ? `<div class="small" style="color:#c8102e;font-weight:600;margin-top:2px">📍 ${esc(p.location)}</div>` : ''}
+            </div>`).join('')}</div>
+        </div>`
+      : (advice.recommended_product_names?.length ? `
         <div class="advice-section">
           <span class="advice-label">Produits a expliquer</span>
           <div class="advice-list">${advice.recommended_product_names.map(item => `<div class="advice-item advice-item-product">${esc(item)}</div>`).join('')}</div>
-        </div>` : ''}
+        </div>` : '')}
       ${advice.follow_up_questions?.length ? `
         <div class="advice-section">
           <span class="advice-label">Questions a poser</span>
