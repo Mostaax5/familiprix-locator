@@ -268,3 +268,106 @@ def parse_planogram_pdf():
 
     return jsonify({"success": True, "products": products, "count": len(products),
                     "tablettes": tablettes, "plano": plano_meta})
+
+
+@import_export_bp.route("/api/import/planogram-catalog", methods=["POST"])
+def import_planogram_catalog():
+    """Bulk-ingest a pre-parsed catalogue of ALL planograms (produced offline so the
+    server never has to parse 78 big PDFs over HTTP). It does two things, neither of
+    which touches product placement:
+      1. Upserts every product into product_reference so UPC lookup instantly returns
+         a real name/description — even for products that aren't placed yet.
+      2. Enriches products already placed in the plan (matched by barcode) by filling
+         in ONLY blank fields (pharmacy code, façades) — never overwriting your data.
+    Accepts a JSON file upload (field 'file') or a raw JSON body: a list of planogram
+    objects {meta:{name,...}, file, products:[{barcode,name,code_familiprix,facings}]}.
+    """
+    username, error = require_editor()
+    if error:
+        return error
+
+    try:
+        if "file" in request.files:
+            payload = json.loads(request.files["file"].read().decode("utf-8"))
+        else:
+            payload = request.get_json(silent=True)
+    except (ValueError, UnicodeDecodeError) as exc:
+        return jsonify({"success": False, "error": f"JSON illisible: {exc}"}), 400
+
+    if isinstance(payload, dict):
+        payload = payload.get("catalog") or payload.get("planograms")
+    if not isinstance(payload, list):
+        return jsonify({"success": False, "error": "Catalogue JSON invalide (liste de planogrammes attendue)."}), 400
+
+    from routes.products import build_barcode_candidates, normalized_digits
+    db = get_db()
+    now = utc_now_iso()
+
+    # Index placed products by every barcode variant so enrichment matches reliably.
+    local_by_bc = {}
+    for r in db.execute("SELECT id, barcode, product_code, facings FROM products").fetchall():
+        d = dict(r)
+        for cand in build_barcode_candidates(d.get("barcode", "")):
+            local_by_bc.setdefault(cand, []).append(d)
+
+    planos = ref_upserts = enriched = products_seen = 0
+    for plano in payload:
+        if not isinstance(plano, dict):
+            continue
+        planos += 1
+        meta = plano.get("meta") or {}
+        plano_name = str(meta.get("name") or "").strip()
+        source = f"Planogramme: {plano_name}" if plano_name else "Planogramme"
+        source_url = str(plano.get("file") or "")
+
+        for p in (plano.get("products") or []):
+            barcode = normalized_digits(p.get("barcode", ""))
+            name = str(p.get("name", "")).strip()
+            if not barcode or len(name) < 2:
+                continue
+            products_seen += 1
+
+            # 1) reference catalogue — keep an existing real name, else use the plano's.
+            db.execute(
+                """INSERT INTO product_reference (barcode, name, brand, description, image_url, source, source_url, updated_at)
+                   VALUES (?, ?, '', '', '', ?, ?, ?)
+                   ON CONFLICT(barcode) DO UPDATE SET
+                       name = CASE WHEN TRIM(COALESCE(product_reference.name, '')) = ''
+                                   THEN excluded.name ELSE product_reference.name END,
+                       source = excluded.source, source_url = excluded.source_url,
+                       updated_at = excluded.updated_at""",
+                (barcode, name, source, source_url, now),
+            )
+            ref_upserts += 1
+
+            # 2) enrich placed products (fill blanks only) — match once per product row.
+            code = str(p.get("code_familiprix", "")).strip()
+            try:
+                facings = int(p.get("facings", 1) or 1)
+            except (TypeError, ValueError):
+                facings = 1
+            matched = {}
+            for cand in build_barcode_candidates(barcode):
+                for d in local_by_bc.get(cand, []):
+                    matched[d["id"]] = d
+            for d in matched.values():
+                changed = False
+                if code and not str(d.get("product_code", "")).strip():
+                    db.execute("UPDATE products SET product_code=? WHERE id=?", (code, d["id"]))
+                    d["product_code"] = code
+                    changed = True
+                if facings > 1 and int(d.get("facings") or 1) <= 1:
+                    db.execute("UPDATE products SET facings=? WHERE id=?", (facings, d["id"]))
+                    d["facings"] = facings
+                    changed = True
+                if changed:
+                    enriched += 1
+
+    db.commit()
+    return jsonify({
+        "success": True,
+        "planograms": planos,
+        "products_seen": products_seen,
+        "reference_upserts": ref_upserts,
+        "enriched_products": enriched,
+    })

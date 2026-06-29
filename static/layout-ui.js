@@ -2071,6 +2071,34 @@ function renderPresentoirSection(aisle, config) {
 // ── Planogram import ──────────────────────────────────────────────────────────
 let planoData = null;
 
+async function importPlanogramCatalog(input) {
+  const file = input.files[0];
+  input.value = '';
+  if (!file) return;
+  if (!requireEditorSession('importer le catalogue de planogrammes')) return;
+  const msg = document.getElementById('planoCatalogMsg');
+  msg.style.color = '#64748b';
+  msg.textContent = 'Import du catalogue en cours…';
+  const form = new FormData();
+  form.append('file', file);
+  try {
+    const res = await fetch('/api/import/planogram-catalog', {method:'POST', body: form, headers: getEditorHeaders()});
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      msg.style.color = '#c8102e';
+      msg.textContent = data.error || 'Erreur lors de l import du catalogue.';
+      return;
+    }
+    msg.style.color = '#16a34a';
+    msg.innerHTML = `<strong>${data.planograms} planogrammes</strong> · ${data.products_seen} produits enregistrés au catalogue · `
+      + `${data.enriched_products} produit(s) déjà placé(s) complété(s).`;
+    if (typeof refreshProductsCache === 'function') { try { await refreshProductsCache(true); } catch(_){} }
+  } catch (e) {
+    msg.style.color = '#c8102e';
+    msg.textContent = 'Impossible d importer le catalogue pour le moment.';
+  }
+}
+
 async function parsePlanogramPDF(input) {
   const file = input.files[0];
   input.value = '';
