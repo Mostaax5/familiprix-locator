@@ -86,6 +86,74 @@ INTENT_LEXICON = [
 ]
 
 
+# ── Abbreviation lexicon ─────────────────────────────────────────────────────────
+# Planogram/étiquette names are heavily abbreviated (SHP=shampooing, PDRE=poudre…).
+# Map the full word a user would type to the short form(s) that appear in product
+# names, so "shampoing" finds "AVEENO SHP …". Also carries a few FR spelling variants.
+# Keep in sync with SEARCH_ABBREVIATIONS in static/search.js.
+SEARCH_ABBREVIATIONS = {
+    "shampoing": ["shp", "shampooing"], "shampooing": ["shp", "shampoing"],
+    "revitalisant": ["rev", "revit", "apres"], "apres": ["apres"],
+    "poudre": ["pdre", "pdr", "pou"],
+    "sirop": ["sir"],
+    "comprime": ["co", "compr", "com"], "comprimes": ["co", "compr", "com"],
+    "capsule": ["caps", "gel"], "capsules": ["caps", "gel"],
+    "creme": ["cr", "crm"], "cremes": ["cr", "crm"],
+    "onguent": ["ong"],
+    "lotion": ["lot", "lotn"],
+    "solution": ["sol", "soln"],
+    "decongestionnant": ["decong", "dec"], "congestion": ["decong", "cong"],
+    "enfant": ["enf"], "enfants": ["enf"],
+    "savon": ["sav"],
+    "deodorant": ["deo"],
+    "antisudorifique": ["antisud", "a sud"],
+    "dentifrice": ["dent"],
+    "brosse": ["bross", "bro"],
+    "rasoir": ["ras"], "rasage": ["ras"],
+    "vaporisateur": ["vapo", "vap"],
+    "nettoyant": ["nett", "net"],
+    "traitement": ["trait", "trmt"],
+    "vitamine": ["vit"], "vitamines": ["vit"],
+    "gouttes": ["gtte", "gttes", "got"], "goutte": ["gtte", "got"],
+    "pastille": ["past"], "pastilles": ["past"],
+    "protection": ["prot"],
+    "feminine": ["fem"], "feminin": ["fem"],
+    "quotidien": ["quot"],
+    "naturel": ["nat"], "naturels": ["nat"], "naturelle": ["nat"],
+    "supplement": ["suppl", "supp"], "supplements": ["suppl", "supp"],
+    "hydratant": ["hydr", "hyd"], "hydratante": ["hydr", "hyd"],
+    "maquillage": ["maq", "maquill"],
+    "coloration": ["color", "col"],
+    "biberon": ["bib"],
+    "serviette": ["serv"], "serviettes": ["serv"],
+    "tampon": ["tamp"], "tampons": ["tamp"],
+}
+
+
+def abbreviation_terms(query):
+    """Short forms implied by the full words in the query (shampoing -> shp)."""
+    terms, seen = [], set()
+    for token in tokenize_search_query(query):
+        for short in SEARCH_ABBREVIATIONS.get(token, []):
+            if short not in seen:
+                seen.add(short)
+                terms.append(short)
+    return terms
+
+
+def _abbreviation_hit(name_norm, abbrevs):
+    """True if a product NAME contains an abbreviation as a whole word or as an
+    abbrev+digits token (e.g. 'co50', 'ca100') — never a loose substring."""
+    if not name_norm or not abbrevs:
+        return False
+    tokens = name_norm.split()
+    for token in tokens:
+        for ab in abbrevs:
+            if token == ab or (token.startswith(ab) and token[len(ab):].isdigit()):
+                return True
+    return False
+
+
 def intent_expansion_terms(query):
     """Product/brand words implied by a symptom query (e.g. 'mal de tête' -> tylenol,
     advil, analgesique). Empty when the query doesn't look like a known need."""
@@ -371,6 +439,7 @@ def product_search_score(product, query):
 def rank_products_for_query(products, query, limit=60):
     variants = query_search_variants(query)
     intent_terms = intent_expansion_terms(query)
+    abbrevs = abbreviation_terms(query)
     if not variants and not intent_terms:
         return []
     ranked = []
@@ -385,6 +454,8 @@ def rank_products_for_query(products, query, limit=60):
             # Discount the symptom→category match so a direct name/brand/UPC match
             # (450+) always wins, but the right category still surfaces.
             best_score = max(best_score, min(intent_hit, 300))
+        if abbrevs and _abbreviation_hit(normalize_search_text(product.get("name", "")), abbrevs):
+            best_score = max(best_score, 430)   # full word matched an abbreviated name
         if best_score > 0:
             ranked.append((best_score, product))
     # Tiebreak: in-stock products before ruptures, then by location.
@@ -430,6 +501,7 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None):
     db = get_db()
     variants = query_search_variants(query)
     intent_terms = intent_expansion_terms(query)
+    abbrevs = abbreviation_terms(query)
     if not variants and not intent_terms:
         return []
     exclude = exclude_barcodes or set()
@@ -446,6 +518,9 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None):
         # score (no cap) — otherwise every intent match ties and sorts alphabetically.
         for term in intent_terms:
             best_score = max(best_score, product_search_score(item, term))
+        # Full word → abbreviated planogram name (shampoing -> SHP).
+        if abbrevs and _abbreviation_hit(normalize_search_text(item.get("name", "")), abbrevs):
+            best_score = max(best_score, 430)
         if best_score > 0:
             item["catalog_only"] = True
             item["in_stock"] = 1

@@ -67,6 +67,51 @@ const INTENT_LEXICON = [
    expand:['sommeil','melatonine','nytol','sleep','valeriane','unisom','tylenol nuit']},
 ];
 
+// Mirror of SEARCH_ABBREVIATIONS in routes/products.py — full word -> planogram short form.
+const SEARCH_ABBREVIATIONS = {
+  shampoing:['shp','shampooing'], shampooing:['shp','shampoing'],
+  revitalisant:['rev','revit','apres'], apres:['apres'],
+  poudre:['pdre','pdr','pou'], sirop:['sir'],
+  comprime:['co','compr','com'], comprimes:['co','compr','com'],
+  capsule:['caps','gel'], capsules:['caps','gel'],
+  creme:['cr','crm'], cremes:['cr','crm'], onguent:['ong'],
+  lotion:['lot','lotn'], solution:['sol','soln'],
+  decongestionnant:['decong','dec'], congestion:['decong','cong'],
+  enfant:['enf'], enfants:['enf'], savon:['sav'], deodorant:['deo'],
+  antisudorifique:['antisud','a sud'], dentifrice:['dent'],
+  brosse:['bross','bro'], rasoir:['ras'], rasage:['ras'],
+  vaporisateur:['vapo','vap'], nettoyant:['nett','net'],
+  traitement:['trait','trmt'], vitamine:['vit'], vitamines:['vit'],
+  gouttes:['gtte','gttes','got'], goutte:['gtte','got'],
+  pastille:['past'], pastilles:['past'], protection:['prot'],
+  feminine:['fem'], feminin:['fem'], quotidien:['quot'],
+  naturel:['nat'], naturels:['nat'], naturelle:['nat'],
+  supplement:['suppl','supp'], supplements:['suppl','supp'],
+  hydratant:['hydr','hyd'], hydratante:['hydr','hyd'],
+  maquillage:['maq','maquill'], coloration:['color','col'], biberon:['bib'],
+  serviette:['serv'], serviettes:['serv'], tampon:['tamp'], tampons:['tamp'],
+};
+
+function abbreviationTerms(query) {
+  const terms = [], seen = new Set();
+  for (const token of tokenizeSearchQuery(query)) {
+    for (const short of (SEARCH_ABBREVIATIONS[token] || [])) {
+      if (!seen.has(short)) { seen.add(short); terms.push(short); }
+    }
+  }
+  return terms;
+}
+
+function abbreviationHit(nameNorm, abbrevs) {
+  if (!nameNorm || !abbrevs.length) return false;
+  for (const t of nameNorm.split(' ')) {
+    for (const a of abbrevs) {
+      if (t === a || (t.startsWith(a) && /^\d+$/.test(t.slice(a.length)))) return true;
+    }
+  }
+  return false;
+}
+
 function intentExpansionTerms(query) {
   const norm = normalizeSearchText(query);
   if (!norm) return [];
@@ -141,6 +186,7 @@ function scoreProductForQuery(product, query) {
 function searchProductsFromCache(query, limit=40) {
   const variants = querySearchVariants(query);
   const intentTerms = intentExpansionTerms(query);
+  const abbrevs = abbreviationTerms(query);
   if (!variants.length && !intentTerms.length) return [];
   const ranked = [];
   for (const product of allProductsCache) {
@@ -151,6 +197,9 @@ function searchProductsFromCache(query, limit=40) {
       for (const term of intentTerms) intentHit = Math.max(intentHit, scoreProductForQuery(product, term));
       // Capped so a symptom→category match never outranks a direct name/UPC match.
       bestScore = Math.max(bestScore, Math.min(intentHit, 300));
+    }
+    if (abbrevs.length && abbreviationHit(productSearchFields(product).name, abbrevs)) {
+      bestScore = Math.max(bestScore, 430);   // full word matched an abbreviated name
     }
     if (bestScore > 0) ranked.push({score: bestScore, product});
   }
