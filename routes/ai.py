@@ -1367,9 +1367,12 @@ def _catalog_enrich_worker():
     db = None
     try:
         db = connect_db()
+        # Only products not yet tried (no description AND no enrich tag) so re-runs stay
+        # fast and don't re-hammer permanent misses. Tagged rows are kept for later.
         rows = [dict(r) for r in db.execute(
             "SELECT barcode, name, brand FROM product_reference "
-            "WHERE TRIM(COALESCE(description,'')) = '' AND TRIM(COALESCE(name,'')) <> ''").fetchall()]
+            "WHERE TRIM(COALESCE(description,'')) = '' AND TRIM(COALESCE(enrich_status,'')) = '' "
+            "AND TRIM(COALESCE(name,'')) <> ''").fetchall()]
         _CATALOG_ENRICH.update(total=len(rows), done=0, updated=0, skipped=0, running=True)
         for r in rows:
             if not _CATALOG_ENRICH["running"]:
@@ -1382,10 +1385,10 @@ def _catalog_enrich_worker():
             if online and online_matches_catalog(r.get("name", ""), r.get("brand", ""), online):
                 db.execute(
                     """UPDATE product_reference SET
-                         description = CASE WHEN TRIM(COALESCE(description,'')) = '' THEN ? ELSE description END,
-                         image_url   = CASE WHEN TRIM(COALESCE(image_url,''))   = '' THEN ? ELSE image_url END,
-                         brand       = CASE WHEN TRIM(COALESCE(brand,''))       = '' THEN ? ELSE brand END,
-                         updated_at  = ?
+                         description   = CASE WHEN TRIM(COALESCE(description,'')) = '' THEN ? ELSE description END,
+                         image_url     = CASE WHEN TRIM(COALESCE(image_url,''))   = '' THEN ? ELSE image_url END,
+                         brand         = CASE WHEN TRIM(COALESCE(brand,''))       = '' THEN ? ELSE brand END,
+                         enrich_status = 'done', updated_at = ?
                        WHERE barcode = ?""",
                     (str(online.get("description", "")).strip(), str(online.get("image_url", "")).strip(),
                      str(online.get("brand", "")).strip(), utc_now_iso(), bc),
@@ -1393,6 +1396,10 @@ def _catalog_enrich_worker():
                 db.commit()
                 _CATALOG_ENRICH["updated"] += 1
             else:
+                # Tag it so we know it still needs a real description (downloadable list).
+                db.execute("UPDATE product_reference SET enrich_status='no_match', updated_at=? WHERE barcode=?",
+                           (utc_now_iso(), bc))
+                db.commit()
                 _CATALOG_ENRICH["skipped"] += 1
             _CATALOG_ENRICH["done"] += 1
             _time.sleep(0.15)   # be gentle on the free open databases
@@ -1418,7 +1425,8 @@ def catalog_enrich_start():
     try:
         row = db.execute(
             "SELECT COUNT(*) AS n FROM product_reference "
-            "WHERE TRIM(COALESCE(description,'')) = '' AND TRIM(COALESCE(name,'')) <> ''").fetchone()
+            "WHERE TRIM(COALESCE(description,'')) = '' AND TRIM(COALESCE(enrich_status,'')) = '' "
+            "AND TRIM(COALESCE(name,'')) <> ''").fetchone()
         total = row["n"] if isinstance(row, dict) else row[0]
     except Exception:
         total = 0
@@ -1440,6 +1448,42 @@ def catalog_enrich_stop():
         return error
     _CATALOG_ENRICH["running"] = False
     return jsonify({"success": True})
+
+
+@ai_bp.route("/api/import/catalog-needs-description", methods=["GET"])
+def catalog_needs_description():
+    """Downloadable CSV of catalogue products that still have NO real description —
+    either never enriched, or the online lookup found no reliable match (tagged
+    'no_match'). These are the ones to describe by hand / from a better source later."""
+    import csv, io as _io
+    db = get_db()
+    rows = db.execute(
+        "SELECT barcode, product_code, name, source, enrich_status FROM product_reference "
+        "WHERE TRIM(COALESCE(description,'')) = '' AND TRIM(COALESCE(name,'')) <> '' "
+        "ORDER BY source, name").fetchall()
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["UPC", "Code Familiprix", "Nom (planogramme)", "Planogramme", "Statut"])
+    for r in rows:
+        d = dict(r)
+        status = "aucune correspondance en ligne" if d.get("enrich_status") == "no_match" else "pas encore tenté"
+        writer.writerow([d.get("barcode", ""), d.get("product_code", ""), d.get("name", ""),
+                         str(d.get("source", "")).replace("Planogramme: ", ""), status])
+    return Response("﻿" + buf.getvalue(), mimetype="text/csv",
+                    headers={"Content-Disposition": 'attachment; filename="produits-sans-description.csv"'})
+
+
+@ai_bp.route("/api/import/catalog-needs-description/count", methods=["GET"])
+def catalog_needs_description_count():
+    db = get_db()
+    row = db.execute(
+        "SELECT COUNT(*) AS n FROM product_reference "
+        "WHERE TRIM(COALESCE(description,'')) = '' AND TRIM(COALESCE(name,'')) <> ''").fetchone()
+    n = row["n"] if isinstance(row, dict) else row[0]
+    no_match = db.execute(
+        "SELECT COUNT(*) AS n FROM product_reference WHERE enrich_status = 'no_match'").fetchone()
+    nm = no_match["n"] if isinstance(no_match, dict) else no_match[0]
+    return jsonify({"needs_description": int(n or 0), "no_match": int(nm or 0)})
 
 
 @ai_bp.route("/api/reference/seed", methods=["POST"])

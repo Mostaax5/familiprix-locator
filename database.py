@@ -260,13 +260,15 @@ def init_postgres_db(db):
             brand        TEXT DEFAULT '',
             description  TEXT DEFAULT '',
             image_url    TEXT DEFAULT '',
-            source       TEXT DEFAULT '',
-            source_url   TEXT DEFAULT '',
-            product_code TEXT DEFAULT '',
-            updated_at   TEXT DEFAULT ''
+            source        TEXT DEFAULT '',
+            source_url    TEXT DEFAULT '',
+            product_code  TEXT DEFAULT '',
+            enrich_status TEXT DEFAULT '',
+            updated_at    TEXT DEFAULT ''
         )
     """)
     db.execute("ALTER TABLE product_reference ADD COLUMN IF NOT EXISTS product_code TEXT DEFAULT ''")
+    db.execute("ALTER TABLE product_reference ADD COLUMN IF NOT EXISTS enrich_status TEXT DEFAULT ''")
 
     db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS max_section TEXT NOT NULL DEFAULT '1'")
     db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS config_json TEXT NOT NULL DEFAULT ''")
@@ -426,15 +428,18 @@ def init_sqlite_db(db):
             brand        TEXT DEFAULT '',
             description  TEXT DEFAULT '',
             image_url    TEXT DEFAULT '',
-            source       TEXT DEFAULT '',
-            source_url   TEXT DEFAULT '',
-            product_code TEXT DEFAULT '',
-            updated_at   TEXT DEFAULT ''
+            source        TEXT DEFAULT '',
+            source_url    TEXT DEFAULT '',
+            product_code  TEXT DEFAULT '',
+            enrich_status TEXT DEFAULT '',
+            updated_at    TEXT DEFAULT ''
         )
     """)
     ref_columns = {row["name"] for row in db.execute("PRAGMA table_info(product_reference)").fetchall()}
     if "product_code" not in ref_columns:
         db.execute("ALTER TABLE product_reference ADD COLUMN product_code TEXT DEFAULT ''")
+    if "enrich_status" not in ref_columns:
+        db.execute("ALTER TABLE product_reference ADD COLUMN enrich_status TEXT DEFAULT ''")
 
     layout_columns = {
         row["name"] for row in db.execute("PRAGMA table_info(aisle_layouts)").fetchall()
