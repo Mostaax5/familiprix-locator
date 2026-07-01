@@ -94,6 +94,22 @@ async function sendAiFeedback(rating) {
   } catch (_) {}
 }
 
+// Append catalogue products (imported planograms, not placed) under the client matches.
+async function appendClientReferenceMatches(question) {
+  const target = document.getElementById('clientMatches');
+  if (!target || !question) return;
+  let ref = [];
+  try { ref = await apiSearchReference(question, 20); } catch (_) {}
+  if (getClientQuestion() !== question) return;   // user moved on — ignore stale results
+  if (!ref.length) return;
+  target.insertAdjacentHTML('beforeend', `
+    <div class="card" style="margin-top:10px">
+      <div class="section-title">📦 Aussi en magasin — position à confirmer</div>
+      <div class="section-note">Produits importés des planogrammes, pas encore placés sur le plan.</div>
+      ${ref.map(p => productCard(p, false, false)).join('')}
+    </div>`);
+}
+
 function runClientSearch(showEmptyMessage=true) {
   const question = getClientQuestion();
   const status = document.getElementById('clientHelpStatus');
@@ -111,6 +127,8 @@ function runClientSearch(showEmptyMessage=true) {
       ? `${currentClientMatches.length} produit(s) en stock. Cliquez "Réponse client (IA)" pour obtenir des conseils.`
       : 'Aucun produit en stock pour cette demande. L IA peut quand meme repondre avec des conseils generaux.';
   }
+  // Also surface catalogue products (imported planograms, not placed yet) below.
+  appendClientReferenceMatches(question);
   return currentClientMatches;
 }
 

@@ -1,7 +1,8 @@
 // ── Product normalization ─────────────────────────────────────────────────────
 function normalizeProduct(product) {
   return {
-    id: Number(product.id),
+    id: (product.id === undefined || product.id === null || product.id === '') ? null : Number(product.id),
+    catalog_only: product.catalog_only ? true : false,
     name: String(product.name || '').trim(),
     brand: String(product.brand || '').trim(),
     description: String(product.description || '').trim(),

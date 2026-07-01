@@ -738,11 +738,14 @@ def lookup_brocade(barcode):
 # ── AI payload helpers ─────────────────────────────────────────────────────────
 
 def product_context_for_client_help(product):
+    aisle = str(product.get("aisle", "")).strip()
+    location = (f"Allée {aisle} {side_display_label(product.get('side',''))} T{str(product.get('shelf','')).strip()}"
+                if aisle else "En magasin — position à confirmer")
     return {
         "name":     str(product.get("name", "")).strip(),
         "brand":    str(product.get("brand", "")).strip(),
         "notes":    str(product.get("usage_notes", "") or product.get("description", "")).strip(),
-        "location": f"Allée {str(product.get('aisle','')).strip()} {side_display_label(product.get('side',''))} T{str(product.get('shelf','')).strip()}",
+        "location": location,
     }
 
 
@@ -757,6 +760,8 @@ def _is_home_brand(brand):
 def _recommendation_location(product):
     """Full, human-readable shelf location for a recommended product."""
     aisle   = str(product.get("aisle", "")).strip()
+    if not aisle:
+        return "En magasin — position à confirmer"
     side    = side_display_label(product.get("side", ""))
     section = str(product.get("section", "") or "1").strip()
     shelf   = str(product.get("shelf", "")).strip()
@@ -1297,11 +1302,32 @@ def lookup_product_online(barcode):
 def lookup_barcode(barcode):
     if not barcode.strip():
         return jsonify({"found": False, "error": "Code-barres manquant"}), 400
-    product = lookup_product_online(barcode)
+
+    # 1) Local reference catalogue FIRST — the imported planograms + past scans. Instant,
+    #    free, and guarantees a real product NAME even when the online sources miss it.
+    ref = reference_lookup(barcode)
+
+    # 2) Online sources add a nicer description + a product image (as before).
+    online = lookup_product_online(barcode)
+
+    product = None
+    if ref and len(str(ref.get("name", "")).strip()) >= 2:
+        # Keep the reliable catalogue name; enrich the rest from online where blank.
+        product = dict(ref)
+        if online:
+            if not str(product.get("description", "")).strip() and online.get("description"):
+                product["description"] = online["description"]
+            if not str(product.get("brand", "")).strip() and online.get("brand"):
+                product["brand"] = online["brand"]
+            if not str(product.get("image_url", "")).strip() and online.get("image_url"):
+                product["image_url"] = online["image_url"]
+    elif online:
+        product = online
+
     if product:
         enrich_lookup_product_with_ai(product)
         return jsonify({"found": True, "product": product})
-    return jsonify({"found": False, "error": "Aucun produit trouve en ligne"})
+    return jsonify({"found": False, "error": "Aucun produit trouve"})
 
 
 @ai_bp.route("/api/reference/count", methods=["GET"])
@@ -1419,6 +1445,13 @@ def client_help():
         db = get_db()
         products = [row_to_product(p) for p in db.execute("SELECT * FROM products").fetchall()]
         candidate_objs = rank_products_for_query(products, question, limit=15)
+
+    # Always augment with the reference catalogue (imported planograms) so the AI can
+    # recommend products we carry even if they aren't placed on a shelf yet.
+    from routes.products import rank_reference_for_query, normalized_digits
+    placed_bcs = {normalized_digits(str(o.get("barcode", ""))) for o in candidate_objs if o.get("barcode")}
+    ref_matches = rank_reference_for_query(question, limit=10, exclude_barcodes=placed_bcs)
+    candidate_objs = (candidate_objs + ref_matches)[:20]
 
     matched_products = [product_context_for_client_help(item) for item in candidate_objs]
 

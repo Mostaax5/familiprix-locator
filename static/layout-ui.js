@@ -749,13 +749,17 @@ function startScanFromSection(aisle, side, sectionIndex) {
 
 // ── Product card ──────────────────────────────────────────────────────────────
 function productCard(p, showDelete=true, showAiButton=true) {
-  const locationParts = [
-    `Allée ${esc(p.aisle)}`,
-    esc(sideStaffLabel(p.side)),
-    `Section ${esc(p.section || '1')}`,
-    `Tablette ${esc(p.shelf)}`,
-    `Pos. ${esc(p.position)}`
-  ];
+  // Catalog-only products come from the imported planograms and have no shelf yet.
+  const catalogOnly = p.catalog_only || !String(p.aisle || '').trim();
+  const locationHtml = catalogOnly
+    ? `<div class="location" style="color:#64748b">📦 En magasin — position à confirmer</div>`
+    : `<div class="location">${[
+        `Allée ${esc(p.aisle)}`,
+        esc(sideStaffLabel(p.side)),
+        `Section ${esc(p.section || '1')}`,
+        `Tablette ${esc(p.shelf)}`,
+        `Pos. ${esc(p.position)}`
+      ].join('<span class="loc-sep"> · </span>')}</div>`;
   const outOfStock = p.in_stock === 0;
   const flipped = p.flipped_label === 1;
   const planoBadge = (p.is_plano ? `<span style="display:inline-block;background:#eef2ff;color:#4338ca;border-radius:6px;padding:1px 7px;font-size:10px;font-weight:700;margin-right:4px">📋 PLANO</span>` : `<span style="display:inline-block;background:#f1f5f9;color:#64748b;border-radius:6px;padding:1px 7px;font-size:10px;font-weight:700;margin-right:4px">HORS-PLANO</span>`)
@@ -772,7 +776,7 @@ function productCard(p, showDelete=true, showAiButton=true) {
         : `<button class="btn btn-outline btn-inline" style="font-size:12px;color:#c8102e;border-color:#f1b8c2" onclick="toggleProductStock(${p.id},false)">⚠ Marquer rupture</button>`}
     </div>${flippedRow}` : '');
   return `<div class="card"${outOfStock ? ' style="border-left:4px solid #c8102e"' : ''}>
-    ${showDelete ? `<button class="delete-btn" onclick="deleteProduct(${p.id})" title="Supprimer">✕</button>` : ''}
+    ${showDelete && p.id && !catalogOnly ? `<button class="delete-btn" onclick="deleteProduct(${p.id})" title="Supprimer">✕</button>` : ''}
     ${isHomeBrand(p.brand) ? `<div class="home-badge">★ Marque maison Familiprix</div>` : ''}
     <div class="product-layout">
       ${p.image_url ? `<img class="product-thumb" src="${esc(p.image_url)}" alt="Image produit">` : ''}
@@ -780,7 +784,7 @@ function productCard(p, showDelete=true, showAiButton=true) {
         <div style="margin-bottom:3px">${planoBadge}</div>
         <div class="name">${esc(p.name)}</div>
         ${p.brand ? `<div class="product-brand">${esc(p.brand)}</div>` : ''}
-        <div class="location">${locationParts.join('<span class="loc-sep"> · </span>')}</div>
+        ${locationHtml}
       </div>
     </div>
     <div class="product-footer">

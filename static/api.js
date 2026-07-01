@@ -22,6 +22,17 @@ async function apiSearchProducts(query, field='') {
   return Array.isArray(data) ? data.map(normalizeProduct) : [];
 }
 
+async function apiSearchReference(query, limit=40) {
+  const trimmed = String(query || '').trim();
+  if (!trimmed) return [];
+  try {
+    const {res, data} = await apiFetch(`/api/products/reference-search?q=${encodeURIComponent(trimmed)}&limit=${limit}`);
+    return res.ok && Array.isArray(data) ? data.map(normalizeProduct) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
 async function apiGetProductByBarcode(barcode) {
   const {res, data} = await apiFetch(`/api/products/barcode/${encodeURIComponent(barcode)}`);
   if (!res.ok) {

@@ -66,9 +66,15 @@ INTENT_LEXICON = [
      "expand": ["gouttes", "yeux", "larmes artificielles", "visine", "systane", "collyre", "refresh"]},
     {"label": "Bébé",
      "triggers": ["bebe", "couche", "couches", "poussee dentaire", "colique", "coliques",
-                  "erytheme fessier", "biberon", "nourrisson"],
+                  "erytheme fessier", "nourrisson"],
      "expand": ["bebe", "couche", "pampers", "huggies", "tempra", "tylenol bebe", "penaten",
                 "creme fesses", "lingette", "ovol"]},
+    {"label": "Bébé — lait & nourriture",
+     "triggers": ["bouffe", "nourriture", "manger", "boire", "lait", "formule", "preparation",
+                  "biberon", "cereale", "cereales", "puree", "purees", "nourrisson", "allaitement",
+                  "maternise"],
+     "expand": ["enfamil", "similac", "preparation nourrisson", "nourrisson", "biberon", "cereales",
+                "puree", "gerber", "maternise", "allaitement", "pablum"]},
     {"label": "Premiers soins",
      "triggers": ["pansement", "coupure", "plaie", "desinfectant", "bandage", "ampoule",
                   "echarde", "eraflure", "saignement"],
@@ -416,6 +422,38 @@ def rank_products_by_code(products, query, limit=60):
     return items[:limit] if limit else items
 
 
+def rank_reference_for_query(query, limit=40, exclude_barcodes=None):
+    """Rank the reference catalogue (all products imported from planograms + past
+    scans) for a name/keyword query. These products have NO shelf location yet, so each
+    is flagged catalog_only=True and the UI shows 'position à confirmer'. Uses the same
+    scorer + intent expansion as the placed-product search."""
+    db = get_db()
+    variants = query_search_variants(query)
+    intent_terms = intent_expansion_terms(query)
+    if not variants and not intent_terms:
+        return []
+    exclude = exclude_barcodes or set()
+    ranked = []
+    for row in db.execute("SELECT barcode, name, brand, description FROM product_reference").fetchall():
+        item = dict(row)
+        bc = normalized_digits(item.get("barcode", ""))
+        if bc and bc in exclude:
+            continue
+        best_score = 0
+        for variant in variants:
+            best_score = max(best_score, product_search_score(item, variant))
+        # Here the catalogue is often searched by symptom alone, so use the FULL intent
+        # score (no cap) — otherwise every intent match ties and sorts alphabetically.
+        for term in intent_terms:
+            best_score = max(best_score, product_search_score(item, term))
+        if best_score > 0:
+            item["catalog_only"] = True
+            item["in_stock"] = 1
+            ranked.append((best_score, item))
+    ranked.sort(key=lambda x: (-x[0], str(x[1].get("name", "")).lower()))
+    return [it for _, it in ranked[:limit]]
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @products_bp.route("/api/products", methods=["GET"])
@@ -440,6 +478,20 @@ def search_products():
     else:
         items = rank_products_for_query(products, query, limit=limit)
     return jsonify(items)
+
+
+@products_bp.route("/api/products/reference-search", methods=["GET"])
+def reference_search():
+    """Search the reference catalogue (imported planograms) for products we carry but
+    that aren't placed on a shelf yet. Excludes barcodes already placed to avoid dups."""
+    query = request.args.get("q", "").strip()
+    if not query:
+        return jsonify([])
+    limit = min(max(clamp_non_negative_int(request.args.get("limit", "40"), 40), 1), 80)
+    db = get_db()
+    placed = {normalized_digits(r["barcode"]) for r in
+              db.execute("SELECT barcode FROM products WHERE TRIM(COALESCE(barcode,'')) <> ''").fetchall()}
+    return jsonify(rank_reference_for_query(query, limit=limit, exclude_barcodes=placed))
 
 
 @products_bp.route("/api/products/barcode/<barcode>", methods=["GET"])

@@ -274,7 +274,10 @@ async function doSearchValue(q) {
       ? `<div class="msg info" style="margin-bottom:8px">${cached.length} produits se terminent par <b>${esc(q)}</b>. Vérifiez le code-barres complet ci-dessous pour choisir le bon.</div>`
       : '';
     // Group results by barcode — if a barcode appears at multiple locations, merge them
-    div.innerHTML = cached.length ? (hint + groupAndRenderSearchResults(cached)) : '<div class="empty">Aucun produit trouve.</div>';
+    div.innerHTML = cached.length ? (hint + groupAndRenderSearchResults(cached)) : '<div class="empty">Aucun produit placé. Recherche dans le catalogue…</div>';
+    // Also search the imported-planogram catalogue for products we carry but that
+    // aren't placed on a shelf yet (server-side, so it doesn't tax the phone).
+    appendReferenceMatches(q, div, cached);
     return;
   }
   try {
@@ -283,6 +286,26 @@ async function doSearchValue(q) {
   } catch (e) {
     div.innerHTML = '<div class="msg error">Impossible de rechercher pour le moment.</div>';
   }
+}
+
+// Fetch catalogue-only products (imported planograms, not placed yet) and append them
+// below the placed results. Server-side search, so it's light on the device.
+async function appendReferenceMatches(q, div, placed) {
+  let ref = [];
+  try { ref = await apiSearchReference(q, 30); } catch (_) {}
+  const current = document.getElementById('searchInput')?.value.trim();
+  if (current !== q) return;                      // user moved on — ignore stale results
+  if (!ref.length) {
+    if (!placed.length) div.innerHTML = '<div class="empty">Aucun produit trouvé.</div>';
+    return;
+  }
+  const html = `<div class="card" style="margin-top:10px">
+    <div class="section-title">📦 Aussi en magasin — position à confirmer</div>
+    <div class="section-note">Produits importés des planogrammes, pas encore placés sur le plan.</div>
+    ${ref.map(p => productCard(p, false, false)).join('')}
+  </div>`;
+  if (!placed.length) div.innerHTML = html;       // replace the "searching…" placeholder
+  else div.insertAdjacentHTML('beforeend', html);
 }
 
 function groupAndRenderSearchResults(products) {
