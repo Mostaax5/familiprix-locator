@@ -2103,6 +2103,36 @@ async function importPlanogramCatalog(input) {
   }
 }
 
+let catalogEnrichTimer = null;
+async function startCatalogEnrich() {
+  if (!requireEditorSession('enrichir le catalogue')) return;
+  const msg = document.getElementById('catalogEnrichMsg');
+  if (msg) { msg.style.color = '#64748b'; msg.textContent = 'Démarrage de l enrichissement…'; }
+  try { await fetch('/api/import/catalog-enrich/start', {method:'POST', headers: getEditorHeaders()}); } catch (_) {}
+  const stop = document.getElementById('catalogEnrichStop'); if (stop) stop.style.display = '';
+  pollCatalogEnrich();
+}
+async function pollCatalogEnrich() {
+  window.clearTimeout(catalogEnrichTimer);
+  let s = {};
+  try { s = await (await fetch('/api/import/catalog-enrich/status')).json(); } catch (_) {}
+  const msg = document.getElementById('catalogEnrichMsg');
+  if (msg) {
+    const pct = s.total ? Math.round(100 * (s.done || 0) / s.total) : 0;
+    msg.style.color = s.running ? '#0369a1' : '#16a34a';
+    msg.innerHTML = `${s.running ? '⏳' : '✓'} ${s.done || 0}/${s.total || 0} (${pct}%) · `
+      + `<b>${s.updated || 0}</b> descriptions/images ajoutées · ${s.skipped || 0} sans correspondance fiable`;
+  }
+  const stop = document.getElementById('catalogEnrichStop');
+  if (s.running) { catalogEnrichTimer = window.setTimeout(pollCatalogEnrich, 3000); }
+  else if (stop) { stop.style.display = 'none'; }
+}
+async function stopCatalogEnrich() {
+  try { await fetch('/api/import/catalog-enrich/stop', {method:'POST', headers: getEditorHeaders()}); } catch (_) {}
+  const msg = document.getElementById('catalogEnrichMsg');
+  if (msg) msg.textContent = 'Arrêt demandé…';
+}
+
 async function parsePlanogramPDF(input) {
   const file = input.files[0];
   input.value = '';

@@ -338,6 +338,13 @@
       </label>
     </div>
     <div id="planoCatalogMsg" style="min-height:18px;font-size:13px;margin-top:6px"></div>
+
+    <div class="section-note" style="margin-top:12px">Optionnel : aller chercher en ligne les <b>vraies descriptions et images</b> pour les produits du catalogue. Chaque résultat est vérifié contre le nom Familiprix (jamais le mauvais produit). Ça tourne en arrière-plan et peut prendre un moment — gardez cette page ouverte.</div>
+    <div class="tool-row" style="margin-top:6px">
+      <button class="btn btn-outline btn-inline" onclick="startCatalogEnrich()">🌐 Enrichir descriptions & images en ligne</button>
+      <button id="catalogEnrichStop" class="btn btn-outline btn-inline" style="display:none;color:#c8102e;border-color:#f1b8c2" onclick="stopCatalogEnrich()">⏹ Arrêter</button>
+    </div>
+    <div id="catalogEnrichMsg" style="min-height:18px;font-size:13px;margin-top:6px"></div>
   </div>
 
   <div class="card">

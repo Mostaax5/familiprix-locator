@@ -1353,6 +1353,83 @@ def reference_count_route():
     return jsonify({"count": reference_count()})
 
 
+# ── Catalogue online-enrichment (fetch real descriptions + images, validated) ────
+_CATALOG_ENRICH = {"running": False, "done": 0, "total": 0, "updated": 0, "skipped": 0}
+
+
+def _catalog_enrich_worker():
+    """Fill in real descriptions + images for catalogue products from the online
+    databases, in the background. Each online result is validated against the Familiprix
+    name (online_matches_catalog) so a WRONG product is never attached. Resumable: only
+    processes rows that still have no description."""
+    import time as _time
+    from database import connect_db
+    db = connect_db()
+    try:
+        rows = [dict(r) for r in db.execute(
+            "SELECT barcode, name, brand FROM product_reference "
+            "WHERE TRIM(COALESCE(description,'')) = '' AND TRIM(COALESCE(name,'')) <> ''").fetchall()]
+    except Exception:
+        rows = []
+    _CATALOG_ENRICH.update(total=len(rows), done=0, updated=0, skipped=0, running=True)
+    try:
+        for r in rows:
+            if not _CATALOG_ENRICH["running"]:
+                break
+            bc = r.get("barcode", "")
+            try:
+                online = lookup_product_online(bc)
+            except Exception:
+                online = None
+            if online and online_matches_catalog(r.get("name", ""), r.get("brand", ""), online):
+                db.execute(
+                    """UPDATE product_reference SET
+                         description = CASE WHEN TRIM(COALESCE(description,'')) = '' THEN ? ELSE description END,
+                         image_url   = CASE WHEN TRIM(COALESCE(image_url,''))   = '' THEN ? ELSE image_url END,
+                         brand       = CASE WHEN TRIM(COALESCE(brand,''))       = '' THEN ? ELSE brand END,
+                         updated_at  = ?
+                       WHERE barcode = ?""",
+                    (str(online.get("description", "")).strip(), str(online.get("image_url", "")).strip(),
+                     str(online.get("brand", "")).strip(), utc_now_iso(), bc),
+                )
+                db.commit()
+                _CATALOG_ENRICH["updated"] += 1
+            else:
+                _CATALOG_ENRICH["skipped"] += 1
+            _CATALOG_ENRICH["done"] += 1
+            _time.sleep(0.15)   # be gentle on the free open databases
+    finally:
+        _CATALOG_ENRICH["running"] = False
+        try: db.close()
+        except Exception: pass
+
+
+@ai_bp.route("/api/import/catalog-enrich/start", methods=["POST"])
+def catalog_enrich_start():
+    username, error = require_editor()
+    if error:
+        return error
+    if _CATALOG_ENRICH["running"]:
+        return jsonify({"success": True, "already_running": True, **_CATALOG_ENRICH})
+    import threading
+    threading.Thread(target=_catalog_enrich_worker, daemon=True).start()
+    return jsonify({"success": True, "started": True})
+
+
+@ai_bp.route("/api/import/catalog-enrich/status", methods=["GET"])
+def catalog_enrich_status():
+    return jsonify(dict(_CATALOG_ENRICH))
+
+
+@ai_bp.route("/api/import/catalog-enrich/stop", methods=["POST"])
+def catalog_enrich_stop():
+    username, error = require_editor()
+    if error:
+        return error
+    _CATALOG_ENRICH["running"] = False
+    return jsonify({"success": True})
+
+
 @ai_bp.route("/api/reference/seed", methods=["POST"])
 def reference_seed_route():
     """Fill the local reference catalog from the open Canadian product databases
