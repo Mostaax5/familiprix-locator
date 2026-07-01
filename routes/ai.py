@@ -1364,15 +1364,13 @@ def _catalog_enrich_worker():
     processes rows that still have no description."""
     import time as _time
     from database import connect_db
-    db = connect_db()
+    db = None
     try:
+        db = connect_db()
         rows = [dict(r) for r in db.execute(
             "SELECT barcode, name, brand FROM product_reference "
             "WHERE TRIM(COALESCE(description,'')) = '' AND TRIM(COALESCE(name,'')) <> ''").fetchall()]
-    except Exception:
-        rows = []
-    _CATALOG_ENRICH.update(total=len(rows), done=0, updated=0, skipped=0, running=True)
-    try:
+        _CATALOG_ENRICH.update(total=len(rows), done=0, updated=0, skipped=0, running=True)
         for r in rows:
             if not _CATALOG_ENRICH["running"]:
                 break
@@ -1398,10 +1396,13 @@ def _catalog_enrich_worker():
                 _CATALOG_ENRICH["skipped"] += 1
             _CATALOG_ENRICH["done"] += 1
             _time.sleep(0.15)   # be gentle on the free open databases
+    except Exception:
+        pass
     finally:
         _CATALOG_ENRICH["running"] = False
-        try: db.close()
-        except Exception: pass
+        if db is not None:
+            try: db.close()
+            except Exception: pass
 
 
 @ai_bp.route("/api/import/catalog-enrich/start", methods=["POST"])
@@ -1411,9 +1412,20 @@ def catalog_enrich_start():
         return error
     if _CATALOG_ENRICH["running"]:
         return jsonify({"success": True, "already_running": True, **_CATALOG_ENRICH})
+    # Compute the total and flag running SYNCHRONOUSLY so the first status poll can't
+    # race the worker thread's startup and stop early (the '0/0' bug).
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT COUNT(*) AS n FROM product_reference "
+            "WHERE TRIM(COALESCE(description,'')) = '' AND TRIM(COALESCE(name,'')) <> ''").fetchone()
+        total = row["n"] if isinstance(row, dict) else row[0]
+    except Exception:
+        total = 0
+    _CATALOG_ENRICH.update(running=True, done=0, updated=0, skipped=0, total=int(total or 0))
     import threading
     threading.Thread(target=_catalog_enrich_worker, daemon=True).start()
-    return jsonify({"success": True, "started": True})
+    return jsonify({"success": True, "started": True, "total": _CATALOG_ENRICH["total"]})
 
 
 @ai_bp.route("/api/import/catalog-enrich/status", methods=["GET"])

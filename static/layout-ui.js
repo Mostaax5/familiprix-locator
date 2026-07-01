@@ -2120,8 +2120,12 @@ async function pollCatalogEnrich() {
   if (msg) {
     const pct = s.total ? Math.round(100 * (s.done || 0) / s.total) : 0;
     msg.style.color = s.running ? '#0369a1' : '#16a34a';
-    msg.innerHTML = `${s.running ? '⏳' : '✓'} ${s.done || 0}/${s.total || 0} (${pct}%) · `
-      + `<b>${s.updated || 0}</b> descriptions/images ajoutées · ${s.skipped || 0} sans correspondance fiable`;
+    if (!s.running && !s.total && !s.done) {
+      msg.textContent = 'Rien à enrichir pour le moment (déjà fait, ou attendez la fin du déploiement puis réessayez).';
+    } else {
+      msg.innerHTML = `${s.running ? '⏳ En cours…' : '✓ Terminé —'} ${s.done || 0}/${s.total || 0} (${pct}%) · `
+        + `<b>${s.updated || 0}</b> descriptions/images ajoutées · ${s.skipped || 0} sans correspondance fiable`;
+    }
   }
   const stop = document.getElementById('catalogEnrichStop');
   if (s.running) { catalogEnrichTimer = window.setTimeout(pollCatalogEnrich, 3000); }
