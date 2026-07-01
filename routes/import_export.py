@@ -326,22 +326,25 @@ def import_planogram_catalog():
             if not barcode or len(name) < 2:
                 continue
             products_seen += 1
+            code = str(p.get("code_familiprix", "")).strip()
 
-            # 1) reference catalogue — keep an existing real name, else use the plano's.
+            # 1) reference catalogue — keep an existing real name/code, else use the
+            #    plano's. Storing the Familiprix code attaches it to the UPC for lookups.
             db.execute(
-                """INSERT INTO product_reference (barcode, name, brand, description, image_url, source, source_url, updated_at)
-                   VALUES (?, ?, '', '', '', ?, ?, ?)
+                """INSERT INTO product_reference (barcode, name, brand, description, image_url, source, source_url, product_code, updated_at)
+                   VALUES (?, ?, '', '', '', ?, ?, ?, ?)
                    ON CONFLICT(barcode) DO UPDATE SET
                        name = CASE WHEN TRIM(COALESCE(product_reference.name, '')) = ''
                                    THEN excluded.name ELSE product_reference.name END,
+                       product_code = CASE WHEN TRIM(COALESCE(product_reference.product_code, '')) = ''
+                                   THEN excluded.product_code ELSE product_reference.product_code END,
                        source = excluded.source, source_url = excluded.source_url,
                        updated_at = excluded.updated_at""",
-                (barcode, name, source, source_url, now),
+                (barcode, name, source, source_url, code, now),
             )
             ref_upserts += 1
 
             # 2) enrich placed products (fill blanks only) — match once per product row.
-            code = str(p.get("code_familiprix", "")).strip()
             try:
                 facings = int(p.get("facings", 1) or 1)
             except (TypeError, ValueError):

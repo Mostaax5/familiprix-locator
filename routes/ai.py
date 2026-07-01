@@ -1108,6 +1108,22 @@ def _reference_upsert(db, product):
     return True
 
 
+def online_matches_catalog(cat_name, cat_brand, online):
+    """Guard against the online databases returning the WRONG product for a UPC.
+    We trust the Familiprix catalogue name; an online result is only accepted if it
+    shares a meaningful word (brand/product) with it. Prevents attaching a random
+    description/image to the right product (the 'match super wrong' problem)."""
+    from routes.products import normalize_search_text, tokenize_search_query
+    online_text = normalize_search_text(f"{online.get('name','')} {online.get('brand','')}")
+    cat_text = normalize_search_text(f"{cat_name} {cat_brand or ''}")
+    if not online_text or not cat_text:
+        return False
+    tokens = [t for t in tokenize_search_query(cat_text) if len(t) >= 4]
+    if not tokens:                                  # very short catalogue name — be strict
+        tokens = tokenize_search_query(cat_text)
+    return any(t in online_text for t in tokens)
+
+
 def reference_lookup(barcode):
     """Return a product from the local reference catalog, or None. Instant & free."""
     from database import connect_db
@@ -1120,6 +1136,7 @@ def reference_lookup(barcode):
                 if str(d.get("name", "")).strip():
                     return {"name": d.get("name", ""), "brand": d.get("brand", ""),
                             "description": d.get("description", ""), "barcode": d.get("barcode", ""),
+                            "product_code": d.get("product_code", ""),
                             "source": (d.get("source", "") or "catalogue") + " · cache",
                             "source_url": d.get("source_url", ""), "image_url": d.get("image_url", "")}
     except Exception:
@@ -1312,9 +1329,10 @@ def lookup_barcode(barcode):
 
     product = None
     if ref and len(str(ref.get("name", "")).strip()) >= 2:
-        # Keep the reliable catalogue name; enrich the rest from online where blank.
+        # Keep the reliable catalogue name/code; enrich the rest from online where blank —
+        # but ONLY if the online result actually matches this product (guards wrong hits).
         product = dict(ref)
-        if online:
+        if online and online_matches_catalog(product.get("name", ""), product.get("brand", ""), online):
             if not str(product.get("description", "")).strip() and online.get("description"):
                 product["description"] = online["description"]
             if not str(product.get("brand", "")).strip() and online.get("brand"):

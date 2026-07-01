@@ -255,16 +255,18 @@ def init_postgres_db(db):
     # grows toward "everything we ever scan". Separate from `products` (the plan).
     db.execute("""
         CREATE TABLE IF NOT EXISTS product_reference (
-            barcode     TEXT PRIMARY KEY,
-            name        TEXT DEFAULT '',
-            brand       TEXT DEFAULT '',
-            description TEXT DEFAULT '',
-            image_url   TEXT DEFAULT '',
-            source      TEXT DEFAULT '',
-            source_url  TEXT DEFAULT '',
-            updated_at  TEXT DEFAULT ''
+            barcode      TEXT PRIMARY KEY,
+            name         TEXT DEFAULT '',
+            brand        TEXT DEFAULT '',
+            description  TEXT DEFAULT '',
+            image_url    TEXT DEFAULT '',
+            source       TEXT DEFAULT '',
+            source_url   TEXT DEFAULT '',
+            product_code TEXT DEFAULT '',
+            updated_at   TEXT DEFAULT ''
         )
     """)
+    db.execute("ALTER TABLE product_reference ADD COLUMN IF NOT EXISTS product_code TEXT DEFAULT ''")
 
     db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS max_section TEXT NOT NULL DEFAULT '1'")
     db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS config_json TEXT NOT NULL DEFAULT ''")
@@ -419,16 +421,20 @@ def init_sqlite_db(db):
     # Reference catalog (see postgres init for rationale): known products by barcode.
     db.execute("""
         CREATE TABLE IF NOT EXISTS product_reference (
-            barcode     TEXT PRIMARY KEY,
-            name        TEXT DEFAULT '',
-            brand       TEXT DEFAULT '',
-            description TEXT DEFAULT '',
-            image_url   TEXT DEFAULT '',
-            source      TEXT DEFAULT '',
-            source_url  TEXT DEFAULT '',
-            updated_at  TEXT DEFAULT ''
+            barcode      TEXT PRIMARY KEY,
+            name         TEXT DEFAULT '',
+            brand        TEXT DEFAULT '',
+            description  TEXT DEFAULT '',
+            image_url    TEXT DEFAULT '',
+            source       TEXT DEFAULT '',
+            source_url   TEXT DEFAULT '',
+            product_code TEXT DEFAULT '',
+            updated_at   TEXT DEFAULT ''
         )
     """)
+    ref_columns = {row["name"] for row in db.execute("PRAGMA table_info(product_reference)").fetchall()}
+    if "product_code" not in ref_columns:
+        db.execute("ALTER TABLE product_reference ADD COLUMN product_code TEXT DEFAULT ''")
 
     layout_columns = {
         row["name"] for row in db.execute("PRAGMA table_info(aisle_layouts)").fetchall()

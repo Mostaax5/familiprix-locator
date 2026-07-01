@@ -536,6 +536,8 @@ async function confirmNewProduct() {
     usage_notes: pendingLookupAssist?.usage_notes || pendingLookupProduct?.usage_notes || '',
     alternative_suggestions: pendingLookupAssist?.alternative_suggestions || pendingLookupProduct?.alternative_suggestions || '',
     barcode,
+    // Familiprix pharmacy code from the planogram catalogue, attached to the UPC.
+    product_code: pendingLookupProduct?.product_code || '',
     is_plano: document.getElementById('scanIsPlano')?.checked ? 1 : 0,
     underneath_label: document.getElementById('scanUnderneath')?.value.trim() || '',
     aisle: rayonCtx.aisle, side: rayonCtx.side, section: rayonCtx.section || '1',

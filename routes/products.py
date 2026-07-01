@@ -434,7 +434,7 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None):
         return []
     exclude = exclude_barcodes or set()
     ranked = []
-    for row in db.execute("SELECT barcode, name, brand, description FROM product_reference").fetchall():
+    for row in db.execute("SELECT barcode, name, brand, description, product_code FROM product_reference").fetchall():
         item = dict(row)
         bc = normalized_digits(item.get("barcode", ""))
         if bc and bc in exclude:
