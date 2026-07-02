@@ -46,7 +46,7 @@ const INTENT_LEXICON = [
   {triggers:['rhume','congestion','nez bouche','sinus','grippe','decongestionnant','mouchoir'],
    expand:['decongestionnant','rhume','sinus','sudafed','otrivin','tylenol rhume','advil rhume','dristan','vicks','sirop']},
   {triggers:['toux','gorge','mal de gorge','expectorant','enrouement'],
-   expand:['sirop','toux','dextromethorphane','guaifenesine','benylin','buckley','pastille','gorge','strepsils','halls','fisherman']},
+   expand:['sirop','toux','dextromethorphane','guaifenesine','benylin','buckley','gorge','strepsils','halls','fisherman']},
   {triggers:['allergie','allergies','urticaire','eternuement','rhinite','allergique'],
    expand:['antihistaminique','allergie','reactine','cetirizine','claritin','loratadine','aerius','benadryl','allegra','blexten']},
   {triggers:['brulure d estomac','brulures d estomac','reflux','acidite','indigestion','aigreur','estomac'],

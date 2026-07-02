@@ -37,8 +37,10 @@ INTENT_LEXICON = [
                 "advil rhume", "dristan", "vicks", "sirop"]},
     {"label": "Toux / gorge",
      "triggers": ["toux", "gorge", "mal de gorge", "expectorant", "enrouement", "extinction de voix"],
+     # no generic 'pastille': it matched dishwasher 'pastilles' products; throat
+     # lozenges are reached via 'gorge' and the brand names below
      "expand": ["sirop", "toux", "dextromethorphane", "guaifenesine", "benylin", "buckley",
-                "pastille", "gorge", "strepsils", "halls", "fisherman"]},
+                "gorge", "strepsils", "halls", "fisherman"]},
     {"label": "Allergies",
      "triggers": ["allergie", "allergies", "urticaire", "eternuement", "rhinite", "allergique"],
      "expand": ["antihistaminique", "allergie", "reactine", "cetirizine", "claritin",
