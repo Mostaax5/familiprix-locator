@@ -1,5 +1,6 @@
 import re
 import json
+import time
 import unicodedata
 from flask import Blueprint, request, jsonify
 from database import get_db, DatabaseIntegrityError
@@ -152,6 +153,73 @@ def _abbreviation_hit(name_norm, abbrevs):
             if token == ab or (token.startswith(ab) and token[len(ab):].isdigit()):
                 return True
     return False
+
+
+# ── Reference-catalogue search cache ─────────────────────────────────────────────
+# The catalogue has ~6000+ rows. Re-normalizing them all (regex) on every keystroke
+# froze the whole app on Render's single worker. So we normalize ONCE into memory and
+# reuse it; the cache refreshes on catalogue import and every 90s (covers enrichment).
+_REF_GEN = 0
+_REF_CACHE = {"gen": -1, "at": 0.0, "rows": []}
+_REF_CACHE_TTL = 90.0
+
+
+def bump_reference_cache():
+    global _REF_GEN
+    _REF_GEN += 1
+
+
+def _reference_corpus(db):
+    now = time.time()
+    if (_REF_CACHE["gen"] == _REF_GEN and _REF_CACHE["rows"]
+            and now - _REF_CACHE["at"] < _REF_CACHE_TTL):
+        return _REF_CACHE["rows"]
+    rows = []
+    for r in db.execute("SELECT barcode, name, brand, description, product_code FROM product_reference").fetchall():
+        d = dict(r)
+        name = normalize_search_text(d.get("name", ""))
+        brand = normalize_search_text(d.get("brand", ""))
+        desc = normalize_search_text(d.get("description", ""))
+        rows.append({
+            "barcode": d.get("barcode", ""), "name": d.get("name", ""),
+            "brand": d.get("brand", ""), "description": d.get("description", ""),
+            "product_code": d.get("product_code", ""),
+            "_bc": normalized_digits(d.get("barcode", "")),
+            "_name": name, "_brand": brand,
+            "_hay": " ".join([name, brand, desc]), "_tokens": name.split(),
+        })
+    _REF_CACHE.update(gen=_REF_GEN, at=now, rows=rows)
+    return rows
+
+
+def _fast_reference_score(row, variants, intent_terms, abbrevs):
+    """Score a pre-normalized catalogue row cheaply (substring checks only, no regex)."""
+    name, brand, hay, bc = row["_name"], row["_brand"], row["_hay"], row["_bc"]
+    best = 0
+    for v in variants:
+        if not v:
+            continue
+        if v.isdigit() and bc:
+            if bc == v: best = max(best, 1200)
+            elif len(v) >= 4 and bc.endswith(v): best = max(best, 900)
+            elif v in bc: best = max(best, 500)
+        if v == name: best = max(best, 800)
+        elif name.startswith(v): best = max(best, 650)
+        elif v in name: best = max(best, 450)
+        if v in brand: best = max(best, 200)
+        elif v in hay: best = max(best, 120)
+    for t in intent_terms:              # uncapped: symptom → category must surface
+        if t == name: best = max(best, 800)
+        elif name.startswith(t): best = max(best, 650)
+        elif t in name: best = max(best, 450)
+        elif t in hay: best = max(best, 200)
+    if abbrevs:
+        for tok in row["_tokens"]:
+            for a in abbrevs:
+                if tok == a or (tok.startswith(a) and tok[len(a):].isdigit()):
+                    best = max(best, 430)
+                    break
+    return best
 
 
 def intent_expansion_terms(query):
@@ -506,27 +574,16 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None):
         return []
     exclude = exclude_barcodes or set()
     ranked = []
-    for row in db.execute("SELECT barcode, name, brand, description, product_code FROM product_reference").fetchall():
-        item = dict(row)
-        bc = normalized_digits(item.get("barcode", ""))
-        if bc and bc in exclude:
+    for row in _reference_corpus(db):
+        if row["_bc"] and row["_bc"] in exclude:
             continue
-        best_score = 0
-        for variant in variants:
-            best_score = max(best_score, product_search_score(item, variant))
-        # Here the catalogue is often searched by symptom alone, so use the FULL intent
-        # score (no cap) — otherwise every intent match ties and sorts alphabetically.
-        for term in intent_terms:
-            best_score = max(best_score, product_search_score(item, term))
-        # Full word → abbreviated planogram name (shampoing -> SHP).
-        if abbrevs and _abbreviation_hit(normalize_search_text(item.get("name", "")), abbrevs):
-            best_score = max(best_score, 430)
-        if best_score > 0:
-            item["catalog_only"] = True
-            item["in_stock"] = 1
-            ranked.append((best_score, item))
-    ranked.sort(key=lambda x: (-x[0], str(x[1].get("name", "")).lower()))
-    return [it for _, it in ranked[:limit]]
+        score = _fast_reference_score(row, variants, intent_terms, abbrevs)
+        if score > 0:
+            ranked.append((score, row))
+    ranked.sort(key=lambda x: (-x[0], x[1]["_name"]))
+    return [{"barcode": r["barcode"], "name": r["name"], "brand": r["brand"],
+             "description": r["description"], "product_code": r["product_code"],
+             "catalog_only": True, "in_stock": 1} for _, r in ranked[:limit]]
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -583,7 +640,8 @@ def client_find():
     db = get_db()
     scored = []
     seen_bc = set()
-    # Placed products first (tiebreak 0) — they carry a real shelf location.
+    # Placed products first (tiebreak 0) — they carry a real shelf location. There are
+    # usually few of these, so the per-request scoring cost is negligible.
     for row in db.execute("SELECT * FROM products").fetchall():
         item = row_to_product(row)
         s = _client_find_score(item, variants, intent_terms, abbrevs)
@@ -592,17 +650,16 @@ def client_find():
             bc = normalized_digits(item.get("barcode", ""))
             if bc:
                 seen_bc.add(bc)
-    # Catalogue products (tiebreak 1), skipping any barcode already placed.
-    for row in db.execute("SELECT barcode, name, brand, description, product_code FROM product_reference").fetchall():
-        item = dict(row)
-        bc = normalized_digits(item.get("barcode", ""))
-        if bc and bc in seen_bc:
+    # Catalogue products (tiebreak 1) — from the cached, pre-normalized corpus (fast).
+    for row in _reference_corpus(db):
+        if row["_bc"] and row["_bc"] in seen_bc:
             continue
-        s = _client_find_score(item, variants, intent_terms, abbrevs)
+        s = _fast_reference_score(row, variants, intent_terms, abbrevs)
         if s > 0:
-            item["catalog_only"] = True
-            item["in_stock"] = 1
-            scored.append((s, 1, item))
+            scored.append((s, 1, {"barcode": row["barcode"], "name": row["name"],
+                                   "brand": row["brand"], "description": row["description"],
+                                   "product_code": row["product_code"],
+                                   "catalog_only": True, "in_stock": 1}))
     scored.sort(key=lambda x: (-x[0], x[1], str(x[2].get("name", "")).lower()))
     return jsonify([it for _, _, it in scored[:limit]])
 

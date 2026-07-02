@@ -1,7 +1,9 @@
 // ── Client tab ────────────────────────────────────────────────────────────────
 function scheduleClientSearch() {
   window.clearTimeout(clientSearchTimer);
-  clientSearchTimer = window.setTimeout(() => runClientSearch(false), 220);
+  // Longer debounce: the client search hits the server, so we wait for a pause in
+  // typing rather than firing a request per keystroke.
+  clientSearchTimer = window.setTimeout(() => runClientSearch(false), 450);
 }
 
 function getClientQuestion() {

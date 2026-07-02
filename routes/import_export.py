@@ -367,6 +367,11 @@ def import_planogram_catalog():
                     enriched += 1
 
     db.commit()
+    try:
+        from routes.products import bump_reference_cache
+        bump_reference_cache()   # refresh the in-memory search corpus
+    except Exception:
+        pass
     return jsonify({
         "success": True,
         "planograms": planos,
