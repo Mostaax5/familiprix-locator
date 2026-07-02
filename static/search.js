@@ -183,7 +183,9 @@ function scoreProductForQuery(product, query) {
   return score;
 }
 
-function searchProductsFromCache(query, limit=40) {
+// minScore: 0 keeps every hit (Search tab — employees may type fragments);
+// the Client tab passes 100 so partial-coverage-only noise never shows to a client.
+function searchProductsFromCache(query, limit=40, minScore=0) {
   const variants = querySearchVariants(query);
   const intentTerms = intentExpansionTerms(query);
   const abbrevs = abbreviationTerms(query);
@@ -201,7 +203,7 @@ function searchProductsFromCache(query, limit=40) {
     if (abbrevs.length && abbreviationHit(productSearchFields(product).name, abbrevs)) {
       bestScore = Math.max(bestScore, 430);   // full word matched an abbreviated name
     }
-    if (bestScore > 0) ranked.push({score: bestScore, product});
+    if (bestScore > 0 && bestScore >= minScore) ranked.push({score: bestScore, product});
   }
   // Tiebreak: in-stock before ruptures, then by name.
   const outOf = p => (p.in_stock === 0 ? 1 : 0);

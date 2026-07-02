@@ -3,5 +3,7 @@ services:
     name: familiprix-locator
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --threads 4 --timeout 60
+    # Server tuning lives in gunicorn.conf.py (auto-loaded); command-line flags
+    # would silently override it, so keep the start command bare.
+    startCommand: gunicorn app:app
     plan: free

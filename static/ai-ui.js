@@ -114,7 +114,8 @@ async function runClientSearch(showEmptyMessage=true) {
     if (status && showEmptyMessage) status.textContent = 'Ecrivez la demande du client pour voir les produits.';
     return [];
   }
-  const localMatches = allProductsCache.length ? searchProductsFromCache(question, 30) : [];
+  // minScore 100 = same noise floor as the server's /api/client/find.
+  const localMatches = allProductsCache.length ? searchProductsFromCache(question, 30, 100) : [];
   currentClientMatches = localMatches;
   renderClientMatches(localMatches, question);
   if (status) {

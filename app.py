@@ -9,6 +9,14 @@ from routes.gist import gist_bp, _restore_from_gist_if_empty
 from routes.import_export import import_export_bp
 
 app = Flask(__name__)
+try:
+    # Gzip every JSON/HTML/JS response: /api/products alone is ~1 MB uncompressed,
+    # which dominated the app's load time on store phones. Optional so a missing
+    # package never prevents boot (dev environments, partial installs).
+    from flask_compress import Compress
+    Compress(app)
+except ImportError:
+    pass
 init_db()
 
 app.register_blueprint(products_bp)

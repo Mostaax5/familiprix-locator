@@ -71,7 +71,13 @@ const SEARCH_STOPWORDS = new Set([
   'dans','de','des','du','en','et','for','how','i','il','ils','je',
   'la','le','les','mais','mon','my','of','on','or','ou','par','pas',
   'pour','que','qui','sans','si','son','sur','the','to','un','une',
-  'with','without','y'
+  'with','without','y',
+  // Filler words of a spoken client request — mirror of routes/products.py.
+  'besoin','cherche','cherchez','chose','choses','conseil','conseillez',
+  'contre','donner','faudrait','faut','madame','medicament','medicaments',
+  'meilleur','meilleure','monsieur','peut','peux','plait','prendre',
+  'produit','produits','quelque','quelques','quoi','recommande',
+  'recommandez','suggestion','svp','veut','veux','voudrais'
 ]);
 
 window.AppConfig = { STORAGE_KEYS, LOCK_HASH, LOCK_TTL_MS, LOCKED_TABS, SEARCH_STOPWORDS, STORES };

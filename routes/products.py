@@ -15,6 +15,14 @@ SEARCH_STOPWORDS = {
     "la", "le", "les", "mais", "mon", "my", "of", "on", "or", "ou", "par", "pas",
     "pour", "que", "qui", "sans", "si", "son", "sur", "the", "to", "un", "une",
     "with", "without", "y",
+    # Filler words of a spoken client request ("quelque chose contre la toux",
+    # "quel produit recommandez-vous"). Left in the query they became matching
+    # tokens and pulled in unrelated products. Keep in sync with config.js.
+    "besoin", "cherche", "cherchez", "chose", "choses", "conseil", "conseillez",
+    "contre", "donner", "faudrait", "faut", "madame", "medicament", "medicaments",
+    "meilleur", "meilleure", "monsieur", "peut", "peux", "plait", "prendre",
+    "produit", "produits", "quelque", "quelques", "quoi", "recommande",
+    "recommandez", "suggestion", "svp", "veut", "veux", "voudrais",
 }
 
 # ── Intent lexicon ───────────────────────────────────────────────────────────────
@@ -624,13 +632,18 @@ def client_find():
     db = get_db()
     scored = []
     seen_bc = set()
+    # Minimum meaningful score for the CLIENT tab: every real signal clears it
+    # (whole-word name token 470+, intent 200-300, brand 200, all-tokens-covered
+    # 120+, barcode 500+). What it drops is partial-coverage-only noise (25/token)
+    # — the "random products" that padded the list when little else matched.
+    MIN_SCORE = 100
     # Placed products first (tiebreak 0) — they carry a real shelf location. Scored
     # from the pre-normalized in-memory corpus with the SAME rules as the catalogue,
     # so the two lists compete fairly and a request costs milliseconds (the old
     # per-request re-normalization took ~17s on Render and looked like "no results").
     for item, prow in _products_corpus(db):
         s = _fast_reference_score(prow, nq, dq, qtokens, intent_terms, abbrevs)
-        if s > 0:
+        if s >= MIN_SCORE:
             scored.append((s, 0, item))
             if prow["_bc"]:
                 seen_bc.add(prow["_bc"])
@@ -639,7 +652,7 @@ def client_find():
         if row["_bc"] and row["_bc"] in seen_bc:
             continue
         s = _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs)
-        if s > 0:
+        if s >= MIN_SCORE:
             scored.append((s, 1, {"barcode": row["barcode"], "name": row["name"],
                                    "brand": row["brand"], "description": row["description"],
                                    "product_code": row["product_code"],
