@@ -22,11 +22,11 @@ async function apiSearchProducts(query, field='') {
   return Array.isArray(data) ? data.map(normalizeProduct) : [];
 }
 
-async function apiClientFind(query, limit=30) {
+async function apiClientFind(query, limit=30, signal) {
   const trimmed = String(query || '').trim();
   if (!trimmed) return [];
   try {
-    const {res, data} = await apiFetch(`/api/client/find?q=${encodeURIComponent(trimmed)}&limit=${limit}`);
+    const {res, data} = await apiFetch(`/api/client/find?q=${encodeURIComponent(trimmed)}&limit=${limit}`, {signal});
     return res.ok && Array.isArray(data) ? data.map(normalizeProduct) : [];
   } catch (e) {
     return [];

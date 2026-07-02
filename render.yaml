@@ -3,5 +3,5 @@ services:
     name: familiprix-locator
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    startCommand: gunicorn app:app --threads 4 --timeout 60
     plan: free

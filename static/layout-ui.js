@@ -1578,7 +1578,11 @@ async function deleteProduct(id) {
   if (!confirm('Supprimer ce produit ?')) return;
   const data = await apiDeleteProduct(id);
   if (!data.success) {
-    const target = document.getElementById('searchResults');
+    // Show the error in the tab the user is actually looking at — writing it to
+    // the hidden search results made a failed delete look like a dead button.
+    const target = document.getElementById('add')?.classList.contains('active')
+      ? document.getElementById('addMsg')
+      : document.getElementById('searchResults');
     if (target) target.innerHTML = `<div class="msg error">${esc(data.error || 'Suppression impossible.')}</div>`;
     return;
   }
@@ -1750,12 +1754,51 @@ async function removeShelf(aisle, side, sectionIndex, shelfIndex) {
   await saveAisleLayout(aisle);
 }
 
-async function _swapCall(aisle, endpoint, body) {
-  const {res, data} = await apiFetch(
-    `/api/layout/aisles/${encodeURIComponent(aisle)}/${endpoint}`,
-    {method:'POST', headers:{'Content-Type':'application/json',...getEditorHeaders()}, body:JSON.stringify(body)}
+// Delete a tablette of a fixture side (Façade A/B or a présentoir façade): the
+// server removes its products and renumbers the shelves above (no section scoping
+// on fixture sides), then the config entry is removed and saved — same contract
+// as removeShelf for the aisle sides.
+async function _removeFixtureShelf(aisle, sideName, fixture, shelfIndex) {
+  const hasProducts = allProductsCache.some(p =>
+    String(p.aisle) === String(aisle) && p.side === sideName && String(p.shelf) === String(shelfIndex + 1)
   );
-  return res.ok && data.success;
+  if (hasProducts && !confirm(`La tablette ${shelfIndex + 1} contient des produits. Supprimer quand même ?`)) return;
+  if (!await _swapCall(aisle, 'remove-shelf', {side: sideName, shelf: String(shelfIndex + 1)})) {
+    document.getElementById('addMsg').innerHTML = '<div class="msg error">Suppression impossible.</div>';
+    return;
+  }
+  fixture.shelves.splice(shelfIndex, 1);
+  if (fixture.labels) fixture.labels.splice(shelfIndex, 1);
+  await saveAisleLayout(aisle);
+}
+
+async function removeFacadeShelf(aisle, facadeKey, shelfIndex) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  if (!layout.config[facadeKey]) return;
+  const sideName = facadeKey === 'facade_a' ? 'Façade A' : 'Façade B';
+  await _removeFixtureShelf(aisle, sideName, _fixFixture(layout.config[facadeKey]), shelfIndex);
+}
+
+async function removePresentoirShelf(aisle, presIndex, facadeIndex, shelfIndex) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const pres = layout.config.presentoirs?.[presIndex];
+  const facade = pres?.facades?.[facadeIndex];
+  if (!pres || !facade) return;
+  await _removeFixtureShelf(aisle, `${pres.name} - ${facade.name}`, _fixFixture(facade), shelfIndex);
+}
+
+async function _swapCall(aisle, endpoint, body) {
+  try {
+    const {res, data} = await apiFetch(
+      `/api/layout/aisles/${encodeURIComponent(aisle)}/${endpoint}`,
+      {method:'POST', headers:{'Content-Type':'application/json',...getEditorHeaders()}, body:JSON.stringify(body)}
+    );
+    return res.ok && data.success;
+  } catch (e) {
+    return false;   // network failure/timeout → caller shows its error message
+  }
 }
 
 async function moveSection(aisle, side, sectionIndex, direction) {
@@ -1938,10 +1981,9 @@ function _facadeShelfGrid(aisle, sideName, fk, shelves, labels) {
                onchange="setFacadeShelfPositions('${esc(aisle)}','${fk}',${shi},this.value)"/>
         <span style="font-size:10px;color:#94a3b8">pos</span>
         <span style="font-size:11px;color:#64748b">${filled} prod.</span>
-        <button onclick="setFacadeShelfCount('${esc(aisle)}','${fk}',${shelves.length - 1 > shi ? shelves.length : shelves.length - 1})"
-                style="margin-left:auto;background:none;border:none;color:#c8102e;cursor:pointer;font-size:14px;line-height:1;padding:0"
-                title="Supprimer tablette"
-                onclick="javascript:void(0)">✕</button>
+        <button onclick="removeFacadeShelf('${esc(aisle)}','${fk}',${shi})"
+                style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5"
+                title="Supprimer cette tablette">✕ Suppr.</button>
       </div>
       <details class="struct-details">
         <summary class="struct-toggle" style="font-size:11px">⚙ Nom / étiquette</summary>
@@ -2019,11 +2061,9 @@ function renderPresentoirSection(aisle, config) {
           <div class="shelf-header" style="gap:4px">
             <span class="shelf-title">${title}</span>
             ${posCtrl}
-            <button onclick="removePresentoir('${esc(aisle)}',${pi})" style="display:none"></button>
-          </div>
-          <div style="display:flex;gap:4px;padding:4px 0;border-top:1px solid rgba(0,0,0,.06);margin-top:3px">
-            <button class="btn btn-outline btn-inline" style="font-size:11px;flex:1" onclick="setPresentoirShelfPositions('${esc(aisle)}',${pi},${fi},${shi-1},0)" >↑</button>
-            <button class="btn btn-outline btn-inline" style="font-size:11px;flex:1" onclick="setPresentoirShelfPositions('${esc(aisle)}',${pi},${fi},${shi+1},0)">↓</button>
+            <button onclick="removePresentoirShelf('${esc(aisle)}',${pi},${fi},${shi})"
+                    style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5"
+                    title="Supprimer cette tablette">✕ Suppr.</button>
           </div>
           ${renderShelfProductList(aisle, sideName, 1, shi + 1, positions)}
         </div>`;

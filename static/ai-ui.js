@@ -98,6 +98,12 @@ async function sendAiFeedback(rating) {
 
 // ONE ranked list from the server: placed products (with location) + catalogue products
 // (position à confirmer), best match first. Fast and works with NO AI.
+// The placed products are ALSO searched instantly on the device (same scorer as the
+// Search tab), so the tab shows results immediately and still works when the server
+// is waking up (Render free tier sleeps) or unreachable — the server response then
+// replaces the local list because it adds the catalogue products.
+let _clientFindController = null;
+
 async function runClientSearch(showEmptyMessage=true) {
   const question = getClientQuestion();
   const status = document.getElementById('clientHelpStatus');
@@ -108,10 +114,24 @@ async function runClientSearch(showEmptyMessage=true) {
     if (status && showEmptyMessage) status.textContent = 'Ecrivez la demande du client pour voir les produits.';
     return [];
   }
-  if (status) status.textContent = 'Recherche des produits…';
+  const localMatches = allProductsCache.length ? searchProductsFromCache(question, 30) : [];
+  currentClientMatches = localMatches;
+  renderClientMatches(localMatches, question);
+  if (status) {
+    status.textContent = localMatches.length
+      ? `${localMatches.length} produit(s) en magasin. Recherche du catalogue…`
+      : 'Recherche des produits…';
+  }
+  // Abort the previous in-flight request so slow responses can't pile up
+  // behind each other on the server while the user types.
+  if (_clientFindController) _clientFindController.abort();
+  const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  _clientFindController = controller;
   let matches = [];
-  try { matches = await apiClientFind(question, 30); } catch (_) {}
+  try { matches = await apiClientFind(question, 30, controller?.signal); } catch (_) {}
   if (getClientQuestion() !== question) return currentClientMatches;   // stale — user kept typing
+  if (controller && _clientFindController !== controller) return currentClientMatches; // superseded
+  if (!matches.length && localMatches.length) matches = localMatches;  // server down → keep local results
   currentClientMatches = matches;
   renderClientMatches(matches, question);
   if (status) {

@@ -193,11 +193,12 @@ def _reference_corpus(db):
 
 
 def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
-    """Score a pre-normalized catalogue row cheaply (substring checks only, no regex).
-    Query parts (nq=normalized query, dq=digits, qtokens=unique tokens) are computed ONCE
-    per request. Additive model mirroring product_search_score for accuracy, PLUS a
-    multi-token coverage bonus so more-specific matches ('advil extra fort') outrank the
-    generic one ('advil'). Intent (symptom→category) and abbreviations floor the score."""
+    """THE search scorer — used for both the catalogue rows and the placed products
+    (via _product_search_row). Substring checks only, no regex: query parts
+    (nq=normalized query, dq=digits, qtokens=unique tokens) are computed ONCE per
+    request. Additive model with a multi-token coverage bonus so more-specific
+    matches ('advil extra fort') outrank the generic one ('advil'). Intent
+    (symptom→category, capped at 300) and abbreviations floor the score."""
     name, brand, hay, bc, toks = row["_name"], row["_brand"], row["_hay"], row["_bc"], row["_tokens"]
     score = 0
     if dq and bc:
@@ -225,12 +226,13 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
                 matched += 1
         if matched:
             score += (100 + 20 * matched) if matched == len(qtokens) else (25 * matched)
-    if intent_terms:                    # uncapped: symptom → category must surface
-        ib = 0
-        for t in intent_terms:
-            if name.startswith(t): ib = 650; break
+    if intent_terms:                    # symptom → category surfaces, but capped so a
+        ib = 0                          # direct name/UPC match (450+) always outranks it
+        for t in intent_terms:          # (uncapped, 'toux' ranked dishwasher 'pastilles'
+            if name.startswith(t): ib = 650; break   # above real cough syrup)
             elif t in name: ib = max(ib, 450)
             elif t in hay: ib = max(ib, 200)
+        ib = min(ib, 300)
         if ib > score:
             score = ib
     if abbrevs and score < 430:
@@ -244,6 +246,48 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
             if done:
                 break
     return score
+
+
+# ── Placed-products search cache ─────────────────────────────────────────────────
+# Same idea as the reference cache above, but for the PLACED products: scoring used
+# to re-normalize every product (regex + unicode) for every query word and every
+# intent term — ~17 seconds per Client-tab request with ~1000 products on Render's
+# small CPU, which also froze every other request behind it on the single worker.
+# The cache key (count, max id, max modified_at) changes on any insert/update/delete
+# (every write path stamps modified_at), so no explicit invalidation hooks are needed.
+_PROD_CACHE = {"key": None, "rows": []}
+
+
+def _product_search_row(item):
+    """Pre-normalized search fields for a placed product, in the shape
+    _fast_reference_score expects — computed once per product, not once per term."""
+    name = normalize_search_text(item.get("name", ""))
+    brand = normalize_search_text(item.get("brand", ""))
+    hay = " ".join([
+        name, brand,
+        normalize_search_text(item.get("description", "")),
+        normalize_search_text(item.get("search_terms", "")),
+        normalize_search_text(item.get("usage_notes", "")),
+        normalize_search_text(item.get("alternative_suggestions", "")),
+    ])
+    return {"_bc": normalized_digits(item.get("barcode", "")),
+            "_name": name, "_brand": brand, "_hay": hay, "_tokens": name.split()}
+
+
+def _products_corpus(db):
+    """All placed products with their pre-normalized search fields: [(item, row)]."""
+    key_row = db.execute(
+        "SELECT COUNT(*) AS n, MAX(id) AS max_id, MAX(modified_at) AS max_mod FROM products"
+    ).fetchone()
+    key = (tuple(key_row.values()) if isinstance(key_row, dict) else tuple(key_row))
+    if _PROD_CACHE["key"] == key:
+        return _PROD_CACHE["rows"]
+    rows = []
+    for r in db.execute("SELECT * FROM products").fetchall():
+        item = row_to_product(r)
+        rows.append((item, _product_search_row(item)))
+    _PROD_CACHE.update(key=key, rows=rows)
+    return rows
 
 
 def intent_expansion_terms(query):
@@ -286,29 +330,6 @@ def tokenize_search_query(query):
         for token in normalize_search_text(query).split()
         if len(token) >= 2 and token not in SEARCH_STOPWORDS
     ]
-
-
-def query_search_variants(query):
-    variants = []
-    seen = set()
-
-    def add(value):
-        cleaned = str(value or "").strip()
-        if cleaned and cleaned not in seen:
-            seen.add(cleaned)
-            variants.append(cleaned)
-
-    normalized = normalize_search_text(query)
-    digits = normalized_digits(query)
-    tokens = tokenize_search_query(query)
-    add(normalized)
-    if tokens:
-        add(" ".join(tokens))
-        for token in tokens:
-            add(token)
-    if digits and len(digits) >= 4:
-        add(digits)
-    return variants
 
 
 def build_barcode_candidates(barcode):
@@ -461,95 +482,26 @@ def integrity_conflict_message(exc):
     return "Cette position’est déjà occupée."
 
 
-def product_search_text(product):
-    return normalize_search_text(" ".join([
-        str(product.get("name", "")),
-        str(product.get("brand", "")),
-        str(product.get("description", "")),
-        str(product.get("search_terms", "")),
-        str(product.get("usage_notes", "")),
-        str(product.get("alternative_suggestions", "")),
-    ]))
-
-
-def product_search_score(product, query):
-    lowered_query = normalize_search_text(query)
-    digits_query = normalized_digits(query)
-    if not lowered_query and not digits_query:
-        return 0
-
-    barcode = normalized_digits(product.get("barcode", ""))
-    name = normalize_search_text(product.get("name", ""))
-    brand = normalize_search_text(product.get("brand", ""))
-    description = normalize_search_text(product.get("description", ""))
-    search_terms = normalize_search_text(product.get("search_terms", ""))
-    usage_notes = normalize_search_text(product.get("usage_notes", ""))
-    alternatives = normalize_search_text(product.get("alternative_suggestions", ""))
-    haystack = product_search_text(product)
-    score = 0
-
-    if digits_query and barcode:
-        if barcode == digits_query:
-            score += 1200
-        elif len(digits_query) >= 4 and barcode.endswith(digits_query):
-            score += 900
-        elif digits_query in barcode:
-            score += 500
-
-    if lowered_query == name:
-        score += 800
-    elif name.startswith(lowered_query):
-        score += 650
-    elif lowered_query in name:
-        score += 450
-
-    if brand.startswith(lowered_query):
-        score += 280
-    elif lowered_query in brand:
-        score += 180
-
-    if lowered_query in description:
-        score += 150
-    if lowered_query in search_terms:
-        score += 240
-    if lowered_query in usage_notes:
-        score += 170
-    if lowered_query in alternatives:
-        score += 120
-
-    unique_tokens = list(dict.fromkeys(tokenize_search_query(query)))
-    if unique_tokens:
-        matched_tokens = sum(1 for token in unique_tokens if token in haystack)
-        if matched_tokens == len(unique_tokens):
-            score += 100 + (20 * matched_tokens)
-        elif matched_tokens:
-            score += 25 * matched_tokens
-
-    return score
-
-
 def rank_products_for_query(products, query, limit=60):
-    variants = query_search_variants(query)
+    """Rank placed products for a query. Each product is normalized ONCE and scored
+    with the same fast additive scorer as the catalogue (substring checks only) —
+    the old per-(product × variant × intent-term) re-normalization took seconds for
+    ~1000 products on Render's small CPU and froze every other request behind it.
+    The scorer keeps the invariants: barcode > exact name > name prefix > name
+    contains > whole-word token, intent capped at 300, abbreviation floor 430."""
+    nq = normalize_search_text(query)
+    dq = normalized_digits(query)
+    qtokens = list(dict.fromkeys(tokenize_search_query(query)))
     intent_terms = intent_expansion_terms(query)
     abbrevs = abbreviation_terms(query)
-    if not variants and not intent_terms:
+    if not nq and not dq and not intent_terms:
         return []
     ranked = []
     for product in products:
-        best_score = 0
-        for variant in variants:
-            best_score = max(best_score, product_search_score(product, variant))
-        if intent_terms:
-            intent_hit = 0
-            for term in intent_terms:
-                intent_hit = max(intent_hit, product_search_score(product, term))
-            # Discount the symptom→category match so a direct name/brand/UPC match
-            # (450+) always wins, but the right category still surfaces.
-            best_score = max(best_score, min(intent_hit, 300))
-        if abbrevs and _abbreviation_hit(normalize_search_text(product.get("name", "")), abbrevs):
-            best_score = max(best_score, 430)   # full word matched an abbreviated name
-        if best_score > 0:
-            ranked.append((best_score, product))
+        score = _fast_reference_score(_product_search_row(product), nq, dq,
+                                      qtokens, intent_terms, abbrevs)
+        if score > 0:
+            ranked.append((score, product))
     # Tiebreak: in-stock products before ruptures, then by location.
     ranked.sort(key=lambda item: (-item[0], 1 if item[1].get("in_stock") == 0 else 0,
                                    location_sort_key(item[1])))
@@ -630,25 +582,25 @@ def search_products():
     field = (request.args.get("field") or "").strip().lower()
     limit = min(max(clamp_non_negative_int(request.args.get("limit", "60"), 60), 1), 120)
     db = get_db()
-    products = [row_to_product(p) for p in db.execute("SELECT * FROM products").fetchall()]
+    corpus = _products_corpus(db)   # cached: no per-request fetch + re-normalization
     if field == "code":
-        items = rank_products_by_code(products, query, limit=limit)
-    else:
-        items = rank_products_for_query(products, query, limit=limit)
-    return jsonify(items)
-
-
-def _client_find_score(item, query, qtokens, intent_terms, abbrevs):
-    # Best of the full query AND each query word (so 'tylenol' strongly favours Tylenol),
-    # then floor with intent (category) and abbreviation matches.
-    best = product_search_score(item, query)
-    for t in qtokens:
-        best = max(best, product_search_score(item, t))
-    for term in intent_terms:
-        best = max(best, product_search_score(item, term))
-    if abbrevs and _abbreviation_hit(normalize_search_text(item.get("name", "")), abbrevs):
-        best = max(best, 430)
-    return best
+        items = rank_products_by_code([item for item, _ in corpus], query, limit=limit)
+        return jsonify(items)
+    nq = normalize_search_text(query)
+    dq = normalized_digits(query)
+    qtokens = list(dict.fromkeys(tokenize_search_query(query)))
+    intent_terms = intent_expansion_terms(query)
+    abbrevs = abbreviation_terms(query)
+    if not nq and not dq and not intent_terms:
+        return jsonify([])
+    ranked = []
+    for item, row in corpus:
+        score = _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs)
+        if score > 0:
+            ranked.append((score, item))
+    ranked.sort(key=lambda e: (-e[0], 1 if e[1].get("in_stock") == 0 else 0,
+                               location_sort_key(e[1])))
+    return jsonify([item for _, item in ranked[:limit]])
 
 
 @products_bp.route("/api/client/find", methods=["GET"])
@@ -670,16 +622,16 @@ def client_find():
     db = get_db()
     scored = []
     seen_bc = set()
-    # Placed products first (tiebreak 0) — they carry a real shelf location. There are
-    # usually few of these, so the per-request scoring cost is negligible.
-    for row in db.execute("SELECT * FROM products").fetchall():
-        item = row_to_product(row)
-        s = _client_find_score(item, query, qtokens, intent_terms, abbrevs)
+    # Placed products first (tiebreak 0) — they carry a real shelf location. Scored
+    # from the pre-normalized in-memory corpus with the SAME rules as the catalogue,
+    # so the two lists compete fairly and a request costs milliseconds (the old
+    # per-request re-normalization took ~17s on Render and looked like "no results").
+    for item, prow in _products_corpus(db):
+        s = _fast_reference_score(prow, nq, dq, qtokens, intent_terms, abbrevs)
         if s > 0:
             scored.append((s, 0, item))
-            bc = normalized_digits(item.get("barcode", ""))
-            if bc:
-                seen_bc.add(bc)
+            if prow["_bc"]:
+                seen_bc.add(prow["_bc"])
     # Catalogue products (tiebreak 1) — from the cached, pre-normalized corpus (fast).
     for row in _reference_corpus(db):
         if row["_bc"] and row["_bc"] in seen_bc:

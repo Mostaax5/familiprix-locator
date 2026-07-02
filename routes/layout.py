@@ -352,10 +352,11 @@ def swap_positions_route(aisle):
 def _renumber_after_remove(db, username, now, aisle, side, field, removed, section=None):
     """Delete products at `field`==removed, then shift every higher `field` down by 1
     so product numbering stays aligned with the config after a middle removal.
-    `field` is 'section' or 'shelf'; for 'shelf', scope to a single section."""
+    `field` is 'section' or 'shelf'; for 'shelf', scope to a single section when one
+    is given (fixture sides — façades/présentoirs — have no sections, pass None)."""
     where = "aisle=? AND side=?"
     params = [aisle, side]
-    if field == "shelf":
+    if field == "shelf" and section is not None:
         where += " AND section=?"
         params.append(section)
     # 1. delete products in the removed section/shelf
@@ -407,7 +408,10 @@ def remove_shelf(aisle):
     if not side or not shelf:
         return jsonify({"success": False, "error": "Paramètres invalides."}), 400
     db = get_db()
-    _renumber_after_remove(db, username, utc_now_iso(), aisle, side, "shelf", shelf, section=section)
+    # Fixture sides (Façade A/B, présentoir façades) carry no meaningful section
+    # value on their products — match their shelves across all sections.
+    section_scope = section if side in ("Gauche", "Droite") else None
+    _renumber_after_remove(db, username, utc_now_iso(), aisle, side, "shelf", shelf, section=section_scope)
     db.commit()
     return jsonify({"success": True})
 
