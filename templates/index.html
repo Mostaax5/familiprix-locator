@@ -280,17 +280,17 @@
       <div class="row3" style="margin-top:10px">
         <div class="field">
           <label class="label">Allée</label>
-          <select id="planoAisle" onchange="updatePlanoPreview()"></select>
+          <select id="planoAisle" onchange="onPlanoSideChange()"></select>
         </div>
         <div class="field">
           <label class="label">Côté</label>
-          <select id="planoSide" onchange="updatePlanoPreview()">
+          <select id="planoSide" onchange="onPlanoSideChange()">
             <option value="Gauche">Côté A</option>
             <option value="Droite">Côté B</option>
           </select>
         </div>
         <div class="field">
-          <label class="label" title="Section du plan où commence le plano">Section de départ</label>
+          <label class="label" title="Section du plan où commence le plano. Côté A remplit vers la Façade A ; Côté B vers la Façade B.">Section de départ</label>
           <input type="number" id="planoSection" value="1" min="1" style="width:64px" oninput="schedulePlanoPreview()"/>
         </div>
       </div>

@@ -2209,7 +2209,7 @@ async function parsePlanogramPDF(input) {
     msg.innerHTML = `<strong style="color:#16a34a">${data.count} produits</strong> trouvés — ${sum}`;
     msg.style.color = '#16a34a';
     document.getElementById('planoConfig').style.display = '';
-    updatePlanoPreview();
+    onPlanoSideChange();   // sets the start section to the côté's starting end, then previews
   } catch(e) {
     msg.textContent = 'Erreur réseau.';
     msg.style.color = '#c8102e';
@@ -2247,6 +2247,29 @@ function planoAddLine() {
   updatePlanoPreview();
 }
 
+// Number of sections on a given aisle côté (0 if the aisle/côté isn't in the plan).
+function planoSectionCount(aisle, side) {
+  const layout = (typeof mapLayouts !== 'undefined' ? mapLayouts : []).find(l => String(l.aisle) === String(aisle));
+  return (((layout && layout.config && layout.config.sides && layout.config.sides[side]) || {}).sections || []).length;
+}
+
+// The section a planogram should START from for a côté: Côté A (Gauche) fills from
+// the Façade B end (its highest section) toward Façade A, so it starts at the last
+// section; Côté B (Droite) starts at section 1 (Façade A end).
+function planoDefaultStartSection(aisle, side) {
+  return side === 'Gauche' ? Math.max(1, planoSectionCount(aisle, side)) : 1;
+}
+
+// Côté or allée changed: reset the "Section de départ" to that côté's natural
+// starting end, then refresh the preview so destinations reflect the direction.
+function onPlanoSideChange() {
+  const aisle = document.getElementById('planoAisle')?.value;
+  const side  = document.getElementById('planoSide')?.value;
+  const secEl = document.getElementById('planoSection');
+  if (secEl) secEl.value = String(planoDefaultStartSection(aisle, side));
+  updatePlanoPreview();
+}
+
 // Mirror of the server's plan_planogram_flow: lay each plano shelf (= lines that
 // share a plano tablette) into the plan's EXISTING tablettes starting at
 // (startSection, startTablette), rolling into the next section when one is full.
@@ -2255,12 +2278,18 @@ function planoAddLine() {
 function computePlanoFlow(config, side, startSection, startTablette, tabStart, tabEnd, skipNS) {
   const out = { byIdx: {}, overflow: new Set(), placed: 0 };
   const sections = ((config && config.sides && config.sides[side]) ? config.sides[side].sections : []) || [];
+  // Direction mirrors the server's plan_planogram_flow: Côté A (Gauche) reads Façade B
+  // → Façade A, so it fills sections DESCENDING from the start section down to section 1;
+  // Côté B (Droite) fills ascending. Only the section order flips (tablettes stay top→bottom).
+  const startIdx = Math.min(Math.max(0, startSection - 1), Math.max(0, sections.length - 1));
   const slots = [];
-  for (let si = Math.max(0, startSection - 1); si < sections.length; si++) {
+  const pushSection = si => {
     const shelfCount = ((sections[si] || {}).shelves || []).length;
-    const firstT = (si === startSection - 1) ? (startTablette - 1) : 0;
+    const firstT = (si === startIdx) ? (startTablette - 1) : 0;
     for (let ti = Math.max(0, firstT); ti < shelfCount; ti++) slots.push([si, ti]);
-  }
+  };
+  if (side === 'Gauche') { for (let si = startIdx; si >= 0; si--) pushSection(si); }
+  else { for (let si = startIdx; si < sections.length; si++) pushSection(si); }
   const byTab = new Map();
   (planoData.products || []).forEach((p, idx) => {
     if (p.tablette < tabStart || p.tablette > tabEnd) return;
@@ -2342,7 +2371,9 @@ function updatePlanoPreview() {
     : '';
 
   preview.innerHTML = `
-    <div style="font-size:11px;color:#64748b;padding:4px 4px 6px">Le plano remplit les tablettes de la section de départ, puis continue dans les sections suivantes. Le nombre de tablettes du plan ne change pas — seul le nombre de positions par tablette s'ajuste.</div>
+    <div style="font-size:11px;color:#64748b;padding:4px 4px 6px">${side === 'Gauche'
+      ? 'Côté A : le plano remplit à partir de la section de départ <b>vers la Façade A</b> (sections décroissantes), car un planogramme se lit de gauche à droite.'
+      : 'Côté B : le plano remplit à partir de la section de départ <b>vers la Façade B</b> (sections croissantes).'} Le nombre de tablettes du plan ne change pas — seul le nombre de positions par tablette s'ajuste.</div>
     ${rows || '<div style="padding:10px;font-size:12px;color:#64748b">Aucun produit dans cette sélection.</div>'}
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 4px;border-top:1px solid #e2e8f0;margin-top:4px;flex-wrap:wrap">
       <button class="btn btn-outline btn-inline" style="font-size:12px;width:auto;margin:0" onclick="planoAddLine()">➕ Ajouter une ligne</button>

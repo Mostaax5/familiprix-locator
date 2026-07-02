@@ -942,10 +942,17 @@ def plan_planogram_flow(config, side, start_section, start_tablette, lines, shri
     `config` in place. Each placement = (section_no, shelf_no, position_no, line)."""
     sections = ((config.get("sides", {}) or {}).get(side, {}) or {}).get("sections", [])
     # Ordered store tablette slots from the start point onward (count per section fixed).
+    # Direction: a planogram reads left→right, which for Côté A (Gauche) runs from the
+    # Façade B end toward Façade A — the OPPOSITE of the section numbering (section 1 is
+    # the Façade A end). So Côté A fills sections DESCENDING from the start section down
+    # to section 1; Côté B (Droite) fills ASCENDING (Façade A → Façade B). Tablettes are
+    # vertical shelves and keep their top-to-bottom order — only the section order flips.
+    start_idx = min(max(0, start_section - 1), max(0, len(sections) - 1))
+    section_indices = range(start_idx, -1, -1) if side == "Gauche" else range(start_idx, len(sections))
     slots = []
-    for si in range(max(0, start_section - 1), len(sections)):
+    for si in section_indices:
         shelf_count = len(sections[si].get("shelves", []))
-        first_t = (start_tablette - 1) if si == (start_section - 1) else 0
+        first_t = (start_tablette - 1) if si == start_idx else 0
         for ti in range(max(0, first_t), shelf_count):
             slots.append((si, ti))
 
