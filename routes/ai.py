@@ -135,6 +135,16 @@ def configured_ai_provider():
     return {"name": "", "label": "", "model": ""}
 
 
+# Last AI failure reason — surfaced to the UI so we stop guessing why "no answer".
+_AI_LAST_ERROR = ""
+
+
+def _set_ai_error(msg):
+    global _AI_LAST_ERROR
+    _AI_LAST_ERROR = str(msg)
+    print(f"[AI] {msg}")
+
+
 # ── Lookup helpers ─────────────────────────────────────────────────────────────
 
 def normalized_digits(value):
@@ -864,7 +874,7 @@ def generate_client_help_payload_gemini(question, products):
             f"Question client:\n{question}\n\n"
             f"Produits disponibles en magasin:\n{json.dumps(products, ensure_ascii=False) if products else '[]'}"
         )}]}],
-        "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json", "maxOutputTokens": 600},
+        "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json", "maxOutputTokens": 2048},
     }
     request_obj = Request(
         f"{GEMINI_BASE_URL}/models/{GEMINI_MODEL}:generateContent?{urlencode({'key': GEMINI_API_KEY})}",
@@ -875,16 +885,32 @@ def generate_client_help_payload_gemini(question, products):
     try:
         with urlopen(request_obj, timeout=10) as response:
             raw_response = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+    except HTTPError as exc:
+        body = ""
+        try: body = exc.read().decode("utf-8", "replace")[:250]
+        except Exception: pass
+        _set_ai_error(f"Gemini a refusé la requête (HTTP {exc.code}, modèle {GEMINI_MODEL}). {body}")
+        return None
+    except (URLError, TimeoutError) as exc:
+        _set_ai_error(f"Gemini injoignable (réseau ou délai dépassé) : {exc}")
+        return None
+    except json.JSONDecodeError:
+        _set_ai_error("Gemini a renvoyé une réponse illisible.")
         return None
     usage = raw_response.get("usageMetadata", {})
     _log_ai_usage("gemini", usage.get("promptTokenCount", 0), usage.get("candidatesTokenCount", 0), question)
     raw_text = extract_gemini_output_text(raw_response)
     if not raw_text:
+        cands = raw_response.get("candidates", [])
+        reason = cands[0].get("finishReason", "?") if cands else "?"
+        blocked = raw_response.get("promptFeedback", {}).get("blockReason", "")
+        _set_ai_error(f"Gemini a renvoyé une réponse vide (finishReason={reason}"
+                      + (f", bloqué={blocked}" if blocked else "") + ").")
         return None
     try:
         parsed = json.loads(raw_text)
     except json.JSONDecodeError:
+        _set_ai_error("Gemini n'a pas renvoyé un JSON valide.")
         return None
     return normalize_client_help_payload(parsed)
 
@@ -938,16 +964,28 @@ def generate_client_help_payload_openai(question, products):
     try:
         with urlopen(request_obj, timeout=10) as response:
             raw_response = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+    except HTTPError as exc:
+        body = ""
+        try: body = exc.read().decode("utf-8", "replace")[:250]
+        except Exception: pass
+        _set_ai_error(f"OpenAI a refusé la requête (HTTP {exc.code}, modèle {OPENAI_MODEL}). {body}")
+        return None
+    except (URLError, TimeoutError) as exc:
+        _set_ai_error(f"OpenAI injoignable (réseau ou délai dépassé) : {exc}")
+        return None
+    except json.JSONDecodeError:
+        _set_ai_error("OpenAI a renvoyé une réponse illisible.")
         return None
     usage = raw_response.get("usage", {})
     _log_ai_usage("openai", usage.get("input_tokens", 0), usage.get("output_tokens", 0), question)
     raw_text = extract_openai_output_text(raw_response)
     if not raw_text:
+        _set_ai_error("OpenAI a renvoyé une réponse vide.")
         return None
     try:
         parsed = json.loads(raw_text)
     except json.JSONDecodeError:
+        _set_ai_error("OpenAI n'a pas renvoyé un JSON valide.")
         return None
     return normalize_client_help_payload(parsed)
 
@@ -1606,9 +1644,12 @@ def client_help():
 
     matched_products = [product_context_for_client_help(item) for item in candidate_objs]
 
+    global _AI_LAST_ERROR
+    _AI_LAST_ERROR = ""
     advice = generate_client_help_payload(question, matched_products)
     if not advice:
-        return jsonify({"success": False, "error": "Impossible de générer la réponse client pour le moment."}), 502
+        return jsonify({"success": False,
+                        "error": _AI_LAST_ERROR or "Impossible de générer la réponse client pour le moment."}), 502
     # Resolve the AI's named picks to real, locatable products (drops anything not in stock).
     advice = _attach_locatable_recommendations(advice, candidate_objs)
     log_ai_interaction("client_help", question, matched_products, advice)
