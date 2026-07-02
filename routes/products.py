@@ -192,34 +192,58 @@ def _reference_corpus(db):
     return rows
 
 
-def _fast_reference_score(row, variants, intent_terms, abbrevs):
-    """Score a pre-normalized catalogue row cheaply (substring checks only, no regex)."""
-    name, brand, hay, bc = row["_name"], row["_brand"], row["_hay"], row["_bc"]
-    best = 0
-    for v in variants:
-        if not v:
-            continue
-        if v.isdigit() and bc:
-            if bc == v: best = max(best, 1200)
-            elif len(v) >= 4 and bc.endswith(v): best = max(best, 900)
-            elif v in bc: best = max(best, 500)
-        if v == name: best = max(best, 800)
-        elif name.startswith(v): best = max(best, 650)
-        elif v in name: best = max(best, 450)
-        if v in brand: best = max(best, 200)
-        elif v in hay: best = max(best, 120)
-    for t in intent_terms:              # uncapped: symptom → category must surface
-        if t == name: best = max(best, 800)
-        elif name.startswith(t): best = max(best, 650)
-        elif t in name: best = max(best, 450)
-        elif t in hay: best = max(best, 200)
-    if abbrevs:
+def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
+    """Score a pre-normalized catalogue row cheaply (substring checks only, no regex).
+    Query parts (nq=normalized query, dq=digits, qtokens=unique tokens) are computed ONCE
+    per request. Additive model mirroring product_search_score for accuracy, PLUS a
+    multi-token coverage bonus so more-specific matches ('advil extra fort') outrank the
+    generic one ('advil'). Intent (symptom→category) and abbreviations floor the score."""
+    name, brand, hay, bc, toks = row["_name"], row["_brand"], row["_hay"], row["_bc"], row["_tokens"]
+    score = 0
+    if dq and bc:
+        if bc == dq: score += 1200
+        elif len(dq) >= 4 and bc.endswith(dq): score += 900
+        elif dq in bc: score += 500
+    # Best name match over the full query AND each query word (a strong single-word match
+    # like 'tylenol' must beat an abbreviation-only match). Whole-word token match avoids
+    # false substrings ('fort' inside 'confort').
+    name_score = 0
+    if nq:
+        if nq == name: name_score = 800
+        elif name.startswith(nq): name_score = 650
+        elif nq in name: name_score = 450
+    for t in qtokens:
+        if name.startswith(t): name_score = max(name_score, 500)
+        elif t in toks: name_score = max(name_score, 470)
+    score += name_score
+    if nq and nq in brand:
+        score += 200
+    if qtokens:
+        matched = 0
+        for t in qtokens:
+            if t in hay:
+                matched += 1
+        if matched:
+            score += (100 + 20 * matched) if matched == len(qtokens) else (25 * matched)
+    if intent_terms:                    # uncapped: symptom → category must surface
+        ib = 0
+        for t in intent_terms:
+            if name.startswith(t): ib = 650; break
+            elif t in name: ib = max(ib, 450)
+            elif t in hay: ib = max(ib, 200)
+        if ib > score:
+            score = ib
+    if abbrevs and score < 430:
         for tok in row["_tokens"]:
+            done = False
             for a in abbrevs:
                 if tok == a or (tok.startswith(a) and tok[len(a):].isdigit()):
-                    best = max(best, 430)
+                    score = 430
+                    done = True
                     break
-    return best
+            if done:
+                break
+    return score
 
 
 def intent_expansion_terms(query):
@@ -567,17 +591,19 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None):
     is flagged catalog_only=True and the UI shows 'position à confirmer'. Uses the same
     scorer + intent expansion as the placed-product search."""
     db = get_db()
-    variants = query_search_variants(query)
+    nq = normalize_search_text(query)
+    dq = normalized_digits(query)
+    qtokens = list(dict.fromkeys(tokenize_search_query(query)))
     intent_terms = intent_expansion_terms(query)
     abbrevs = abbreviation_terms(query)
-    if not variants and not intent_terms:
+    if not nq and not dq and not intent_terms:
         return []
     exclude = exclude_barcodes or set()
     ranked = []
     for row in _reference_corpus(db):
         if row["_bc"] and row["_bc"] in exclude:
             continue
-        score = _fast_reference_score(row, variants, intent_terms, abbrevs)
+        score = _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs)
         if score > 0:
             ranked.append((score, row))
     ranked.sort(key=lambda x: (-x[0], x[1]["_name"]))
@@ -612,11 +638,13 @@ def search_products():
     return jsonify(items)
 
 
-def _client_find_score(item, variants, intent_terms, abbrevs):
-    best = 0
-    for variant in variants:
-        best = max(best, product_search_score(item, variant))
-    for term in intent_terms:          # uncapped: symptom → category must surface strongly
+def _client_find_score(item, query, qtokens, intent_terms, abbrevs):
+    # Best of the full query AND each query word (so 'tylenol' strongly favours Tylenol),
+    # then floor with intent (category) and abbreviation matches.
+    best = product_search_score(item, query)
+    for t in qtokens:
+        best = max(best, product_search_score(item, t))
+    for term in intent_terms:
         best = max(best, product_search_score(item, term))
     if abbrevs and _abbreviation_hit(normalize_search_text(item.get("name", "")), abbrevs):
         best = max(best, 430)
@@ -632,10 +660,12 @@ def client_find():
     if not query:
         return jsonify([])
     limit = min(max(clamp_non_negative_int(request.args.get("limit", "30"), 30), 1), 60)
-    variants = query_search_variants(query)
+    nq = normalize_search_text(query)
+    dq = normalized_digits(query)
+    qtokens = list(dict.fromkeys(tokenize_search_query(query)))
     intent_terms = intent_expansion_terms(query)
     abbrevs = abbreviation_terms(query)
-    if not variants and not intent_terms:
+    if not nq and not dq and not intent_terms:
         return jsonify([])
     db = get_db()
     scored = []
@@ -644,7 +674,7 @@ def client_find():
     # usually few of these, so the per-request scoring cost is negligible.
     for row in db.execute("SELECT * FROM products").fetchall():
         item = row_to_product(row)
-        s = _client_find_score(item, variants, intent_terms, abbrevs)
+        s = _client_find_score(item, query, qtokens, intent_terms, abbrevs)
         if s > 0:
             scored.append((s, 0, item))
             bc = normalized_digits(item.get("barcode", ""))
@@ -654,7 +684,7 @@ def client_find():
     for row in _reference_corpus(db):
         if row["_bc"] and row["_bc"] in seen_bc:
             continue
-        s = _fast_reference_score(row, variants, intent_terms, abbrevs)
+        s = _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs)
         if s > 0:
             scored.append((s, 1, {"barcode": row["barcode"], "name": row["name"],
                                    "brand": row["brand"], "description": row["description"],
