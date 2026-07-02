@@ -146,6 +146,110 @@ def reset_database():
     })
 
 
+def _clean_cell(val):
+    return str(val or "").strip()
+
+
+def _cell_is_int(val):
+    try:
+        int(_clean_cell(val))
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def parse_planogram_tables(tables):
+    """Parse planogram product rows from a sequence of tables IN DOCUMENT ORDER
+    (every page's tables concatenated, first page first).
+
+    The column mapping (`current_col`) AND the carried-down tablette/position
+    persist across tables and pages. This is the fix for tablettes that span a
+    page break: a planogram prints the `UPC | Description` header only on the
+    first page of a tablette, so when tablette 5 continues onto the next page
+    that continuation table has no header. Resetting the state per-table (the old
+    behaviour) left `current_col` empty on the continuation page and silently
+    dropped every one of its rows — a whole half-tablette lost. Keeping the state
+    means the continuation reuses the last header and the last tablette number
+    (its cells are blank/merged in the PDF), so nothing is dropped.
+
+    Returns the ordered, de-duplicated list of product dicts."""
+    products = []
+    seen = {}
+    current_col = None
+    last_tab = last_pos = None
+
+    for table in tables:
+        if not table:
+            continue
+        for row in table:
+            if not row:
+                continue
+            cells = [_clean_cell(c) for c in row]
+            lower = [c.lower() for c in cells]
+
+            if any(c == "upc" for c in lower) and any("description" in c for c in lower):
+                current_col = {}
+                for j, h in enumerate(lower):
+                    if h == "tablette":                  current_col["t"] = j
+                    elif h == "position":                current_col["p"] = j
+                    elif "fa" in h and "ade" in h:       current_col["f"] = j
+                    elif h == "upc":                     current_col["u"] = j
+                    elif "code" in h and "upc" not in h: current_col["c"] = j
+                    elif "description" in h:             current_col["d"] = j
+                    elif "ajout" in h:                   current_col["a"] = j
+                    elif "statut" in h:                  current_col["s"] = j
+                    elif "stock" in h:                   current_col["e"] = j
+                continue
+
+            if not current_col or "u" not in current_col or "d" not in current_col:
+                continue
+
+            def g(k, _cells=cells, _col=current_col):
+                i = _col.get(k)
+                return _cells[i] if i is not None and i < len(_cells) else ""
+
+            tab = g("t") or last_tab
+            pos = g("p") or last_pos
+            if not _cell_is_int(tab) or not _cell_is_int(pos):
+                continue
+
+            upc  = re.sub(r"\s+", "", g("u"))
+            desc = g("d")
+            if not upc or not desc:
+                continue
+
+            last_tab, last_pos = tab, pos
+            t_int, p_int = int(tab), int(pos)
+            key = (t_int, p_int)
+            ajout    = g("a").lower() == "oui"
+            en_stock = g("e").lower() != "non"
+
+            if key in seen:
+                idx = seen[key]
+                if ajout:              products[idx]["is_new"]  = True
+                if g("e").lower() == "oui": products[idx]["en_stock"] = True
+                continue
+
+            try:
+                facings = int(re.sub(r"\D", "", g("f")) or "1")
+            except (ValueError, TypeError):
+                facings = 1
+            seen[key] = len(products)
+            products.append({
+                "tablette": t_int,
+                "position": p_int,
+                "barcode":  upc,
+                "code_familiprix": g("c"),
+                "facings":  max(1, facings),   # général info only, not placement
+                "name":     desc,
+                "is_new":   ajout,
+                "en_stock": en_stock,
+            })
+
+    products.sort(key=lambda x: (x["tablette"], x["position"]))
+    return products
+
+
 @import_export_bp.route("/api/import/planogram-parse", methods=["POST"])
 def parse_planogram_pdf():
     try:
@@ -160,19 +264,8 @@ def parse_planogram_pdf():
     if not f.filename.lower().endswith(".pdf"):
         return jsonify({"success": False, "error": "Le fichier doit etre un PDF."}), 400
 
-    products = []
-    seen = {}
     plano_meta = {"name": "", "number": "", "version": ""}
-
-    def _clean(val):
-        return str(val or "").strip()
-
-    def _is_int(val):
-        try:
-            int(_clean(val))
-            return True
-        except (ValueError, TypeError):
-            return False
+    all_tables = []
 
     try:
         with pdfplumber.open(_io.BytesIO(f.read())) as pdf:
@@ -188,79 +281,14 @@ def parse_planogram_pdf():
             except Exception:
                 pass
 
+            # Concatenate every page's tables IN ORDER, then parse with state that
+            # carries across page breaks (see parse_planogram_tables).
             for page in pdf.pages:
-                for table in (page.extract_tables() or []):
-                    current_col = None
-                    last_tab = last_pos = None
-
-                    for row in table:
-                        if not row:
-                            continue
-                        cells = [_clean(c) for c in row]
-                        lower = [c.lower() for c in cells]
-
-                        if any(c == "upc" for c in lower) and any("description" in c for c in lower):
-                            current_col = {}
-                            for j, h in enumerate(lower):
-                                if h == "tablette":                  current_col["t"] = j
-                                elif h == "position":                current_col["p"] = j
-                                elif "fa" in h and "ade" in h:       current_col["f"] = j
-                                elif h == "upc":                     current_col["u"] = j
-                                elif "code" in h and "upc" not in h: current_col["c"] = j
-                                elif "description" in h:             current_col["d"] = j
-                                elif "ajout" in h:                   current_col["a"] = j
-                                elif "statut" in h:                  current_col["s"] = j
-                                elif "stock" in h:                   current_col["e"] = j
-                            continue
-
-                        if not current_col or "u" not in current_col or "d" not in current_col:
-                            continue
-
-                        def g(k, _cells=cells, _col=current_col):
-                            i = _col.get(k)
-                            return _cells[i] if i is not None and i < len(_cells) else ""
-
-                        tab = g("t") or last_tab
-                        pos = g("p") or last_pos
-                        if not _is_int(tab) or not _is_int(pos):
-                            continue
-
-                        upc  = re.sub(r"\s+", "", g("u"))
-                        desc = g("d")
-                        if not upc or not desc:
-                            continue
-
-                        last_tab, last_pos = tab, pos
-                        t_int, p_int = int(tab), int(pos)
-                        key = (t_int, p_int)
-                        ajout    = g("a").lower() == "oui"
-                        en_stock = g("e").lower() != "non"
-
-                        if key in seen:
-                            idx = seen[key]
-                            if ajout:              products[idx]["is_new"]  = True
-                            if g("e").lower() == "oui": products[idx]["en_stock"] = True
-                            continue
-
-                        try:
-                            facings = int(re.sub(r"\D", "", g("f")) or "1")
-                        except (ValueError, TypeError):
-                            facings = 1
-                        seen[key] = len(products)
-                        products.append({
-                            "tablette": t_int,
-                            "position": p_int,
-                            "barcode":  upc,
-                            "code_familiprix": g("c"),
-                            "facings":  max(1, facings),   # général info only, not placement
-                            "name":     desc,
-                            "is_new":   ajout,
-                            "en_stock": en_stock,
-                        })
+                all_tables.extend(page.extract_tables() or [])
     except Exception as exc:
         return jsonify({"success": False, "error": f"Erreur d’analyse PDF: {exc}"}), 500
 
-    products.sort(key=lambda x: (x["tablette"], x["position"]))
+    products = parse_planogram_tables(all_tables)
     tablettes = {}
     for p in products:
         t = str(p["tablette"])
