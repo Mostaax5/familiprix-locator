@@ -94,50 +94,38 @@ async function sendAiFeedback(rating) {
   } catch (_) {}
 }
 
-// Append catalogue products (imported planograms, not placed) under the client matches.
-async function appendClientReferenceMatches(question) {
-  const target = document.getElementById('clientMatches');
-  if (!target || !question) return;
-  let ref = [];
-  try { ref = await apiSearchReference(question, 20); } catch (_) {}
-  if (getClientQuestion() !== question) return;   // user moved on — ignore stale results
-  if (!ref.length) return;
-  target.insertAdjacentHTML('beforeend', `
-    <div class="card" style="margin-top:10px">
-      <div class="section-title">📦 Aussi en magasin — position à confirmer</div>
-      <div class="section-note">Produits importés des planogrammes, pas encore placés sur le plan.</div>
-      ${ref.map(p => productCard(p, false, false)).join('')}
-    </div>`);
-}
-
-function runClientSearch(showEmptyMessage=true) {
+// ONE ranked list from the server: placed products (with location) + catalogue products
+// (position à confirmer), best match first. Fast and works with NO AI.
+async function runClientSearch(showEmptyMessage=true) {
   const question = getClientQuestion();
   const status = document.getElementById('clientHelpStatus');
   renderClientAdvice(null);
   if (!question) {
     currentClientMatches = [];
     renderClientMatches([], '');
-    if (status && showEmptyMessage) status.textContent = 'Ecrivez la question du client pour voir les produits proposes.';
+    if (status && showEmptyMessage) status.textContent = 'Ecrivez la demande du client pour voir les produits.';
     return [];
   }
-  currentClientMatches = searchProductsFromCache(question, 20);
-  renderClientMatches(currentClientMatches, question);
+  if (status) status.textContent = 'Recherche des produits…';
+  let matches = [];
+  try { matches = await apiClientFind(question, 30); } catch (_) {}
+  if (getClientQuestion() !== question) return currentClientMatches;   // stale — user kept typing
+  currentClientMatches = matches;
+  renderClientMatches(matches, question);
   if (status) {
-    status.textContent = currentClientMatches.length
-      ? `${currentClientMatches.length} produit(s) en stock. Cliquez "Réponse client (IA)" pour obtenir des conseils.`
-      : 'Aucun produit en stock pour cette demande. L IA peut quand meme repondre avec des conseils generaux.';
+    status.textContent = matches.length
+      ? `${matches.length} produit(s) trouvé(s). « Réponse client (IA) » est optionnel.`
+      : 'Aucun produit trouvé pour cette demande.';
   }
-  // Also surface catalogue products (imported planograms, not placed yet) below.
-  appendClientReferenceMatches(question);
-  return currentClientMatches;
+  return matches;
 }
 
 async function generateClientHelp() {
   const question = getClientQuestion();
   const status = document.getElementById('clientHelpStatus');
-  const matches = runClientSearch(false);
+  const matches = await runClientSearch(false);
   if (!question) {
-    if (status) status.textContent = 'Ecrivez d’abord la question du client.';
+    if (status) status.textContent = 'Ecrivez d’abord la demande du client.';
     return;
   }
   if (!backendInfo.ai_enabled) {
@@ -145,11 +133,7 @@ async function generateClientHelp() {
     renderClientAdvice(null);
     return;
   }
-  if (status) {
-    status.textContent = matches.length
-      ? `Generation de la réponse via ${aiProviderLabel()} (${matches.length} produit(s) en stock)...`
-      : `Aucun produit en stock. L IA va repondre avec des conseils generaux...`;
-  }
+  if (status) status.textContent = `Génération de la réponse via ${aiProviderLabel()}… (quelques secondes)`;
   const result = await apiGenerateClientHelp({question, products: matches.slice(0, 20).map(sanitizeProductForClientAi)});
   if (!result.success || !result.advice) {
     renderClientAdvice(null);

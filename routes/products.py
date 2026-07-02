@@ -555,6 +555,58 @@ def search_products():
     return jsonify(items)
 
 
+def _client_find_score(item, variants, intent_terms, abbrevs):
+    best = 0
+    for variant in variants:
+        best = max(best, product_search_score(item, variant))
+    for term in intent_terms:          # uncapped: symptom → category must surface strongly
+        best = max(best, product_search_score(item, term))
+    if abbrevs and _abbreviation_hit(normalize_search_text(item.get("name", "")), abbrevs):
+        best = max(best, 430)
+    return best
+
+
+@products_bp.route("/api/client/find", methods=["GET"])
+def client_find():
+    """ONE ranked list for the Client tab: placed products (with location) AND catalogue
+    products (position à confirmer) scored together by the SAME rules, best match first.
+    Works with zero AI — this is the reliable core of the client helper."""
+    query = request.args.get("q", "").strip()
+    if not query:
+        return jsonify([])
+    limit = min(max(clamp_non_negative_int(request.args.get("limit", "30"), 30), 1), 60)
+    variants = query_search_variants(query)
+    intent_terms = intent_expansion_terms(query)
+    abbrevs = abbreviation_terms(query)
+    if not variants and not intent_terms:
+        return jsonify([])
+    db = get_db()
+    scored = []
+    seen_bc = set()
+    # Placed products first (tiebreak 0) — they carry a real shelf location.
+    for row in db.execute("SELECT * FROM products").fetchall():
+        item = row_to_product(row)
+        s = _client_find_score(item, variants, intent_terms, abbrevs)
+        if s > 0:
+            scored.append((s, 0, item))
+            bc = normalized_digits(item.get("barcode", ""))
+            if bc:
+                seen_bc.add(bc)
+    # Catalogue products (tiebreak 1), skipping any barcode already placed.
+    for row in db.execute("SELECT barcode, name, brand, description, product_code FROM product_reference").fetchall():
+        item = dict(row)
+        bc = normalized_digits(item.get("barcode", ""))
+        if bc and bc in seen_bc:
+            continue
+        s = _client_find_score(item, variants, intent_terms, abbrevs)
+        if s > 0:
+            item["catalog_only"] = True
+            item["in_stock"] = 1
+            scored.append((s, 1, item))
+    scored.sort(key=lambda x: (-x[0], x[1], str(x[2].get("name", "")).lower()))
+    return jsonify([it for _, _, it in scored[:limit]])
+
+
 @products_bp.route("/api/products/reference-search", methods=["GET"])
 def reference_search():
     """Search the reference catalogue (imported planograms) for products we carry but
