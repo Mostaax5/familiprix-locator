@@ -873,7 +873,7 @@ def generate_client_help_payload_gemini(question, products):
         method="POST",
     )
     try:
-        with urlopen(request_obj, timeout=14) as response:
+        with urlopen(request_obj, timeout=10) as response:
             raw_response = json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
         return None
@@ -936,7 +936,7 @@ def generate_client_help_payload_openai(question, products):
         method="POST",
     )
     try:
-        with urlopen(request_obj, timeout=14) as response:
+        with urlopen(request_obj, timeout=10) as response:
             raw_response = json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
         return None
