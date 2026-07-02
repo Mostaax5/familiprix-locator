@@ -1,11 +1,17 @@
 import json
 import re
 import os
+import gc
+import threading
 from flask import Blueprint, request, jsonify, Response
 from database import get_db, DatabaseIntegrityError
 from auth import require_editor, utc_now_iso
 
 import_export_bp = Blueprint("import_export", __name__)
+
+# Serialize PDF parsing across worker threads — pdfplumber is memory-heavy and two
+# concurrent parses can exhaust Render's 512 MB instance (see parse_planogram_pdf).
+_PDF_PARSE_LOCK = threading.Lock()
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -158,96 +164,111 @@ def _cell_is_int(val):
         return False
 
 
-def parse_planogram_tables(tables):
-    """Parse planogram product rows from a sequence of tables IN DOCUMENT ORDER
-    (every page's tables concatenated, first page first).
+class _PlanogramParser:
+    """Streaming planogram parser: feed it one table at a time (in document order)
+    and it accumulates only the parsed products — never the raw tables. That lets
+    the caller extract-then-free each PDF page as it goes, so peak memory stays
+    small even for a 5 MB / 7000-row planogram (holding every page at once is what
+    ran Render's 512 MB instance out of memory).
 
-    The column mapping (`current_col`) AND the carried-down tablette/position
-    persist across tables and pages. This is the fix for tablettes that span a
-    page break: a planogram prints the `UPC | Description` header only on the
-    first page of a tablette, so when tablette 5 continues onto the next page
-    that continuation table has no header. Resetting the state per-table (the old
-    behaviour) left `current_col` empty on the continuation page and silently
-    dropped every one of its rows — a whole half-tablette lost. Keeping the state
-    means the continuation reuses the last header and the last tablette number
-    (its cells are blank/merged in the PDF), so nothing is dropped.
+    The column mapping and carried-down tablette/position persist ACROSS tables and
+    pages: a planogram prints the `UPC | Description` header only on the first page
+    of a tablette, so a tablette continuing onto the next page has no header and
+    blank/merged cells. Keeping the state means the continuation reuses the last
+    header + last tablette number, so nothing is dropped at a page break."""
 
-    Returns the ordered, de-duplicated list of product dicts."""
-    products = []
-    seen = {}
-    current_col = None
-    last_tab = last_pos = None
+    def __init__(self):
+        self.products = []
+        self.seen = {}
+        self.current_col = None
+        self.last_tab = None
+        self.last_pos = None
 
-    for table in tables:
+    def feed_table(self, table):
         if not table:
-            continue
+            return
         for row in table:
-            if not row:
-                continue
-            cells = [_clean_cell(c) for c in row]
-            lower = [c.lower() for c in cells]
+            self._feed_row(row)
 
-            if any(c == "upc" for c in lower) and any("description" in c for c in lower):
-                current_col = {}
-                for j, h in enumerate(lower):
-                    if h == "tablette":                  current_col["t"] = j
-                    elif h == "position":                current_col["p"] = j
-                    elif "fa" in h and "ade" in h:       current_col["f"] = j
-                    elif h == "upc":                     current_col["u"] = j
-                    elif "code" in h and "upc" not in h: current_col["c"] = j
-                    elif "description" in h:             current_col["d"] = j
-                    elif "ajout" in h:                   current_col["a"] = j
-                    elif "statut" in h:                  current_col["s"] = j
-                    elif "stock" in h:                   current_col["e"] = j
-                continue
+    def _feed_row(self, row):
+        if not row:
+            return
+        cells = [_clean_cell(c) for c in row]
+        lower = [c.lower() for c in cells]
 
-            if not current_col or "u" not in current_col or "d" not in current_col:
-                continue
+        if any(c == "upc" for c in lower) and any("description" in c for c in lower):
+            col = {}
+            for j, h in enumerate(lower):
+                if h == "tablette":                  col["t"] = j
+                elif h == "position":                col["p"] = j
+                elif "fa" in h and "ade" in h:       col["f"] = j
+                elif h == "upc":                     col["u"] = j
+                elif "code" in h and "upc" not in h: col["c"] = j
+                elif "description" in h:             col["d"] = j
+                elif "ajout" in h:                   col["a"] = j
+                elif "statut" in h:                  col["s"] = j
+                elif "stock" in h:                   col["e"] = j
+            self.current_col = col
+            return
 
-            def g(k, _cells=cells, _col=current_col):
-                i = _col.get(k)
-                return _cells[i] if i is not None and i < len(_cells) else ""
+        col = self.current_col
+        if not col or "u" not in col or "d" not in col:
+            return
 
-            tab = g("t") or last_tab
-            pos = g("p") or last_pos
-            if not _cell_is_int(tab) or not _cell_is_int(pos):
-                continue
+        def g(k, _cells=cells, _col=col):
+            i = _col.get(k)
+            return _cells[i] if i is not None and i < len(_cells) else ""
 
-            upc  = re.sub(r"\s+", "", g("u"))
-            desc = g("d")
-            if not upc or not desc:
-                continue
+        tab = g("t") or self.last_tab
+        pos = g("p") or self.last_pos
+        if not _cell_is_int(tab) or not _cell_is_int(pos):
+            return
 
-            last_tab, last_pos = tab, pos
-            t_int, p_int = int(tab), int(pos)
-            key = (t_int, p_int)
-            ajout    = g("a").lower() == "oui"
-            en_stock = g("e").lower() != "non"
+        upc  = re.sub(r"\s+", "", g("u"))
+        desc = g("d")
+        if not upc or not desc:
+            return
 
-            if key in seen:
-                idx = seen[key]
-                if ajout:              products[idx]["is_new"]  = True
-                if g("e").lower() == "oui": products[idx]["en_stock"] = True
-                continue
+        self.last_tab, self.last_pos = tab, pos
+        t_int, p_int = int(tab), int(pos)
+        key = (t_int, p_int)
+        ajout    = g("a").lower() == "oui"
+        en_stock = g("e").lower() != "non"
 
-            try:
-                facings = int(re.sub(r"\D", "", g("f")) or "1")
-            except (ValueError, TypeError):
-                facings = 1
-            seen[key] = len(products)
-            products.append({
-                "tablette": t_int,
-                "position": p_int,
-                "barcode":  upc,
-                "code_familiprix": g("c"),
-                "facings":  max(1, facings),   # général info only, not placement
-                "name":     desc,
-                "is_new":   ajout,
-                "en_stock": en_stock,
-            })
+        if key in self.seen:
+            idx = self.seen[key]
+            if ajout:                     self.products[idx]["is_new"]  = True
+            if g("e").lower() == "oui":   self.products[idx]["en_stock"] = True
+            return
 
-    products.sort(key=lambda x: (x["tablette"], x["position"]))
-    return products
+        try:
+            facings = int(re.sub(r"\D", "", g("f")) or "1")
+        except (ValueError, TypeError):
+            facings = 1
+        self.seen[key] = len(self.products)
+        self.products.append({
+            "tablette": t_int,
+            "position": p_int,
+            "barcode":  upc,
+            "code_familiprix": g("c"),
+            "facings":  max(1, facings),   # général info only, not placement
+            "name":     desc,
+            "is_new":   ajout,
+            "en_stock": en_stock,
+        })
+
+    def result(self):
+        self.products.sort(key=lambda x: (x["tablette"], x["position"]))
+        return self.products
+
+
+def parse_planogram_tables(tables):
+    """Parse product rows from a sequence of tables in document order. Thin wrapper
+    over _PlanogramParser (used by tests and the offline catalogue rebuild)."""
+    parser = _PlanogramParser()
+    for table in tables:
+        parser.feed_table(table)
+    return parser.result()
 
 
 @import_export_bp.route("/api/import/planogram-parse", methods=["POST"])
@@ -265,30 +286,44 @@ def parse_planogram_pdf():
         return jsonify({"success": False, "error": "Le fichier doit etre un PDF."}), 400
 
     plano_meta = {"name": "", "number": "", "version": ""}
-    all_tables = []
+    parser = _PlanogramParser()
 
-    try:
-        with pdfplumber.open(_io.BytesIO(f.read())) as pdf:
-            # Plano identity from the cover page text (best-effort).
-            try:
-                head = pdf.pages[0].extract_text() or ""
-                m = re.search(r"PLANOGRAMME\s*:\s*([^\n]+)", head, re.IGNORECASE)
-                if m: plano_meta["name"] = m.group(1).strip()[:120]
-                m = re.search(r"Plano\s*#\s*([0-9]+)", head, re.IGNORECASE)
-                if m: plano_meta["number"] = m.group(1).strip()
-                m = re.search(r"Version\s*#\s*([A-Za-z0-9]+)", head, re.IGNORECASE)
-                if m: plano_meta["version"] = m.group(1).strip()
-            except Exception:
-                pass
+    # Only ONE PDF parses at a time. pdfplumber peaks at hundreds of MB on a
+    # multi-MB planogram; two concurrent uploads (8 worker threads) stacking their
+    # peaks is what pushed Render's 512 MB instance over the edge. Serializing makes
+    # a second uploader wait a few seconds instead of crashing the whole app.
+    with _PDF_PARSE_LOCK:
+        try:
+            with pdfplumber.open(_io.BytesIO(f.read())) as pdf:
+                # Plano identity from the cover page text (best-effort).
+                try:
+                    head = pdf.pages[0].extract_text() or ""
+                    m = re.search(r"PLANOGRAMME\s*:\s*([^\n]+)", head, re.IGNORECASE)
+                    if m: plano_meta["name"] = m.group(1).strip()[:120]
+                    m = re.search(r"Plano\s*#\s*([0-9]+)", head, re.IGNORECASE)
+                    if m: plano_meta["number"] = m.group(1).strip()
+                    m = re.search(r"Version\s*#\s*([A-Za-z0-9]+)", head, re.IGNORECASE)
+                    if m: plano_meta["version"] = m.group(1).strip()
+                except Exception:
+                    pass
 
-            # Concatenate every page's tables IN ORDER, then parse with state that
-            # carries across page breaks (see parse_planogram_tables).
-            for page in pdf.pages:
-                all_tables.extend(page.extract_tables() or [])
-    except Exception as exc:
-        return jsonify({"success": False, "error": f"Erreur d’analyse PDF: {exc}"}), 500
+                # Extract each page's tables, feed them to the streaming parser, then
+                # FREE the page's cached objects before moving on — so we never hold
+                # the whole PDF in memory. State carries across page breaks in parser.
+                for page in pdf.pages:
+                    for table in (page.extract_tables() or []):
+                        parser.feed_table(table)
+                    try:
+                        page.flush_cache()          # drop pdfplumber's per-page object cache
+                        page.get_textmap.cache_clear()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            gc.collect()
+            return jsonify({"success": False, "error": f"Erreur d’analyse PDF: {exc}"}), 500
 
-    products = parse_planogram_tables(all_tables)
+    products = parser.result()
+    gc.collect()   # reclaim the many small pdfplumber objects now, not eventually
     tablettes = {}
     for p in products:
         t = str(p["tablette"])
