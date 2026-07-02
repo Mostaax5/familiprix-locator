@@ -938,6 +938,20 @@ def set_is_plano(product_id):
     return jsonify({"success": True, "product": row_to_product(product)})
 
 
+def fixture_for_side(config, side):
+    """The {shelves, labels} dict of a fixture side (Façade A/B or a présentoir
+    façade named '<présentoir> - <façade>'), or None for the aisle côtés."""
+    if side == "Façade A":
+        return config.get("facade_a")
+    if side == "Façade B":
+        return config.get("facade_b")
+    for pres in (config.get("presentoirs") or []):
+        for facade in (pres.get("facades") or []):
+            if side == f"{pres.get('name', '')} - {facade.get('name', '')}":
+                return facade
+    return None
+
+
 def plan_planogram_flow(config, side, start_section, start_tablette, lines, shrink=False):
     """Flow plano lines across the côté's EXISTING sections, starting at
     (start_section, start_tablette). The number of tablettes per section is the
@@ -953,21 +967,29 @@ def plan_planogram_flow(config, side, start_section, start_tablette, lines, shri
     `lines` = [{"tablette": int, "position": int, "p": <payload>}, ...].
     Returns (placements, overflow_shelf_count) and adjusts position counts in
     `config` in place. Each placement = (section_no, shelf_no, position_no, line)."""
-    sections = ((config.get("sides", {}) or {}).get(side, {}) or {}).get("sections", [])
-    # Ordered store tablette slots from the start point onward (count per section fixed).
-    # Direction: a planogram reads left→right, which for Côté A (Gauche) runs from the
-    # Façade B end toward Façade A — the OPPOSITE of the section numbering (section 1 is
-    # the Façade A end). So Côté A fills sections DESCENDING from the start section down
-    # to section 1; Côté B (Droite) fills ASCENDING (Façade A → Façade B). Tablettes are
-    # vertical shelves and keep their top-to-bottom order — only the section order flips.
-    start_idx = min(max(0, start_section - 1), max(0, len(sections) - 1))
-    section_indices = range(start_idx, -1, -1) if side == "Gauche" else range(start_idx, len(sections))
+    fixture = None if side in ("Gauche", "Droite") else fixture_for_side(config, side)
+    # Slots = (shelves-container, section_no, shelf_index) in fill order.
     slots = []
-    for si in section_indices:
-        shelf_count = len(sections[si].get("shelves", []))
-        first_t = (start_tablette - 1) if si == start_idx else 0
-        for ti in range(max(0, first_t), shelf_count):
-            slots.append((si, ti))
+    if fixture is not None:
+        # Fixture sides (Façade A/B, présentoir façades) are ONE flat run of
+        # tablettes with no sections: fill from start_tablette downward. Their
+        # products always store section '1'.
+        for ti in range(max(0, start_tablette - 1), len(fixture.get("shelves", []))):
+            slots.append((fixture, 1, ti))
+    else:
+        sections = ((config.get("sides", {}) or {}).get(side, {}) or {}).get("sections", [])
+        # Direction: a planogram reads left→right, which for Côté A (Gauche) runs from the
+        # Façade B end toward Façade A — the OPPOSITE of the section numbering (section 1 is
+        # the Façade A end). So Côté A fills sections DESCENDING from the start section down
+        # to section 1; Côté B (Droite) fills ASCENDING (Façade A → Façade B). Tablettes are
+        # vertical shelves and keep their top-to-bottom order — only the section order flips.
+        start_idx = min(max(0, start_section - 1), max(0, len(sections) - 1))
+        section_indices = range(start_idx, -1, -1) if side == "Gauche" else range(start_idx, len(sections))
+        for si in section_indices:
+            shelf_count = len(sections[si].get("shelves", []))
+            first_t = (start_tablette - 1) if si == start_idx else 0
+            for ti in range(max(0, first_t), shelf_count):
+                slots.append((sections[si], si + 1, ti))
 
     # Group plano lines into shelves by their plano tablette, in ascending order.
     by_tablette = {}
@@ -981,14 +1003,14 @@ def plan_planogram_flow(config, side, start_section, start_tablette, lines, shri
         if idx >= len(slots):
             overflow += 1
             continue
-        si, ti = slots[idx]
+        container, sec_no, ti = slots[idx]
         max_pos = max((l["position"] for l in shelf_lines), default=0)
         # Positions follow the plano: always grow to fit; shrink to the plano's
         # count too when shrink is on (import archives anything past the new end).
-        if shrink or max_pos > sections[si]["shelves"][ti]:
-            sections[si]["shelves"][ti] = max_pos
+        if shrink or max_pos > container["shelves"][ti]:
+            container["shelves"][ti] = max_pos
         for ln in shelf_lines:
-            placements.append((si + 1, ti + 1, ln["position"], ln))
+            placements.append((sec_no, ti + 1, ln["position"], ln))
     return placements, overflow
 
 
@@ -1018,9 +1040,18 @@ def bulk_import_products():
     if not row:
         return jsonify({"success": False, "error": f"L'allée {aisle} n'existe pas dans le plan. Créez d'abord l'allée."}), 400
     config = normalize_layout_config(row["config_json"], row["max_section"], row["max_shelf"], row["max_position"])
-    sections = ((config.get("sides", {}) or {}).get(side, {}) or {}).get("sections", [])
-    if not sections:
-        return jsonify({"success": False, "error": "Ce côté n'a aucune section dans le plan."}), 400
+    is_fixture = side not in ("Gauche", "Droite")
+    if is_fixture:
+        fixture = fixture_for_side(config, side)
+        if fixture is None:
+            return jsonify({"success": False, "error": f"Le côté « {side} » n'existe pas dans le plan de cette allée."}), 400
+        if not fixture.get("shelves"):
+            return jsonify({"success": False,
+                            "error": "Cette façade n'a aucune tablette. Ajoutez d'abord des tablettes dans l'onglet Plan (bouton Tablette)."}), 400
+    else:
+        sections = ((config.get("sides", {}) or {}).get(side, {}) or {}).get("sections", [])
+        if not sections:
+            return jsonify({"success": False, "error": "Ce côté n'a aucune section dans le plan."}), 400
 
     # Build the filtered plano lines (keep each row's full payload).
     now = utc_now_iso()
@@ -1129,10 +1160,15 @@ def bulk_import_products():
             key = (str(sec_no), str(shelf_no))
             touched[key] = max(touched.get(key, 0), pos_no)
         for (sec_s, shelf_s), new_max in touched.items():
-            for r in db.execute(
-                "SELECT * FROM products WHERE aisle=? AND side=? AND section=? AND shelf=?",
-                (aisle, side, sec_s, shelf_s)
-            ).fetchall():
+            # Fixture sides carry no meaningful section on their products —
+            # prune their shelves across all sections (same rule as remove-shelf).
+            if is_fixture:
+                prune_q = "SELECT * FROM products WHERE aisle=? AND side=? AND shelf=?"
+                prune_params = (aisle, side, shelf_s)
+            else:
+                prune_q = "SELECT * FROM products WHERE aisle=? AND side=? AND section=? AND shelf=?"
+                prune_params = (aisle, side, sec_s, shelf_s)
+            for r in db.execute(prune_q, prune_params).fetchall():
                 try:
                     if int(str(dict(r).get("position", "0"))) > new_max:
                         archive_and_delete_product(db, r, username, now)

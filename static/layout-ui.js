@@ -2260,13 +2260,18 @@ function planoDefaultStartSection(aisle, side) {
   return side === 'Gauche' ? Math.max(1, planoSectionCount(aisle, side)) : 1;
 }
 
-// Côté or allée changed: reset the "Section de départ" to that côté's natural
-// starting end, then refresh the preview so destinations reflect the direction.
+// Côté or allée changed: refresh the côté/façade list for the aisle, reset the
+// "Section de départ" to that côté's natural starting end (hidden entirely for
+// façades/présentoirs — they have no sections), then refresh the preview.
 function onPlanoSideChange() {
   const aisle = document.getElementById('planoAisle')?.value;
-  const side  = document.getElementById('planoSide')?.value;
+  populatePlanoSides(aisle);
+  const side = document.getElementById('planoSide')?.value;
+  const isFixture = side !== 'Gauche' && side !== 'Droite';
   const secEl = document.getElementById('planoSection');
-  if (secEl) secEl.value = String(planoDefaultStartSection(aisle, side));
+  if (secEl) secEl.value = isFixture ? '1' : String(planoDefaultStartSection(aisle, side));
+  const secField = document.getElementById('planoSectionField');
+  if (secField) secField.style.display = isFixture ? 'none' : '';
   updatePlanoPreview();
 }
 
@@ -2277,19 +2282,27 @@ function onPlanoSideChange() {
 // from product index → {section, shelf, position}, plus the set of overflow rows.
 function computePlanoFlow(config, side, startSection, startTablette, tabStart, tabEnd, skipNS) {
   const out = { byIdx: {}, overflow: new Set(), placed: 0 };
-  const sections = ((config && config.sides && config.sides[side]) ? config.sides[side].sections : []) || [];
-  // Direction mirrors the server's plan_planogram_flow: Côté A (Gauche) reads Façade B
-  // → Façade A, so it fills sections DESCENDING from the start section down to section 1;
-  // Côté B (Droite) fills ascending. Only the section order flips (tablettes stay top→bottom).
-  const startIdx = Math.min(Math.max(0, startSection - 1), Math.max(0, sections.length - 1));
-  const slots = [];
-  const pushSection = si => {
-    const shelfCount = ((sections[si] || {}).shelves || []).length;
-    const firstT = (si === startIdx) ? (startTablette - 1) : 0;
-    for (let ti = Math.max(0, firstT); ti < shelfCount; ti++) slots.push([si, ti]);
-  };
-  if (side === 'Gauche') { for (let si = startIdx; si >= 0; si--) pushSection(si); }
-  else { for (let si = startIdx; si < sections.length; si++) pushSection(si); }
+  const slots = [];   // [section_no, shelf_index] in fill order
+  const fixture = _planoFixtureForSide(config, side);
+  if (fixture) {
+    // Fixture sides (Façade A/B, présentoir façades) are one flat run of
+    // tablettes with no sections — fill from the start tablette downward.
+    const shelves = fixture.shelves || [];
+    for (let ti = Math.max(0, startTablette - 1); ti < shelves.length; ti++) slots.push([1, ti]);
+  } else {
+    const sections = ((config && config.sides && config.sides[side]) ? config.sides[side].sections : []) || [];
+    // Direction mirrors the server's plan_planogram_flow: Côté A (Gauche) reads Façade B
+    // → Façade A, so it fills sections DESCENDING from the start section down to section 1;
+    // Côté B (Droite) fills ascending. Only the section order flips (tablettes stay top→bottom).
+    const startIdx = Math.min(Math.max(0, startSection - 1), Math.max(0, sections.length - 1));
+    const pushSection = si => {
+      const shelfCount = ((sections[si] || {}).shelves || []).length;
+      const firstT = (si === startIdx) ? (startTablette - 1) : 0;
+      for (let ti = Math.max(0, firstT); ti < shelfCount; ti++) slots.push([si + 1, ti]);
+    };
+    if (side === 'Gauche') { for (let si = startIdx; si >= 0; si--) pushSection(si); }
+    else { for (let si = startIdx; si < sections.length; si++) pushSection(si); }
+  }
   const byTab = new Map();
   (planoData.products || []).forEach((p, idx) => {
     if (p.tablette < tabStart || p.tablette > tabEnd) return;
@@ -2300,10 +2313,43 @@ function computePlanoFlow(config, side, startSection, startTablette, tabStart, t
   [...byTab.keys()].sort((a, b) => a - b).forEach((t, i) => {
     const idxs = byTab.get(t).slice().sort((a, b) => (planoData.products[a].position || 0) - (planoData.products[b].position || 0));
     if (i >= slots.length) { idxs.forEach(idx => out.overflow.add(idx)); return; }
-    const [si, ti] = slots[i];
-    idxs.forEach(idx => { out.byIdx[idx] = { section: si + 1, shelf: ti + 1, position: planoData.products[idx].position }; out.placed++; });
+    const [secNo, ti] = slots[i];
+    idxs.forEach(idx => { out.byIdx[idx] = { section: secNo, shelf: ti + 1, position: planoData.products[idx].position }; out.placed++; });
   });
   return out;
+}
+
+// Mirror of the server's fixture_for_side: the {shelves, labels} of a fixture
+// side (Façade A/B or '<présentoir> - <façade>'), or null for the aisle côtés.
+function _planoFixtureForSide(config, side) {
+  if (!config || side === 'Gauche' || side === 'Droite') return null;
+  if (side === 'Façade A') return config.facade_a || null;
+  if (side === 'Façade B') return config.facade_b || null;
+  for (const pres of (config.presentoirs || [])) {
+    for (const f of (pres.facades || [])) {
+      if (side === `${pres.name} - ${f.name}`) return f;
+    }
+  }
+  return null;
+}
+
+// Fill the Côté selector with everything importable on this aisle: the two
+// côtés always, plus the façades/présentoir façades that have tablettes.
+function populatePlanoSides(aisle) {
+  const sel = document.getElementById('planoSide');
+  if (!sel) return;
+  const layout = (typeof mapLayouts !== 'undefined' ? mapLayouts : []).find(l => String(l.aisle) === String(aisle));
+  const cfg = layout ? layout.config : null;
+  const opts = [['Gauche', 'Côté A'], ['Droite', 'Côté B'], ['Façade A', '🔲 Façade A'], ['Façade B', '🔲 Façade B']];
+  for (const pres of (cfg?.presentoirs || [])) {
+    for (const f of (pres.facades || [])) {
+      const s = `${pres.name} - ${f.name}`;
+      opts.push([s, `📦 ${s}`]);
+    }
+  }
+  const current = sel.value;
+  sel.innerHTML = opts.map(([v, label]) => `<option value="${esc(v)}">${esc(label)}</option>`).join('');
+  sel.value = opts.some(([v]) => v === current) ? current : 'Gauche';
 }
 
 // Debounced preview: typing in the config fields rebuilds the whole row list
@@ -2336,8 +2382,9 @@ function updatePlanoPreview() {
     if (skipNS && !p.en_stock) return '';
     const isPlano = p.is_plano !== false;
     const place = flow.byIdx[idx];
+    const isFixtureSide = side !== 'Gauche' && side !== 'Droite';
     const dest = place
-      ? `→ Allée ${esc(aisle)} · ${esc(sideDisplayLabel(side))} · S${esc(place.section)} · T${esc(place.shelf)} · P${esc(place.position)}`
+      ? `→ Allée ${esc(aisle)} · ${esc(sideDisplayLabel(side))}${isFixtureSide ? '' : ` · S${esc(place.section)}`} · T${esc(place.shelf)} · P${esc(place.position)}`
       : `⚠ Hors plan — aucune tablette libre (le nombre de tablettes n'est pas modifié). Ajoutez des tablettes au plan ou changez le départ.`;
     return `<div style="display:flex;align-items:center;gap:6px;padding:6px 4px;border-bottom:1px solid #f1f5f9;flex-wrap:wrap${place ? '' : ';background:#fff5f5'}">
       <input type="number" value="${esc(p.tablette)}" title="Tablette (plano)" style="width:42px;padding:3px;font-size:12px;text-align:center"
@@ -2373,7 +2420,9 @@ function updatePlanoPreview() {
   preview.innerHTML = `
     <div style="font-size:11px;color:#64748b;padding:4px 4px 6px">${side === 'Gauche'
       ? 'Côté A : le plano remplit à partir de la section de départ <b>vers la Façade A</b> (sections décroissantes), car un planogramme se lit de gauche à droite.'
-      : 'Côté B : le plano remplit à partir de la section de départ <b>vers la Façade B</b> (sections croissantes).'} Le nombre de tablettes du plan ne change pas — seul le nombre de positions par tablette s'ajuste.</div>
+      : side === 'Droite'
+      ? 'Côté B : le plano remplit à partir de la section de départ <b>vers la Façade B</b> (sections croissantes).'
+      : `${esc(side)} : le plano remplit les tablettes de la façade à partir de la tablette de départ, vers le bas.`} Le nombre de tablettes du plan ne change pas — seul le nombre de positions par tablette s'ajuste.</div>
     ${rows || '<div style="padding:10px;font-size:12px;color:#64748b">Aucun produit dans cette sélection.</div>'}
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 4px;border-top:1px solid #e2e8f0;margin-top:4px;flex-wrap:wrap">
       <button class="btn btn-outline btn-inline" style="font-size:12px;width:auto;margin:0" onclick="planoAddLine()">➕ Ajouter une ligne</button>
