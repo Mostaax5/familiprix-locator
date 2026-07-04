@@ -1,6 +1,9 @@
 import re
+import os
 import json
 import time
+import hashlib
+import tempfile
 import unicodedata
 from flask import Blueprint, request, jsonify
 from database import get_db, DatabaseIntegrityError
@@ -301,12 +304,29 @@ def _product_search_row(item):
             "_name": name, "_brand": brand, "_hay": hay, "_tokens": name.split()}
 
 
-def _products_corpus(db):
-    """All placed products with their pre-normalized search fields: [(item, row)]."""
+def client_etag_matches(etag):
+    """True if the request's If-None-Match carries our ETag. Tolerates the
+    '-gzip' suffix flask-compress appends to ETags of compressed responses."""
+    try:
+        tags = request.if_none_match.as_set(include_weak=True)
+    except Exception:
+        return False
+    return any(t == etag or t.startswith(f"{etag}-") for t in tags)
+
+
+def products_state_key(db):
+    """Cheap fingerprint of the products table — changes on ANY insert/update/
+    delete (every write path stamps modified_at). Drives the search-corpus cache
+    AND the /api/products ETag."""
     key_row = db.execute(
         "SELECT COUNT(*) AS n, MAX(id) AS max_id, MAX(modified_at) AS max_mod FROM products"
     ).fetchone()
-    key = (tuple(key_row.values()) if isinstance(key_row, dict) else tuple(key_row))
+    return (tuple(key_row.values()) if isinstance(key_row, dict) else tuple(key_row))
+
+
+def _products_corpus(db):
+    """All placed products with their pre-normalized search fields: [(item, row)]."""
+    key = products_state_key(db)
     if _PROD_CACHE["key"] == key:
         return _PROD_CACHE["rows"]
     rows = []
@@ -595,10 +615,18 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None):
 
 @products_bp.route("/api/products", methods=["GET"])
 def get_products():
+    """Full catalog for the phones' local cache. ETag'd on the products state key:
+    when nothing changed since the phone's last fetch it gets an instant 304 and
+    reuses its stored copy — this endpoint is fetched at every app open and tab
+    switch, and used to re-serialize ~1 MB of JSON every time."""
     db = get_db()
-    products = [row_to_product(p) for p in db.execute("SELECT * FROM products").fetchall()]
-    products.sort(key=location_sort_key)
-    return jsonify(products)
+    etag = hashlib.md5(repr(products_state_key(db)).encode()).hexdigest()
+    if client_etag_matches(etag):
+        return "", 304
+    products = sorted((item for item, _ in _products_corpus(db)), key=location_sort_key)
+    response = jsonify(products)
+    response.set_etag(etag, weak=True)
+    return response
 
 
 @products_bp.route("/api/products/search", methods=["GET"])
@@ -1237,7 +1265,18 @@ def planogram_history():
 
 def schedule_backfill_missing():
     """At startup, automatically fetch any still-missing product images in the
-    background — no button, no user action."""
+    background — no button, no user action. Throttled to once per 12h via a
+    temp-file marker: the worker recycles every ~500 requests, and re-hitting
+    the image sources for the same unfindable products at every recycle was
+    pure waste."""
+    try:
+        marker = os.path.join(tempfile.gettempdir(), "familiprix-backfill.last")
+        if os.path.exists(marker) and time.time() - os.path.getmtime(marker) < 12 * 3600:
+            return
+        with open(marker, "w", encoding="utf-8") as fh:
+            fh.write(str(time.time()))
+    except OSError:
+        pass
     try:
         from database import connect_db
         db = connect_db()

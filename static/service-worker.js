@@ -1,4 +1,4 @@
-const CACHE_NAME = 'familiprix-locator-v4';
+const CACHE_NAME = 'familiprix-locator-v5';
 const OFFLINE_CACHE = [
   '/',
   '/manifest.json',
@@ -25,7 +25,11 @@ self.addEventListener('fetch', event => {
   if (url.origin !== self.location.origin) return;
 
   if (url.pathname.startsWith('/api/')) {
-    event.respondWith(fetch(event.request, {cache: 'no-store'}));
+    // Pass the request through UNCHANGED: each API call carries its own cache
+    // mode ('no-store' by default; 'no-cache' for the big product/layout lists
+    // so the browser can revalidate with ETag and reuse its stored copy on 304).
+    // Forcing no-store here used to defeat that entirely.
+    event.respondWith(fetch(event.request));
     return;
   }
 

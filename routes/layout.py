@@ -194,6 +194,18 @@ def aisle_sort_key(value):
 @layout_bp.route("/api/layout/aisles", methods=["GET"])
 def get_layout_aisles():
     db = get_db()
+    # ETag combines the layouts state AND the products state (the response embeds
+    # per-aisle product counts) — unchanged plan = instant 304 for the phone.
+    import hashlib
+    from routes.products import products_state_key, client_etag_matches
+    layouts_key_row = db.execute(
+        "SELECT COUNT(*) AS n, MAX(modified_at) AS max_mod FROM aisle_layouts"
+    ).fetchone()
+    layouts_key = (tuple(layouts_key_row.values()) if isinstance(layouts_key_row, dict)
+                   else tuple(layouts_key_row))
+    etag = hashlib.md5(repr((layouts_key, products_state_key(db))).encode()).hexdigest()
+    if client_etag_matches(etag):
+        return "", 304
     aisles = db.execute(
         """
         SELECT l.aisle, l.max_section, l.max_shelf, l.max_position, l.config_json, l.enabled, l.modified_by, l.modified_at,
@@ -210,7 +222,9 @@ def get_layout_aisles():
         item.pop("config_json", None)
         result.append(item)
     result.sort(key=lambda item: aisle_sort_key(item.get("aisle")))
-    return jsonify(result)
+    response = jsonify(result)
+    response.set_etag(etag, weak=True)
+    return response
 
 
 @layout_bp.route("/api/layout/aisles", methods=["POST"])

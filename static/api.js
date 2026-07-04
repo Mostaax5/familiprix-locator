@@ -8,7 +8,10 @@ async function apiFetch(url, options = {}) {
 }
 
 async function apiGetProducts() {
-  const {res, data} = await apiFetch('/api/products');
+  // 'no-cache' (NOT no-store): the browser keeps the last copy and revalidates
+  // with If-None-Match — when nothing changed the server answers an instant 304
+  // and the ~1 MB list is served from the phone's own cache.
+  const {res, data} = await apiFetch('/api/products', {cache: 'no-cache'});
   if (!res.ok) throw new Error('products-fetch');
   return Array.isArray(data) ? data.map(normalizeProduct) : [];
 }
@@ -90,7 +93,7 @@ async function apiDeleteProduct(id) {
 }
 
 async function apiGetLayoutAisles() {
-  const {res, data} = await apiFetch('/api/layout/aisles');
+  const {res, data} = await apiFetch('/api/layout/aisles', {cache: 'no-cache'});   // ETag revalidation
   if (!res.ok) throw new Error('layout-fetch');
   return Array.isArray(data) ? data : [];
 }

@@ -69,11 +69,44 @@ def _push_to_gist(payload):
         return False, str(exc)
 
 
-def _schedule_gist_backup(db):
+# Debounced backup: during a scanning session every add/delete used to build the
+# FULL ~1000-product payload synchronously inside the request AND push a gist per
+# scan. Now the mutation just arms a 60s timer; when it fires, one background
+# thread builds the payload with its own connection and pushes the LATEST state.
+_BACKUP_DELAY_S = 60.0
+_backup_timer_lock = threading.Lock()
+_backup_timer = None
+
+
+def _schedule_gist_backup(_db=None):
+    """Arm (or leave armed) the debounced backup. `_db` is accepted for call-site
+    compatibility but unused — the payload is built later, off the request path."""
+    global _backup_timer
     if not GITHUB_TOKEN:
         return
-    payload = _build_backup_payload(db)
-    threading.Thread(target=_push_to_gist, args=(payload,), daemon=True).start()
+    with _backup_timer_lock:
+        if _backup_timer is not None:
+            return   # one push already pending — it will capture this change too
+        timer = threading.Timer(_BACKUP_DELAY_S, _run_scheduled_backup)
+        timer.daemon = True
+        _backup_timer = timer
+        timer.start()
+
+
+def _run_scheduled_backup():
+    global _backup_timer
+    with _backup_timer_lock:
+        _backup_timer = None
+    try:
+        from database import connect_db
+        db = connect_db()
+        try:
+            payload = _build_backup_payload(db)
+        finally:
+            db.close()
+        _push_to_gist(payload)
+    except Exception as exc:
+        print(f"[Gist] Sauvegarde planifiée échouée: {exc}")
 
 
 def _restore_from_gist_if_empty():

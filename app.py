@@ -1,5 +1,7 @@
 import os
-from flask import Flask, render_template, send_from_directory, jsonify
+import traceback
+from flask import Flask, render_template, send_from_directory, jsonify, request
+from werkzeug.exceptions import HTTPException
 from database import close_db, get_backend_summary, get_db, init_db
 from auth import utc_now_iso
 from routes.products import products_bp, first_column, schedule_backfill_missing
@@ -46,6 +48,29 @@ def service_worker():
 @app.teardown_appcontext
 def teardown_database(_error):
     close_db(_error)
+
+
+@app.errorhandler(Exception)
+def handle_any_error(exc):
+    """API callers always get JSON (the frontend parses every response as JSON —
+    an HTML error page used to break it silently), and unexpected errors land in
+    the Render logs with a full traceback instead of vanishing."""
+    if isinstance(exc, HTTPException):
+        if request.path.startswith("/api/"):
+            return jsonify({"success": False, "error": exc.description}), exc.code
+        return exc
+    traceback.print_exc()
+    if request.path.startswith("/api/"):
+        return jsonify({"success": False, "error": "Erreur interne du serveur."}), 500
+    return "Erreur interne du serveur.", 500
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    return response
 
 
 @app.route("/api/system/info", methods=["GET"])

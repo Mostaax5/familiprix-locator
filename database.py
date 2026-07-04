@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import threading
 from flask import g, has_app_context
 
 try:
@@ -8,6 +9,11 @@ try:
 except ImportError:  # pragma: no cover - available after requirements install
     psycopg = None
     dict_row = None
+
+try:
+    from psycopg_pool import ConnectionPool
+except ImportError:  # pragma: no cover - pool is optional (psycopg[pool])
+    ConnectionPool = None
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "familiprix.db")
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
@@ -40,9 +46,10 @@ class CursorResult:
 
 
 class DatabaseConnection:
-    def __init__(self, connection, backend):
+    def __init__(self, connection, backend, pool=None):
         self.connection = connection
         self.backend = backend
+        self.pool = pool
 
     def execute(self, query, params=()):
         params = tuple(params or ())
@@ -74,13 +81,39 @@ class DatabaseConnection:
         self.connection.commit()
 
     def close(self):
-        self.connection.close()
+        # Pooled connections go back to the pool (rolled back + reset by putconn)
+        # instead of paying a fresh TCP+TLS+auth handshake on the next request.
+        if self.pool is not None:
+            self.pool.putconn(self.connection)
+        else:
+            self.connection.close()
+
+
+_PG_POOL = None
+_PG_POOL_LOCK = threading.Lock()
+
+
+def _get_pg_pool():
+    global _PG_POOL
+    if _PG_POOL is None:
+        with _PG_POOL_LOCK:
+            if _PG_POOL is None:
+                # Small pool: 4 gunicorn threads + a couple of background workers.
+                # min_size=0 so an idle app holds no connection open.
+                _PG_POOL = ConnectionPool(
+                    DATABASE_URL, min_size=0, max_size=6, max_idle=300,
+                    kwargs={"row_factory": dict_row}, open=True,
+                )
+    return _PG_POOL
 
 
 def connect_db():
     if DB_BACKEND == "postgres":
         if psycopg is None:
             raise RuntimeError("psycopg is required when DATABASE_URL is set.")
+        if ConnectionPool is not None:
+            pool = _get_pg_pool()
+            return DatabaseConnection(pool.getconn(), "postgres", pool=pool)
         conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
         return DatabaseConnection(conn, "postgres")
 
