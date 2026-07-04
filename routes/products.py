@@ -226,6 +226,14 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
     for t in qtokens:
         if name.startswith(t): name_score = max(name_score, 500)
         elif t in toks: name_score = max(name_score, 470)
+        elif name_score < 460:
+            # Planogram names are abbreviated: a name token that PREFIXES the query
+            # word is that word abbreviated ('MELAT' ⊂ 'melatonine', 'VITAM' ⊂
+            # 'vitamines'). ≥4 chars so tiny tokens ('co') never false-match.
+            for tok in toks:
+                if len(tok) >= 4 and t.startswith(tok):
+                    name_score = 460
+                    break
     score += name_score
     if nq and nq in brand:
         score += 200
@@ -239,9 +247,18 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
     if intent_terms:                    # symptom → category surfaces, but capped so a
         ib = 0                          # direct name/UPC match (450+) always outranks it
         for t in intent_terms:          # (uncapped, 'toux' ranked dishwasher 'pastilles'
-            if name.startswith(t): ib = 650; break   # above real cough syrup)
-            elif t in name: ib = max(ib, 450)
+            if name.startswith(t): ib = 300; break    # above real cough syrup)
+            elif t in name: ib = max(ib, 300)
             elif t in hay: ib = max(ib, 200)
+            else:
+                # Same abbreviated-name rule as above: 'dormir' expands to
+                # 'melatonine', which must reach a product named 'MELAT …'.
+                for tok in toks:
+                    if len(tok) >= 4 and t.startswith(tok):
+                        ib = 300
+                        break
+            if ib >= 300:
+                break                   # already at the intent cap — stop scanning
         ib = min(ib, 300)
         if ib > score:
             score = ib

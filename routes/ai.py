@@ -83,16 +83,17 @@ _AI_AUTO_ENRICH = os.environ.get("AI_AUTO_ENRICH", "").strip().lower() in {"1", 
 # like gemini-2.5-flash). It searches the web like a human would.
 _AI_DEEP_LOOKUP = os.environ.get("AI_DEEP_LOOKUP", "").strip().lower() in {"1", "true", "yes", "on"}
 
+# Canned replies for pure LOGISTICS questions only. Keys like "pharmacien" or
+# "retour" used to intercept REAL medical questions ("dois-je voir le pharmacien
+# pour X ?", "un retour de rhume") with a useless canned line — the AI looked
+# broken. Kept only for unambiguous store-info keywords, and _try_simple_answer
+# additionally requires a SHORT question so long real questions always reach the AI.
 _SIMPLE_ANSWERS = {
     "heure":         "Pour les heures d’ouverture, consultez votre succursale Familiprix locale ou familiprix.com.",
-    "ouvert":        "Pour les heures d’ouverture, consultez votre succursale Familiprix locale ou familiprix.com.",
-    "ferm":          "Pour les heures d’ouverture, consultez votre succursale Familiprix locale ou familiprix.com.",
     "livraison":     "La livraison varie selon les succursales. Contactez directement votre pharmacie Familiprix.",
     "telephone":     "Le numéro de téléphone est affiché à l’entrée du magasin ou sur familiprix.com.",
     "adresse":       "L’adresse se trouve sur familiprix.com dans le localisateur de pharmacies.",
-    "retour":        "La politique de retour varie. Adressez-vous au comptoir de votre succursale.",
     "stationnement": "Renseignez-vous directement auprès de votre succursale pour le stationnement.",
-    "pharmacien":    "Pour parler a un pharmacien, présentez-vous au comptoir de la pharmacie.",
 }
 
 
@@ -111,6 +112,8 @@ def _check_ai_rate_limit() -> bool:
 
 def _try_simple_answer(question: str):
     q = question.lower()
+    if len(q) > 60:
+        return None   # a long question is a real question — let the AI answer it
     for keyword, answer in _SIMPLE_ANSWERS.items():
         if keyword in q:
             return answer
@@ -751,12 +754,88 @@ def product_context_for_client_help(product):
     aisle = str(product.get("aisle", "")).strip()
     location = (f"Allée {aisle} {side_display_label(product.get('side',''))} T{str(product.get('shelf','')).strip()}"
                 if aisle else "En magasin — position à confirmer")
-    return {
+    ctx = {
         "name":     str(product.get("name", "")).strip(),
         "brand":    str(product.get("brand", "")).strip(),
         "notes":    str(product.get("usage_notes", "") or product.get("description", "")).strip(),
         "location": location,
+        # The UPC is essential context: without it a question that names a UPC
+        # ("quelle saveur a le 0605388...") could never be matched to its product.
+        "upc":      str(product.get("barcode", "")).strip(),
     }
+    if str(product.get("in_stock", 1)) == "0":
+        ctx["rupture"] = True   # only flag the exceptions to keep the context small
+    return ctx
+
+
+def _build_client_candidates(question, limit=35):
+    """Build the AI's store context SERVER-side from the question itself.
+
+    - Every 8-14 digit run in the question is resolved to its exact product(s)
+      (placed plan + imported catalogue) and pinned FIRST — so 'quelle saveur a
+      le 0605...' always carries the right product, even if the text search
+      would never have found it.
+    - The rest is the same fast ranked search as the Client tab, with a BIGGER
+      cap (35 vs the old 20) so assortment questions ('toutes les saveurs de
+      mélatonine ?') see the whole product family, not an arbitrary slice.
+    All matching runs on the pre-normalized in-memory corpora — milliseconds."""
+    from routes.products import (_products_corpus, _reference_corpus, _fast_reference_score,
+                                 normalize_search_text, normalized_digits, tokenize_search_query,
+                                 intent_expansion_terms, abbreviation_terms, build_barcode_candidates)
+    db = get_db()
+    out, seen_keys, seen_bc = [], set(), set()
+
+    def add(item, bc):
+        key = ("id", item.get("id")) if item.get("id") else ("bc", bc or str(id(item)))
+        if key in seen_keys or (bc and bc in seen_bc and not item.get("id")):
+            return
+        seen_keys.add(key)
+        if bc:
+            seen_bc.add(bc)
+        out.append(item)
+
+    def ref_to_item(row):
+        return {"barcode": row["barcode"], "name": row["name"], "brand": row["brand"],
+                "description": row["description"], "product_code": row["product_code"],
+                "catalog_only": True, "in_stock": 1}
+
+    # 1) Exact UPC(s) named in the question — pinned first.
+    upc_digits = set()
+    for run in re.findall(r"\d[\d\s\-]{6,18}\d", question):
+        digits = normalized_digits(run)
+        if 8 <= len(digits) <= 14:
+            for cand in build_barcode_candidates(digits):
+                upc_digits.add(normalized_digits(cand))
+    if upc_digits:
+        for item, prow in _products_corpus(db):
+            if prow["_bc"] and prow["_bc"] in upc_digits:
+                add(item, prow["_bc"])
+        for row in _reference_corpus(db):
+            if row["_bc"] and row["_bc"] in upc_digits:
+                add(ref_to_item(row), row["_bc"])
+
+    # 2) Ranked text search — same scorer and noise floor as the Client tab.
+    nq = normalize_search_text(question)
+    dq = normalized_digits(question) if not upc_digits else ""   # UPCs already handled
+    qtokens = list(dict.fromkeys(tokenize_search_query(question)))
+    intent_terms = intent_expansion_terms(question)
+    abbrevs = abbreviation_terms(question)
+    scored = []
+    if nq or dq or intent_terms:
+        for item, prow in _products_corpus(db):
+            s = _fast_reference_score(prow, nq, dq, qtokens, intent_terms, abbrevs)
+            if s >= 100:
+                scored.append((s, 0, item, prow["_bc"]))
+        for row in _reference_corpus(db):
+            s = _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs)
+            if s >= 100:
+                scored.append((s, 1, ref_to_item(row), row["_bc"]))
+        scored.sort(key=lambda x: (-x[0], x[1], str(x[2].get("name", "")).lower()))
+    for _, _, item, bc in scored:
+        if len(out) >= limit:
+            break
+        add(item, bc)
+    return out[:limit]
 
 
 _HOME_BRANDS = ("familiprix", "biomedic", "essentiel")
@@ -851,28 +930,46 @@ def generate_client_help_payload(question, products):
     return None
 
 
+# Shared instructions for the client-help AI (both providers). Written for an
+# EXPERT store assistant: answer the question asked (info, assortment or
+# recommendation), decode planogram-abbreviated names, never invent products.
+_CLIENT_HELP_INSTRUCTIONS = (
+    "Tu es l'assistant expert d'un employé de pharmacie Familiprix au Québec. "
+    "Tu connais parfaitement l'inventaire du magasin : la liste JSON fournie contient les produits pertinents "
+    "(champs: name, brand, notes, location, upc, et rupture=true si non disponible). "
+    "RÉPONDS D'ABORD À LA QUESTION POSÉE, directement et précisément, dans summary (2 à 5 phrases, en français). "
+    "Les noms de produits sont abrégés au style planogramme — décode-les : "
+    "MELAT=mélatonine, CO=comprimés, CO CROQ=comprimés croquables, CAPS=capsules, GEL=gélules, SIR=sirop, "
+    "SHP=shampooing, CR=crème, PDRE=poudre, SOL=solution, VAPO=vaporisateur, GTTE=gouttes, ENF=enfants, "
+    "X/F ou XF=extra fort, FRAISE/CERISE/MENTHE/ORANGE/RAISIN=saveurs, les nombres = dosage ou format. "
+    "Trois types de questions :\n"
+    "1. INFO sur un produit précis (nom ou UPC) : retrouve-le dans la liste (l'UPC de la question correspond au champ upc) "
+    "et réponds avec ses informations (saveur, dosage, format déduits du nom et des notes). Si l'information demandée "
+    "n'apparaît ni dans le nom ni dans les notes, utilise tes connaissances générales de ce produit précis et dis de "
+    "confirmer sur l'emballage. Mentionne l'emplacement (location).\n"
+    "2. ASSORTIMENT (« quelles saveurs / formats / dosages avons-nous ? ») : énumère dans summary TOUS les produits "
+    "pertinents de la liste avec le détail demandé, et mets CHACUN d'eux dans recommended_product_names.\n"
+    "3. BESOIN / SYMPTÔME d'un client : recommande le meilleur produit de la liste puis 1 à 3 vraies alternatives.\n"
+    "Règles : ne propose JAMAIS un produit hors liste ; recommended_product_names contient uniquement des noms copiés "
+    "EXACTEMENT de la liste (tel quel, sans reformuler), du plus pertinent au moins pertinent. "
+    "Si un produit est de marque Biomedic ou Essentiel (marques maison Familiprix), signale-le. "
+    "Si un produit a rupture=true, dis qu'il est en rupture de stock. "
+    "Si la liste est vide, donne un conseil général de pharmacie sans nommer de produit précis. "
+    "Ne pose pas de diagnostic. pharmacist_referral=true quand il faut orienter vers le pharmacien : "
+    "grossesse, bébé, interaction médicamenteuse, symptômes graves, douleur importante, difficulté respiratoire, "
+    "fièvre élevée, durée inhabituelle ou doute médical. "
+    "Retourne uniquement un JSON en français avec exactement les clés "
+    "summary (texte), recommended_product_names (tableau), follow_up_questions (tableau), "
+    "safety_flags (tableau), pharmacist_referral (booléen) et pharmacist_reason (texte)."
+)
+
+
 def generate_client_help_payload_gemini(question, products):
     payload = {
         "contents": [{"parts": [{"text": (
-            "Tu aides un employe de pharmacie Familiprix au Quebec a repondre a un client. "
-            "Donne toujours le meilleur conseil possible. "
-            "Base-toi UNIQUEMENT sur les produits fournis dans la liste. "
-            "Ne propose jamais un produit qui n’est pas dans la liste fournie. "
-            "Si un produit de la liste est de marque Biomedic ou Essentiel (marques maison Familiprix), precise-le dans ta réponse. "
-            "Si la liste est vide, donne un conseil général en pharmacie sans nommer de produits specifiques. "
-            "Ne pose pas de diagnostic. "
-            "Dis clairement quand il faut orienter le client vers le pharmacien: "
-            "grossesse, bebe, interaction medicamenteuse, symptomes graves, douleur importante, "
-            "difficulte respiratoire, fievre élevée, duree inhabituelle ou doute medical. "
-            "Dans recommended_product_names, mets UNIQUEMENT des noms copies EXACTEMENT de la liste fournie "
-            "(copie-colle le nom tel quel, sans le reformuler), classes du plus pertinent au moins pertinent : "
-            "d'abord le meilleur produit pour ce besoin precis, puis 1 a 3 vraies alternatives de la meme categorie. "
-            "N'invente jamais un nom de produit et n'en propose aucun qui n'est pas dans la liste. "
-            "Retourne uniquement un JSON en francais avec exactement les clés "
-            "summary (texte), recommended_product_names (tableau), follow_up_questions (tableau), "
-            f"safety_flags (tableau), pharmacist_referral (booleen) et pharmacist_reason (texte).\n\n"
-            f"Question client:\n{question}\n\n"
-            f"Produits disponibles en magasin:\n{json.dumps(products, ensure_ascii=False) if products else '[]'}"
+            f"{_CLIENT_HELP_INSTRUCTIONS}\n\n"
+            f"Question de l'employé:\n{question}\n\n"
+            f"Produits du magasin:\n{json.dumps(products, ensure_ascii=False) if products else '[]'}"
         )}]}],
         "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json", "maxOutputTokens": 2048},
     }
@@ -883,7 +980,9 @@ def generate_client_help_payload_gemini(question, products):
         method="POST",
     )
     try:
-        with urlopen(request_obj, timeout=10) as response:
+        # 20s (was 10): the richer 35-product context takes a moment longer to
+        # generate; a timeout here means NO answer at all, which is worse.
+        with urlopen(request_obj, timeout=20) as response:
             raw_response = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         body = ""
@@ -919,23 +1018,7 @@ def generate_client_help_payload_openai(question, products):
     payload = {
         "model": OPENAI_MODEL,
         "reasoning": {"effort": "low"},
-        "instructions": (
-            "Tu aides un employe de pharmacie Familiprix au Quebec a repondre a un client. "
-            "Donne toujours le meilleur conseil possible. "
-            "Base-toi UNIQUEMENT sur les produits fournis dans la liste. "
-            "Ne propose jamais un produit qui n’est pas dans la liste fournie. "
-            "Si un produit de la liste est de marque Biomedic ou Essentiel (marques maison Familiprix), precise-le dans ta réponse. "
-            "Si la liste est vide, donne un conseil général en pharmacie sans nommer de produits specifiques. "
-            "Ne pose pas de diagnostic. "
-            "Dis clairement quand il faut orienter le client vers le pharmacien: "
-            "grossesse, bebe, interaction medicamenteuse, symptomes graves, douleur importante, "
-            "difficulte respiratoire, fievre élevée, duree inhabituelle ou doute medical. "
-            "Dans recommended_product_names, mets UNIQUEMENT des noms copies EXACTEMENT de la liste fournie "
-            "(copie-colle le nom tel quel, sans le reformuler), classes du plus pertinent au moins pertinent : "
-            "d'abord le meilleur produit pour ce besoin precis, puis 1 a 3 vraies alternatives de la meme categorie. "
-            "N'invente jamais un nom de produit et n'en propose aucun qui n'est pas dans la liste. "
-            "Retourne uniquement un JSON en francais."
-        ),
+        "instructions": _CLIENT_HELP_INSTRUCTIONS,
         "input": json.dumps({"question": question, "products": products}, ensure_ascii=False),
         "text": {"format": {
             "type": "json_schema", "name": "client_help", "strict": True,
@@ -943,7 +1026,7 @@ def generate_client_help_payload_openai(question, products):
                 "type": "object",
                 "properties": {
                     "summary": {"type": "string"},
-                    "recommended_product_names": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
+                    "recommended_product_names": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
                     "follow_up_questions":       {"type": "array", "items": {"type": "string"}, "maxItems": 4},
                     "safety_flags":              {"type": "array", "items": {"type": "string"}, "maxItems": 4},
                     "pharmacist_referral": {"type": "boolean"},
@@ -962,7 +1045,7 @@ def generate_client_help_payload_openai(question, products):
         method="POST",
     )
     try:
-        with urlopen(request_obj, timeout=10) as response:
+        with urlopen(request_obj, timeout=20) as response:
             raw_response = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         body = ""
@@ -1624,23 +1707,10 @@ def client_help():
     if not _check_ai_rate_limit():
         return jsonify({"success": False, "error": "Trop de requetes IA. Reessayez dans une heure."}), 429
 
-    # Build the candidate set from REAL store products (kept whole, with locations) so
-    # every recommendation the AI returns can be mapped back to a findable shelf spot.
-    raw_products = data.get("products")
-    if isinstance(raw_products, list):
-        candidate_objs = [item for item in raw_products[:15] if isinstance(item, dict)]
-    else:
-        from routes.products import row_to_product, rank_products_for_query
-        db = get_db()
-        products = [row_to_product(p) for p in db.execute("SELECT * FROM products").fetchall()]
-        candidate_objs = rank_products_for_query(products, question, limit=15)
-
-    # Always augment with the reference catalogue (imported planograms) so the AI can
-    # recommend products we carry even if they aren't placed on a shelf yet.
-    from routes.products import rank_reference_for_query, normalized_digits
-    placed_bcs = {normalized_digits(str(o.get("barcode", ""))) for o in candidate_objs if o.get("barcode")}
-    ref_matches = rank_reference_for_query(question, limit=10, exclude_barcodes=placed_bcs)
-    candidate_objs = (candidate_objs + ref_matches)[:20]
+    # Build the candidate set SERVER-side from the question itself (UPC-aware,
+    # assortment-friendly) — never from whatever the phone happened to send. Every
+    # recommendation the AI returns maps back to a real, findable store product.
+    candidate_objs = _build_client_candidates(question, limit=35)
 
     matched_products = [product_context_for_client_help(item) for item in candidate_objs]
 

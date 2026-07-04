@@ -140,9 +140,10 @@ function productSearchFields(product) {
     const alternatives = normalizeSearchText(product.alternative_suggestions);
     const barcode = normalizedDigits(product.barcode);
     const haystack = [name, brand, description, searchTerms, usageNotes, alternatives].join(' ');
+    const nameTokens = name ? name.split(' ') : [];
     // non-enumerable so it never gets copied into API payloads (e.g. {...product})
     Object.defineProperty(product, '_sf', {
-      value: {name, brand, description, searchTerms, usageNotes, alternatives, barcode, haystack},
+      value: {name, brand, description, searchTerms, usageNotes, alternatives, barcode, haystack, nameTokens},
       enumerable: false, writable: true, configurable: true,
     });
   }
@@ -168,6 +169,13 @@ function scoreProductForQuery(product, query) {
   if (loweredQuery === name) score += 800;
   else if (name.startsWith(loweredQuery)) score += 650;
   else if (loweredQuery && name.includes(loweredQuery)) score += 450;
+  else if (loweredQuery && !loweredQuery.includes(' ')) {
+    // Planogram names are abbreviated: a name token that PREFIXES the query word
+    // is that word abbreviated ('MELAT' ⊂ 'melatonine'). Mirror of the server rule.
+    for (const tok of f.nameTokens) {
+      if (tok.length >= 4 && loweredQuery.startsWith(tok)) { score += 440; break; }
+    }
+  }
   if (loweredQuery === brand) score += 300;
   else if (loweredQuery && brand.includes(loweredQuery)) score += 180;
   if (loweredQuery && description.includes(loweredQuery)) score += 150;

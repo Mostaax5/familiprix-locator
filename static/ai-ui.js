@@ -10,16 +10,6 @@ function getClientQuestion() {
   return document.getElementById('clientQuestion')?.value.trim() || '';
 }
 
-function sanitizeProductForClientAi(product) {
-  return {
-    name: product.name || '', brand: product.brand || '', description: product.description || '',
-    usage_notes: product.usage_notes || '', search_terms: product.search_terms || '',
-    alternative_suggestions: product.alternative_suggestions || '', barcode: product.barcode || '',
-    aisle: product.aisle || '', side: product.side || '', section: product.section || '',
-    shelf: product.shelf || '', position: product.position || ''
-  };
-}
-
 function renderClientMatches(matches, question) {
   const target = document.getElementById('clientMatches');
   if (!target) return;
@@ -146,7 +136,6 @@ async function runClientSearch(showEmptyMessage=true) {
 async function generateClientHelp() {
   const question = getClientQuestion();
   const status = document.getElementById('clientHelpStatus');
-  const matches = await runClientSearch(false);
   if (!question) {
     if (status) status.textContent = 'Ecrivez d’abord la demande du client.';
     return;
@@ -156,14 +145,19 @@ async function generateClientHelp() {
     renderClientAdvice(null);
     return;
   }
+  // The product list refreshes in parallel — the SERVER builds the AI's store
+  // context from the question itself (UPC-aware, full product families), so the
+  // answer no longer depends on what this phone's search happened to find.
+  runClientSearch(false);
   if (status) status.textContent = `Génération de la réponse via ${aiProviderLabel()}… (quelques secondes)`;
-  const result = await apiGenerateClientHelp({question, products: matches.slice(0, 20).map(sanitizeProductForClientAi)});
+  const result = await apiGenerateClientHelp({question});
   if (!result.success || !result.advice) {
     renderClientAdvice(null);
     if (status) status.textContent = result.error || 'Reponse client indisponible.';
     return;
   }
-  renderClientAdvice(result.advice, matches.length > 0);
+  const hasStoreProducts = (result.advice.recommended_products || []).length > 0 || currentClientMatches.length > 0;
+  renderClientAdvice(result.advice, hasStoreProducts);
   if (status) status.textContent = `Réponse generee via ${aiProviderLabel()}. Verifiez avant de conseiller.`;
 }
 
