@@ -104,6 +104,14 @@ def _run_scheduled_backup():
             payload = _build_backup_payload(db)
         finally:
             db.close()
+        # SAFETY: never let the AUTOMATIC backup overwrite a good gist with a
+        # nearly-empty database (fresh/replaced Postgres, restore not run yet…).
+        # The gist may be the only surviving copy of the store at that moment.
+        # A deliberate wipe can still be backed up manually via /api/gist/backup.
+        if len(payload.get("products") or []) < 5:
+            print("[Gist] Sauvegarde automatique IGNORÉE: base quasi vide "
+                  f"({len(payload.get('products') or [])} produits) — protection de la sauvegarde existante.")
+            return
         _push_to_gist(payload)
     except Exception as exc:
         print(f"[Gist] Sauvegarde planifiée échouée: {exc}")

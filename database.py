@@ -100,10 +100,17 @@ def _get_pg_pool():
             if _PG_POOL is None:
                 # Small pool: 4 gunicorn threads + a couple of background workers.
                 # min_size=0 so an idle app holds no connection open.
-                _PG_POOL = ConnectionPool(
-                    DATABASE_URL, min_size=0, max_size=6, max_idle=300,
-                    kwargs={"row_factory": dict_row}, open=True,
+                # open=False + timeout=15: connections open lazily PER REQUEST. With
+                # open=True the pool blocked 30s at import when the DB was unreachable
+                # (e.g. expired Render Postgres) and gunicorn crash-looped — the app
+                # must boot anyway so it can report the problem and recover once the
+                # database is back.
+                pool = ConnectionPool(
+                    DATABASE_URL, min_size=0, max_size=6, max_idle=300, timeout=15,
+                    kwargs={"row_factory": dict_row}, open=False,
                 )
+                pool.open(wait=False)   # non-blocking: getconn() waits (≤15s), boot never does
+                _PG_POOL = pool
     return _PG_POOL
 
 

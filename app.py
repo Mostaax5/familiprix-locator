@@ -19,7 +19,17 @@ try:
     Compress(app)
 except ImportError:
     pass
-init_db()
+
+# If the database is unreachable at boot (expired/suspended Render Postgres, DNS
+# outage…), the app MUST still start: crash-looping here hid the real problem
+# behind a dead site and blocked recovery. The failure is remembered and exposed
+# by /api/system/info so the phones can say WHY there is no data.
+DB_BOOT_ERROR = ""
+try:
+    init_db()
+except Exception as exc:  # noqa: BLE001 — any DB failure must not kill the boot
+    DB_BOOT_ERROR = str(exc)
+    print(f"[BOOT] Base de données injoignable au démarrage: {exc}")
 
 app.register_blueprint(products_bp)
 app.register_blueprint(layout_bp)
@@ -75,8 +85,19 @@ def add_security_headers(response):
 
 @app.route("/api/system/info", methods=["GET"])
 def get_system_info():
-    db = get_db()
     ai_provider = configured_ai_provider()
+    try:
+        db = get_db()
+        db.execute("SELECT 1").fetchone()
+    except Exception as exc:  # noqa: BLE001 — report instead of a bare 500
+        return jsonify({
+            **get_backend_summary(),
+            "db_unreachable": True,
+            "db_error": DB_BOOT_ERROR or str(exc),
+            "ai_enabled": bool(ai_provider["name"]),
+            "ai_provider": ai_provider["name"],
+            "ai_provider_label": ai_provider["label"],
+        }), 503
     duplicate_slots = db.execute(
         """
         SELECT COUNT(*) AS count
@@ -130,7 +151,10 @@ if __name__ == "__main__":
         print("HTTPS demande, mais certificat local introuvable.")
         return None
 
-    init_db()
+    try:
+        init_db()
+    except Exception as exc:  # noqa: BLE001 — dev server must boot to show errors
+        print(f"[BOOT] Base de données injoignable au démarrage: {exc}")
     ssl_context = resolve_ssl_context()
     debug_mode = os.environ.get("FLASK_DEBUG", "").strip().lower() in {"1", "true", "yes"}
     app.run(debug=debug_mode, host="0.0.0.0", port=5000, ssl_context=ssl_context)
