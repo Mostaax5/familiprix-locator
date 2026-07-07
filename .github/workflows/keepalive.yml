@@ -1,14 +1,14 @@
 # Render's free tier spins the app down after ~15 idle minutes; the next visitor
 # then waits ~1 minute for a cold start ("the app takes forever to load").
-# This pings the app every 10 minutes during store hours (Quebec ≈ 07:00-22:00
-# local ≈ 11:00-02:00 UTC) so it stays warm when employees need it, and sleeps
-# overnight to conserve Render's free instance hours.
+# Ping every 10 minutes AROUND THE CLOCK: one always-on service uses ~744 of the
+# 750 free instance hours per month, so there is no reason to let it sleep — the
+# store-hours-only window made every night-time work session start with a cold
+# minute.
 name: Keep Render app warm
 
 on:
   schedule:
-    - cron: "*/10 11-23 * * *"   # 11:00-23:59 UTC
-    - cron: "*/10 0-1 * * *"     # 00:00-01:59 UTC (evening in Quebec)
+    - cron: "*/10 * * * *"
   workflow_dispatch: {}
 
 jobs:
