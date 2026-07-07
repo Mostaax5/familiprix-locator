@@ -4,6 +4,7 @@ import json
 import time
 import hashlib
 import tempfile
+import threading
 import unicodedata
 from flask import Blueprint, request, jsonify
 from database import get_db, DatabaseIntegrityError
@@ -169,12 +170,15 @@ def _abbreviation_hit(name_norm, abbrevs):
 
 
 # ── Reference-catalogue search cache ─────────────────────────────────────────────
-# The catalogue has ~6000+ rows. Re-normalizing them all (regex) on every keystroke
-# froze the whole app on Render's single worker. So we normalize ONCE into memory and
-# reuse it; the cache refreshes on catalogue import and every 90s (covers enrichment).
+# The catalogue has ~9000+ rows. Re-normalizing them all (regex) on every keystroke
+# froze the whole app on Render's single worker, so we normalize ONCE into memory.
+# Freshness: a CHEAP state-key query per request (count + max updated_at — every
+# write path stamps updated_at) instead of the old blanket 90s TTL, which forced a
+# full re-download + re-normalization of the whole catalogue every 90 seconds and
+# made a random search pay 10-20s on Render's small CPU ("forever to load").
 _REF_GEN = 0
-_REF_CACHE = {"gen": -1, "at": 0.0, "rows": []}
-_REF_CACHE_TTL = 90.0
+_REF_CACHE = {"gen": -1, "key": None, "rows": []}
+_REF_LOCK = threading.Lock()
 
 
 def bump_reference_cache():
@@ -182,26 +186,37 @@ def bump_reference_cache():
     _REF_GEN += 1
 
 
+def _reference_state_key(db):
+    row = db.execute(
+        "SELECT COUNT(*) AS n, MAX(updated_at) AS max_upd FROM product_reference"
+    ).fetchone()
+    return (tuple(row.values()) if isinstance(row, dict) else tuple(row))
+
+
 def _reference_corpus(db):
-    now = time.time()
-    if (_REF_CACHE["gen"] == _REF_GEN and _REF_CACHE["rows"]
-            and now - _REF_CACHE["at"] < _REF_CACHE_TTL):
+    key = (_REF_GEN, _reference_state_key(db))
+    if _REF_CACHE["key"] == key and _REF_CACHE["rows"]:
         return _REF_CACHE["rows"]
-    rows = []
-    for r in db.execute("SELECT barcode, name, brand, description, product_code FROM product_reference").fetchall():
-        d = dict(r)
-        name = normalize_search_text(d.get("name", ""))
-        brand = normalize_search_text(d.get("brand", ""))
-        desc = normalize_search_text(d.get("description", ""))
-        rows.append({
-            "barcode": d.get("barcode", ""), "name": d.get("name", ""),
-            "brand": d.get("brand", ""), "description": d.get("description", ""),
-            "product_code": d.get("product_code", ""),
-            "_bc": normalized_digits(d.get("barcode", "")),
-            "_name": name, "_brand": brand,
-            "_hay": " ".join([name, brand, desc]), "_tokens": name.split(),
-        })
-    _REF_CACHE.update(gen=_REF_GEN, at=now, rows=rows)
+    # One rebuild at a time: without the lock, several concurrent searches after a
+    # catalogue change would all rebuild the 9k-row corpus and stack CPU + memory.
+    with _REF_LOCK:
+        if _REF_CACHE["key"] == key and _REF_CACHE["rows"]:
+            return _REF_CACHE["rows"]
+        rows = []
+        for r in db.execute("SELECT barcode, name, brand, description, product_code FROM product_reference").fetchall():
+            d = dict(r)
+            name = normalize_search_text(d.get("name", ""))
+            brand = normalize_search_text(d.get("brand", ""))
+            desc = normalize_search_text(d.get("description", ""))
+            rows.append({
+                "barcode": d.get("barcode", ""), "name": d.get("name", ""),
+                "brand": d.get("brand", ""), "description": d.get("description", ""),
+                "product_code": d.get("product_code", ""),
+                "_bc": normalized_digits(d.get("barcode", "")),
+                "_name": name, "_brand": brand,
+                "_hay": " ".join([name, brand, desc]), "_tokens": name.split(),
+            })
+        _REF_CACHE.update(key=key, rows=rows)
     return rows
 
 
