@@ -2177,12 +2177,16 @@ async function stopCatalogEnrich() {
   if (msg) msg.textContent = 'Arrêt demandé…';
 }
 
+// Token so an old poll loop stops cleanly if the user picks another PDF.
+let _planoParseToken = 0;
+
 async function parsePlanogramPDF(input) {
   const file = input.files[0];
   input.value = '';
   if (!file) return;
+  const token = ++_planoParseToken;
   const msg = document.getElementById('planoMsg');
-  msg.textContent = 'Analyse en cours…';
+  msg.textContent = 'Envoi du PDF…';
   msg.style.color = '#64748b';
   document.getElementById('planoConfig').style.display = 'none';
   planoData = null;
@@ -2190,13 +2194,47 @@ async function parsePlanogramPDF(input) {
   const form = new FormData();
   form.append('file', file);
   try {
+    // The server parses in the BACKGROUND and we poll for the result: a big
+    // plano takes minutes on the server's small CPU — parsing inside the
+    // upload request hit the HTTP timeout and looked like a dead button.
     const res  = await fetch('/api/import/planogram-parse', {method:'POST', body: form});
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      msg.textContent = data.error || 'Erreur lors de l analyse.';
+    const up = await res.json();
+    if (!res.ok || !up.success || !up.job) {
+      msg.textContent = up.error || 'Erreur lors de l analyse.';
       msg.style.color = '#c8102e';
       return;
     }
+    const t0 = Date.now();
+    let data = null;
+    while (Date.now() - t0 < 8 * 60 * 1000) {           // up to 8 min for a huge plano
+      await new Promise(r => setTimeout(r, 2500));
+      if (token !== _planoParseToken) return;           // user picked another PDF
+      let sj = null;
+      try {
+        const sr = await fetch(`/api/import/planogram-parse/status/${up.job}`, {cache: 'no-store'});
+        sj = await sr.json();
+      } catch (e) { continue; }                          // transient network — keep polling
+      if (!sj) continue;
+      if (sj.status === 'error') {
+        msg.textContent = sj.error || 'Erreur lors de l analyse.';
+        msg.style.color = '#c8102e';
+        return;
+      }
+      if (sj.status === 'done') { data = sj; break; }
+      if (sj.status === 'unknown') {
+        msg.textContent = sj.error || 'Analyse perdue — re-choisissez le PDF.';
+        msg.style.color = '#c8102e';
+        return;
+      }
+      const s = Math.round((Date.now() - t0) / 1000);
+      msg.textContent = `Analyse en cours… ${s}s (un gros plano peut prendre 1 à 3 minutes — restez sur cette page)`;
+    }
+    if (!data) {
+      msg.textContent = 'L analyse prend trop de temps. Réessayez dans une minute.';
+      msg.style.color = '#c8102e';
+      return;
+    }
+    if (token !== _planoParseToken) return;
     planoData = data;
     // Every parsed line is a plano product by default (editable in the preview).
     (planoData.products || []).forEach(p => { if (p.is_plano === undefined) p.is_plano = true; });

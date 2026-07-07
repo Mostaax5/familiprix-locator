@@ -2,6 +2,9 @@ import json
 import re
 import os
 import gc
+import time
+import uuid
+import tempfile
 import threading
 from flask import Blueprint, request, jsonify, Response
 from database import get_db, DatabaseIntegrityError
@@ -12,6 +15,114 @@ import_export_bp = Blueprint("import_export", __name__)
 # Serialize PDF parsing across worker threads — pdfplumber is memory-heavy and two
 # concurrent parses can exhaust Render's 512 MB instance (see parse_planogram_pdf).
 _PDF_PARSE_LOCK = threading.Lock()
+
+# ── Async parse jobs ─────────────────────────────────────────────────────────────
+# A big planogram takes MINUTES to parse on Render's small CPU — far past any HTTP
+# timeout, so a synchronous upload died with "Erreur réseau" even though the app
+# was healthy. The upload now just STORES the PDF and returns a job id; a background
+# thread parses it (memory-safe: streaming + one at a time) and the phone polls the
+# status endpoint. Jobs live as files in the temp dir so they survive a gunicorn
+# worker recycle; if the worker died mid-parse (pid changed), the poll relaunches
+# the parse from the stored PDF — self-healing, never stuck.
+_JOBS_DIR = os.path.join(tempfile.gettempdir(), "plano-parse-jobs")
+_JOB_MAX_AGE_S = 6 * 3600
+
+
+def _job_paths(job_id):
+    return (os.path.join(_JOBS_DIR, f"{job_id}.json"),
+            os.path.join(_JOBS_DIR, f"{job_id}.pdf"))
+
+
+def _write_job(job_id, payload):
+    os.makedirs(_JOBS_DIR, exist_ok=True)
+    path = _job_paths(job_id)[0]
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False)
+    os.replace(tmp, path)   # atomic: a poll never sees a half-written file
+
+
+def _read_job(job_id):
+    try:
+        with open(_job_paths(job_id)[0], "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def _cleanup_old_jobs():
+    try:
+        cutoff = time.time() - _JOB_MAX_AGE_S
+        for name in os.listdir(_JOBS_DIR):
+            path = os.path.join(_JOBS_DIR, name)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _launch_parse_thread(job_id):
+    """Parse the job's stored PDF in a background thread and write the result."""
+    def worker():
+        json_path, pdf_path = _job_paths(job_id)
+        try:
+            import pdfplumber
+            import io as _io
+            with open(pdf_path, "rb") as fh:
+                pdf_bytes = fh.read()
+            plano_meta = {"name": "", "number": "", "version": ""}
+            parser = _PlanogramParser()
+            # One PDF at a time — two concurrent pdfplumber parses can exhaust
+            # the 512 MB instance. A queued job just waits here.
+            with _PDF_PARSE_LOCK:
+                with pdfplumber.open(_io.BytesIO(pdf_bytes)) as pdf:
+                    del pdf_bytes
+                    try:
+                        head = pdf.pages[0].extract_text() or ""
+                        m = re.search(r"PLANOGRAMME\s*:\s*([^\n]+)", head, re.IGNORECASE)
+                        if m: plano_meta["name"] = m.group(1).strip()[:120]
+                        m = re.search(r"Plano\s*#\s*([0-9]+)", head, re.IGNORECASE)
+                        if m: plano_meta["number"] = m.group(1).strip()
+                        m = re.search(r"Version\s*#\s*([A-Za-z0-9]+)", head, re.IGNORECASE)
+                        if m: plano_meta["version"] = m.group(1).strip()
+                    except Exception:
+                        pass
+                    # Stream: parse then FREE each page so the whole PDF is never
+                    # held in memory (this is what OOM'd the 512 MB instance).
+                    for page in pdf.pages:
+                        for table in (page.extract_tables() or []):
+                            parser.feed_table(table)
+                        try:
+                            page.flush_cache()
+                            page.get_textmap.cache_clear()
+                        except Exception:
+                            pass
+            products = parser.result()
+            tablettes = {}
+            for p in products:
+                t = str(p["tablette"])
+                tablettes[t] = tablettes.get(t, 0) + 1
+            _write_job(job_id, {"status": "done", "success": True,
+                                "products": products, "count": len(products),
+                                "tablettes": tablettes, "plano": plano_meta})
+            try:
+                os.remove(pdf_path)   # done — the stored PDF is no longer needed
+            except OSError:
+                pass
+        except Exception as exc:
+            _write_job(job_id, {"status": "error", "success": False,
+                                "error": f"Erreur d’analyse PDF: {exc}"})
+            try:
+                os.remove(pdf_path)
+            except OSError:
+                pass
+        finally:
+            gc.collect()   # reclaim pdfplumber's many small objects now
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -273,9 +384,11 @@ def parse_planogram_tables(tables):
 
 @import_export_bp.route("/api/import/planogram-parse", methods=["POST"])
 def parse_planogram_pdf():
+    """Accept the PDF, store it, launch the background parse, return a job id
+    IMMEDIATELY. A big plano takes minutes on this CPU — parsing inside the
+    request timed out at every layer while looking like a dead button."""
     try:
-        import pdfplumber
-        import io as _io
+        import pdfplumber  # noqa: F401 — fail fast if the parser isn't available
     except ImportError:
         return jsonify({"success": False, "error": "pdfplumber n’est pas installe sur ce serveur."}), 503
 
@@ -285,52 +398,32 @@ def parse_planogram_pdf():
     if not f.filename.lower().endswith(".pdf"):
         return jsonify({"success": False, "error": "Le fichier doit etre un PDF."}), 400
 
-    plano_meta = {"name": "", "number": "", "version": ""}
-    parser = _PlanogramParser()
+    _cleanup_old_jobs()
+    job_id = uuid.uuid4().hex[:12]
+    json_path, pdf_path = _job_paths(job_id)
+    os.makedirs(_JOBS_DIR, exist_ok=True)
+    f.save(pdf_path)
+    _write_job(job_id, {"status": "running", "pid": os.getpid(), "created": time.time()})
+    _launch_parse_thread(job_id)
+    return jsonify({"success": True, "job": job_id})
 
-    # Only ONE PDF parses at a time. pdfplumber peaks at hundreds of MB on a
-    # multi-MB planogram; two concurrent uploads (8 worker threads) stacking their
-    # peaks is what pushed Render's 512 MB instance over the edge. Serializing makes
-    # a second uploader wait a few seconds instead of crashing the whole app.
-    with _PDF_PARSE_LOCK:
-        try:
-            with pdfplumber.open(_io.BytesIO(f.read())) as pdf:
-                # Plano identity from the cover page text (best-effort).
-                try:
-                    head = pdf.pages[0].extract_text() or ""
-                    m = re.search(r"PLANOGRAMME\s*:\s*([^\n]+)", head, re.IGNORECASE)
-                    if m: plano_meta["name"] = m.group(1).strip()[:120]
-                    m = re.search(r"Plano\s*#\s*([0-9]+)", head, re.IGNORECASE)
-                    if m: plano_meta["number"] = m.group(1).strip()
-                    m = re.search(r"Version\s*#\s*([A-Za-z0-9]+)", head, re.IGNORECASE)
-                    if m: plano_meta["version"] = m.group(1).strip()
-                except Exception:
-                    pass
 
-                # Extract each page's tables, feed them to the streaming parser, then
-                # FREE the page's cached objects before moving on — so we never hold
-                # the whole PDF in memory. State carries across page breaks in parser.
-                for page in pdf.pages:
-                    for table in (page.extract_tables() or []):
-                        parser.feed_table(table)
-                    try:
-                        page.flush_cache()          # drop pdfplumber's per-page object cache
-                        page.get_textmap.cache_clear()
-                    except Exception:
-                        pass
-        except Exception as exc:
-            gc.collect()
-            return jsonify({"success": False, "error": f"Erreur d’analyse PDF: {exc}"}), 500
-
-    products = parser.result()
-    gc.collect()   # reclaim the many small pdfplumber objects now, not eventually
-    tablettes = {}
-    for p in products:
-        t = str(p["tablette"])
-        tablettes[t] = tablettes.get(t, 0) + 1
-
-    return jsonify({"success": True, "products": products, "count": len(products),
-                    "tablettes": tablettes, "plano": plano_meta})
+@import_export_bp.route("/api/import/planogram-parse/status/<job_id>", methods=["GET"])
+def parse_planogram_status(job_id):
+    if not re.fullmatch(r"[0-9a-f]{12}", str(job_id or "")):
+        return jsonify({"success": False, "error": "Job invalide."}), 400
+    job = _read_job(job_id)
+    if job is None:
+        return jsonify({"success": False, "status": "unknown",
+                        "error": "Analyse introuvable ou expirée. Re-choisissez le PDF."}), 404
+    if job.get("status") == "running":
+        # Self-heal: if the worker that started the parse was recycled mid-job
+        # (pid changed), the thread died with it — relaunch from the stored PDF.
+        if job.get("pid") != os.getpid() and os.path.exists(_job_paths(job_id)[1]):
+            _write_job(job_id, {**job, "pid": os.getpid()})
+            _launch_parse_thread(job_id)
+        return jsonify({"success": True, "status": "running"})
+    return jsonify(job)
 
 
 @import_export_bp.route("/api/import/planogram-catalog", methods=["POST"])

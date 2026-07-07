@@ -71,7 +71,10 @@ def handle_any_error(exc):
         return exc
     traceback.print_exc()
     if request.path.startswith("/api/"):
-        return jsonify({"success": False, "error": "Erreur interne du serveur."}), 500
+        # detail = exception type + message so failures are diagnosable from the
+        # response itself (Render log access is not always at hand).
+        return jsonify({"success": False, "error": "Erreur interne du serveur.",
+                        "detail": f"{type(exc).__name__}: {exc}"[:300]}), 500
     return "Erreur interne du serveur.", 500
 
 
