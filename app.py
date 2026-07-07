@@ -88,6 +88,7 @@ def add_security_headers(response):
 
 @app.route("/api/system/info", methods=["GET"])
 def get_system_info():
+    from database import pool_stats
     ai_provider = configured_ai_provider()
     try:
         db = get_db()
@@ -96,7 +97,8 @@ def get_system_info():
         return jsonify({
             **get_backend_summary(),
             "db_unreachable": True,
-            "db_error": DB_BOOT_ERROR or str(exc),
+            "db_error": f"{type(exc).__name__}: {DB_BOOT_ERROR or exc}",
+            "pool": pool_stats(),
             "ai_enabled": bool(ai_provider["name"]),
             "ai_provider": ai_provider["name"],
             "ai_provider_label": ai_provider["label"],

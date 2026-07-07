@@ -1285,16 +1285,14 @@ def reference_save(product):
 
 
 def reference_count():
-    from database import connect_db
-    db = connect_db()
+    # get_db(): inside a request this REUSES the request's connection instead of
+    # checking a second one out of the pool (system/info did that on every ping).
     try:
+        db = get_db()
         row = db.execute("SELECT COUNT(*) AS c FROM product_reference").fetchone()
         return int(dict(row).get("c", 0)) if row else 0
     except Exception:
         return 0
-    finally:
-        try: db.close()
-        except Exception: pass
 
 
 def _seed_reference_worker(jobs, pages, page_size):

@@ -114,13 +114,28 @@ def _get_pg_pool():
     return _PG_POOL
 
 
+def pool_stats():
+    """Live pool statistics (for /api/system/info diagnostics)."""
+    if _PG_POOL is None:
+        return None
+    try:
+        return _PG_POOL.get_stats()
+    except Exception:
+        return None
+
+
 def connect_db():
     if DB_BACKEND == "postgres":
         if psycopg is None:
             raise RuntimeError("psycopg is required when DATABASE_URL is set.")
         if ConnectionPool is not None:
             pool = _get_pg_pool()
-            return DatabaseConnection(pool.getconn(), "postgres", pool=pool)
+            try:
+                return DatabaseConnection(pool.getconn(), "postgres", pool=pool)
+            except Exception as exc:  # PoolTimeout/pool trouble — NEVER block the app on it
+                print(f"[DB] pool indisponible ({exc}) — connexion directe de secours. stats={pool_stats()}")
+                conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=15)
+                return DatabaseConnection(conn, "postgres")
         conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
         return DatabaseConnection(conn, "postgres")
 
