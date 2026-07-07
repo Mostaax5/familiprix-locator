@@ -99,21 +99,30 @@ async function apiGetLayoutAisles() {
 }
 
 async function apiCreateLayoutAisle(payload) {
-  const {res, data} = await apiFetch('/api/layout/aisles', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-    body: JSON.stringify(payload)
-  });
-  return res.ok ? data : {success: false, error: data.error || 'Erreur de creation d allée.'};
+  try {
+    const {res, data} = await apiFetch('/api/layout/aisles', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: JSON.stringify(payload)
+    });
+    return res.ok ? data : {success: false, error: data.error || 'Erreur de creation d allée.'};
+  } catch (e) {
+    // Without this, a network blip made « Créer l'allée » die silently.
+    return {success: false, error: 'Impossible de créer l’allée pour le moment (réseau).'};
+  }
 }
 
 async function apiUpdateLayoutAisle(aisle, payload) {
-  const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}`, {
-    method: 'PUT',
-    headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-    body: JSON.stringify(payload)
-  });
-  return res.ok ? data : {success: false, error: data.error || 'Erreur de mise a jour d allée.'};
+  try {
+    const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}`, {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: JSON.stringify(payload)
+    });
+    return res.ok ? data : {success: false, error: data.error || 'Erreur de mise a jour d allée.'};
+  } catch (e) {
+    return {success: false, error: 'Impossible de sauvegarder l’allée pour le moment (réseau).'};
+  }
 }
 
 async function apiDeleteLayoutAisle(aisle) {

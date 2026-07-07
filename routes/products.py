@@ -737,7 +737,7 @@ def add_product():
     username, error = require_editor()
     if error:
         return error
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     name     = data.get("name", "").strip()
     brand    = data.get("brand", "").strip()
     description = data.get("description", "").strip()
@@ -806,7 +806,10 @@ def update_product(product_id):
     username, error = require_editor()
     if error:
         return error
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    missing = [k for k in ("name", "aisle", "side", "shelf", "position") if not str(data.get(k, "")).strip()]
+    if missing:
+        return jsonify({"error": f"Champs obligatoires manquants: {', '.join(missing)}"}), 400
     db = get_db()
     existing = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
     if not existing:
