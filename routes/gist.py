@@ -38,10 +38,30 @@ def _build_backup_payload(db):
     }
 
 
+def _gist_file_content(file_info):
+    """Full content of a gist file. GitHub's API TRUNCATES `content` above ~1 MB
+    (a store of ~1000 products is right at that size) — a truncated backup would
+    parse as broken JSON and the restore would silently fail. When flagged
+    truncated, fetch the raw_url which always returns the whole file."""
+    if not file_info:
+        return None
+    if file_info.get("truncated") and file_info.get("raw_url"):
+        req = Request(
+            file_info["raw_url"],
+            headers={"Authorization": f"token {GITHUB_TOKEN}",
+                     "X-GitHub-Api-Version": "2022-11-28"},
+        )
+        with urlopen(req, timeout=30) as resp:
+            return resp.read().decode("utf-8")
+    return file_info.get("content")
+
+
 def _push_to_gist(payload):
     if not GITHUB_TOKEN:
         return False, "GITHUB_TOKEN non configure"
-    content = json.dumps(payload, ensure_ascii=False, indent=2)
+    # Compact JSON (no indentation): pretty-printing doubled the size and pushed
+    # the backup toward GitHub's 1 MB API-read threshold (see _gist_file_content).
+    content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     body = json.dumps({
         "description": "Familiprix Locator - sauvegarde automatique",
         "public": False,
@@ -139,10 +159,11 @@ def _restore_from_gist_if_empty():
         with urlopen(req, timeout=15) as resp:
             gist = json.loads(resp.read())
         file_info = gist.get("files", {}).get(_GIST_FILENAME)
-        if not file_info:
+        content = _gist_file_content(file_info)
+        if not content:
             db.close()
             return
-        payload = json.loads(file_info["content"])
+        payload = json.loads(content)
         if payload.get("export_version") != 1:
             db.close()
             return
@@ -241,9 +262,10 @@ def gist_restore_now():
         with urlopen(req, timeout=15) as resp:
             gist = json.loads(resp.read())
         file_info = gist.get("files", {}).get(_GIST_FILENAME)
-        if not file_info:
+        content = _gist_file_content(file_info)
+        if not content:
             return jsonify({"success": False, "error": "Fichier de sauvegarde introuvable dans le gist."}), 404
-        payload = json.loads(file_info["content"])
+        payload = json.loads(content)
     except Exception as exc:
         return jsonify({"success": False, "error": f"Impossible de lire le gist: {exc}"}), 500
     if payload.get("export_version") != 1:
