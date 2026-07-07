@@ -2163,8 +2163,10 @@ async function pollCatalogEnrich() {
     if (!s.running && !s.total && !s.done) {
       msg.textContent = 'Rien à enrichir pour le moment (déjà fait, ou attendez la fin du déploiement puis réessayez).';
     } else {
-      msg.innerHTML = `${s.running ? '⏳ En cours…' : '✓ Terminé —'} ${s.done || 0}/${s.total || 0} (${pct}%) · `
-        + `<b>${s.updated || 0}</b> descriptions/images ajoutées · ${s.skipped || 0} sans correspondance fiable`;
+      const eta = (s.running && s.eta_minutes > 0) ? ` · ≈ ${s.eta_minutes} min restantes` : '';
+      const resumed = s.resumed ? ' (reprise automatique après redémarrage)' : '';
+      msg.innerHTML = `${s.running ? '⏳ En cours…' : '✓ Terminé —'} ${s.done || 0}/${s.total || 0} (${pct}%)${eta} · `
+        + `<b>${s.updated || 0}</b> descriptions/images ajoutées · ${s.skipped || 0} sans correspondance fiable${resumed}`;
     }
   }
   const stop = document.getElementById('catalogEnrichStop');

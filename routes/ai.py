@@ -1476,12 +1476,43 @@ def reference_count_route():
 _CATALOG_ENRICH = {"running": False, "done": 0, "total": 0, "updated": 0, "skipped": 0}
 
 
+_ENRICH_CHUNK = 25       # lookups submitted per batch — Stop reacts within one batch
+_ENRICH_WORKERS = 5      # parallel ONLINE lookups (network-bound); DB writes stay
+                         # on the single worker thread so commits remain per-row
+
+
+def _enrich_marker_path():
+    import tempfile
+    return os.path.join(tempfile.gettempdir(), "familiprix-enrich.json")
+
+
+def _write_enrich_marker():
+    """Progress snapshot on disk: it survives a gunicorn worker recycle, so the
+    status endpoint can detect a dead run (pid changed) and RESUME it alone."""
+    try:
+        with open(_enrich_marker_path(), "w", encoding="utf-8") as fh:
+            json.dump({**_CATALOG_ENRICH, "pid": os.getpid()}, fh)
+    except OSError:
+        pass
+
+
+def _read_enrich_marker():
+    try:
+        with open(_enrich_marker_path(), "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
 def _catalog_enrich_worker():
     """Fill in real descriptions + images for catalogue products from the online
     databases, in the background. Each online result is validated against the Familiprix
-    name (online_matches_catalog) so a WRONG product is never attached. Resumable: only
-    processes rows that still have no description."""
-    import time as _time
+    name (online_matches_catalog) so a WRONG product is never attached — the validation
+    is unchanged; only the FETCHING is parallel (5 at a time, it was 1 by 1 with a
+    sleep: ~6-7h for the catalogue, now well under 2h). Every row is committed
+    individually, so progress survives any crash, and re-runs only process rows that
+    still have no description."""
+    from concurrent.futures import ThreadPoolExecutor
     from database import connect_db
     db = None
     try:
@@ -1492,40 +1523,48 @@ def _catalog_enrich_worker():
             "SELECT barcode, name, brand FROM product_reference "
             "WHERE TRIM(COALESCE(description,'')) = '' AND TRIM(COALESCE(enrich_status,'')) = '' "
             "AND TRIM(COALESCE(name,'')) <> ''").fetchall()]
-        _CATALOG_ENRICH.update(total=len(rows), done=0, updated=0, skipped=0, running=True)
-        for r in rows:
-            if not _CATALOG_ENRICH["running"]:
-                break
-            bc = r.get("barcode", "")
+        _CATALOG_ENRICH.update(total=len(rows), done=0, updated=0, skipped=0,
+                               running=True, started_at=time.time())
+        _write_enrich_marker()
+
+        def _lookup(r):
             try:
-                online = lookup_product_online(bc)
+                return r, lookup_product_online(r.get("barcode", ""))
             except Exception:
-                online = None
-            if online and online_matches_catalog(r.get("name", ""), r.get("brand", ""), online):
-                db.execute(
-                    """UPDATE product_reference SET
-                         description   = CASE WHEN TRIM(COALESCE(description,'')) = '' THEN ? ELSE description END,
-                         image_url     = CASE WHEN TRIM(COALESCE(image_url,''))   = '' THEN ? ELSE image_url END,
-                         brand         = CASE WHEN TRIM(COALESCE(brand,''))       = '' THEN ? ELSE brand END,
-                         enrich_status = 'done', updated_at = ?
-                       WHERE barcode = ?""",
-                    (str(online.get("description", "")).strip(), str(online.get("image_url", "")).strip(),
-                     str(online.get("brand", "")).strip(), utc_now_iso(), bc),
-                )
-                db.commit()
-                _CATALOG_ENRICH["updated"] += 1
-            else:
-                # Tag it so we know it still needs a real description (downloadable list).
-                db.execute("UPDATE product_reference SET enrich_status='no_match', updated_at=? WHERE barcode=?",
-                           (utc_now_iso(), bc))
-                db.commit()
-                _CATALOG_ENRICH["skipped"] += 1
-            _CATALOG_ENRICH["done"] += 1
-            _time.sleep(0.15)   # be gentle on the free open databases
+                return r, None
+
+        with ThreadPoolExecutor(max_workers=_ENRICH_WORKERS) as pool:
+            for i in range(0, len(rows), _ENRICH_CHUNK):
+                if not _CATALOG_ENRICH["running"]:
+                    break
+                for r, online in pool.map(_lookup, rows[i:i + _ENRICH_CHUNK]):
+                    bc = r.get("barcode", "")
+                    if online and online_matches_catalog(r.get("name", ""), r.get("brand", ""), online):
+                        db.execute(
+                            """UPDATE product_reference SET
+                                 description   = CASE WHEN TRIM(COALESCE(description,'')) = '' THEN ? ELSE description END,
+                                 image_url     = CASE WHEN TRIM(COALESCE(image_url,''))   = '' THEN ? ELSE image_url END,
+                                 brand         = CASE WHEN TRIM(COALESCE(brand,''))       = '' THEN ? ELSE brand END,
+                                 enrich_status = 'done', updated_at = ?
+                               WHERE barcode = ?""",
+                            (str(online.get("description", "")).strip(), str(online.get("image_url", "")).strip(),
+                             str(online.get("brand", "")).strip(), utc_now_iso(), bc),
+                        )
+                        db.commit()
+                        _CATALOG_ENRICH["updated"] += 1
+                    else:
+                        # Tag it so we know it still needs a real description (downloadable list).
+                        db.execute("UPDATE product_reference SET enrich_status='no_match', updated_at=? WHERE barcode=?",
+                                   (utc_now_iso(), bc))
+                        db.commit()
+                        _CATALOG_ENRICH["skipped"] += 1
+                    _CATALOG_ENRICH["done"] += 1
+                _write_enrich_marker()   # once per batch — the resume checkpoint
     except Exception:
         pass
     finally:
         _CATALOG_ENRICH["running"] = False
+        _write_enrich_marker()
         if db is not None:
             try: db.close()
             except Exception: pass
@@ -1557,7 +1596,27 @@ def catalog_enrich_start():
 
 @ai_bp.route("/api/import/catalog-enrich/status", methods=["GET"])
 def catalog_enrich_status():
-    return jsonify(dict(_CATALOG_ENRICH))
+    state = dict(_CATALOG_ENRICH)
+    if not state.get("running"):
+        # Self-heal: the marker says a run was active in ANOTHER process (worker
+        # recycle/restart killed its thread mid-run). Progress is already committed
+        # row by row — just relaunch; the worker naturally resumes on what's left.
+        marker = _read_enrich_marker()
+        if marker and marker.get("running") and marker.get("pid") != os.getpid():
+            _CATALOG_ENRICH.update(running=True, done=0, updated=0, skipped=0,
+                                   total=0, started_at=time.time())
+            _write_enrich_marker()
+            import threading
+            threading.Thread(target=_catalog_enrich_worker, daemon=True).start()
+            state = dict(_CATALOG_ENRICH)
+            state["resumed"] = True
+    if state.get("running") and state.get("done") and state.get("started_at"):
+        elapsed = max(1.0, time.time() - float(state["started_at"]))
+        rate = state["done"] / elapsed
+        remaining = max(0, int(state.get("total", 0)) - int(state["done"]))
+        state["eta_minutes"] = int(round(remaining / max(rate, 0.01) / 60))
+    state.pop("started_at", None)
+    return jsonify(state)
 
 
 @ai_bp.route("/api/import/catalog-enrich/stop", methods=["POST"])
@@ -1566,6 +1625,7 @@ def catalog_enrich_stop():
     if error:
         return error
     _CATALOG_ENRICH["running"] = False
+    _write_enrich_marker()   # a deliberate stop must NOT be auto-resumed
     return jsonify({"success": True})
 
 
