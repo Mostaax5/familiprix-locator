@@ -1043,6 +1043,12 @@ def plan_planogram_flow(config, side, start_section, start_tablette, lines, shri
 
     placements = []
     overflow = 0
+    # STORE CONVENTION: positions always count from the Façade A end toward the
+    # Façade B end, on BOTH côtés. A planogram reads left→right as you FACE the
+    # shelf, which on Côté A (Gauche) runs Façade B→A — so its positions must be
+    # MIRRORED within each tablette (plano position 1 becomes the last position).
+    # Côté B and the fixture sides keep the plano's numbering unchanged.
+    mirror_positions = (side == "Gauche")
     for idx, ptab in enumerate(sorted(by_tablette.keys())):
         shelf_lines = sorted(by_tablette[ptab], key=lambda l: l["position"])
         if idx >= len(slots):
@@ -1055,7 +1061,8 @@ def plan_planogram_flow(config, side, start_section, start_tablette, lines, shri
         if shrink or max_pos > container["shelves"][ti]:
             container["shelves"][ti] = max_pos
         for ln in shelf_lines:
-            placements.append((sec_no, ti + 1, ln["position"], ln))
+            pos = (max_pos + 1 - ln["position"]) if mirror_positions else ln["position"]
+            placements.append((sec_no, ti + 1, pos, ln))
     return placements, overflow
 
 

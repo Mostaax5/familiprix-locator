@@ -2348,11 +2348,20 @@ function computePlanoFlow(config, side, startSection, startTablette, tabStart, t
     if (!byTab.has(p.tablette)) byTab.set(p.tablette, []);
     byTab.get(p.tablette).push(idx);
   });
+  // STORE CONVENTION (mirror of the server): positions always count from the
+  // Façade A end toward Façade B, on BOTH côtés. A plano reads left→right facing
+  // the shelf, which on Côté A runs B→A — so its positions are MIRRORED there.
+  const mirrorPositions = (side === 'Gauche');
   [...byTab.keys()].sort((a, b) => a - b).forEach((t, i) => {
     const idxs = byTab.get(t).slice().sort((a, b) => (planoData.products[a].position || 0) - (planoData.products[b].position || 0));
     if (i >= slots.length) { idxs.forEach(idx => out.overflow.add(idx)); return; }
     const [secNo, ti] = slots[i];
-    idxs.forEach(idx => { out.byIdx[idx] = { section: secNo, shelf: ti + 1, position: planoData.products[idx].position }; out.placed++; });
+    const maxPos = Math.max(0, ...idxs.map(idx => planoData.products[idx].position || 0));
+    idxs.forEach(idx => {
+      const raw = planoData.products[idx].position;
+      out.byIdx[idx] = { section: secNo, shelf: ti + 1, position: mirrorPositions ? (maxPos + 1 - raw) : raw };
+      out.placed++;
+    });
   });
   return out;
 }
@@ -2457,10 +2466,10 @@ function updatePlanoPreview() {
 
   preview.innerHTML = `
     <div style="font-size:11px;color:#64748b;padding:4px 4px 6px">${side === 'Gauche'
-      ? 'Côté A : le plano remplit à partir de la section de départ <b>vers la Façade A</b> (sections décroissantes), car un planogramme se lit de gauche à droite.'
+      ? 'Côté A : le plano remplit à partir de la section de départ <b>vers la Façade A</b> (sections décroissantes) et les positions sont <b>inversées</b>, car un planogramme se lit de gauche à droite face à la tablette.'
       : side === 'Droite'
       ? 'Côté B : le plano remplit à partir de la section de départ <b>vers la Façade B</b> (sections croissantes).'
-      : `${esc(side)} : le plano remplit les tablettes de la façade à partir de la tablette de départ, vers le bas.`} Le nombre de tablettes du plan ne change pas — seul le nombre de positions par tablette s'ajuste.</div>
+      : `${esc(side)} : le plano remplit les tablettes de la façade à partir de la tablette de départ, vers le bas.`} <b>Règle du magasin : sections ET positions comptent toujours de la Façade A vers la Façade B, sur les deux côtés.</b> Le nombre de tablettes du plan ne change pas — seul le nombre de positions par tablette s'ajuste.</div>
     ${rows || '<div style="padding:10px;font-size:12px;color:#64748b">Aucun produit dans cette sélection.</div>'}
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 4px;border-top:1px solid #e2e8f0;margin-top:4px;flex-wrap:wrap">
       <button class="btn btn-outline btn-inline" style="font-size:12px;width:auto;margin:0" onclick="planoAddLine()">➕ Ajouter une ligne</button>
