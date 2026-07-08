@@ -177,8 +177,14 @@ def _abbreviation_hit(name_norm, abbrevs):
 # full re-download + re-normalization of the whole catalogue every 90 seconds and
 # made a random search pay 10-20s on Render's small CPU ("forever to load").
 _REF_GEN = 0
-_REF_CACHE = {"gen": -1, "key": None, "rows": []}
+_REF_CACHE = {"gen": -1, "key": None, "rows": [], "built_at": 0.0}
 _REF_LOCK = threading.Lock()
+# Never rebuild more often than this. The enrichment stamps updated_at on EVERY
+# row it processes, so during a run the state key changes every few seconds —
+# rebuilding the ~9k-row corpus per search allocated 40-60 MB each time and ran
+# the 512 MB instance out of memory. Serving a ≤2-minute-stale catalogue during
+# a write burst is invisible to users; the memory spike was not.
+_REF_MIN_REBUILD_S = 120.0
 
 
 def bump_reference_cache():
@@ -195,12 +201,23 @@ def _reference_state_key(db):
 
 def _reference_corpus(db):
     key = (_REF_GEN, _reference_state_key(db))
-    if _REF_CACHE["key"] == key and _REF_CACHE["rows"]:
+
+    def _fresh_enough():
+        if _REF_CACHE["key"] == key and _REF_CACHE["rows"]:
+            return True
+        # Rate-limit ONLY background write-drift (same generation): enrichment
+        # stamps rows continuously. An explicit import bumps _REF_GEN and always
+        # rebuilds immediately, so freshly imported products search instantly.
+        same_gen = bool(_REF_CACHE["rows"]) and _REF_CACHE["key"] is not None \
+            and _REF_CACHE["key"][0] == _REF_GEN
+        return same_gen and time.time() - _REF_CACHE["built_at"] < _REF_MIN_REBUILD_S
+
+    if _fresh_enough():
         return _REF_CACHE["rows"]
     # One rebuild at a time: without the lock, several concurrent searches after a
     # catalogue change would all rebuild the 9k-row corpus and stack CPU + memory.
     with _REF_LOCK:
-        if _REF_CACHE["key"] == key and _REF_CACHE["rows"]:
+        if _fresh_enough():
             return _REF_CACHE["rows"]
         rows = []
         for r in db.execute("SELECT barcode, name, brand, description, product_code FROM product_reference").fetchall():
@@ -216,7 +233,7 @@ def _reference_corpus(db):
                 "_name": name, "_brand": brand,
                 "_hay": " ".join([name, brand, desc]), "_tokens": name.split(),
             })
-        _REF_CACHE.update(key=key, rows=rows)
+        _REF_CACHE.update(key=key, rows=rows, built_at=time.time())
     return rows
 
 

@@ -1476,9 +1476,11 @@ def reference_count_route():
 _CATALOG_ENRICH = {"running": False, "done": 0, "total": 0, "updated": 0, "skipped": 0}
 
 
-_ENRICH_CHUNK = 25       # lookups submitted per batch — Stop reacts within one batch
-_ENRICH_WORKERS = 5      # parallel ONLINE lookups (network-bound); DB writes stay
-                         # on the single worker thread so commits remain per-row
+_ENRICH_CHUNK = 20       # lookups submitted per batch — Stop reacts within one batch
+_ENRICH_WORKERS = 4      # parallel ONLINE lookups (network-bound); DB writes stay
+                         # on the single worker thread so commits remain per-row.
+                         # 4 (not more): some sources return very large JSON per
+                         # product and the whole app must fit in Render's 512 MB.
 
 
 def _enrich_marker_path():
@@ -1560,6 +1562,10 @@ def _catalog_enrich_worker():
                         _CATALOG_ENRICH["skipped"] += 1
                     _CATALOG_ENRICH["done"] += 1
                 _write_enrich_marker()   # once per batch — the resume checkpoint
+                # Free the batch's parsed online payloads NOW (some sources return
+                # hundreds of KB per product) — RSS creep here OOM'd the instance.
+                import gc
+                gc.collect()
     except Exception:
         pass
     finally:
