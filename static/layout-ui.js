@@ -2163,10 +2163,18 @@ async function pollCatalogEnrich() {
     if (!s.running && !s.total && !s.done) {
       msg.textContent = 'Rien à enrichir pour le moment (déjà fait, ou attendez la fin du déploiement puis réessayez).';
     } else {
+      // A stopped run that did NOT reach the end is an interruption, not a success —
+      // saying « Terminé » at 2% hid real failures.
+      const incomplete = !s.running && s.total && (s.done || 0) < s.total;
+      msg.style.color = s.running ? '#0369a1' : (incomplete ? '#b45309' : '#16a34a');
+      const head = s.running ? '⏳ En cours…' : (incomplete ? '⚠ Interrompu —' : '✓ Terminé —');
       const eta = (s.running && s.eta_minutes > 0) ? ` · ≈ ${s.eta_minutes} min restantes` : '';
       const resumed = s.resumed ? ' (reprise automatique après redémarrage)' : '';
-      msg.innerHTML = `${s.running ? '⏳ En cours…' : '✓ Terminé —'} ${s.done || 0}/${s.total || 0} (${pct}%)${eta} · `
-        + `<b>${s.updated || 0}</b> descriptions/images ajoutées · ${s.skipped || 0} sans correspondance fiable${resumed}`;
+      const retry = incomplete
+        ? ` · <b>cliquez « Enrichir » pour continuer</b>${s.error ? ` (cause: ${esc(s.error)})` : ''}`
+        : '';
+      msg.innerHTML = `${head} ${s.done || 0}/${s.total || 0} (${pct}%)${eta} · `
+        + `<b>${s.updated || 0}</b> descriptions/images ajoutées · ${s.skipped || 0} sans correspondance fiable${resumed}${retry}`;
     }
   }
   const stop = document.getElementById('catalogEnrichStop');
