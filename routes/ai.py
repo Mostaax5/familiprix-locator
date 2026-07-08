@@ -1637,22 +1637,36 @@ def catalog_enrich_start():
     return jsonify({"success": True, "started": True, "total": _CATALOG_ENRICH["total"]})
 
 
+def maybe_resume_enrichment():
+    """Self-heal: if the marker says a run was active in ANOTHER process (worker
+    recycle/restart killed its thread mid-run), relaunch it — progress is already
+    committed row by row, so the worker naturally resumes on what's left. Called
+    from the status poll AND from /api/system/info, which the keep-alive pings hit
+    every 10 minutes: the run recovers even with every phone closed. Returns True
+    when a resume was launched."""
+    try:
+        if _CATALOG_ENRICH["running"]:
+            return False
+        marker = _read_enrich_marker()
+        if not (marker and marker.get("running") and marker.get("pid") != os.getpid()):
+            return False
+        _CATALOG_ENRICH.update(running=True, done=0, updated=0, skipped=0,
+                               total=0, started_at=time.time())
+        _CATALOG_ENRICH.pop("error", None)
+        _write_enrich_marker()
+        import threading
+        threading.Thread(target=_catalog_enrich_worker, daemon=True).start()
+        return True
+    except Exception:
+        return False
+
+
 @ai_bp.route("/api/import/catalog-enrich/status", methods=["GET"])
 def catalog_enrich_status():
+    resumed = maybe_resume_enrichment()
     state = dict(_CATALOG_ENRICH)
-    if not state.get("running"):
-        # Self-heal: the marker says a run was active in ANOTHER process (worker
-        # recycle/restart killed its thread mid-run). Progress is already committed
-        # row by row — just relaunch; the worker naturally resumes on what's left.
-        marker = _read_enrich_marker()
-        if marker and marker.get("running") and marker.get("pid") != os.getpid():
-            _CATALOG_ENRICH.update(running=True, done=0, updated=0, skipped=0,
-                                   total=0, started_at=time.time())
-            _write_enrich_marker()
-            import threading
-            threading.Thread(target=_catalog_enrich_worker, daemon=True).start()
-            state = dict(_CATALOG_ENRICH)
-            state["resumed"] = True
+    if resumed:
+        state["resumed"] = True
     if state.get("running") and state.get("done") and state.get("started_at"):
         elapsed = max(1.0, time.time() - float(state["started_at"]))
         rate = state["done"] / elapsed

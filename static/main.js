@@ -139,6 +139,9 @@ if ('serviceWorker' in navigator) {
 }
 
 document.addEventListener('keydown', handleHardwareScannerKey);
+// Any real interaction renews the 4h unlock (sliding expiry — see lock.js).
+['click', 'keydown', 'touchstart'].forEach(evt =>
+  document.addEventListener(evt, () => renewLockSession(), {passive: true}));
 document.addEventListener('focusin', event => {
   if (event.target instanceof HTMLInputElement && event.target.type === 'number') {
     selectNumericField(event.target);

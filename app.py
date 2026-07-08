@@ -6,7 +6,7 @@ from database import close_db, get_backend_summary, get_db, init_db
 from auth import utc_now_iso
 from routes.products import products_bp, first_column, schedule_backfill_missing
 from routes.layout import layout_bp
-from routes.ai import ai_bp, configured_ai_provider, reference_count
+from routes.ai import ai_bp, configured_ai_provider, reference_count, maybe_resume_enrichment
 from routes.gist import gist_bp, _restore_from_gist_if_empty
 from routes.import_export import import_export_bp
 
@@ -89,7 +89,8 @@ def add_security_headers(response):
 @app.route("/api/system/info", methods=["GET"])
 def get_system_info():
     from database import pool_stats
-    ai_provider = configured_ai_provider()
+    maybe_resume_enrichment()   # keep-alive pings land here — a dead enrichment
+    ai_provider = configured_ai_provider()   # run recovers with no page open
     try:
         db = get_db()
         db.execute("SELECT 1").fetchone()
