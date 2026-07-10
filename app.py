@@ -1,4 +1,5 @@
 import os
+import time
 import traceback
 from flask import Flask, render_template, send_from_directory, jsonify, request
 from werkzeug.exceptions import HTTPException
@@ -136,10 +137,37 @@ def get_system_info():
     })
 
 
+def _start_self_keepalive():
+    """Render's free tier sleeps the app after ~15 idle minutes; the next visitor
+    then waits 30-60s. The GitHub cron ping turned out to actually fire every
+    1-4 HOURS (GitHub throttles frequent schedules hard), so the app now pings
+    ITSELF every 5 minutes: the request goes through Render's public proxy and
+    resets the idle timer, so a running instance never sleeps. Only active where
+    Render sets RENDER_EXTERNAL_URL (never in local dev). Bonus: each ping hits
+    /api/system/info, which is also the enrichment self-heal trigger."""
+    base_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    if not base_url:
+        return
+    import threading
+    from urllib.request import urlopen
+
+    def worker():
+        while True:
+            time.sleep(300)
+            try:
+                with urlopen(f"{base_url}/api/system/info", timeout=30) as resp:
+                    resp.read()
+            except Exception:
+                pass   # transient failure — the next ping is 5 minutes away
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
 # ── Boot ───────────────────────────────────────────────────────────────────────
 
 _restore_from_gist_if_empty()
 schedule_backfill_missing()   # auto-fetch any missing product images in background
+_start_self_keepalive()
 
 if __name__ == "__main__":
     DEFAULT_CERT_PATH = os.path.join(os.path.dirname(__file__), "certs", "localhost.pem")

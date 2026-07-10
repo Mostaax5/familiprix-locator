@@ -518,10 +518,18 @@ def find_existing_image_for_barcode(db, barcode, exclude_id=None):
     return ""
 
 
+# One image-fill at a time: every planogram import schedules a fill for all its
+# new products, and back-to-back imports used to run SEVERAL fills concurrently —
+# each product lookup fanning out to 16 parallel HTTP requests. That memory bomb
+# (not the enrichment) is what kept exceeding Render's 512 MB during rebuild days.
+_IMAGE_FILL_LOCK = threading.Lock()
+
+
 def schedule_image_fill(barcodes):
     """Fetch missing product images online in a background thread — fully
-    automatic, no user action. Mirrors the gist-backup threading pattern."""
-    import threading
+    automatic, no user action. Serialized (one fill at a time) and each lookup's
+    internal fan-out is capped, so imports can be chained safely all day."""
+    import gc
     codes = [str(b).strip() for b in (barcodes or []) if str(b or "").strip()]
     codes = list(dict.fromkeys(codes))
     if not codes:
@@ -530,26 +538,30 @@ def schedule_image_fill(barcodes):
     def worker():
         from database import connect_db
         from routes.ai import lookup_product_online
-        db = connect_db()
-        try:
-            for bc in codes:
-                try:
-                    # already has an image for this barcode? reuse it; else look up online
-                    img = find_existing_image_for_barcode(db, bc)
-                    if not img:
-                        product = lookup_product_online(bc)
-                        img = str((product or {}).get("image_url", "")).strip()
-                    if img:
-                        db.execute(
-                            "UPDATE products SET image_url=? WHERE barcode=? AND TRIM(COALESCE(image_url,'')) = ''",
-                            (img, bc)
-                        )
-                        db.commit()
-                except Exception:
-                    pass
-        finally:
-            try: db.close()
-            except Exception: pass
+        with _IMAGE_FILL_LOCK:
+            db = connect_db()
+            try:
+                for i, bc in enumerate(codes):
+                    try:
+                        # already has an image for this barcode? reuse it; else look up online
+                        img = find_existing_image_for_barcode(db, bc)
+                        if not img:
+                            product = lookup_product_online(bc, max_workers=6)   # capped fan-out
+                            img = str((product or {}).get("image_url", "")).strip()
+                        if img:
+                            db.execute(
+                                "UPDATE products SET image_url=? WHERE barcode=? AND TRIM(COALESCE(image_url,'')) = ''",
+                                (img, bc)
+                            )
+                            db.commit()
+                    except Exception:
+                        pass
+                    if i % 20 == 19:
+                        gc.collect()   # free the parsed lookup payloads promptly
+            finally:
+                try: db.close()
+                except Exception: pass
+                gc.collect()
 
     threading.Thread(target=worker, daemon=True).start()
 
