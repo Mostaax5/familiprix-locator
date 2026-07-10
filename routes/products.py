@@ -1056,15 +1056,24 @@ def plan_planogram_flow(config, side, start_section, start_tablette, lines, shri
         # products always store section '1'.
         for ti in range(max(0, start_tablette - 1), len(fixture.get("shelves", []))):
             slots.append((fixture, 1, ti))
-    else:
-        sections = ((config.get("sides", {}) or {}).get(side, {}) or {}).get("sections", [])
+    single_sided = False
+    if fixture is None:
+        sides_cfg = (config.get("sides", {}) or {})
+        sections = (sides_cfg.get(side, {}) or {}).get("sections", [])
+        other = "Droite" if side == "Gauche" else "Gauche"
+        # A one-sided "aisle" (Labo, Caisse, a wall/counter…) has no opposite côté,
+        # so it has no real Façade A/B ends: it is read PLAINLY left→right —
+        # ascending sections and positions exactly as the planogram numbers them.
+        # The Façade-anchored direction rule only applies to real two-sided aisles.
+        single_sided = not ((sides_cfg.get(other, {}) or {}).get("sections", []))
         # Direction: a planogram reads left→right, which for Côté A (Gauche) runs from the
         # Façade B end toward Façade A — the OPPOSITE of the section numbering (section 1 is
         # the Façade A end). So Côté A fills sections DESCENDING from the start section down
         # to section 1; Côté B (Droite) fills ASCENDING (Façade A → Façade B). Tablettes are
         # vertical shelves and keep their top-to-bottom order — only the section order flips.
         start_idx = min(max(0, start_section - 1), max(0, len(sections) - 1))
-        section_indices = range(start_idx, -1, -1) if side == "Gauche" else range(start_idx, len(sections))
+        descending = (side == "Gauche" and not single_sided)
+        section_indices = range(start_idx, -1, -1) if descending else range(start_idx, len(sections))
         for si in section_indices:
             shelf_count = len(sections[si].get("shelves", []))
             first_t = (start_tablette - 1) if si == start_idx else 0
@@ -1082,8 +1091,8 @@ def plan_planogram_flow(config, side, start_section, start_tablette, lines, shri
     # Façade B end, on BOTH côtés. A planogram reads left→right as you FACE the
     # shelf, which on Côté A (Gauche) runs Façade B→A — so its positions must be
     # MIRRORED within each tablette (plano position 1 becomes the last position).
-    # Côté B and the fixture sides keep the plano's numbering unchanged.
-    mirror_positions = (side == "Gauche")
+    # Côté B, one-sided walls and the fixture sides keep the plano's numbering.
+    mirror_positions = (side == "Gauche" and not single_sided)
     for idx, ptab in enumerate(sorted(by_tablette.keys())):
         shelf_lines = sorted(by_tablette[ptab], key=lambda l: l["position"])
         if idx >= len(slots):
