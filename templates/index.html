@@ -194,15 +194,15 @@
 <div id="client" class="section content">
   <div class="card">
     <div class="section-title">Questions client</div>
-    <div class="section-note">Écrivez la demande complète. L’IA la comprend, cherche dans la base, retire les résultats non pertinents et prépare la réponse.</div>
+    <div class="section-note">Écrivez la demande complète. L’IA comprend la conversation; les produits viennent uniquement du plan actuel du magasin.</div>
     <div class="field">
       <label class="label" for="clientQuestion">Demande du client</label>
-      <textarea id="clientQuestion" placeholder="Ex: J’ai besoin d’Advile, ou donne-moi tous les laits fruités et explique les différences" oninput="onClientQuestionInput()"></textarea>
+      <textarea id="clientQuestion" placeholder="Ex: Quels Advil avons-nous et quelles sont les différences?" oninput="onClientQuestionInput()"></textarea>
     </div>
     <div class="tool-row">
       <button class="btn btn-inline" id="clientFindButton" onclick="findClientProducts()">Trouver produits</button>
     </div>
-    <div id="clientHelpStatus" class="inline-note">Écrivez la demande du client, puis cliquez sur « Trouver produits ».</div>
+    <div id="clientHelpStatus" class="inline-note">Après la réponse, posez une autre question pour préciser ou comparer.</div>
   </div>
   <div id="clientAdvice"></div>
   <div id="clientMatches"></div>

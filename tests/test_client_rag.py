@@ -3,7 +3,11 @@ from unittest.mock import patch
 
 from app import app
 from routes.ai import normalize_verified_client_answer
-from routes.products import hybrid_client_candidates, normalize_search_text
+from routes.products import (
+    find_existing_image_for_barcode,
+    hybrid_client_candidates,
+    normalize_search_text,
+)
 
 
 def search_row(name, brand="", description="", barcode=""):
@@ -45,6 +49,48 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertEqual([item["name"] for item in matches], ["Advil Extra Fort"])
 
+    def test_duplicate_plan_positions_are_one_product_with_all_locations(self):
+        first = {
+            "id": 1, "name": "Advil", "brand": "Advil", "barcode": "111",
+            "aisle": "2", "side": "Gauche", "section": "1", "shelf": "2", "position": "1",
+        }
+        second = {
+            **first, "id": 2, "aisle": "5", "side": "Droite", "shelf": "3", "position": "4",
+        }
+        corpus = [
+            (first, search_row(first["name"], first["brand"], barcode="111")),
+            (second, search_row(second["name"], second["brand"], barcode="111")),
+        ]
+        plan = {
+            "corrected_query": "Advil", "search_queries": ["Advil"],
+            "keywords": ["Advil"], "must_include": ["Advil"], "exclude": [],
+        }
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            matches = hybrid_client_candidates("Advil", plan, limit=10)
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(len(matches[0]["locations"]), 2)
+
+    def test_product_can_reuse_reference_catalogue_image_by_upc(self):
+        class Result:
+            def __init__(self, row):
+                self.row = row
+
+            def fetchone(self):
+                return self.row
+
+        class FakeDb:
+            def __init__(self):
+                self.calls = 0
+
+            def execute(self, _query, _params):
+                self.calls += 1
+                return Result(None if self.calls == 1 else {"image_url": "https://example.test/advil.jpg"})
+
+        image = find_existing_image_for_barcode(FakeDb(), "12345678")
+        self.assertEqual(image, "https://example.test/advil.jpg")
+
     def test_assortment_retrieval_keeps_matching_flavours_only(self):
         strawberry = {"id": 1, "name": "Milk Strawberry", "brand": "Test", "barcode": "111"}
         banana = {"id": 2, "name": "Milk Banana", "brand": "Test", "barcode": "222"}
@@ -80,11 +126,32 @@ class ClientRagTests(unittest.TestCase):
         result = normalize_verified_client_answer(parsed, ["product:1"])
         self.assertEqual(result["selected_product_ids"], ["product:1"])
 
-    def test_client_endpoint_returns_only_verified_products(self):
+    def test_client_retrieval_never_uses_reference_catalogue(self):
+        placed = {"id": 1, "name": "Tylenol", "brand": "Tylenol", "barcode": "111"}
+        corpus = [(placed, search_row(placed["name"], placed["brand"], barcode="111"))]
+        plan = {
+            "corrected_query": "Advil", "search_queries": ["Advil"],
+            "keywords": ["Advil"], "must_include": ["Advil"], "exclude": [],
+        }
+        reference_mock = patch("routes.products._reference_corpus")
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus), \
+             reference_mock as reference:
+            matches = hybrid_client_candidates("Advil", plan, limit=10)
+
+        self.assertEqual(matches, [])
+        reference.assert_not_called()
+
+    def test_client_endpoint_returns_all_plan_matches_and_separate_highlights(self):
         candidate = {
             "id": 1, "client_id": "product:1", "name": "Advil", "brand": "Advil",
             "barcode": "111", "aisle": "2", "side": "Gauche", "section": "1",
             "shelf": "3", "position": "2", "in_stock": 1,
+        }
+        second_candidate = {
+            "id": 2, "client_id": "product:2", "name": "Advil Enfants", "brand": "Advil",
+            "barcode": "222", "aisle": "2", "side": "Gauche", "section": "1",
+            "shelf": "3", "position": "3", "in_stock": 1,
         }
         plan = {
             "intent": "specific_product", "corrected_query": "Advil",
@@ -101,16 +168,24 @@ class ClientRagTests(unittest.TestCase):
         with patch("routes.ai.configured_ai_provider", return_value={"name": "deepseek", "label": "DeepSeek", "model": "test"}), \
              patch("routes.ai._check_ai_rate_limit", return_value=True), \
              patch("routes.ai.generate_client_query_plan", return_value=plan), \
-             patch("routes.products.hybrid_client_candidates", return_value=[candidate]), \
+             patch("routes.products.hybrid_client_candidates", return_value=[candidate, second_candidate]), \
+             patch("routes.products.hydrate_candidate_images"), \
              patch("routes.ai.generate_verified_client_answer", return_value=verified), \
              patch("routes.ai.log_ai_interaction"):
             with app.test_client() as client:
-                response = client.post("/api/client/help", json={"question": "Jai besoin dadvile"})
+                response = client.post("/api/client/help", json={
+                    "question": "Et pour les enfants?",
+                    "history": [{"role": "user", "content": "Jai besoin dadvile"}],
+                })
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertTrue(payload["success"])
-        self.assertEqual([item["client_id"] for item in payload["products"]], ["product:1"])
+        self.assertEqual(
+            [item["client_id"] for item in payload["products"]],
+            ["product:1", "product:2"],
+        )
+        self.assertEqual(payload["highlighted_product_ids"], ["product:1"])
 
 
 if __name__ == "__main__":

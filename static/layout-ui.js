@@ -458,7 +458,10 @@ function loadAddDraft() {
 
 function persistClientDraft() {
   localStorage.setItem(STORAGE_KEYS.clientDraft, JSON.stringify({
-    question: document.getElementById('clientQuestion')?.value.trim() || ''
+    question: document.getElementById('clientQuestion')?.value.trim() || '',
+    conversation: (typeof getClientConversationForStorage === 'function')
+      ? getClientConversationForStorage()
+      : []
   }));
 }
 
@@ -468,6 +471,9 @@ function loadClientDraft() {
   try {
     const draft = JSON.parse(saved);
     document.getElementById('clientQuestion').value = draft.question || '';
+    if (typeof restoreClientConversation === 'function') {
+      restoreClientConversation(draft.conversation || []);
+    }
   } catch (e) {}
 }
 

@@ -20,6 +20,13 @@ function normalizeProduct(product) {
     section: String(product.section || '1').trim() || '1',
     shelf: String(product.shelf || '').trim(),
     position: String(product.position || '').trim(),
+    locations: Array.isArray(product.locations) ? product.locations.map(location => ({
+      aisle: String(location?.aisle || '').trim(),
+      side: String(location?.side || 'Gauche').trim() || 'Gauche',
+      section: String(location?.section || '1').trim() || '1',
+      shelf: String(location?.shelf || '').trim(),
+      position: String(location?.position || '').trim(),
+    })) : [],
     is_plano: Number(product.is_plano) ? 1 : 0,
     in_stock: (product.in_stock === 0 || product.in_stock === '0') ? 0 : 1,
     linked_position: String(product.linked_position || '').trim(),

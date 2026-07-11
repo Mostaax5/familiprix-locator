@@ -518,14 +518,24 @@ def find_existing_image_for_barcode(db, barcode, exclude_id=None):
         row = db.execute(q, tuple(params)).fetchone()
         if row:
             return (row["image_url"] if isinstance(row, dict) else row[0]) or ""
+    # The broad catalogue is never used as Client inventory, but an image already
+    # verified for the same UPC is safe to reuse on the real mapped product.
+    for candidate in build_barcode_candidates(barcode):
+        row = db.execute(
+            "SELECT image_url FROM product_reference "
+            "WHERE barcode=? AND TRIM(COALESCE(image_url,'')) <> '' LIMIT 1",
+            (candidate,),
+        ).fetchone()
+        if row:
+            return (row["image_url"] if isinstance(row, dict) else row[0]) or ""
     return ""
 
 
-# One image-fill at a time: every planogram import schedules a fill for all its
-# new products, and back-to-back imports used to run SEVERAL fills concurrently —
-# each product lookup fanning out to 16 parallel HTTP requests. That memory bomb
-# (not the enrichment) is what kept exceeding Render's 512 MB during rebuild days.
-_IMAGE_FILL_LOCK = threading.Lock()
+# A coalescing queue keeps exactly one image worker alive. Repeated Client searches
+# can safely request the same missing UPCs without creating waiting background threads.
+_IMAGE_FILL_STATE_LOCK = threading.Lock()
+_IMAGE_FILL_PENDING = set()
+_IMAGE_FILL_ACTIVE = False
 
 
 def schedule_image_fill(barcodes):
@@ -533,40 +543,102 @@ def schedule_image_fill(barcodes):
     automatic, no user action. Serialized (one fill at a time) and each lookup's
     internal fan-out is capped, so imports can be chained safely all day."""
     import gc
-    codes = [str(b).strip() for b in (barcodes or []) if str(b or "").strip()]
-    codes = list(dict.fromkeys(codes))
+    global _IMAGE_FILL_ACTIVE
+    codes = {str(b).strip() for b in (barcodes or []) if str(b or "").strip()}
     if not codes:
         return
 
+    with _IMAGE_FILL_STATE_LOCK:
+        _IMAGE_FILL_PENDING.update(codes)
+        if _IMAGE_FILL_ACTIVE:
+            return
+        _IMAGE_FILL_ACTIVE = True
+
     def worker():
+        global _IMAGE_FILL_ACTIVE
         from database import connect_db
         from routes.ai import lookup_product_online
-        with _IMAGE_FILL_LOCK:
+        db = None
+        processed = 0
+        try:
             db = connect_db()
-            try:
-                for i, bc in enumerate(codes):
-                    try:
-                        # already has an image for this barcode? reuse it; else look up online
-                        img = find_existing_image_for_barcode(db, bc)
-                        if not img:
-                            product = lookup_product_online(bc, max_workers=6)   # capped fan-out
-                            img = str((product or {}).get("image_url", "")).strip()
-                        if img:
+            while True:
+                with _IMAGE_FILL_STATE_LOCK:
+                    if not _IMAGE_FILL_PENDING:
+                        break
+                    bc = _IMAGE_FILL_PENDING.pop()
+                try:
+                    # Reuse an image already known for this UPC (including the
+                    # reference catalogue); only then fan out to online sources.
+                    img = find_existing_image_for_barcode(db, bc)
+                    if not img:
+                        product = lookup_product_online(bc, max_workers=6)
+                        img = str((product or {}).get("image_url", "")).strip()
+                    if img:
+                        now = utc_now_iso()
+                        updated = False
+                        for candidate in build_barcode_candidates(bc):
                             db.execute(
-                                "UPDATE products SET image_url=? WHERE barcode=? AND TRIM(COALESCE(image_url,'')) = ''",
-                                (img, bc)
+                                "UPDATE products SET image_url=?, modified_at=? "
+                                "WHERE barcode=? AND TRIM(COALESCE(image_url,'')) = ''",
+                                (img, now, candidate),
                             )
+                            updated = True
+                        if updated:
                             db.commit()
-                    except Exception:
-                        pass
-                    if i % 20 == 19:
-                        gc.collect()   # free the parsed lookup payloads promptly
-            finally:
-                try: db.close()
-                except Exception: pass
-                gc.collect()
+                except Exception:
+                    pass
+                processed += 1
+                if processed % 20 == 0:
+                    gc.collect()
+        finally:
+            try:
+                if db is not None:
+                    db.close()
+            except Exception:
+                pass
+            with _IMAGE_FILL_STATE_LOCK:
+                # A fatal connection error must not leave the queue permanently
+                # marked active; a later request can start a fresh worker.
+                _IMAGE_FILL_ACTIVE = False
+                # Do not spin-restart immediately when the database itself is down.
+                # The next normal scheduling event can retry after recovery.
+                pending_snapshot = list(_IMAGE_FILL_PENDING) if db is not None else []
+            if pending_snapshot:
+                schedule_image_fill(pending_snapshot)
+            gc.collect()
 
     threading.Thread(target=worker, daemon=True).start()
+
+
+def hydrate_candidate_images(products):
+    """Attach any already-known UPC image to mapped Client results immediately,
+    then queue only truly missing images for background lookup."""
+    db = get_db()
+    unresolved = []
+    changed = False
+    now = utc_now_iso()
+    for product in products:
+        if str(product.get("image_url", "") or "").strip():
+            continue
+        barcode = str(product.get("barcode", "") or "").strip()
+        if not barcode:
+            continue
+        image_url = find_existing_image_for_barcode(db, barcode, exclude_id=product.get("id"))
+        if image_url:
+            product["image_url"] = image_url
+            if product.get("id") is not None:
+                db.execute(
+                    "UPDATE products SET image_url=?, modified_at=? WHERE id=?",
+                    (image_url, now, product["id"]),
+                )
+                changed = True
+        else:
+            unresolved.append(barcode)
+    if changed:
+        db.commit()
+    schedule_image_fill(unresolved)
+    return products
 
 
 def integrity_conflict_message(exc):
@@ -688,46 +760,53 @@ def _client_candidate_id(item, catalog_only=False):
     return f"reference:{barcode}" if barcode else f"reference-name:{normalize_search_text(item.get('name', ''))}"
 
 
-def hybrid_client_candidates(question, query_plan, limit=45):
+def hybrid_client_candidates(question, query_plan, limit=60):
     """Agentic hybrid retrieval for the one-button Client search.
 
     The first AI pass supplies corrected/expanded queries and constraints. This
     retriever then combines the existing deterministic scorer, description-aware
     BM25-style relevance, strict fuzzy name matching, intent expansion and exact
-    UPC matching. The returned candidates are deliberately broad; a second AI
-    pass is the final relevance gate.
+    UPC matching. Only ``products`` rows are searched: ``product_reference`` may
+    enrich metadata/images, but can never become store inventory in Client search.
     """
     db = get_db()
     documents = []
-    seen_product_keys = set()
+    documents_by_key = {}
 
     def product_key(item, row):
         return ("barcode", row["_bc"]) if row["_bc"] else (
             "name", row["_name"], row["_brand"]
         )
 
-    # Real shelf products win over reference-only catalogue duplicates.
+    def location_for(item):
+        return {
+            "aisle": str(item.get("aisle", "")).strip(),
+            "side": str(item.get("side", "")).strip(),
+            "section": str(item.get("section", "1")).strip() or "1",
+            "shelf": str(item.get("shelf", "")).strip(),
+            "position": str(item.get("position", "")).strip(),
+        }
+
+    # One card per product/UPC, with every mapped store location attached.
     for item, row in _products_corpus(db):
         key = product_key(item, row)
-        if key in seen_product_keys:
+        if key in documents_by_key:
+            existing = documents_by_key[key]["item"]
+            location = location_for(item)
+            if location not in existing["locations"]:
+                existing["locations"].append(location)
+            if not existing.get("image_url") and item.get("image_url"):
+                existing["image_url"] = item.get("image_url")
+            existing["in_stock"] = 1 if existing.get("in_stock") or item.get("in_stock") else 0
+            existing["is_plano"] = 1 if existing.get("is_plano") or item.get("is_plano") else 0
             continue
-        seen_product_keys.add(key)
         product = dict(item)
         product["client_id"] = _client_candidate_id(product)
-        documents.append({"item": product, "row": row, "source_rank": 0})
-
-    for row in _reference_corpus(db):
-        item = {
-            "barcode": row["barcode"], "name": row["name"], "brand": row["brand"],
-            "description": row["description"], "product_code": row["product_code"],
-            "catalog_only": True, "in_stock": 1,
-        }
-        key = product_key(item, row)
-        if key in seen_product_keys:
-            continue
-        seen_product_keys.add(key)
-        item["client_id"] = _client_candidate_id(item, catalog_only=True)
-        documents.append({"item": item, "row": row, "source_rank": 1})
+        product["catalog_only"] = False
+        product["locations"] = [location_for(product)]
+        document = {"item": product, "row": row, "source_rank": 0}
+        documents.append(document)
+        documents_by_key[key] = document
 
     def clean_list(value, max_items=20):
         if not isinstance(value, list):
@@ -827,7 +906,7 @@ def hybrid_client_candidates(question, query_plan, limit=45):
         -entry[0], entry[1], 1 if entry[2].get("in_stock") == 0 else 0,
         normalize_search_text(entry[2].get("name", "")),
     ))
-    return [item for _, _, item in scored[:max(1, min(int(limit), 60))]]
+    return [item for _, _, item in scored[:max(1, min(int(limit), 100))]]
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -846,6 +925,36 @@ def get_products():
     response = jsonify(products)
     response.set_etag(etag, weak=True)
     return response
+
+
+@products_bp.route("/api/products/images", methods=["GET"])
+def get_product_images():
+    """Small polling endpoint for Client cards while background UPC image lookup
+    runs. Avoids re-downloading the full product list just to reveal new pictures."""
+    ids = []
+    for raw in str(request.args.get("ids", "")).split(","):
+        try:
+            product_id = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if product_id > 0 and product_id not in ids:
+            ids.append(product_id)
+        if len(ids) >= 100:
+            break
+    if not ids:
+        return jsonify({"images": {}})
+    db = get_db()
+    images = {}
+    placeholders = ",".join("?" for _ in ids)
+    rows = db.execute(
+        f"SELECT id, image_url FROM products WHERE id IN ({placeholders})", tuple(ids)
+    ).fetchall()
+    for row in rows:
+        item = dict(row)
+        value = str(item.get("image_url", "") or "").strip()
+        if value:
+            images[str(item["id"])] = value
+    return jsonify({"images": images})
 
 
 @products_bp.route("/api/products/search", methods=["GET"])

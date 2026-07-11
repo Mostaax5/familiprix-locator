@@ -179,6 +179,17 @@ async function apiGenerateClientHelp(payload, signal) {
   }
 }
 
+async function apiGetProductImages(ids) {
+  const cleanIds = [...new Set((ids || []).map(Number).filter(id => Number.isInteger(id) && id > 0))].slice(0, 100);
+  if (!cleanIds.length) return {images: {}};
+  try {
+    const {res, data} = await apiFetch(`/api/products/images?ids=${encodeURIComponent(cleanIds.join(','))}`);
+    return res.ok && data && typeof data === 'object' ? data : {images: {}};
+  } catch (_) {
+    return {images: {}};
+  }
+}
+
 async function apiSetProductStock(id, inStock) {
   try {
     const {res, data} = await apiFetch(`/api/products/${id}/stock`, {
