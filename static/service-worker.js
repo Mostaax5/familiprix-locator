@@ -1,4 +1,4 @@
-const CACHE_NAME = 'familiprix-locator-v5';
+const CACHE_NAME = 'familiprix-locator-v6';
 const OFFLINE_CACHE = [
   '/',
   '/manifest.json',
@@ -33,27 +33,31 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  event.respondWith(networkFirst(event.request));
+  event.respondWith(staleWhileRevalidate(event.request));
 });
 
-async function networkFirst(request) {
+// App shell strategy: serve INSTANTLY from the device's copy and refresh it in
+// the background (stale-while-revalidate). The old network-first re-downloaded
+// every JS/CSS file over the store wifi before showing anything — the single
+// biggest part of "the app takes forever to open". Updates land one open later.
+// Data stays fresh: /api/* never goes through this cache (see above).
+async function staleWhileRevalidate(request) {
   const cache = await caches.open(CACHE_NAME);
-
-  try {
-    const response = await fetch(request, {cache: 'no-store'});
+  const cached = await cache.match(request);
+  const refresh = fetch(request).then(response => {
     if (response && response.ok && shouldCache(request)) {
       cache.put(request, response.clone());
     }
     return response;
-  } catch (error) {
-    const cached = await cache.match(request);
-    if (cached) return cached;
-    if (request.mode === 'navigate') {
-      const fallback = await cache.match('/');
-      if (fallback) return fallback;
-    }
-    throw error;
+  }).catch(() => null);
+  if (cached) return cached;                       // instant paint
+  const fresh = await refresh;                     // first-ever visit: network
+  if (fresh) return fresh;
+  if (request.mode === 'navigate') {
+    const fallback = await cache.match('/');
+    if (fallback) return fallback;
   }
+  return new Response('Hors ligne', {status: 503});
 }
 
 function shouldCache(request) {

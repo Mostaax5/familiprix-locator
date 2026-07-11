@@ -14,11 +14,12 @@ workers = 1          # Render free tier: one small CPU — more workers just swa
 threads = 4
 timeout = 180
 keepalive = 5
-# Recycle the worker every ~500 requests (± jitter): Python/pdfplumber don't always
-# return freed memory to the OS, so over a long uptime RSS creeps up until the
-# 512 MB cap kills the instance. A periodic clean restart keeps memory flat, and
-# with only one worker gunicorn drains in-flight requests before replacing it.
+# Recycle the worker every ~2000 requests (± jitter): Python/pdfplumber don't
+# always return freed memory to the OS, so over a long uptime RSS creeps up.
+# 2000 (was 500): every recycle gives the NEXT visitor a slow "cold worker"
+# moment, and now that the real memory hogs are capped at the source (enrichment,
+# image fill, corpus rebuilds), aggressive recycling costs more than it protects.
 # (A recycle can kill a background plano parse — the status endpoint detects the
 # dead pid and relaunches it from the stored PDF, so jobs self-heal.)
-max_requests = 500
-max_requests_jitter = 50
+max_requests = 2000
+max_requests_jitter = 200

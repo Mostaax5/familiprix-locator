@@ -162,6 +162,16 @@ def _start_self_keepalive():
     from urllib.request import urlopen
 
     def worker():
+        # Warm-up FIRST: right after any (re)start, hit the endpoints that build
+        # the in-memory search corpora so the first human request is instant —
+        # the first visitor after a restart used to pay the whole index build.
+        time.sleep(5)
+        for path in ("/api/system/info", "/api/products", "/api/client/find?q=warmup&limit=1"):
+            try:
+                with urlopen(f"{base_url}{path}", timeout=60) as resp:
+                    resp.read()
+            except Exception:
+                pass
         while True:
             time.sleep(300)
             try:
