@@ -22,6 +22,7 @@ const STORAGE_KEYS = {
   addDraft: 'familiprixAddDraft',
   clientDraft: 'familiprixClientDraft',
   editorSession: 'familiprixEditorSession',
+  planSnapshot: 'familiprixPlanSnapshot',
   store: 'familiprixStore'
 };
 

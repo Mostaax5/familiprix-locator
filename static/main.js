@@ -39,11 +39,13 @@ function upsertCachedProduct(product) {
   if (index >= 0) allProductsCache[index] = normalized;
   else allProductsCache.push(normalized);
   lastProductsRefreshAt = Date.now();
+  if (typeof savePlanSnapshot === 'function') savePlanSnapshot();
 }
 
 function removeCachedProduct(productId) {
   allProductsCache = allProductsCache.filter(item => Number(item.id) !== Number(productId));
   lastProductsRefreshAt = Date.now();
+  if (typeof savePlanSnapshot === 'function') savePlanSnapshot();
 }
 
 // ── Utilities ────────────────────────────────────────────────────────────────
@@ -95,6 +97,16 @@ function getEditorHeaders() {
   return {'X-User-Name': loadEditorSession().username || 'appareil'};
 }
 
+function setActiveTabUi(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.getElementById(tab)?.classList.add('active');
+  const tabs = ['search','client','scan','add'];
+  const button = document.querySelectorAll('.tab')[tabs.indexOf(tab)];
+  if (button) button.classList.add('active');
+  localStorage.setItem(STORAGE_KEYS.activeTab, tab);
+}
+
 // ── Tab switching ─────────────────────────────────────────────────────────────
 async function switchTab(tab) {
   // Locked sections (Scan, Plan) require the password and a non-expired session.
@@ -105,12 +117,7 @@ async function switchTab(tab) {
   // runs its own stream (scannerStream stays null), so without this it keeps
   // decoding video forever in the background and overheats the device.
   if (scannerStream || html5Scanner || quaggaActive) await stopCamera();
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
-  document.getElementById(tab).classList.add('active');
-  const tabs = ['search','client','scan','add'];
-  document.querySelectorAll('.tab')[tabs.indexOf(tab)].classList.add('active');
-  localStorage.setItem(STORAGE_KEYS.activeTab, tab);
+  setActiveTabUi(tab);
   if (tab === 'add') loadMapEditor();
   if (tab === 'search') {
     if (document.getElementById('searchInput')?.value.trim()) doSearch();
@@ -172,7 +179,68 @@ window.addEventListener('pagehide', () => {
   if (scannerStream || html5Scanner || quaggaActive) stopCamera();
 });
 
+function getStartupTab() {
+  const savedTab = localStorage.getItem(STORAGE_KEYS.activeTab);
+  const validTabs = ['scan','search','client','add'];
+  const preferred = (savedTab && validTabs.includes(savedTab)) ? savedTab : 'search';
+  return (LOCKED_TABS.has(preferred) && !isUnlocked()) ? 'search' : preferred;
+}
+
+function paintStartupTab(tab) {
+  setActiveTabUi(tab);
+  if (tab === 'add') {
+    const restored = (typeof restorePlanSnapshot === 'function') && restorePlanSnapshot();
+    if (restored) {
+      normalizeCursorToLayout();
+      updateCursorUi();
+      renderPlanStartEditor();
+      refreshPlanUi();
+    } else if (typeof showPlanLoading === 'function') {
+      showPlanLoading();
+    }
+  }
+}
+
+function runStartupTabEffects(tab) {
+  if (tab === 'add') {
+    refreshPlanUi();
+    loadPlanogramHistory();
+    loadReferenceCount();
+  }
+  if (tab === 'search') {
+    if (document.getElementById('searchInput')?.value.trim()) doSearch();
+    refreshProductsCache().then(() => {
+      if (document.getElementById('search').classList.contains('active') && document.getElementById('searchInput')?.value.trim()) doSearch();
+    });
+  }
+  if (tab === 'client') {
+    runClientSearch(false);
+    refreshProductsCache().then(() => {
+      if (document.getElementById('client').classList.contains('active')) runClientSearch(false);
+    });
+  }
+  if (tab === 'scan') {
+    if (typeof populateRayonAisleList === 'function') populateRayonAisleList();
+    window.setTimeout(focusScanInput, 50);
+  }
+  if (tab === 'client') window.setTimeout(() => document.getElementById('clientQuestion')?.focus(), 50);
+  if (tab === 'search') window.setTimeout(() => document.getElementById('searchInput')?.focus(), 50);
+}
+
 async function bootApp() {
+  loadCursor();
+  loadScanDraft();
+  loadAddDraft();
+  loadClientDraft();
+  updateDeviceSupport();
+  updateAppShellState();
+  updateNetworkStatus();
+  updateLockUi();
+  ensureStoreSelected();
+
+  const startTab = getStartupTab();
+  paintStartupTab(startTab);
+
   const [systemResult, productsResult, layoutsResult] = await Promise.allSettled([
     apiGetSystemInfo(), apiGetProducts(), apiGetLayoutAisles()
   ]);
@@ -180,7 +248,7 @@ async function bootApp() {
   if (productsResult.status === 'fulfilled') {
     allProductsCache = productsResult.value;
     lastProductsRefreshAt = Date.now();
-  } else {
+  } else if (!allProductsCache.length) {
     allProductsCache = [];
   }
   if (layoutsResult.status === 'fulfilled') {
@@ -191,32 +259,20 @@ async function bootApp() {
     sortMapLayouts();
     dirtyLayoutAisles = new Set();
     lastLayoutsRefreshAt = Date.now();
-  } else {
+  } else if (!mapLayouts.length) {
     mapLayouts = [];
   }
-  loadCursor();
   normalizeCursorToLayout();
   updateCursorUi();
   renderPlanStartEditor();
-  loadScanDraft();
-  loadAddDraft();
-  loadClientDraft();
-  updateDeviceSupport();
   updateAppShellState();
   updateNetworkStatus();
   updateLockUi();
-  ensureStoreSelected();
-  const savedTab = localStorage.getItem(STORAGE_KEYS.activeTab);
-  const validTabs = ['scan','search','client','add'];
-  const preferred = (savedTab && validTabs.includes(savedTab)) ? savedTab : 'search';
-  // SECURITY: a page load NEVER auto-opens a locked tab (Scan/Plan) — not even
-  // with a valid session. Refreshing while on Plan used to land straight back
-  // inside it; now every load starts on a public tab and reaching Scan/Plan
-  // takes a deliberate tap (instant if the session is valid, password if not).
-  const startTab = LOCKED_TABS.has(preferred) ? 'search' : preferred;
-  switchTab(startTab);
+  savePlanSnapshot();
+  const activeTabAfterLoad = localStorage.getItem(STORAGE_KEYS.activeTab) || startTab;
+  runStartupTabEffects(activeTabAfterLoad);
   runClientSearch(false);
-  if (startTab === 'scan') focusScanInput();
+  if (activeTabAfterLoad === 'scan') focusScanInput();
 }
 
 bootApp().then(() => {

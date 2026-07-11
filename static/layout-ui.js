@@ -144,6 +144,79 @@ function markLayoutDirty(aisle) { dirtyLayoutAisles.add(String(aisle)); }
 function clearLayoutDirty(aisle) { dirtyLayoutAisles.delete(String(aisle)); }
 function hasDirtyLayouts() { return dirtyLayoutAisles.size > 0; }
 
+function compactPlanProduct(product) {
+  if (!String(product?.aisle || '').trim()) return null;
+  return {
+    id: product.id ?? null,
+    name: String(product.name || ''),
+    brand: String(product.brand || ''),
+    barcode: String(product.barcode || ''),
+    product_code: String(product.product_code || ''),
+    aisle: String(product.aisle || ''),
+    side: String(product.side || 'Gauche'),
+    section: String(product.section || '1'),
+    shelf: String(product.shelf || ''),
+    position: String(product.position || ''),
+    facings: Number(product.facings) > 0 ? Number(product.facings) : 1,
+    is_plano: Number(product.is_plano) ? 1 : 0,
+    in_stock: (product.in_stock === 0 || product.in_stock === '0') ? 0 : 1,
+    linked_position: String(product.linked_position || ''),
+    flipped_label: Number(product.flipped_label) ? 1 : 0,
+    underneath_label: String(product.underneath_label || ''),
+    modified_by: String(product.modified_by || ''),
+    modified_at: String(product.modified_at || ''),
+    created_by: String(product.created_by || ''),
+    created_at: String(product.created_at || ''),
+    last_change_by: String(product.last_change_by || product.modified_by || product.created_by || ''),
+    last_change_at: String(product.last_change_at || product.modified_at || product.created_at || '')
+  };
+}
+
+function savePlanSnapshot() {
+  if (!STORAGE_KEYS.planSnapshot) return;
+  if (!mapLayouts.length) {
+    localStorage.removeItem(STORAGE_KEYS.planSnapshot);
+    return;
+  }
+  try {
+    const products = allProductsCache.map(compactPlanProduct).filter(Boolean);
+    localStorage.setItem(STORAGE_KEYS.planSnapshot, JSON.stringify({
+      savedAt: Date.now(),
+      layouts: mapLayouts,
+      products
+    }));
+  } catch (e) {}
+}
+
+function restorePlanSnapshot() {
+  if (!STORAGE_KEYS.planSnapshot || mapLayouts.length) return false;
+  const raw = localStorage.getItem(STORAGE_KEYS.planSnapshot);
+  if (!raw) return false;
+  try {
+    const snapshot = JSON.parse(raw);
+    if (!snapshot || !Array.isArray(snapshot.layouts) || !snapshot.layouts.length) return false;
+    const normalize = (typeof normalizeProduct === 'function') ? normalizeProduct : (item => item);
+    allProductsCache = Array.isArray(snapshot.products) ? snapshot.products.map(normalize) : [];
+    lastProductsRefreshAt = 0;
+    mapLayouts = snapshot.layouts.map(layout => syncLayoutRecord({
+      ...layout,
+      config: normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position)
+    }));
+    sortMapLayouts();
+    dirtyLayoutAisles = new Set();
+    lastLayoutsRefreshAt = 0;
+    return true;
+  } catch (e) {
+    localStorage.removeItem(STORAGE_KEYS.planSnapshot);
+    return false;
+  }
+}
+
+function showPlanLoading(message='Chargement du plan...') {
+  const div = document.getElementById('mapContent');
+  if (div && !mapLayouts.length) div.innerHTML = `<div class="empty">${esc(message)}</div>`;
+}
+
 // Normalizing a layout config is a deep rebuild. The rayon fields call this 3×
 // per keystroke, so memoize the last result by (aisle, config-reference). When a
 // layout mutates, syncLayoutRecord swaps in a new config object → reference
@@ -298,6 +371,7 @@ async function refreshProductsCache(force=false) {
     allProductsCache = await apiGetProducts();
     mapLayouts.forEach(layout => syncLayoutRecord(layout));
     lastProductsRefreshAt = Date.now();
+    savePlanSnapshot();
   } catch (e) {}
   return allProductsCache;
 }
@@ -313,6 +387,7 @@ async function refreshLayoutsCache(force=false) {
     }));
     sortMapLayouts();
     lastLayoutsRefreshAt = Date.now();
+    savePlanSnapshot();
   } catch (e) {}
   return mapLayouts;
 }
@@ -1378,8 +1453,14 @@ function setPlanAisleTrees(aisle, open) {
 }
 
 async function loadMapEditor(forceServer=false) {
-  if (mapLayouts.length) refreshPlanUi();   // instant paint from the boot cache
-  await Promise.allSettled([refreshProductsCache(forceServer), refreshLayoutsCache(forceServer)]);
+  const restoredSnapshot = restorePlanSnapshot();
+  if (mapLayouts.length) refreshPlanUi();   // instant paint from boot memory or local snapshot
+  else showPlanLoading();
+  await Promise.allSettled([
+    refreshProductsCache(forceServer || restoredSnapshot),
+    refreshLayoutsCache(forceServer || restoredSnapshot)
+  ]);
+  savePlanSnapshot();
   refreshPlanUi();
   loadPlanogramHistory();
   loadReferenceCount();
@@ -1593,6 +1674,7 @@ async function createAisleLayout() {
     document.getElementById('mapRightSections').value = '0';
     document.getElementById('mapInitialShelves').value = '0';
     document.getElementById('mapInitialPositions').value = '0';
+    savePlanSnapshot();
     refreshPlanUi();
   }
 }
@@ -1616,6 +1698,7 @@ async function saveAisleLayout(aisle) {
     layout.modified_at = nowIsoWithoutMs();
     syncLayoutRecord(layout);
     lastLayoutsRefreshAt = Date.now();
+    savePlanSnapshot();
     refreshPlanUi();
   }
 }
@@ -1659,6 +1742,7 @@ async function removeAisleLayout(aisle) {
     await refreshProductsCache(true);
     lastLayoutsRefreshAt = Date.now();
     planStartDraft = getCursorSelection();
+    savePlanSnapshot();
     refreshPlanUi();
   }
 }
@@ -1744,6 +1828,7 @@ async function importDatabase(input) {
     if (msg) { msg.className = 'msg success'; msg.textContent = `Import termine: ${data.imported_products} produit(s) et ${data.imported_layouts} allée(s) importes. ${data.skipped_products ? data.skipped_products + ' ignore(s).' : ''}`; }
     await refreshProductsCache(true);
     await refreshLayoutsCache(true);
+    savePlanSnapshot();
     renderMapEditor();
   } catch (e) {
     if (msg) { msg.className = 'msg error'; msg.textContent = e.message || 'Erreur lors de l import.'; }
@@ -1769,6 +1854,7 @@ async function resetDatabase(wipeLayouts) {
     }
     await refreshProductsCache(true);
     if (wipeLayouts) { await refreshLayoutsCache(true); renderMapEditor(); }
+    savePlanSnapshot();
   } catch (e) {
     if (msg) { msg.className = 'msg error'; msg.textContent = e.message || 'Erreur lors de la suppression.'; }
   }
