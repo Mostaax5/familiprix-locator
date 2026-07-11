@@ -483,7 +483,7 @@ function updateBackendStatusInfo() {
   }
   msgs.push(backendInfo.ai_enabled
     ? `Aide client IA active via ${aiProviderLabel()}.`
-    : 'Aide client IA inactive tant que GEMINI_API_KEY n’est pas configurée.');
+    : 'Aide client IA inactive tant qu’une clé IA n’est pas configurée.');
   if (Number(backendInfo.duplicate_slots || 0) > 0) msgs.push(`Attention: ${backendInfo.duplicate_slots} position(s) contiennent déjà plusieurs produits.`);
   if (Number(backendInfo.duplicate_barcodes || 0) > 0) msgs.push(`Attention: ${backendInfo.duplicate_barcodes} code(s)-barres sont dupliques dans la base.`);
   target.textContent = msgs.join(' ');

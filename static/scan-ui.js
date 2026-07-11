@@ -290,7 +290,7 @@ function renderLookupAssistPreview() {
     preview.innerHTML = '';
     status.textContent = backendInfo.ai_enabled
       ? `Optionnel: genere des mots-clés clients, une explication simple et des alternatives via ${aiProviderLabel()}.`
-      : 'IA non configurée sur le serveur. Ajoutez GEMINI_API_KEY sur Render.';
+      : 'IA non configurée sur le serveur. Ajoutez une clé IA sur Render.';
     return;
   }
   status.textContent = 'Aide client generee. Elle sera sauvegardee avec ce produit.';

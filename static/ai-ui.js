@@ -141,7 +141,7 @@ async function generateClientHelp() {
     return;
   }
   if (!backendInfo.ai_enabled) {
-    if (status) status.textContent = 'IA inactive. Ajoutez GEMINI_API_KEY sur Render pour la réponse client guidee.';
+    if (status) status.textContent = 'IA inactive. Ajoutez une clé IA sur Render pour la réponse client guidee.';
     renderClientAdvice(null);
     return;
   }

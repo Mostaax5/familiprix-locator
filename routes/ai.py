@@ -62,6 +62,9 @@ GEMINI_BASE_URL = os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.
 OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY",  "").strip()
 OPENAI_MODEL    = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+DEEPSEEK_MODEL   = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat").strip() or "deepseek-chat"
+DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
 
 _GEMINI_INPUT_COST_PER_M  = 0.075
 _GEMINI_OUTPUT_COST_PER_M = 0.30
@@ -123,14 +126,21 @@ def _try_simple_answer(question: str):
 def _log_ai_usage(provider: str, input_tokens: int, output_tokens: int, question_preview: str = "") -> None:
     if provider == "gemini":
         cost = (input_tokens * _GEMINI_INPUT_COST_PER_M + output_tokens * _GEMINI_OUTPUT_COST_PER_M) / 1_000_000
-    else:
+    elif provider == "openai":
         cost = (input_tokens * _OPENAI_INPUT_COST_PER_M + output_tokens * _OPENAI_OUTPUT_COST_PER_M) / 1_000_000
+    else:
+        cost = None
     preview = question_preview[:60].replace("\n", " ")
-    print(f"[AI-COST] provider={provider} model={GEMINI_MODEL if provider=='gemini' else OPENAI_MODEL} "
-          f"in={input_tokens} out={output_tokens} cost=${cost:.6f} q=\"{preview}\"")
+    model = {"gemini": GEMINI_MODEL, "openai": OPENAI_MODEL,
+             "deepseek": DEEPSEEK_MODEL}.get(provider, "")
+    cost_text = f" cost=${cost:.6f}" if cost is not None else ""
+    print(f"[AI-COST] provider={provider} model={model} in={input_tokens} out={output_tokens}"
+          f"{cost_text} q=\"{preview}\"")
 
 
 def configured_ai_provider():
+    if DEEPSEEK_API_KEY:
+        return {"name": "deepseek", "label": "DeepSeek", "model": DEEPSEEK_MODEL}
     if GEMINI_API_KEY:
         return {"name": "gemini", "label": "Gemini", "model": GEMINI_MODEL}
     if OPENAI_API_KEY:
@@ -914,6 +924,8 @@ def _attach_locatable_recommendations(advice, candidate_objs):
 
 def generate_product_assist_payload(name, brand, description, barcode):
     provider = configured_ai_provider()
+    if provider["name"] == "deepseek":
+        return generate_product_assist_payload_deepseek(name, brand, description, barcode)
     if provider["name"] == "gemini":
         return generate_product_assist_payload_gemini(name, brand, description, barcode)
     if provider["name"] == "openai":
@@ -923,6 +935,8 @@ def generate_product_assist_payload(name, brand, description, barcode):
 
 def generate_client_help_payload(question, products):
     provider = configured_ai_provider()
+    if provider["name"] == "deepseek":
+        return generate_client_help_payload_deepseek(question, products)
     if provider["name"] == "gemini":
         return generate_client_help_payload_gemini(question, products)
     if provider["name"] == "openai":
@@ -1073,6 +1087,66 @@ def generate_client_help_payload_openai(question, products):
     return normalize_client_help_payload(parsed)
 
 
+def _deepseek_json_request(messages, max_tokens, question_preview=""):
+    """Call DeepSeek's OpenAI-compatible chat endpoint and return parsed JSON."""
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": messages,
+        "temperature": 0.2,
+        "max_tokens": max_tokens,
+        "response_format": {"type": "json_object"},
+    }
+    request_obj = Request(
+        f"{DEEPSEEK_BASE_URL}/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                 "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request_obj, timeout=20) as response:
+            raw_response = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", "replace")[:250]
+        except Exception:
+            pass
+        _set_ai_error(f"DeepSeek a refusé la requête (HTTP {exc.code}, modèle {DEEPSEEK_MODEL}). {body}")
+        return None
+    except (URLError, TimeoutError) as exc:
+        _set_ai_error(f"DeepSeek injoignable (réseau ou délai dépassé) : {exc}")
+        return None
+    except json.JSONDecodeError:
+        _set_ai_error("DeepSeek a renvoyé une réponse illisible.")
+        return None
+
+    usage = raw_response.get("usage", {})
+    _log_ai_usage("deepseek", usage.get("prompt_tokens", 0),
+                  usage.get("completion_tokens", 0), question_preview)
+    choices = raw_response.get("choices", [])
+    raw_text = str(((choices[0] if choices else {}).get("message") or {}).get("content", "")).strip()
+    if not raw_text:
+        _set_ai_error("DeepSeek a renvoyé une réponse vide.")
+        return None
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        _set_ai_error("DeepSeek n'a pas renvoyé un JSON valide.")
+        return None
+
+
+def generate_client_help_payload_deepseek(question, products):
+    parsed = _deepseek_json_request([
+        {"role": "system", "content": _CLIENT_HELP_INSTRUCTIONS},
+        {"role": "user", "content": json.dumps({
+            "question": question,
+            "products": products,
+        }, ensure_ascii=False)},
+    ], max_tokens=2048, question_preview=question)
+    return normalize_client_help_payload(parsed) if isinstance(parsed, dict) else None
+
+
 def generate_product_assist_payload_gemini(name, brand, description, barcode):
     prompt = {"name": name, "brand": brand, "description": description, "barcode": barcode}
     payload = {
@@ -1157,6 +1231,20 @@ def generate_product_assist_payload_openai(name, brand, description, barcode):
     except json.JSONDecodeError:
         return None
     return normalize_assist_payload(parsed)
+
+
+def generate_product_assist_payload_deepseek(name, brand, description, barcode):
+    prompt = {"name": name, "brand": brand, "description": description, "barcode": barcode}
+    parsed = _deepseek_json_request([
+        {"role": "system", "content": (
+            "Tu aides les employés d'une pharmacie Familiprix au Québec. "
+            "Retourne uniquement un objet JSON valide en français avec exactement les clés "
+            "search_terms (tableau), usage_notes (texte) et alternative_suggestions (tableau). "
+            "Sois concis, concret, prudent sur le plan médical et ne donne pas de diagnostic."
+        )},
+        {"role": "user", "content": json.dumps({"product": prompt}, ensure_ascii=False)},
+    ], max_tokens=400, question_preview=name)
+    return normalize_assist_payload(parsed) if isinstance(parsed, dict) else None
 
 
 def normalize_assist_payload(parsed):
@@ -1788,7 +1876,7 @@ def assist_product():
     if not name and not description:
         return jsonify({"success": False, "error": "Nom ou description requis."}), 400
     if not configured_ai_provider()["name"]:
-        return jsonify({"success": False, "error": "GEMINI_API_KEY n’est pas configure sur le serveur."}), 503
+        return jsonify({"success": False, "error": "Aucune clé IA n’est configurée sur le serveur."}), 503
     assist = generate_product_assist_payload(name, brand, description, barcode)
     if not assist:
         return jsonify({"success": False, "error": "Impossible de générer l aide client pour le moment."}), 502
@@ -1817,7 +1905,7 @@ def client_help():
         }})
 
     if not configured_ai_provider()["name"]:
-        return jsonify({"success": False, "error": "GEMINI_API_KEY n’est pas configure sur le serveur."}), 503
+        return jsonify({"success": False, "error": "Aucune clé IA n’est configurée sur le serveur."}), 503
 
     if not _check_ai_rate_limit():
         return jsonify({"success": False, "error": "Trop de requetes IA. Reessayez dans une heure."}), 429
