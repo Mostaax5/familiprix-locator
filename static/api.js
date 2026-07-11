@@ -165,12 +165,13 @@ async function apiGenerateProductAssist(payload) {
   }
 }
 
-async function apiGenerateClientHelp(payload) {
+async function apiGenerateClientHelp(payload, signal) {
   try {
     const {res, data} = await apiFetch('/api/client/help', {
       method: 'POST',
       headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-      body: JSON.stringify(_withStore(payload))
+      body: JSON.stringify(_withStore(payload)),
+      signal
     });
     return res.ok ? data : {success: false, error: data.error || 'Reponse client indisponible pour le moment.'};
   } catch (error) {

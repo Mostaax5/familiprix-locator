@@ -170,6 +170,17 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:#c8102e;box-sh
 .advice-card{background:#fafbfc;border:1px solid #e4e6ea;border-radius:12px;padding:14px;margin-top:10px}
 .advice-list{display:grid;gap:6px;margin-top:10px}
 .advice-item{font-size:12px;color:#334155;line-height:1.5;padding:9px 12px;border-radius:10px;background:white;border:1px solid #e4e6ea}
+.client-answer-text{white-space:pre-line}
+.client-product-link{color:#1d4ed8;text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:2px;font-weight:700;cursor:pointer}
+.client-product-link:hover{color:#1e40af}
+.client-answer-products{margin-top:12px;font-size:12px;color:#64748b;line-height:1.7}
+.client-answer-products>span:first-child{font-weight:700;color:#475569}
+.client-link-sep{color:#94a3b8;padding:0 3px}
+.client-products-section{margin-top:16px}
+.client-product-anchor{scroll-margin-top:150px}
+.client-product-anchor:target>.card{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.14)}
+.client-feedback-row{margin-top:12px;display:flex;align-items:center;gap:8px;color:#94a3b8;font-size:12px}
+.client-feedback-row .btn{font-size:12px;padding:4px 10px;width:auto;margin:0}
 
 /* ── Product card enhanced ── */
 .home-badge{display:inline-flex;align-items:center;gap:5px;background:linear-gradient(135deg,#c8102e 0%,#a50d25 100%);color:white;font-size:11px;font-weight:700;padding:4px 10px;border-radius:6px;margin-bottom:10px;letter-spacing:.03em;box-shadow:0 1px 3px rgba(200,16,46,.3)}

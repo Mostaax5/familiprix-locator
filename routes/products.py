@@ -3,9 +3,12 @@ import os
 import json
 import time
 import hashlib
+import math
 import tempfile
 import threading
 import unicodedata
+from collections import Counter
+from difflib import SequenceMatcher
 from flask import Blueprint, request, jsonify
 from database import get_db, DatabaseIntegrityError
 from auth import require_editor, utc_now_iso, side_display_label
@@ -653,6 +656,178 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None):
     return [{"barcode": r["barcode"], "name": r["name"], "brand": r["brand"],
              "description": r["description"], "product_code": r["product_code"],
              "catalog_only": True, "in_stock": 1} for _, r in ranked[:limit]]
+
+
+def _fuzzy_product_score(row, query_tokens):
+    """Typo-aware name/brand score. Kept deliberately strict so a misspelling such
+    as ``advile`` reaches ``Advil`` without turning short, generic words into noise."""
+    product_tokens = list(dict.fromkeys(row["_tokens"] + row["_brand"].split()))
+    best = 0
+    for query_token in query_tokens:
+        if len(query_token) < 4 or query_token in product_tokens:
+            continue
+        variants = [query_token]
+        # Spoken French is often typed without the apostrophe: "dadvile" should
+        # also be compared as "advile", and "ladvil" as "advil".
+        if len(query_token) >= 6 and query_token[0] in {"d", "l"}:
+            variants.append(query_token[1:])
+        for variant in variants:
+            for product_token in product_tokens:
+                if len(product_token) < 4 or variant[0] != product_token[0]:
+                    continue
+                ratio = SequenceMatcher(None, variant, product_token).ratio()
+                if ratio >= 0.78:
+                    best = max(best, int(360 + (ratio * 160)))
+    return best
+
+
+def _client_candidate_id(item, catalog_only=False):
+    if not catalog_only and item.get("id") is not None:
+        return f"product:{item['id']}"
+    barcode = normalized_digits(item.get("barcode", ""))
+    return f"reference:{barcode}" if barcode else f"reference-name:{normalize_search_text(item.get('name', ''))}"
+
+
+def hybrid_client_candidates(question, query_plan, limit=45):
+    """Agentic hybrid retrieval for the one-button Client search.
+
+    The first AI pass supplies corrected/expanded queries and constraints. This
+    retriever then combines the existing deterministic scorer, description-aware
+    BM25-style relevance, strict fuzzy name matching, intent expansion and exact
+    UPC matching. The returned candidates are deliberately broad; a second AI
+    pass is the final relevance gate.
+    """
+    db = get_db()
+    documents = []
+    seen_product_keys = set()
+
+    def product_key(item, row):
+        return ("barcode", row["_bc"]) if row["_bc"] else (
+            "name", row["_name"], row["_brand"]
+        )
+
+    # Real shelf products win over reference-only catalogue duplicates.
+    for item, row in _products_corpus(db):
+        key = product_key(item, row)
+        if key in seen_product_keys:
+            continue
+        seen_product_keys.add(key)
+        product = dict(item)
+        product["client_id"] = _client_candidate_id(product)
+        documents.append({"item": product, "row": row, "source_rank": 0})
+
+    for row in _reference_corpus(db):
+        item = {
+            "barcode": row["barcode"], "name": row["name"], "brand": row["brand"],
+            "description": row["description"], "product_code": row["product_code"],
+            "catalog_only": True, "in_stock": 1,
+        }
+        key = product_key(item, row)
+        if key in seen_product_keys:
+            continue
+        seen_product_keys.add(key)
+        item["client_id"] = _client_candidate_id(item, catalog_only=True)
+        documents.append({"item": item, "row": row, "source_rank": 1})
+
+    def clean_list(value, max_items=20):
+        if not isinstance(value, list):
+            return []
+        out = []
+        for raw in value:
+            text = str(raw or "").strip()
+            if text and text not in out:
+                out.append(text)
+            if len(out) >= max_items:
+                break
+        return out
+
+    corrected = str(query_plan.get("corrected_query", "") or "").strip()
+    phrases = [question]
+    if corrected and normalize_search_text(corrected) != normalize_search_text(question):
+        phrases.append(corrected)
+    phrases.extend(clean_list(query_plan.get("search_queries"), 10))
+    phrases.extend(clean_list(query_plan.get("keywords"), 16))
+    phrases = list(dict.fromkeys(p for p in phrases if p))
+
+    must_include = clean_list(query_plan.get("must_include"), 10)
+    exclude = [normalize_search_text(x) for x in clean_list(query_plan.get("exclude"), 10)]
+    exclude = [x for x in exclude if x]
+
+    prepared_queries = []
+    for phrase in phrases:
+        nq = normalize_search_text(phrase)
+        dq = normalized_digits(phrase)
+        qtokens = list(dict.fromkeys(tokenize_search_query(phrase)))
+        intent_terms = intent_expansion_terms(phrase)
+        abbrevs = abbreviation_terms(phrase)
+        if nq or dq or intent_terms:
+            prepared_queries.append((nq, dq, qtokens, intent_terms, abbrevs))
+
+    retrieval_tokens = []
+    for phrase in phrases + must_include:
+        retrieval_tokens.extend(tokenize_search_query(phrase))
+    retrieval_tokens = list(dict.fromkeys(t for t in retrieval_tokens if len(t) >= 2))[:32]
+
+    # Query-specific BM25 statistics. Only terms from this request are counted,
+    # so this remains fast over the cached 9k catalogue on Render's small CPU.
+    tokenized_documents = []
+    document_frequency = Counter()
+    total_length = 0
+    retrieval_token_set = set(retrieval_tokens)
+    for document in documents:
+        tokens = document["row"]["_hay"].split()
+        counts = Counter(token for token in tokens if token in retrieval_token_set)
+        document_length = max(1, len(tokens))
+        tokenized_documents.append((counts, document_length))
+        total_length += document_length
+        for token in counts:
+            if counts[token]:
+                document_frequency[token] += 1
+    doc_count = max(1, len(documents))
+    average_length = total_length / doc_count
+
+    upc_digits = set()
+    for run in re.findall(r"\d[\d\s\-]{6,18}\d", question):
+        digits = normalized_digits(run)
+        if 8 <= len(digits) <= 14:
+            upc_digits.update(normalized_digits(c) for c in build_barcode_candidates(digits))
+
+    scored = []
+    for document, token_data in zip(documents, tokenized_documents):
+        counts, doc_length = token_data
+        row = document["row"]
+        lexical = 0
+        for nq, dq, qtokens, intent_terms, abbrevs in prepared_queries:
+            lexical = max(lexical, _fast_reference_score(
+                row, nq, dq, qtokens, intent_terms, abbrevs
+            ))
+
+        fuzzy = _fuzzy_product_score(row, retrieval_tokens)
+        bm25 = 0.0
+        for token in retrieval_tokens:
+            frequency = counts.get(token, 0)
+            if not frequency:
+                continue
+            df = document_frequency[token]
+            inverse_frequency = math.log(1 + ((doc_count - df + 0.5) / (df + 0.5)))
+            denominator = frequency + 1.2 * (1 - 0.75 + 0.75 * doc_length / average_length)
+            bm25 += inverse_frequency * ((frequency * 2.2) / denominator)
+
+        hay = row["_hay"]
+        must_hits = sum(1 for value in must_include if normalize_search_text(value) in hay)
+        exclusion_penalty = 260 if any(value in hay for value in exclude) else 0
+        exact_upc = bool(upc_digits and row["_bc"] in upc_digits)
+        score = max(lexical, fuzzy) + min(260, int(bm25 * 34)) + (must_hits * 35) - exclusion_penalty
+        if exact_upc:
+            score = max(score, 2000)
+        if score >= 90:
+            scored.append((score, document["source_rank"], document["item"]))
+
+    scored.sort(key=lambda entry: (
+        -entry[0], entry[1], 1 if entry[2].get("in_stock") == 0 else 0,
+        normalize_search_text(entry[2].get("name", "")),
+    ))
+    return [item for _, _, item in scored[:max(1, min(int(limit), 60))]]
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────

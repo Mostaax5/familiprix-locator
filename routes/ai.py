@@ -1136,6 +1136,265 @@ def _deepseek_json_request(messages, max_tokens, question_preview=""):
         return None
 
 
+def _gemini_structured_request(system_prompt, user_payload, max_tokens, question_preview=""):
+    payload = {
+        "contents": [{"parts": [{"text": (
+            f"{system_prompt}\n\nEntrée JSON:\n{json.dumps(user_payload, ensure_ascii=False)}"
+        )}]}],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json",
+            "maxOutputTokens": max_tokens,
+        },
+    }
+    request_obj = Request(
+        f"{GEMINI_BASE_URL}/models/{GEMINI_MODEL}:generateContent?{urlencode({'key': GEMINI_API_KEY})}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request_obj, timeout=20) as response:
+            raw_response = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        _set_ai_error(f"Gemini a refusé la requête structurée (HTTP {exc.code}).")
+        return None
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        _set_ai_error(f"Gemini n'a pas pu produire la réponse structurée : {exc}")
+        return None
+    usage = raw_response.get("usageMetadata", {})
+    _log_ai_usage("gemini", usage.get("promptTokenCount", 0),
+                  usage.get("candidatesTokenCount", 0), question_preview)
+    raw_text = extract_gemini_output_text(raw_response)
+    try:
+        return json.loads(raw_text) if raw_text else None
+    except json.JSONDecodeError:
+        _set_ai_error("Gemini n'a pas renvoyé un JSON valide.")
+        return None
+
+
+def _openai_structured_request(system_prompt, user_payload, max_tokens,
+                               schema_name, schema, question_preview=""):
+    payload = {
+        "model": OPENAI_MODEL,
+        "reasoning": {"effort": "low"},
+        "instructions": system_prompt,
+        "input": json.dumps(user_payload, ensure_ascii=False),
+        "max_output_tokens": max_tokens,
+        "text": {"format": {
+            "type": "json_schema", "name": schema_name, "strict": True,
+            "schema": schema,
+        }},
+    }
+    request_obj = Request(
+        f"{OPENAI_BASE_URL}/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}",
+                 "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request_obj, timeout=20) as response:
+            raw_response = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        _set_ai_error(f"OpenAI a refusé la requête structurée (HTTP {exc.code}).")
+        return None
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        _set_ai_error(f"OpenAI n'a pas pu produire la réponse structurée : {exc}")
+        return None
+    usage = raw_response.get("usage", {})
+    _log_ai_usage("openai", usage.get("input_tokens", 0),
+                  usage.get("output_tokens", 0), question_preview)
+    raw_text = extract_openai_output_text(raw_response)
+    try:
+        return json.loads(raw_text) if raw_text else None
+    except json.JSONDecodeError:
+        _set_ai_error("OpenAI n'a pas renvoyé un JSON valide.")
+        return None
+
+
+def _provider_structured_request(system_prompt, user_payload, max_tokens,
+                                 schema_name, schema, question_preview=""):
+    provider = configured_ai_provider()["name"]
+    if provider == "deepseek":
+        return _deepseek_json_request([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        ], max_tokens=max_tokens, question_preview=question_preview)
+    if provider == "gemini":
+        return _gemini_structured_request(
+            system_prompt, user_payload, max_tokens, question_preview
+        )
+    if provider == "openai":
+        return _openai_structured_request(
+            system_prompt, user_payload, max_tokens, schema_name, schema, question_preview
+        )
+    return None
+
+
+_CLIENT_QUERY_PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "intent": {"type": "string"},
+        "corrected_query": {"type": "string"},
+        "search_queries": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
+        "keywords": {"type": "array", "items": {"type": "string"}, "maxItems": 16},
+        "must_include": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
+        "exclude": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
+        "wants_all": {"type": "boolean"},
+        "needs_comparison": {"type": "boolean"},
+        "answer_language": {"type": "string"},
+        "medical": {"type": "boolean"},
+    },
+    "required": ["intent", "corrected_query", "search_queries", "keywords",
+                 "must_include", "exclude", "wants_all", "needs_comparison",
+                 "answer_language", "medical"],
+    "additionalProperties": False,
+}
+
+_CLIENT_QUERY_PLAN_INSTRUCTIONS = (
+    "Tu es le planificateur de recherche d'un catalogue de pharmacie québécoise. "
+    "Analyse la phrase complète sans perdre son intention. Corrige les fautes probables "
+    "de marques et produits (exemple: advile/dadvile -> Advil), mais ne transforme jamais "
+    "une demande de nourriture en demande de médicament. Génère des requêtes bilingues "
+    "français/anglais et des synonymes qui peuvent réellement apparaître dans le nom, la "
+    "marque, la description ou les notes d'un produit. Pour un symptôme, ajoute les familles "
+    "ou ingrédients pertinents; pour un assortiment, conserve toutes les contraintes de "
+    "catégorie, saveur, format et marque. wants_all=true pour 'tous/toutes/all/each'. "
+    "needs_comparison=true quand l'utilisateur demande une différence ou comparaison. "
+    "Retourne uniquement un objet JSON respectant exactement le schéma demandé."
+)
+
+
+def _clean_ai_string_list(value, max_items):
+    if not isinstance(value, list):
+        return []
+    out = []
+    for item in value:
+        text = str(item or "").strip()
+        if text and text not in out:
+            out.append(text)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def normalize_client_query_plan(parsed, question):
+    parsed = parsed if isinstance(parsed, dict) else {}
+    language = str(parsed.get("answer_language", "fr") or "fr").lower()
+    return {
+        "intent": str(parsed.get("intent", "product_search") or "product_search").strip(),
+        "corrected_query": str(parsed.get("corrected_query", "") or question).strip(),
+        "search_queries": _clean_ai_string_list(parsed.get("search_queries"), 10),
+        "keywords": _clean_ai_string_list(parsed.get("keywords"), 16),
+        "must_include": _clean_ai_string_list(parsed.get("must_include"), 10),
+        "exclude": _clean_ai_string_list(parsed.get("exclude"), 10),
+        "wants_all": bool(parsed.get("wants_all", False)),
+        "needs_comparison": bool(parsed.get("needs_comparison", False)),
+        "answer_language": "en" if language.startswith("en") else "fr",
+        "medical": bool(parsed.get("medical", False)),
+    }
+
+
+def generate_client_query_plan(question):
+    parsed = _provider_structured_request(
+        _CLIENT_QUERY_PLAN_INSTRUCTIONS,
+        {"question": question, "required_schema": _CLIENT_QUERY_PLAN_SCHEMA},
+        max_tokens=900,
+        schema_name="client_query_plan",
+        schema=_CLIENT_QUERY_PLAN_SCHEMA,
+        question_preview=question,
+    )
+    return normalize_client_query_plan(parsed, question) if isinstance(parsed, dict) else None
+
+
+_CLIENT_VERIFICATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "answer": {"type": "string"},
+        "selected_product_ids": {
+            "type": "array", "items": {"type": "string"}, "maxItems": 60,
+        },
+        "follow_up_questions": {
+            "type": "array", "items": {"type": "string"}, "maxItems": 4,
+        },
+        "safety_flags": {
+            "type": "array", "items": {"type": "string"}, "maxItems": 5,
+        },
+        "pharmacist_referral": {"type": "boolean"},
+        "pharmacist_reason": {"type": "string"},
+    },
+    "required": ["answer", "selected_product_ids", "follow_up_questions",
+                 "safety_flags", "pharmacist_referral", "pharmacist_reason"],
+    "additionalProperties": False,
+}
+
+_CLIENT_VERIFICATION_INSTRUCTIONS = (
+    "Tu es à la fois le reranker final et le rédacteur d'un assistant Familiprix. "
+    "Compare chaque candidat à la QUESTION ORIGINALE, pas seulement aux mots-clés. "
+    "Élimine tout produit qui n'est pas directement pertinent. selected_product_ids doit "
+    "contenir uniquement des candidate_id fournis, sans en inventer. Si wants_all=true, "
+    "conserve tous les candidats qui satisfont réellement toutes les contraintes, mais aucun "
+    "autre. Pour une faute de marque, privilégie la vraie marque correspondante. Une demande "
+    "sur ce qu'il faut manger ne justifie pas automatiquement un analgésique. Ne prétends pas "
+    "connaître une saveur, un ingrédient ou un dosage absent des données. Rédige ensuite answer "
+    "dans answer_language, directement selon la demande. Mentionne chaque produit sélectionné "
+    "avec son nom EXACT, copié tel quel, afin que l'interface puisse le rendre cliquable. Ne "
+    "nomme aucun produit non sélectionné. Pour une comparaison, explique les différences visibles "
+    "dans les données. Ne pose pas de diagnostic. Signale le pharmacien pour grossesse, bébé, "
+    "interaction, difficulté respiratoire, symptômes graves, fièvre élevée ou persistante, ou "
+    "doute médical. Retourne uniquement le JSON demandé."
+)
+
+
+def product_context_for_client_rag(product):
+    context = product_context_for_client_help(product)
+    context.update({
+        "candidate_id": str(product.get("client_id", "")),
+        "description": str(product.get("description", "") or "").strip(),
+        "search_terms": str(product.get("search_terms", "") or "").strip(),
+        "usage_notes": str(product.get("usage_notes", "") or "").strip(),
+        "product_code": str(product.get("product_code", "") or "").strip(),
+    })
+    return context
+
+
+def normalize_verified_client_answer(parsed, valid_ids):
+    parsed = parsed if isinstance(parsed, dict) else {}
+    valid_ids = set(valid_ids)
+    selected = []
+    for raw in parsed.get("selected_product_ids", []):
+        candidate_id = str(raw or "").strip()
+        if candidate_id in valid_ids and candidate_id not in selected:
+            selected.append(candidate_id)
+    return {
+        "answer": str(parsed.get("answer", "") or "").strip(),
+        "selected_product_ids": selected,
+        "follow_up_questions": _clean_ai_string_list(parsed.get("follow_up_questions"), 4),
+        "safety_flags": _clean_ai_string_list(parsed.get("safety_flags"), 5),
+        "pharmacist_referral": bool(parsed.get("pharmacist_referral", False)),
+        "pharmacist_reason": str(parsed.get("pharmacist_reason", "") or "").strip(),
+    }
+
+
+def generate_verified_client_answer(question, query_plan, candidates):
+    contexts = [product_context_for_client_rag(product) for product in candidates]
+    parsed = _provider_structured_request(
+        _CLIENT_VERIFICATION_INSTRUCTIONS,
+        {"question": question, "query_plan": query_plan, "candidates": contexts,
+         "required_schema": _CLIENT_VERIFICATION_SCHEMA},
+        max_tokens=2400,
+        schema_name="client_verified_answer",
+        schema=_CLIENT_VERIFICATION_SCHEMA,
+        question_preview=question,
+    )
+    if not isinstance(parsed, dict):
+        return None
+    return normalize_verified_client_answer(
+        parsed, [product.get("client_id", "") for product in candidates]
+    )
+
+
 def generate_client_help_payload_deepseek(question, products):
     parsed = _deepseek_json_request([
         {"role": "system", "content": _CLIENT_HELP_INSTRUCTIONS},
@@ -1895,14 +2154,17 @@ def client_help():
 
     simple = _try_simple_answer(question)
     if simple:
-        return jsonify({"success": True, "advice": {
+        advice = {
             "summary": simple,
             "recommended_product_names": [],
+            "recommended_products": [],
             "follow_up_questions": [],
             "safety_flags": [],
             "pharmacist_referral": False,
             "pharmacist_reason": "",
-        }})
+        }
+        return jsonify({"success": True, "answer": simple, "products": [],
+                        "query_plan": None, "advice": advice})
 
     if not configured_ai_provider()["name"]:
         return jsonify({"success": False, "error": "Aucune clé IA n’est configurée sur le serveur."}), 503
@@ -1910,23 +2172,58 @@ def client_help():
     if not _check_ai_rate_limit():
         return jsonify({"success": False, "error": "Trop de requetes IA. Reessayez dans une heure."}), 429
 
-    # Build the candidate set SERVER-side from the question itself (UPC-aware,
-    # assortment-friendly) — never from whatever the phone happened to send. Every
-    # recommendation the AI returns maps back to a real, findable store product.
-    candidate_objs = _build_client_candidates(question, limit=35)
-
-    matched_products = [product_context_for_client_help(item) for item in candidate_objs]
-
     global _AI_LAST_ERROR
     _AI_LAST_ERROR = ""
-    advice = generate_client_help_payload(question, matched_products)
-    if not advice:
+
+    # Pass 1: correct spelling and transform the full request into structured,
+    # bilingual catalogue queries without losing intent or constraints.
+    query_plan = generate_client_query_plan(question)
+    if not query_plan:
         return jsonify({"success": False,
-                        "error": _AI_LAST_ERROR or "Impossible de générer la réponse client pour le moment."}), 502
-    # Resolve the AI's named picks to real, locatable products (drops anything not in stock).
-    advice = _attach_locatable_recommendations(advice, candidate_objs)
-    log_ai_interaction("client_help", question, matched_products, advice)
-    return jsonify({"success": True, "advice": advice})
+                        "error": _AI_LAST_ERROR or "Impossible d'analyser la demande pour le moment."}), 502
+
+    # Hybrid retrieval: UPC/name rules + descriptions + intent + BM25-style
+    # relevance + fuzzy spelling. 'All' requests keep a wider candidate window.
+    from routes.products import hybrid_client_candidates
+    candidate_limit = 60 if query_plan.get("wants_all") else 45
+    candidates = hybrid_client_candidates(question, query_plan, limit=candidate_limit)
+
+    # Pass 2: the model may select only the real candidate IDs below. This removes
+    # unrelated retrievals and writes the final answer from the verified products.
+    verified = generate_verified_client_answer(question, query_plan, candidates)
+    if not verified:
+        return jsonify({"success": False,
+                        "error": _AI_LAST_ERROR or "Impossible de vérifier les produits pour le moment."}), 502
+
+    by_id = {str(product.get("client_id", "")): product for product in candidates}
+    products = [by_id[candidate_id] for candidate_id in verified["selected_product_ids"]
+                if candidate_id in by_id]
+    answer = verified["answer"] or (
+        "Aucun produit suffisamment lié à cette demande n'a été trouvé dans la base."
+    )
+    recommended_products = [{
+        "candidate_id": product.get("client_id", ""),
+        "name": str(product.get("name", "")).strip(),
+        "brand": str(product.get("brand", "")).strip(),
+        "location": _recommendation_location(product),
+        "barcode": str(product.get("barcode", "")).strip(),
+        "home_brand": _is_home_brand(product.get("brand", "")),
+    } for product in products]
+    advice = {
+        "summary": answer,
+        "recommended_product_names": [product["name"] for product in recommended_products],
+        "recommended_products": recommended_products,
+        "follow_up_questions": verified["follow_up_questions"],
+        "safety_flags": verified["safety_flags"],
+        "pharmacist_referral": verified["pharmacist_referral"],
+        "pharmacist_reason": verified["pharmacist_reason"],
+    }
+    log_ai_interaction("client_rag", question, {
+        "query_plan": query_plan,
+        "retrieved": [product_context_for_client_rag(product) for product in candidates],
+    }, advice)
+    return jsonify({"success": True, "answer": answer, "products": products,
+                    "query_plan": query_plan, "advice": advice})
 
 
 @ai_bp.route("/api/ai/feedback", methods=["POST"])

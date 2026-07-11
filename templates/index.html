@@ -194,16 +194,15 @@
 <div id="client" class="section content">
   <div class="card">
     <div class="section-title">Questions client</div>
-    <div class="section-note">Ecrivez la demande du client. Le système cherche d’abord avec vos règles et la base du magasin. Ensuite, l’IA aide seulement a expliquer, comparer et dire quand il faut passer au pharmacien.</div>
+    <div class="section-note">Écrivez la demande complète. L’IA la comprend, cherche dans la base, retire les résultats non pertinents et prépare la réponse.</div>
     <div class="field">
-      <label class="label" for="clientQuestion">Question ou mots-clés</label>
-      <textarea id="clientQuestion" placeholder="Ex: quelque chose pour la gorge irritee, la toux seche ou le nez bouche" oninput="scheduleClientSearch()"></textarea>
+      <label class="label" for="clientQuestion">Demande du client</label>
+      <textarea id="clientQuestion" placeholder="Ex: J’ai besoin d’Advile, ou donne-moi tous les laits fruités et explique les différences" oninput="onClientQuestionInput()"></textarea>
     </div>
     <div class="tool-row">
-      <button class="btn btn-inline" onclick="runClientSearch()">Trouver produits</button>
-      <button class="btn btn-outline btn-inline" onclick="generateClientHelp()">Réponse client (IA)</button>
+      <button class="btn btn-inline" id="clientFindButton" onclick="findClientProducts()">Trouver produits</button>
     </div>
-    <div id="clientHelpStatus" class="inline-note">Commencez par ecrire la question du client. Les produits proposes viennent d’abord de la base du magasin.</div>
+    <div id="clientHelpStatus" class="inline-note">Écrivez la demande du client, puis cliquez sur « Trouver produits ».</div>
   </div>
   <div id="clientAdvice"></div>
   <div id="clientMatches"></div>

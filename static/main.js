@@ -2,6 +2,7 @@
 function normalizeProduct(product) {
   return {
     id: (product.id === undefined || product.id === null || product.id === '') ? null : Number(product.id),
+    client_id: String(product.client_id || '').trim(),
     catalog_only: product.catalog_only ? true : false,
     name: String(product.name || '').trim(),
     brand: String(product.brand || '').trim(),
@@ -125,12 +126,6 @@ async function switchTab(tab) {
       if (document.getElementById('search').classList.contains('active') && document.getElementById('searchInput')?.value.trim()) doSearch();
     });
   }
-  if (tab === 'client') {
-    runClientSearch(false);
-    refreshProductsCache().then(() => {
-      if (document.getElementById('client').classList.contains('active')) runClientSearch(false);
-    });
-  }
   if (tab === 'scan') { if (typeof populateRayonAisleList === 'function') populateRayonAisleList(); window.setTimeout(focusScanInput, 50); }
   if (tab === 'client') window.setTimeout(() => document.getElementById('clientQuestion')?.focus(), 50);
   if (tab === 'search') window.setTimeout(() => document.getElementById('searchInput')?.focus(), 50);
@@ -213,12 +208,6 @@ function runStartupTabEffects(tab) {
       if (document.getElementById('search').classList.contains('active') && document.getElementById('searchInput')?.value.trim()) doSearch();
     });
   }
-  if (tab === 'client') {
-    runClientSearch(false);
-    refreshProductsCache().then(() => {
-      if (document.getElementById('client').classList.contains('active')) runClientSearch(false);
-    });
-  }
   if (tab === 'scan') {
     if (typeof populateRayonAisleList === 'function') populateRayonAisleList();
     window.setTimeout(focusScanInput, 50);
@@ -271,7 +260,6 @@ async function bootApp() {
   savePlanSnapshot();
   const activeTabAfterLoad = localStorage.getItem(STORAGE_KEYS.activeTab) || startTab;
   runStartupTabEffects(activeTabAfterLoad);
-  runClientSearch(false);
   if (activeTabAfterLoad === 'scan') focusScanInput();
 }
 
