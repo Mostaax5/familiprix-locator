@@ -1,6 +1,7 @@
 import os
 import time
 import traceback
+from collections import deque
 from flask import Flask, render_template, send_from_directory, jsonify, request
 from werkzeug.exceptions import HTTPException
 from database import close_db, get_backend_summary, get_db, init_db
@@ -79,6 +80,24 @@ def handle_any_error(exc):
     return "Erreur interne du serveur.", 500
 
 
+# Who is actually reaching the app? (time UTC, path, user-agent). Exposed in
+# /api/system/info to diagnose keep-alive: UptimeRobot pings should appear here
+# every 5 minutes — if they don't, the monitor isn't reaching the app at all.
+_RECENT_HITS = deque(maxlen=15)
+
+
+@app.before_request
+def _track_recent_hits():
+    try:
+        _RECENT_HITS.append({
+            "t": time.strftime("%H:%M:%S", time.gmtime()),
+            "path": str(request.path)[:40],
+            "ua": (request.headers.get("User-Agent") or "?")[:60],
+        })
+    except Exception:
+        pass
+
+
 @app.after_request
 def add_security_headers(response):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -138,6 +157,7 @@ def get_system_info():
         # Guessing at "did the deploy actually land?" has burned us repeatedly.
         "version": os.environ.get("RENDER_GIT_COMMIT", "")[:7],
         "self_keepalive": _SELF_KEEPALIVE_ACTIVE,
+        "recent_hits": list(_RECENT_HITS),
     })
 
 
