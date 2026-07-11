@@ -134,7 +134,14 @@ def get_system_info():
         "duplicate_slots": int(first_column(duplicate_slots) or 0),
         "duplicate_barcodes": int(first_column(duplicate_barcodes) or 0),
         "reference_count": reference_count(),
+        # Deploy diagnostics: which commit is live + whether the self-ping armed.
+        # Guessing at "did the deploy actually land?" has burned us repeatedly.
+        "version": os.environ.get("RENDER_GIT_COMMIT", "")[:7],
+        "self_keepalive": _SELF_KEEPALIVE_ACTIVE,
     })
+
+
+_SELF_KEEPALIVE_ACTIVE = False
 
 
 def _start_self_keepalive():
@@ -145,9 +152,12 @@ def _start_self_keepalive():
     resets the idle timer, so a running instance never sleeps. Only active where
     Render sets RENDER_EXTERNAL_URL (never in local dev). Bonus: each ping hits
     /api/system/info, which is also the enrichment self-heal trigger."""
+    global _SELF_KEEPALIVE_ACTIVE
     base_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
     if not base_url:
+        print("[KEEPALIVE] RENDER_EXTERNAL_URL absent — auto-ping inactif (normal en local).")
         return
+    _SELF_KEEPALIVE_ACTIVE = True
     import threading
     from urllib.request import urlopen
 
