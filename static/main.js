@@ -149,8 +149,9 @@ document.getElementById('mapContent').addEventListener('toggle', event => {
   if (!(node instanceof HTMLDetailsElement)) return;
   const nodeId = node.dataset.nodeId;
   if (!nodeId) return;
-  if (node.open) openPlanNodes.add(nodeId);
+  if (node.open) { openPlanNodes.delete('--closed--' + nodeId); openPlanNodes.add(nodeId); }
   else openPlanNodes.delete(nodeId);
+  if (node.open && typeof hydratePlanNode === 'function') hydratePlanNode(node);
 }, true);
 document.getElementById('scanInput').addEventListener('input', persistScanDraft);
 document.getElementById('clientQuestion').addEventListener('input', persistClientDraft);

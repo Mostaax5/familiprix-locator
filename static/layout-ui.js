@@ -697,6 +697,7 @@ function ensureCursorStillValid() {
 // rebuild on the next frame instead of N synchronous full rebuilds — far less
 // CPU/heat. renderMapEditor() is still called directly for one-off renders.
 let _planUiPending = false;
+let _skipPlanCaptureOnce = false;
 function refreshPlanUi() {
   if (_planUiPending) return;
   _planUiPending = true;
@@ -725,7 +726,39 @@ function captureOpenPlanNodesFromDom() {
 function detailsOpenAttr(nodeId) {
   if (openPlanNodes.has('--closed--' + nodeId)) return '';          // explicitly closed
   if (openPlanNodes.has(nodeId)) return ' open';                    // explicitly open
-  return nodeId.startsWith('planAisle-') ? ' open' : '';            // default: aisles open
+  return '';                                                        // default: summary only
+}
+
+function isPlanNodeOpen(nodeId) {
+  return openPlanNodes.has(nodeId) && !openPlanNodes.has('--closed--' + nodeId);
+}
+
+function directTreeBody(node) {
+  return [...node.children].find(child => child.classList && child.classList.contains('tree-body'));
+}
+
+function hydratePlanNode(node) {
+  if (!node || !node.open) return;
+  const body = directTreeBody(node);
+  if (!body || body.dataset.lazyEmpty !== '1') return;
+
+  const kind = node.dataset.planKind || '';
+  const aisle = node.dataset.aisle || '';
+  const layout = mapLayouts.find(l => String(l.aisle) === String(aisle));
+  const config = layout ? layout.config : null;
+
+  if (kind === 'aisle' && layout && config) {
+    renderMapEditor();
+    return;
+  } else if (kind === 'side' && config) {
+    node.outerHTML = renderSide(aisle, node.dataset.side || '', config);
+    return;
+  } else if (kind === 'section' && config) {
+    const side = node.dataset.side || '';
+    const sectionIndex = Number(node.dataset.sectionIndex || 0);
+    const section = config.sides?.[side]?.sections?.[sectionIndex];
+    if (section) node.outerHTML = renderSection(aisle, side, sectionIndex, section);
+  }
 }
 
 function selectNumericField(input) {
@@ -1143,7 +1176,17 @@ function renderSection(aisle, side, sectionIndex, section) {
   const sectionProducts = counts.section.get(ck) || 0;
   const sectionHome = counts.sectionHome.get(ck) || 0;
   const sectionNodeId = `planSection-${aisle}-${side}-${sectionIndex}`;
-  return `<details class="tree-node plan-section" data-node-id="${sectionNodeId}"${detailsOpenAttr(sectionNodeId)}>
+  const attrs = `data-plan-kind="section" data-aisle="${esc(aisle)}" data-side="${esc(side)}" data-section-index="${sectionIndex}" data-node-id="${sectionNodeId}"`;
+  if (!isPlanNodeOpen(sectionNodeId)) {
+    return `<details class="tree-node plan-section" ${attrs}${detailsOpenAttr(sectionNodeId)}>
+    <summary>
+      <span>Section ${sectionIndex + 1}</span>
+      <span class="tree-meta">${sectionProducts} prod. · ${section.shelves.length} T${sectionHome ? ` · <span style="color:#c8102e">★${sectionHome}</span>` : ''}</span>
+    </summary>
+    <div class="tree-body plan-lazy-body" data-lazy-empty="1"></div>
+  </details>`;
+  }
+  return `<details class="tree-node plan-section" ${attrs}${detailsOpenAttr(sectionNodeId)}>
     <summary>
       <span>Section ${sectionIndex + 1}</span>
       <span class="tree-meta">${sectionProducts} prod. · ${section.shelves.length} T${sectionHome ? ` · <span style="color:#c8102e">★${sectionHome}</span>` : ''}</span>
@@ -1177,7 +1220,17 @@ function renderSide(aisle, side, config) {
   const sideNodeId = `planSide-${aisle}-${side}`;
   const sideLabel = sideDisplayLabel(side);
   const sideCount = planSummaryCounts().side.get(`${aisle}|${side}`) || 0;
-  return `<details class="tree-node plan-side" data-node-id="${sideNodeId}"${detailsOpenAttr(sideNodeId)}>
+  const attrs = `data-plan-kind="side" data-aisle="${esc(aisle)}" data-side="${esc(side)}" data-node-id="${sideNodeId}"`;
+  if (!isPlanNodeOpen(sideNodeId)) {
+    return `<details class="tree-node plan-side" ${attrs}${detailsOpenAttr(sideNodeId)}>
+    <summary>
+      <span>${sideLabel}</span>
+      <span class="tree-meta">${sections.length} section${sections.length !== 1 ? 's' : ''} · ${sideCount} produit${sideCount !== 1 ? 's' : ''}</span>
+    </summary>
+    <div class="tree-body plan-lazy-body" data-lazy-empty="1"></div>
+  </details>`;
+  }
+  return `<details class="tree-node plan-side" ${attrs}${detailsOpenAttr(sideNodeId)}>
     <summary>
       <span>${sideLabel}</span>
       <span class="tree-meta">${sections.length} section${sections.length !== 1 ? 's' : ''} · ${sideCount} produit${sideCount !== 1 ? 's' : ''}</span>
@@ -1234,7 +1287,8 @@ function rerenderSide(aisle, side) {
 }
 
 function renderMapEditor() {
-  captureOpenPlanNodesFromDom();
+  if (_skipPlanCaptureOnce) _skipPlanCaptureOnce = false;
+  else captureOpenPlanNodesFromDom();
   const msgDiv = document.getElementById('addMsg');
   const div = document.getElementById('mapContent');
   const counts = planSummaryCounts();   // memoized per cache version (no rescan on layout-only edits)
@@ -1249,6 +1303,15 @@ function renderMapEditor() {
         const aisleNodeId = `planAisle-${layout.aisle}`;
         const homeCount = counts.home.get(String(layout.aisle)) || 0;
         const dirty = dirtyLayoutAisles.has(String(layout.aisle));
+        if (!isPlanNodeOpen(aisleNodeId)) {
+          return `<details class="tree-node plan-aisle-node" id="${aisleNodeId}" data-plan-kind="aisle" data-aisle="${esc(layout.aisle)}" data-node-id="${aisleNodeId}"${detailsOpenAttr(aisleNodeId)}>
+        <summary>
+          <span>Allée ${esc(layout.aisle)}</span>
+          <span class="tree-meta">${layout.product_count || 0} produit${Number(layout.product_count || 0) !== 1 ? 's' : ''} · <span id="aisleSlots-${esc(layout.aisle)}">${slotCount}</span> slots${homeCount ? ` · <span style="color:#c8102e">★${homeCount} maison</span>` : ''}${dirty ? ' · <span style="color:#d97706">non sauvegardé</span>' : ''}</span>
+        </summary>
+        <div class="tree-body plan-lazy-body" data-lazy-empty="1"></div>
+      </details>`;
+        }
         return `<details class="tree-node plan-aisle-node" id="${aisleNodeId}" data-node-id="${aisleNodeId}"${detailsOpenAttr(aisleNodeId)}>
         <summary>
           <span>Allée ${esc(layout.aisle)}</span>
@@ -1275,20 +1338,47 @@ function renderMapEditor() {
   if (!msgDiv.textContent) msgDiv.innerHTML = '';
 }
 
+function planNodeIdsForAisle(layout) {
+  const aisle = String(layout.aisle);
+  const config = layout.config || defaultLayoutConfig();
+  const ids = [`planAisle-${aisle}`];
+  ['Gauche', 'Droite'].forEach(side => {
+    ids.push(`planSide-${aisle}-${side}`);
+    (config.sides?.[side]?.sections || []).forEach((_section, index) => {
+      ids.push(`planSection-${aisle}-${side}-${index}`);
+    });
+  });
+  ids.push(`planFacade-${aisle}-facade_a`, `planFacade-${aisle}-facade_b`);
+  (config.presentoirs || []).forEach((pres, pi) => {
+    ids.push(`planPres-${aisle}-${pi}`);
+    (pres.facades || []).forEach((_facade, fi) => ids.push(`planPres-${aisle}-${pi}-F${fi}`));
+  });
+  return ids;
+}
+
 function setAllPlanTrees(open) {
-  document.querySelectorAll('#mapContent details.tree-node').forEach(node => { node.open = open; });
-  captureOpenPlanNodesFromDom();
+  openPlanNodes = new Set();
+  if (open) {
+    mapLayouts.forEach(layout => planNodeIdsForAisle(layout).forEach(id => openPlanNodes.add(id)));
+  }
+  _skipPlanCaptureOnce = true;
+  renderMapEditor();
 }
 
 function setPlanAisleTrees(aisle, open) {
-  const root = document.getElementById(`planAisle-${aisle}`);
-  if (!root) return;
-  root.open = open;
-  root.querySelectorAll('details.tree-node').forEach(node => { node.open = open; });
-  captureOpenPlanNodesFromDom();
+  const layout = mapLayouts.find(item => String(item.aisle) === String(aisle));
+  if (!layout) return;
+  planNodeIdsForAisle(layout).forEach(id => {
+    openPlanNodes.delete('--closed--' + id);
+    if (open) openPlanNodes.add(id);
+    else openPlanNodes.delete(id);
+  });
+  _skipPlanCaptureOnce = true;
+  renderMapEditor();
 }
 
 async function loadMapEditor(forceServer=false) {
+  if (mapLayouts.length) refreshPlanUi();   // instant paint from the boot cache
   await Promise.allSettled([refreshProductsCache(forceServer), refreshLayoutsCache(forceServer)]);
   refreshPlanUi();
   loadPlanogramHistory();
