@@ -7,7 +7,7 @@ async function _sha256Hex(str) {
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// Locked unless: session marker === the password hash AND set < 4h ago.
+// Locked unless: session marker === the password hash AND set < 8h ago.
 // Expired or tampered sessions are cleared and treated as locked.
 function isUnlocked() {
   if (localStorage.getItem('familiprixSession') !== LOCK_HASH) return false;
@@ -80,19 +80,9 @@ function lockApp() {
   if (LOCKED_TABS.has(localStorage.getItem(STORAGE_KEYS.activeTab))) switchTab('search');
 }
 
-// Sliding expiry: ACTIVE use silently renews the 4h session, so the password is
-// only asked again after 4 hours of real inactivity — never in the middle of a
-// work session (mapping an aisle or watching the enrichment used to get kicked
-// out at exactly 4h). An ALREADY-expired session is never resurrected here.
-let _lockRenewAt = 0;
-function renewLockSession() {
-  const now = Date.now();
-  if (now - _lockRenewAt < 60000) return;   // at most one localStorage write per minute
-  if (localStorage.getItem('familiprixSession') !== LOCK_HASH) return;
-  const at = parseInt(localStorage.getItem('familiprixSessionAt') || '0', 10);
-  if (!at || now - at > LOCK_TTL_MS) return;
-  localStorage.setItem('familiprixSessionAt', String(now));
-  _lockRenewAt = now;
-}
+// SECURITY DECISION (2026-07-11): the session window is FIXED from the moment
+// the password was entered — activity never extends it. A sliding renewal was
+// tried and made sessions effectively immortal on any actively-used device.
+// At 8h, one unlock covers a full shift without ever compromising the expiry.
 
 window.AppLock = { isUnlocked, updateLockUi, showLockModal, closeLockModal, unlockApp, lockApp };

@@ -98,8 +98,8 @@ function getEditorHeaders() {
 // ── Tab switching ─────────────────────────────────────────────────────────────
 async function switchTab(tab) {
   // Locked sections (Scan, Plan) require the password and a non-expired session.
-  // The 4h timer is fixed from unlock time — NOT refreshed on use — so the
-  // session truly expires 4h after the password was entered.
+  // The 8h timer is fixed from unlock time — NOT refreshed on use — so the
+  // session truly expires 8h after the password was entered (one per shift).
   if (LOCKED_TABS.has(tab) && !isUnlocked()) { showLockModal(tab); return; }
   // Stop the camera/decoders when leaving — MUST include quaggaActive: Quagga
   // runs its own stream (scannerStream stays null), so without this it keeps
@@ -139,9 +139,6 @@ if ('serviceWorker' in navigator) {
 }
 
 document.addEventListener('keydown', handleHardwareScannerKey);
-// Any real interaction renews the 4h unlock (sliding expiry — see lock.js).
-['click', 'keydown', 'touchstart'].forEach(evt =>
-  document.addEventListener(evt, () => renewLockSession(), {passive: true}));
 document.addEventListener('focusin', event => {
   if (event.target instanceof HTMLInputElement && event.target.type === 'number') {
     selectNumericField(event.target);
@@ -210,8 +207,12 @@ async function bootApp() {
   ensureStoreSelected();
   const savedTab = localStorage.getItem(STORAGE_KEYS.activeTab);
   const validTabs = ['scan','search','client','add'];
-  const preferred = (savedTab && validTabs.includes(savedTab)) ? savedTab : 'scan';
-  const startTab  = (LOCKED_TABS.has(preferred) && !isUnlocked()) ? 'search' : preferred;
+  const preferred = (savedTab && validTabs.includes(savedTab)) ? savedTab : 'search';
+  // SECURITY: a page load NEVER auto-opens a locked tab (Scan/Plan) — not even
+  // with a valid session. Refreshing while on Plan used to land straight back
+  // inside it; now every load starts on a public tab and reaching Scan/Plan
+  // takes a deliberate tap (instant if the session is valid, password if not).
+  const startTab = LOCKED_TABS.has(preferred) ? 'search' : preferred;
   switchTab(startTab);
   runClientSearch(false);
   if (startTab === 'scan') focusScanInput();
