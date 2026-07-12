@@ -19,12 +19,79 @@ function getClientConversationForStorage() {
   }));
 }
 
+function clientProductForStorage(product) {
+  return {
+    id: product.id ?? null,
+    client_id: String(product.client_id || ''),
+    name: String(product.name || ''),
+    brand: String(product.brand || ''),
+    description: String(product.description || ''),
+    image_url: String(product.image_url || ''),
+    search_terms: String(product.search_terms || ''),
+    usage_notes: String(product.usage_notes || ''),
+    barcode: String(product.barcode || ''),
+    product_code: String(product.product_code || ''),
+    facings: Number(product.facings) || 1,
+    aisle: String(product.aisle || ''),
+    side: String(product.side || ''),
+    section: String(product.section || '1'),
+    shelf: String(product.shelf || ''),
+    position: String(product.position || ''),
+    locations: Array.isArray(product.locations) ? product.locations.slice(0, 20) : [],
+    is_plano: Number(product.is_plano) ? 1 : 0,
+    in_stock: product.in_stock === 0 ? 0 : 1,
+  };
+}
+
+function getClientSearchStateForStorage() {
+  const products = currentClientMatches.slice(0, 100).map(clientProductForStorage);
+  const advice = _latestClientResult?.advice || {};
+  const latestResult = _latestClientResult ? {
+    response_mode: _latestClientResult.response_mode || 'detailed',
+    answer: String(_latestClientResult.answer || advice.summary || ''),
+    highlighted_product_ids: Array.isArray(_latestClientResult.highlighted_product_ids)
+      ? _latestClientResult.highlighted_product_ids.slice(0, 12).map(String)
+      : [],
+    advice: {
+      summary: String(advice.summary || ''),
+      follow_up_questions: Array.isArray(advice.follow_up_questions)
+        ? advice.follow_up_questions.slice(0, 4).map(String) : [],
+      safety_flags: Array.isArray(advice.safety_flags)
+        ? advice.safety_flags.slice(0, 5).map(String) : [],
+      pharmacist_referral: Boolean(advice.pharmacist_referral),
+      pharmacist_reason: String(advice.pharmacist_reason || ''),
+    },
+  } : null;
+  return {products, latest_result: latestResult};
+}
+
+function restoreClientSearchState(state) {
+  if (!state || typeof state !== 'object') return;
+  const rawProducts = Array.isArray(state.products)
+    ? state.products
+    : (Array.isArray(state.latest_result?.products) ? state.latest_result.products : []);
+  if (!state.latest_result && !rawProducts.length) {
+    updateClientHistoryAction();
+    return;
+  }
+  const products = rawProducts.slice(0, 100).map(normalizeProduct);
+  currentClientMatches = products;
+  _latestClientResult = state.latest_result && typeof state.latest_result === 'object'
+    ? {...state.latest_result, products}
+    : null;
+  renderClientConversation();
+  renderClientMatches(products);
+  if (products.length) pollClientProductImages();
+  updateClientHistoryAction();
+}
+
 function restoreClientConversation(messages) {
   if (!Array.isArray(messages)) return;
   clientConversation = messages.slice(-12).filter(message =>
     message && ['user', 'assistant'].includes(message.role) && String(message.content || '').trim()
   ).map(message => ({role: message.role, content: String(message.content).trim()}));
   renderClientConversation();
+  updateClientHistoryAction();
 }
 
 function clientHistoryPayload() {
@@ -160,6 +227,7 @@ function renderClientConversation() {
   if (!target) return;
   if (!clientConversation.length) {
     target.innerHTML = '';
+    updateClientHistoryAction();
     return;
   }
   const lastIndex = clientConversation.length - 1;
@@ -180,6 +248,7 @@ function renderClientConversation() {
   </div>`;
   target.onmouseup = captureClientTextSelection;
   target.ontouchend = captureClientTextSelection;
+  updateClientHistoryAction();
 }
 
 function productInitials(product) {
@@ -308,6 +377,7 @@ function renderClientMatches(matches) {
   if (!target) return;
   if (!matches.length) {
     target.innerHTML = '<div class="empty">Aucun produit correspondant dans le plan actuel du magasin.</div>';
+    updateClientHistoryAction();
     return;
   }
   target.innerHTML = `
@@ -324,6 +394,7 @@ function renderClientMatches(matches) {
   `;
   target.onmouseup = captureClientTextSelection;
   target.ontouchend = captureClientTextSelection;
+  updateClientHistoryAction();
 }
 
 function updateClientQuotePreview() {
@@ -427,6 +498,22 @@ function submitClientFollowup() {
   });
 }
 
+function updateClientHistoryAction() {
+  const button = document.getElementById('clientClearHistoryButton');
+  if (!button) return;
+  button.hidden = !(
+    clientConversation.length || currentClientMatches.length || _latestClientResult
+  );
+}
+
+function clearClientHistory() {
+  resetClientSearchResults(false);
+  const status = document.getElementById('clientHelpStatus');
+  if (status) status.textContent = 'Historique effacé. La demande en cours est conservée.';
+  updateClientHistoryAction();
+  document.getElementById('clientQuestion')?.focus();
+}
+
 function resetClientSearchResults(showStatus=true) {
   if (_clientRagController) {
     _clientRagController.abort();
@@ -450,6 +537,7 @@ function resetClientSearchResults(showStatus=true) {
     if (status) status.textContent = 'Écrivez une demande, puis cliquez sur « Trouver produits ».';
   }
   persistClientDraft();
+  updateClientHistoryAction();
 }
 
 function onClientQuestionInput() {
@@ -495,6 +583,7 @@ function updateClientImages(images) {
     media.appendChild(img);
     updated += 1;
   }
+  if (updated) persistClientDraft();
   return updated;
 }
 
@@ -591,4 +680,5 @@ function generateClientHelp() { return findClientProducts(); }
 window.AppAI = {
   findClientProducts, resetClientSearchResults, onClientQuestionInput,
   getClientConversationForStorage, restoreClientConversation,
+  getClientSearchStateForStorage, restoreClientSearchState, clearClientHistory,
 };

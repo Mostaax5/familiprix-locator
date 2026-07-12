@@ -457,12 +457,18 @@ function loadAddDraft() {
 }
 
 function persistClientDraft() {
-  localStorage.setItem(STORAGE_KEYS.clientDraft, JSON.stringify({
-    question: document.getElementById('clientQuestion')?.value.trim() || '',
-    conversation: (typeof getClientConversationForStorage === 'function')
-      ? getClientConversationForStorage()
-      : []
-  }));
+  try {
+    localStorage.setItem(STORAGE_KEYS.clientDraft, JSON.stringify({
+      store_id: (typeof getCurrentStore === 'function' ? getCurrentStore()?.id : '') || '',
+      question: document.getElementById('clientQuestion')?.value.trim() || '',
+      conversation: (typeof getClientConversationForStorage === 'function')
+        ? getClientConversationForStorage()
+        : [],
+      search_state: (typeof getClientSearchStateForStorage === 'function')
+        ? getClientSearchStateForStorage()
+        : null,
+    }));
+  } catch (_) {}
 }
 
 function loadClientDraft() {
@@ -470,9 +476,14 @@ function loadClientDraft() {
   if (!saved) return;
   try {
     const draft = JSON.parse(saved);
+    const currentStoreId = (typeof getCurrentStore === 'function' ? getCurrentStore()?.id : '') || '';
+    if (draft.store_id && draft.store_id !== currentStoreId) return;
     document.getElementById('clientQuestion').value = draft.question || '';
     if (typeof restoreClientConversation === 'function') {
       restoreClientConversation(draft.conversation || []);
+    }
+    if (typeof restoreClientSearchState === 'function') {
+      restoreClientSearchState(draft.search_state || null);
     }
   } catch (e) {}
 }

@@ -196,6 +196,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:#c8102e;box-sh
 .client-response-mode{display:inline-flex;margin-bottom:8px;border-radius:5px;padding:3px 7px;font-size:9px;font-weight:800;text-transform:uppercase;background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe}
 .client-response-mode.is-fast{background:#ecfdf5;color:#047857;border-color:#a7f3d0}
 .client-direct-reply{margin-top:14px;padding-top:13px;border-top:1px solid #e5e7eb}
+.client-clear-history{margin-left:auto;color:#64748b;border-color:#cbd5e1}
 .client-reply-title{font-size:11px;font-weight:800;color:#334155;margin-bottom:7px}
 .client-reply-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:stretch}
 .client-reply-row textarea{min-height:54px;resize:vertical;margin:0}
@@ -291,6 +292,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:#c8102e;box-sh
   .cursor{align-items:flex-start;flex-direction:column}
   .btn-inline{width:100%}
   .client-message{max-width:100%}
+  .client-clear-history{margin-left:0}
   .client-message-user{max-width:92%}
   .client-products-heading{align-items:center}
   .client-result-card{grid-template-columns:82px minmax(0,1fr);gap:10px;padding:10px}
