@@ -432,6 +432,24 @@
   <div id="mapContent"></div>
 </div>
 
+<!-- Product details opened from Client result cards. -->
+<div id="clientProductModal" class="client-product-modal" hidden onclick="onClientProductModalClick(event)" onkeydown="if(event.key==='Escape')closeClientProductDetails()">
+  <div class="client-product-dialog" role="dialog" aria-modal="true" aria-labelledby="clientProductDialogTitle">
+    <div class="client-product-dialog-bar">
+      <div id="clientProductDialogTitle" class="client-product-dialog-title">Détails du produit</div>
+      <button type="button" class="client-product-dialog-close" onclick="closeClientProductDetails()" title="Fermer" aria-label="Fermer">×</button>
+    </div>
+    <div id="clientProductDetailContent"></div>
+    <div class="client-product-question">
+      <label class="label" for="clientProductQuestion">Question sur ce produit</label>
+      <div class="client-reply-row">
+        <textarea id="clientProductQuestion" rows="2" placeholder="Ex: Quelle est la différence avec le format liquide?" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();askAboutClientProduct()}"></textarea>
+        <button type="button" class="btn btn-inline client-reply-send" onclick="askAboutClientProduct()">Demander</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="/static/scanner.js"></script>
 <script src="/static/api.js"></script>
 <script src="/static/config.js"></script>

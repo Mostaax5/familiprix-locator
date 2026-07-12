@@ -1326,12 +1326,63 @@ def generate_client_query_plan(question, history=None):
     return normalize_client_query_plan(parsed, question) if isinstance(parsed, dict) else None
 
 
+def classify_client_request(question, follow_up=False, focus_product_id="", selected_text=""):
+    """Route product lookups locally and reserve AI for questions needing an answer."""
+    from routes.products import intent_expansion_terms, normalize_search_text
+
+    normalized = normalize_search_text(question)
+    if follow_up or focus_product_id or selected_text:
+        return "detailed"
+    detailed_phrases = (
+        "difference", "differer", "compare", "comparaison", "versus", " vs ",
+        "pour quelle", "quel pour", "quelle pour", "situation", "lequel choisir",
+        "laquelle choisir", "quoi choisir", "devrais", "dois je", "peut on",
+        "comment", "pourquoi", "c est quoi", "what is", "which one", "should i",
+        "recommend", "conseille", "meilleur", "mieux", "avantage", "inconvenient",
+        "liquide ou", "comprime ou", "capsule ou", "gel ou", "pour un enfant",
+    )
+    padded = f" {normalized} "
+    if any(phrase in padded for phrase in detailed_phrases):
+        return "detailed"
+    words = set(normalized.split())
+    if (("pour" in words and words.intersection({"quel", "quelle", "lequel", "laquelle"})) or
+            ("for" in words and words.intersection({"what", "which"}))):
+        return "detailed"
+    if intent_expansion_terms(question):
+        return "detailed"
+    return "lookup"
+
+
+def build_client_query_plan(question, mode="lookup"):
+    """Fast deterministic plan used by retrieval; AI no longer blocks search."""
+    from routes.products import intent_expansion_terms, normalize_search_text, tokenize_search_query
+
+    normalized = normalize_search_text(question)
+    tokens = tokenize_search_query(question)
+    padded = f" {normalized} "
+    comparison_markers = ("difference", "compare", "comparaison", "versus", " vs ", " ou ")
+    wants_all = any(word in normalized.split() for word in ("all", "tout", "tous", "toute", "toutes"))
+    english_words = sum(word in normalized.split() for word in ("what", "which", "show", "find", "all", "tell"))
+    return {
+        "intent": "product_lookup" if mode == "lookup" else "advice_or_comparison",
+        "corrected_query": question,
+        "search_queries": [question],
+        "keywords": tokens[:20],
+        "must_include": [],
+        "exclude": [],
+        "wants_all": wants_all,
+        "needs_comparison": any(marker in padded for marker in comparison_markers),
+        "answer_language": "en" if english_words >= 2 else "fr",
+        "medical": bool(intent_expansion_terms(question)),
+    }
+
+
 _CLIENT_VERIFICATION_SCHEMA = {
     "type": "object",
     "properties": {
         "answer": {"type": "string"},
         "selected_product_ids": {
-            "type": "array", "items": {"type": "string"}, "maxItems": 60,
+            "type": "array", "items": {"type": "string"}, "maxItems": 8,
         },
         "follow_up_questions": {
             "type": "array", "items": {"type": "string"}, "maxItems": 4,
@@ -1355,10 +1406,19 @@ _CLIENT_VERIFICATION_INSTRUCTIONS = (
     "de marque, comprends la vraie marque correspondante. Une demande "
     "sur ce qu'il faut manger ne justifie pas automatiquement un analgésique. Ne prétends pas "
     "connaître une saveur, un ingrédient ou un dosage absent des données. Rédige answer dans "
-    "answer_language, directement selon la demande et en tenant compte de l'historique. Fais une "
-    "réponse courte et facile à dire au client: 2 à 6 petits paragraphes, sans Markdown, sans **, "
-    "et sans recopier une longue liste de produits. Si beaucoup de produits correspondent, résume "
-    "les familles et différences utiles puis laisse les cartes afficher la liste complète. "
+    "answer_language, directement selon la demande et en tenant compte de l'historique. "
+    "Si selected_text_from_previous_answer est fourni, réponds précisément à la question en reliant "
+    "ce passage au contexte. Si focused_product_id est fourni, centre la réponse sur ce produit. "
+    "Fais une réponse précise, facile à dire au client et suffisamment approfondie pour répondre à TOUTES "
+    "les dimensions demandées: 3 à 8 petits paragraphes, sans Markdown, sans **, et sans recopier "
+    "une longue liste de produits. Pour une comparaison de formes, distingue explicitement les "
+    "liquides/suspensions, comprimés/caplets, capsules liquides/liqui-gels et mini-gels quand ils "
+    "sont présents. Explique les différences pratiques pertinentes: façon de les prendre, facilité "
+    "à avaler, flexibilité de dose, clientèle/âge indiqué dans les données, ingrédient, dosage et "
+    "format. Tu peux employer des connaissances générales de pharmacie pour expliquer une forme, "
+    "mais présente-les comme générales et n'attribue jamais au produit un fait absent de sa fiche. "
+    "Si beaucoup de produits correspondent, résume les familles et choisis au maximum 6 produits "
+    "représentatifs; les cartes affichent la liste complète. "
     "Décode les abréviations de planogramme usuelles: ENF=enfants, CO=comprimés, CAPS=capsules, "
     "SIR=sirop, CR=crème, VAPO=vaporisateur, GTTE=gouttes, X/F=extra fort; les nombres indiquent "
     "souvent le dosage ou le format. "
@@ -1395,6 +1455,8 @@ def normalize_verified_client_answer(parsed, valid_ids):
         candidate_id = str(raw or "").strip()
         if candidate_id in valid_ids and candidate_id not in selected:
             selected.append(candidate_id)
+        if len(selected) >= 8:
+            break
     return {
         "answer": str(parsed.get("answer", "") or "").strip(),
         "selected_product_ids": selected,
@@ -1405,14 +1467,17 @@ def normalize_verified_client_answer(parsed, valid_ids):
     }
 
 
-def generate_verified_client_answer(question, query_plan, candidates, history=None):
+def generate_verified_client_answer(question, query_plan, candidates, history=None,
+                                    selected_text="", focus_product_id=""):
     contexts = [product_context_for_client_rag(product) for product in candidates]
     parsed = _provider_structured_request(
         _CLIENT_VERIFICATION_INSTRUCTIONS,
         {"conversation": normalize_client_history(history), "question": question,
+         "selected_text_from_previous_answer": selected_text,
+         "focused_product_id": focus_product_id,
          "query_plan": query_plan, "candidates": contexts,
          "required_schema": _CLIENT_VERIFICATION_SCHEMA},
-        max_tokens=2400,
+        max_tokens=1400,
         schema_name="client_verified_answer",
         schema=_CLIENT_VERIFICATION_SCHEMA,
         question_preview=question,
@@ -2176,41 +2241,89 @@ def assist_product():
 
 @ai_bp.route("/api/client/help", methods=["POST"])
 def client_help():
+    started_at = time.perf_counter()
     data = request.get_json() or {}
     question = str(data.get("question", "")).strip()
     history = normalize_client_history(data.get("history"))
+    follow_up = bool(data.get("follow_up", False))
+    selected_text = str(data.get("selected_text", "") or "").strip()[:500]
+    focus_product_id = str(data.get("focus_product_id", "") or "").strip()[:100]
+    context_product_ids = []
+    for raw_id in data.get("context_product_ids", []) if isinstance(data.get("context_product_ids"), list) else []:
+        candidate_id = str(raw_id or "").strip()[:100]
+        if candidate_id and candidate_id not in context_product_ids:
+            context_product_ids.append(candidate_id)
+        if len(context_product_ids) >= 80:
+            break
     if not question:
         return jsonify({"success": False, "error": "Question client requise."}), 400
 
+    global _AI_LAST_ERROR
+    _AI_LAST_ERROR = ""
+    response_mode = classify_client_request(
+        question, follow_up=follow_up, focus_product_id=focus_product_id,
+        selected_text=selected_text,
+    )
+    query_plan = build_client_query_plan(question, response_mode)
+
+    # Retrieval is immediate and inventory-safe: only mapped store-plan products
+    # can become cards. A direct reply stays inside the products from that thread.
+    from routes.products import (
+        client_products_by_ids, hybrid_client_candidates, hydrate_candidate_images,
+    )
+    candidate_limit = 100 if query_plan.get("wants_all") else 60
+    context_products = client_products_by_ids(context_product_ids, limit=80)
+    if follow_up and context_products:
+        candidates = context_products
+    else:
+        retrieval_question = question
+        if follow_up and history:
+            previous_user = next(
+                (item["content"] for item in reversed(history) if item.get("role") == "user"), ""
+            )
+            if previous_user:
+                retrieval_question = f"{previous_user} {question}"
+                query_plan = build_client_query_plan(retrieval_question, response_mode)
+        candidates = hybrid_client_candidates(retrieval_question, query_plan, limit=candidate_limit)
+    hydrate_candidate_images(candidates)
+
+    if response_mode == "lookup":
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        return jsonify({
+            "success": True,
+            "response_mode": "lookup",
+            "answer": "",
+            "products": candidates,
+            "highlighted_product_ids": [],
+            "query_plan": query_plan,
+            "advice": {
+                "summary": "",
+                "recommended_product_names": [],
+                "recommended_products": [],
+                "follow_up_questions": [],
+                "safety_flags": [],
+                "pharmacist_referral": False,
+                "pharmacist_reason": "",
+            },
+            "elapsed_ms": elapsed_ms,
+        })
+
     if not configured_ai_provider()["name"]:
         return jsonify({"success": False, "error": "Aucune clé IA n’est configurée sur le serveur."}), 503
-
     if not _check_ai_rate_limit():
         return jsonify({"success": False, "error": "Trop de requetes IA. Reessayez dans une heure."}), 429
 
-    global _AI_LAST_ERROR
-    _AI_LAST_ERROR = ""
-
-    # Pass 1: correct spelling and transform the full request into structured,
-    # bilingual catalogue queries without losing intent or constraints.
-    query_plan = generate_client_query_plan(question, history)
-    if not query_plan:
-        return jsonify({"success": False,
-                        "error": _AI_LAST_ERROR or "Impossible d'analyser la demande pour le moment."}), 502
-
-    # Hybrid retrieval is exhaustive but inventory-safe: it reads only products
-    # mapped into the store plan. The broad reference catalogue never contributes
-    # a Client result. AI interprets the request; it does not invent inventory.
-    from routes.products import hybrid_client_candidates, hydrate_candidate_images
-    candidate_limit = 100 if query_plan.get("wants_all") else 60
-    candidates = hybrid_client_candidates(question, query_plan, limit=candidate_limit)
-    hydrate_candidate_images(candidates)
-
-    # Pass 2 writes the conversational employee answer and identifies only the
-    # products it names. All deterministic matches remain visible as cards below.
-    answer_candidates = candidates[:60]
+    query_plan["context_product_ids"] = context_product_ids
+    answer_candidates = list(candidates)
+    if focus_product_id:
+        answer_candidates.sort(
+            key=lambda product: 0 if str(product.get("client_id", "")) == focus_product_id else 1
+        )
+    # A smaller grounded context improves response time and keeps comparisons readable.
+    answer_candidates = answer_candidates[:30]
     verified = generate_verified_client_answer(
-        question, query_plan, answer_candidates, history
+        question, query_plan, answer_candidates, history,
+        selected_text=selected_text, focus_product_id=focus_product_id,
     )
     if not verified:
         return jsonify({"success": False,
@@ -2243,12 +2356,17 @@ def client_help():
     }
     log_ai_interaction("client_rag", question, {
         "history": history,
+        "selected_text": selected_text,
+        "focus_product_id": focus_product_id,
         "query_plan": query_plan,
         "retrieved": [product_context_for_client_rag(product) for product in answer_candidates],
     }, advice)
-    return jsonify({"success": True, "answer": answer, "products": candidates,
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    return jsonify({"success": True, "response_mode": "detailed",
+                    "answer": answer, "products": candidates,
                     "highlighted_product_ids": verified["selected_product_ids"],
-                    "query_plan": query_plan, "advice": advice})
+                    "query_plan": query_plan, "advice": advice,
+                    "elapsed_ms": elapsed_ms})
 
 
 @ai_bp.route("/api/ai/feedback", methods=["POST"])

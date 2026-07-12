@@ -760,18 +760,10 @@ def _client_candidate_id(item, catalog_only=False):
     return f"reference:{barcode}" if barcode else f"reference-name:{normalize_search_text(item.get('name', ''))}"
 
 
-def hybrid_client_candidates(question, query_plan, limit=60):
-    """Agentic hybrid retrieval for the one-button Client search.
-
-    The first AI pass supplies corrected/expanded queries and constraints. This
-    retriever then combines the existing deterministic scorer, description-aware
-    BM25-style relevance, strict fuzzy name matching, intent expansion and exact
-    UPC matching. Only ``products`` rows are searched: ``product_reference`` may
-    enrich metadata/images, but can never become store inventory in Client search.
-    """
-    db = get_db()
-    documents = []
-    documents_by_key = {}
+def _mapped_client_products(db):
+    """Return one client-facing product per UPC/name with every plan location."""
+    products = []
+    products_by_key = {}
 
     def product_key(item, row):
         return ("barcode", row["_bc"]) if row["_bc"] else (
@@ -787,11 +779,10 @@ def hybrid_client_candidates(question, query_plan, limit=60):
             "position": str(item.get("position", "")).strip(),
         }
 
-    # One card per product/UPC, with every mapped store location attached.
     for item, row in _products_corpus(db):
         key = product_key(item, row)
-        if key in documents_by_key:
-            existing = documents_by_key[key]["item"]
+        if key in products_by_key:
+            existing = products_by_key[key]["item"]
             location = location_for(item)
             if location not in existing["locations"]:
                 existing["locations"].append(location)
@@ -805,8 +796,37 @@ def hybrid_client_candidates(question, query_plan, limit=60):
         product["catalog_only"] = False
         product["locations"] = [location_for(product)]
         document = {"item": product, "row": row, "source_rank": 0}
-        documents.append(document)
-        documents_by_key[key] = document
+        products.append(document)
+        products_by_key[key] = document
+    return products
+
+
+def client_products_by_ids(candidate_ids, limit=60):
+    """Reload trusted mapped products selected in an earlier client turn."""
+    wanted = {str(value or "").strip() for value in candidate_ids or []}
+    if not wanted:
+        return []
+    products = []
+    for document in _mapped_client_products(get_db()):
+        product = document["item"]
+        if str(product.get("client_id", "")) in wanted:
+            products.append(product)
+        if len(products) >= max(1, min(int(limit), 100)):
+            break
+    return products
+
+
+def hybrid_client_candidates(question, query_plan, limit=60):
+    """Hybrid retrieval for the one-button Client search.
+
+    A fast query plan supplies search phrases and constraints. This retriever
+    combines the existing deterministic scorer, description-aware
+    BM25-style relevance, strict fuzzy name matching, intent expansion and exact
+    UPC matching. Only ``products`` rows are searched: ``product_reference`` may
+    enrich metadata/images, but can never become store inventory in Client search.
+    """
+    db = get_db()
+    documents = _mapped_client_products(db)
 
     def clean_list(value, max_items=20):
         if not isinstance(value, list):

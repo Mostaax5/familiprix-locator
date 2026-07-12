@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from app import app
-from routes.ai import normalize_verified_client_answer
+from routes.ai import classify_client_request, normalize_verified_client_answer
 from routes.products import (
     find_existing_image_for_barcode,
     hybrid_client_candidates,
@@ -126,6 +126,17 @@ class ClientRagTests(unittest.TestCase):
         result = normalize_verified_client_answer(parsed, ["product:1"])
         self.assertEqual(result["selected_product_ids"], ["product:1"])
 
+    def test_request_router_separates_fast_lookup_from_detailed_advice(self):
+        self.assertEqual(classify_client_request("Advil"), "lookup")
+        self.assertEqual(classify_client_request("Montre-moi les Advil"), "lookup")
+        self.assertEqual(
+            classify_client_request("Quelle est la différence entre liquide et comprimés?"),
+            "detailed",
+        )
+        self.assertEqual(classify_client_request("Que prendre pour la fièvre?"), "detailed")
+        self.assertEqual(classify_client_request("Quel Advil pour enfant?"), "detailed")
+        self.assertEqual(classify_client_request("Et le liquide?", follow_up=True), "detailed")
+
     def test_client_retrieval_never_uses_reference_catalogue(self):
         placed = {"id": 1, "name": "Tylenol", "brand": "Tylenol", "barcode": "111"}
         corpus = [(placed, search_row(placed["name"], placed["brand"], barcode="111"))]
@@ -167,25 +178,49 @@ class ClientRagTests(unittest.TestCase):
         }
         with patch("routes.ai.configured_ai_provider", return_value={"name": "deepseek", "label": "DeepSeek", "model": "test"}), \
              patch("routes.ai._check_ai_rate_limit", return_value=True), \
-             patch("routes.ai.generate_client_query_plan", return_value=plan), \
+             patch("routes.ai.generate_client_query_plan") as old_planner, \
              patch("routes.products.hybrid_client_candidates", return_value=[candidate, second_candidate]), \
              patch("routes.products.hydrate_candidate_images"), \
-             patch("routes.ai.generate_verified_client_answer", return_value=verified), \
+             patch("routes.ai.generate_verified_client_answer", return_value=verified) as verifier, \
              patch("routes.ai.log_ai_interaction"):
             with app.test_client() as client:
                 response = client.post("/api/client/help", json={
                     "question": "Et pour les enfants?",
                     "history": [{"role": "user", "content": "Jai besoin dadvile"}],
+                    "follow_up": True,
                 })
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertTrue(payload["success"])
+        self.assertEqual(payload["response_mode"], "detailed")
         self.assertEqual(
             [item["client_id"] for item in payload["products"]],
             ["product:1", "product:2"],
         )
         self.assertEqual(payload["highlighted_product_ids"], ["product:1"])
+        old_planner.assert_not_called()
+        verifier.assert_called_once()
+
+    def test_simple_product_lookup_does_not_call_ai(self):
+        candidate = {
+            "id": 1, "client_id": "product:1", "name": "Advil", "brand": "Advil",
+            "barcode": "111", "aisle": "2", "side": "Gauche", "section": "1",
+            "shelf": "3", "position": "2", "in_stock": 1,
+        }
+        with patch("routes.products.hybrid_client_candidates", return_value=[candidate]), \
+             patch("routes.products.hydrate_candidate_images"), \
+             patch("routes.ai.configured_ai_provider") as provider, \
+             patch("routes.ai.generate_verified_client_answer") as verifier:
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={"question": "Advil"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["response_mode"], "lookup")
+        self.assertEqual(payload["products"][0]["name"], "Advil")
+        provider.assert_not_called()
+        verifier.assert_not_called()
 
 
 if __name__ == "__main__":

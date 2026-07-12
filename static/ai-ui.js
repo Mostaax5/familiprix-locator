@@ -3,6 +3,8 @@
 let _clientRagController = null;
 let _clientImagePollTimer = null;
 let _latestClientResult = null;
+let _clientSelectedQuote = '';
+let _clientFocusedProductId = '';
 let clientConversation = [];
 
 function getClientQuestion() {
@@ -70,18 +72,36 @@ function highlightedClientProducts(result) {
   return products.filter(product => ids.has(String(product.client_id || '')));
 }
 
+function clientDirectReplyMarkup() {
+  return `
+    <div class="client-direct-reply">
+      <div class="client-reply-title">Continuer cette conversation</div>
+      <div id="clientQuotePreview" class="client-quote-preview"${_clientSelectedQuote ? '' : ' hidden'}>
+        <span id="clientQuoteText">${esc(_clientSelectedQuote)}</span>
+        <button type="button" class="client-quote-remove" onclick="clearClientSelectedQuote()" title="Retirer la citation" aria-label="Retirer la citation">×</button>
+      </div>
+      <div class="client-reply-row">
+        <textarea id="clientFollowupQuestion" rows="2" placeholder="Posez une question sur cette réponse…" onkeydown="onClientFollowupKeydown(event)"></textarea>
+        <button class="btn btn-inline client-reply-send" id="clientFollowupButton" onclick="submitClientFollowup()">Envoyer</button>
+      </div>
+    </div>`;
+}
+
 function renderLatestAssistantDetails(result) {
   const advice = result?.advice || {};
   const products = Array.isArray(result?.products) ? result.products : [];
   const highlighted = highlightedClientProducts(result);
   const links = highlighted.map(product => clientProductLink(product)).join('<span class="client-link-sep"> · </span>');
   return `
+    <div class="client-response-mode ${result?.response_mode === 'lookup' ? 'is-fast' : 'is-detailed'}">
+      ${result?.response_mode === 'lookup' ? 'Recherche rapide' : 'Réponse détaillée'}
+    </div>
     <div class="client-chat-answer">${linkifyClientAnswer(result?.answer || advice.summary || '', products)}</div>
     ${links ? `<div class="client-answer-products"><span>Produits cités :</span> ${links}</div>` : ''}
     ${advice.follow_up_questions?.length ? `
       <div class="advice-section">
         <span class="advice-label">À préciser avec le client</span>
-        <div class="advice-list">${advice.follow_up_questions.map(item => `<div class="advice-item">${esc(item)}</div>`).join('')}</div>
+        <div class="advice-list">${advice.follow_up_questions.map(item => `<button type="button" class="advice-item client-followup-suggestion" data-question="${encodeURIComponent(String(item))}" onclick="useClientFollowup(decodeURIComponent(this.dataset.question))">${esc(item)}</button>`).join('')}</div>
       </div>` : ''}
     ${advice.safety_flags?.length ? `
       <div class="advice-section">
@@ -90,11 +110,12 @@ function renderLatestAssistantDetails(result) {
       </div>` : ''}
     ${advice.pharmacist_referral ? `<div class="msg error client-referral">Orienter vers le pharmacien. ${esc(advice.pharmacist_reason || '')}</div>` : ''}
     ${!advice.pharmacist_referral && advice.pharmacist_reason ? `<div class="msg info client-referral">${esc(advice.pharmacist_reason)}</div>` : ''}
-    <div id="aiFeedbackRow" class="client-feedback-row">
+    ${result?.response_mode !== 'lookup' ? `<div id="aiFeedbackRow" class="client-feedback-row">
       <span>Cette réponse aide ?</span>
       <button class="btn btn-outline btn-inline" onclick="sendAiFeedback('up')">Oui</button>
       <button class="btn btn-outline btn-inline" onclick="sendAiFeedback('down')">Non</button>
-    </div>
+    </div>` : ''}
+    ${clientDirectReplyMarkup()}
   `;
 }
 
@@ -108,15 +129,19 @@ function renderClientConversation() {
   const lastIndex = clientConversation.length - 1;
   target.innerHTML = `<div class="client-conversation" aria-live="polite">
     ${clientConversation.map((message, index) => {
-      const isLatestAssistant = index === lastIndex && message.role === 'assistant' && _latestClientResult;
+      const isLatestAssistant = index === lastIndex && message.role === 'assistant';
       return `<div class="client-message client-message-${message.role}">
         <div class="client-message-label">${message.role === 'user' ? 'Demande' : 'Réponse'}</div>
         ${isLatestAssistant
-          ? renderLatestAssistantDetails(_latestClientResult)
+          ? (_latestClientResult
+              ? renderLatestAssistantDetails(_latestClientResult)
+              : `<div class="client-chat-answer">${esc(cleanClientAnswer(message.content))}</div>${clientDirectReplyMarkup()}`)
           : `<div class="client-chat-answer">${esc(cleanClientAnswer(message.content))}</div>`}
       </div>`;
     }).join('')}
   </div>`;
+  target.onmouseup = captureClientAnswerSelection;
+  target.ontouchend = captureClientAnswerSelection;
 }
 
 function productInitials(product) {
@@ -141,9 +166,76 @@ function clientProductLocations(product) {
     </span>`).join('');
 }
 
+function openClientProductDetails(candidateId) {
+  const product = currentClientMatches.find(item => String(item.client_id || '') === String(candidateId || ''));
+  const modal = document.getElementById('clientProductModal');
+  const content = document.getElementById('clientProductDetailContent');
+  if (!product || !modal || !content) return;
+  _clientFocusedProductId = String(product.client_id || '');
+  const description = product.description || product.usage_notes || 'Aucune description détaillée disponible pour ce produit.';
+  const searchTerms = Array.isArray(product.search_terms) ? product.search_terms.join(', ') : String(product.search_terms || '');
+  content.innerHTML = `
+    <div class="client-product-detail-head">
+      <div class="client-product-detail-media">
+        <div class="client-product-image-fallback">${esc(productInitials(product))}</div>
+        ${product.image_url ? `<img src="${esc(product.image_url)}" alt="${esc(product.name)}" onload="this.previousElementSibling.hidden=true" onerror="this.remove()">` : ''}
+      </div>
+      <div class="client-product-detail-title">
+        <div class="client-result-badges">
+          <span class="client-plan-badge ${product.is_plano ? 'is-plano' : 'is-hors-plano'}">${product.is_plano ? 'PLANO' : 'HORS-PLANO'}</span>
+          ${product.in_stock === 0 ? '<span class="client-stock-badge">RUPTURE</span>' : ''}
+        </div>
+        <h2>${esc(product.name)}</h2>
+        ${product.brand ? `<div class="client-result-brand">${esc(product.brand)}</div>` : ''}
+      </div>
+    </div>
+    <div class="client-product-detail-section">
+      <div class="client-product-detail-label">Emplacement en magasin</div>
+      <div class="client-result-locations">${clientProductLocations(product)}</div>
+    </div>
+    <div class="client-product-detail-section">
+      <div class="client-product-detail-label">Description</div>
+      <div class="client-product-detail-copy">${esc(description)}</div>
+    </div>
+    ${product.usage_notes && product.usage_notes !== description ? `<div class="client-product-detail-section"><div class="client-product-detail-label">Aide client</div><div class="client-product-detail-copy">${esc(product.usage_notes)}</div></div>` : ''}
+    ${searchTerms ? `<div class="client-product-detail-section"><div class="client-product-detail-label">Termes associés</div><div class="client-product-detail-copy">${esc(searchTerms)}</div></div>` : ''}
+    <div class="client-product-detail-codes">
+      ${product.barcode ? `<span>UPC ${esc(product.barcode)}</span>` : ''}
+      ${product.product_code ? `<span>Code pharmacie ${esc(product.product_code)}</span>` : ''}
+    </div>`;
+  const input = document.getElementById('clientProductQuestion');
+  if (input) input.value = '';
+  modal.hidden = false;
+  document.body.classList.add('modal-open');
+  window.setTimeout(() => input?.focus(), 50);
+}
+
+function closeClientProductDetails() {
+  const modal = document.getElementById('clientProductModal');
+  if (modal) modal.hidden = true;
+  _clientFocusedProductId = '';
+  document.body.classList.remove('modal-open');
+}
+
+function onClientProductModalClick(event) {
+  if (event.target?.id === 'clientProductModal') closeClientProductDetails();
+}
+
+async function askAboutClientProduct() {
+  const input = document.getElementById('clientProductQuestion');
+  const question = input?.value.trim() || '';
+  if (!question) {
+    input?.focus();
+    return;
+  }
+  const focusProductId = _clientFocusedProductId;
+  closeClientProductDetails();
+  await runClientRequest(question, {followUp: true, focusProductId});
+}
+
 function clientProductCard(product) {
   const description = product.usage_notes || product.description || '';
-  return `<article class="client-result-card${product.in_stock === 0 ? ' is-out-of-stock' : ''}" id="${clientProductDomId(product)}">
+  return `<article class="client-result-card${product.in_stock === 0 ? ' is-out-of-stock' : ''}" id="${clientProductDomId(product)}" data-client-id="${esc(product.client_id || '')}" role="button" tabindex="0" onclick="openClientProductDetails(this.dataset.clientId)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openClientProductDetails(this.dataset.clientId)}">
     ${clientProductImage(product)}
     <div class="client-result-body">
       <div class="client-result-badges">
@@ -158,6 +250,7 @@ function clientProductCard(product) {
       <div class="client-result-codes">
         ${product.barcode ? `<span>UPC ${esc(product.barcode)}</span>` : ''}
         ${product.product_code ? `<span>Code ${esc(product.product_code)}</span>` : ''}
+        <span class="client-detail-affordance">Voir détails</span>
       </div>
     </div>
   </article>`;
@@ -184,6 +277,57 @@ function renderClientMatches(matches) {
   `;
 }
 
+function updateClientQuotePreview() {
+  const preview = document.getElementById('clientQuotePreview');
+  const text = document.getElementById('clientQuoteText');
+  if (text) text.textContent = _clientSelectedQuote;
+  if (preview) preview.hidden = !_clientSelectedQuote;
+}
+
+function clearClientSelectedQuote() {
+  _clientSelectedQuote = '';
+  updateClientQuotePreview();
+}
+
+function captureClientAnswerSelection() {
+  window.setTimeout(() => {
+    const selection = window.getSelection?.();
+    const quote = String(selection?.toString() || '').trim().replace(/\s+/g, ' ').slice(0, 500);
+    if (!quote || !selection?.rangeCount) return;
+    const node = selection.getRangeAt(0).commonAncestorContainer;
+    const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    const answer = element?.closest?.('.client-message-assistant .client-chat-answer');
+    if (!answer || !document.getElementById('clientAdvice')?.contains(answer)) return;
+    _clientSelectedQuote = quote;
+    updateClientQuotePreview();
+    document.getElementById('clientFollowupQuestion')?.focus();
+  }, 0);
+}
+
+function useClientFollowup(question) {
+  const input = document.getElementById('clientFollowupQuestion');
+  if (!input) return;
+  input.value = String(question || '');
+  input.focus();
+}
+
+function onClientFollowupKeydown(event) {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    submitClientFollowup();
+  }
+}
+
+function submitClientFollowup() {
+  const input = document.getElementById('clientFollowupQuestion');
+  const question = input?.value.trim() || '';
+  if (!question) {
+    input?.focus();
+    return;
+  }
+  return runClientRequest(question, {followUp: true, selectedText: _clientSelectedQuote});
+}
+
 function resetClientSearchResults(showStatus=true) {
   if (_clientRagController) {
     _clientRagController.abort();
@@ -191,6 +335,8 @@ function resetClientSearchResults(showStatus=true) {
   }
   if (_clientImagePollTimer) window.clearTimeout(_clientImagePollTimer);
   _latestClientResult = null;
+  _clientSelectedQuote = '';
+  _clientFocusedProductId = '';
   currentClientMatches = [];
   clientConversation = [];
   const advice = document.getElementById('clientAdvice');
@@ -262,17 +408,14 @@ async function pollClientProductImages(attempt=0) {
   }
 }
 
-async function findClientProducts() {
-  const question = getClientQuestion();
+async function runClientRequest(question, options={}) {
+  question = String(question || '').trim();
   const status = document.getElementById('clientHelpStatus');
   const button = document.getElementById('clientFindButton');
+  const followupButton = document.getElementById('clientFollowupButton');
   if (!question) {
     if (status) status.textContent = 'Écrivez d’abord la demande du client.';
     document.getElementById('clientQuestion')?.focus();
-    return;
-  }
-  if (!backendInfo.ai_enabled) {
-    if (status) status.textContent = 'IA inactive. Ajoutez une clé IA sur Render.';
     return;
   }
 
@@ -282,12 +425,23 @@ async function findClientProducts() {
   const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
   _clientRagController = controller;
   if (button) button.disabled = true;
-  if (status) status.textContent = `${aiProviderLabel()} comprend la demande et cherche dans le plan du magasin…`;
+  if (followupButton) followupButton.disabled = true;
+  if (status) status.textContent = options.followUp
+    ? `${aiProviderLabel()} approfondit la réponse avec les produits déjà affichés…`
+    : 'Recherche dans le plan actuel du magasin…';
 
-  const result = await apiGenerateClientHelp({question, history}, controller?.signal);
+  const result = await apiGenerateClientHelp({
+    question,
+    history,
+    follow_up: Boolean(options.followUp),
+    selected_text: options.selectedText || '',
+    focus_product_id: options.focusProductId || '',
+    context_product_ids: currentClientMatches.map(product => product.client_id).filter(Boolean).slice(0, 80),
+  }, controller?.signal);
   if (controller && _clientRagController !== controller) return;
   _clientRagController = null;
   if (button) button.disabled = false;
+  if (followupButton) followupButton.disabled = false;
   if (!result.success) {
     if (status) status.textContent = result.error || 'Recherche indisponible pour le moment.';
     return;
@@ -295,6 +449,12 @@ async function findClientProducts() {
 
   const products = Array.isArray(result.products) ? result.products.map(normalizeProduct) : [];
   result.products = products;
+  if (result.response_mode === 'lookup') {
+    result.answer = products.length
+      ? `${products.length} produit(s) correspondant(s) sont dans le plan du magasin. Ouvrez une carte pour voir sa description, ses codes et tous ses emplacements.`
+      : 'Aucun produit correspondant n’est présent dans le plan actuel du magasin.';
+    result.advice = {...(result.advice || {}), summary: result.answer};
+  }
   _latestClientResult = result;
   currentClientMatches = products;
   clientConversation.push({role: 'user', content: question});
@@ -302,16 +462,24 @@ async function findClientProducts() {
   clientConversation = clientConversation.slice(-12);
   const input = document.getElementById('clientQuestion');
   if (input) input.value = '';
+  const followupInput = document.getElementById('clientFollowupQuestion');
+  if (followupInput) followupInput.value = '';
+  _clientSelectedQuote = '';
   persistClientDraft();
   renderClientConversation();
   renderClientMatches(products);
   pollClientProductImages();
   if (status) {
-    status.textContent = products.length
-      ? `${products.length} produit(s) trouvé(s) dans le plan. Vous pouvez poser une question de suivi.`
-      : 'Aucun produit du plan ne correspond. Vous pouvez préciser la demande.';
+    const timing = result.elapsed_ms ? ` en ${(result.elapsed_ms / 1000).toFixed(1)} s` : '';
+    status.textContent = result.response_mode === 'lookup'
+      ? `Recherche rapide${timing} : ${products.length} produit(s) trouvé(s) dans le plan.`
+      : `Réponse détaillée${timing}. Vous pouvez répondre directement sous la réponse.`;
   }
-  input?.focus();
+  document.getElementById('clientFollowupQuestion')?.focus();
+}
+
+function findClientProducts() {
+  return runClientRequest(getClientQuestion(), {followUp: false});
 }
 
 // Compatibility hooks for older installed service-worker shells.
