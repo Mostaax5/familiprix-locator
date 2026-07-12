@@ -2317,7 +2317,8 @@ async function importPlanogramCatalog(input) {
     }
     msg.style.color = '#16a34a';
     msg.innerHTML = `<strong>${data.planograms} planogrammes</strong> · ${data.products_seen} produits enregistrés au catalogue · `
-      + `${data.enriched_products} produit(s) déjà placé(s) complété(s).`;
+      + `${data.enriched_products} code(s)/façade(s) complété(s) · `
+      + `${data.metadata_linked_products || 0} description(s)/image(s) reliée(s) au plan.`;
     if (typeof refreshProductsCache === 'function') { try { await refreshProductsCache(true); } catch(_){} }
   } catch (e) {
     msg.style.color = '#c8102e';
@@ -2326,8 +2327,10 @@ async function importPlanogramCatalog(input) {
 }
 
 let catalogEnrichTimer = null;
+let catalogEnrichWasRunning = false;
 async function startCatalogEnrich() {
   if (!requireEditorSession('enrichir le catalogue')) return;
+  catalogEnrichWasRunning = true;
   const msg = document.getElementById('catalogEnrichMsg');
   if (msg) { msg.style.color = '#64748b'; msg.textContent = 'Démarrage de l enrichissement…'; }
   try { await fetch('/api/import/catalog-enrich/start', {method:'POST', headers: getEditorHeaders()}); } catch (_) {}
@@ -2356,12 +2359,22 @@ async function pollCatalogEnrich() {
         ? ` · <b>cliquez « Enrichir » pour continuer</b>${s.error ? ` (cause: ${esc(s.error)})` : ''}`
         : '';
       msg.innerHTML = `${head} ${s.done || 0}/${s.total || 0} (${pct}%)${eta} · `
-        + `<b>${s.updated || 0}</b> descriptions/images ajoutées · ${s.skipped || 0} sans correspondance fiable${resumed}${retry}`;
+        + `<b>${s.updated || 0}</b> descriptions/images ajoutées · `
+        + `${s.linked || 0} produit(s) du plan mis à jour · `
+        + `${s.skipped || 0} sans correspondance fiable${resumed}${retry}`;
     }
   }
   const stop = document.getElementById('catalogEnrichStop');
-  if (s.running) { catalogEnrichTimer = window.setTimeout(pollCatalogEnrich, 3000); }
-  else if (stop) { stop.style.display = 'none'; }
+  if (s.running) {
+    catalogEnrichWasRunning = true;
+    catalogEnrichTimer = window.setTimeout(pollCatalogEnrich, 3000);
+  } else {
+    if (stop) stop.style.display = 'none';
+    if (catalogEnrichWasRunning && typeof refreshProductsCache === 'function') {
+      catalogEnrichWasRunning = false;
+      try { await refreshProductsCache(true); } catch (_) {}
+    }
+  }
 }
 async function stopCatalogEnrich() {
   try { await fetch('/api/import/catalog-enrich/stop', {method:'POST', headers: getEditorHeaders()}); } catch (_) {}

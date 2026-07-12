@@ -531,6 +531,136 @@ def find_existing_image_for_barcode(db, barcode, exclude_id=None):
     return ""
 
 
+_REFERENCE_METADATA_FIELDS = ("brand", "description", "image_url", "product_code")
+
+
+def build_reference_metadata_index(db):
+    """Index trusted catalogue metadata by every equivalent UPC representation."""
+    index = {}
+
+    def quality(item):
+        return sum(bool(str(item.get(field, "") or "").strip()) for field in _REFERENCE_METADATA_FIELDS)
+
+    rows = db.execute(
+        "SELECT barcode, brand, description, image_url, product_code FROM product_reference"
+    ).fetchall()
+    for row in rows:
+        item = dict(row)
+        keys = {
+            normalized_digits(candidate)
+            for candidate in build_barcode_candidates(item.get("barcode", ""))
+            if normalized_digits(candidate)
+        }
+        for key in keys:
+            current = index.get(key)
+            if current is None:
+                index[key] = dict(item)
+                continue
+            combined = dict(current)
+            item_is_richer = quality(item) > quality(current)
+            for field in _REFERENCE_METADATA_FIELDS:
+                incoming = str(item.get(field, "") or "").strip()
+                if incoming and (item_is_richer or not str(combined.get(field, "") or "").strip()):
+                    combined[field] = incoming
+            index[key] = combined
+    return index
+
+
+def reference_metadata_for_barcode(reference_index, barcode):
+    """Resolve a catalogue row from a raw UPC, including leading-zero variants."""
+    best = None
+    best_quality = -1
+    for candidate in build_barcode_candidates(barcode):
+        item = reference_index.get(normalized_digits(candidate))
+        if not item:
+            continue
+        item_quality = sum(
+            bool(str(item.get(field, "") or "").strip())
+            for field in _REFERENCE_METADATA_FIELDS
+        )
+        if item_quality > best_quality:
+            best = item
+            best_quality = item_quality
+    return best or {}
+
+
+def merge_reference_metadata(product, reference):
+    """Fill blank product metadata from its UPC reference without overwriting edits."""
+    merged = dict(product or {})
+    reference = reference or {}
+    for field in _REFERENCE_METADATA_FIELDS:
+        if not str(merged.get(field, "") or "").strip():
+            value = str(reference.get(field, "") or "").strip()
+            if value:
+                merged[field] = value
+    return merged
+
+
+def planogram_metadata(existing, reference, barcode, product_code=""):
+    """Resolve metadata for a plano row without carrying data across different UPCs."""
+    existing = dict(existing or {})
+    incoming_keys = {
+        normalized_digits(candidate) for candidate in build_barcode_candidates(barcode)
+        if normalized_digits(candidate)
+    }
+    existing_keys = {
+        normalized_digits(candidate)
+        for candidate in build_barcode_candidates(existing.get("barcode", ""))
+        if normalized_digits(candidate)
+    }
+    prior = existing if incoming_keys and incoming_keys & existing_keys else {}
+    metadata = merge_reference_metadata(prior, reference)
+    return {
+        "brand": str(metadata.get("brand", "") or "").strip(),
+        "description": str(metadata.get("description", "") or "").strip(),
+        "image_url": str(metadata.get("image_url", "") or "").strip(),
+        "product_code": str(product_code or metadata.get("product_code", "") or "").strip(),
+        "source_url": str(prior.get("source_url", "") or "").strip(),
+        "usage_notes": str(prior.get("usage_notes", "") or "").strip(),
+        "alternative_suggestions": str(
+            prior.get("alternative_suggestions", "") or ""
+        ).strip(),
+    }
+
+
+def update_product_metadata_from_reference(db, product, reference, now=None):
+    """Persist a blank-field-only metadata merge for one placed product."""
+    original = dict(product or {})
+    merged = merge_reference_metadata(original, reference)
+    if not any(
+        str(merged.get(field, "") or "").strip() != str(original.get(field, "") or "").strip()
+        for field in _REFERENCE_METADATA_FIELDS
+    ):
+        return False
+    db.execute(
+        """UPDATE products SET brand=?, description=?, image_url=?, product_code=?, modified_at=?
+           WHERE id=?""",
+        (merged.get("brand", ""), merged.get("description", ""),
+         merged.get("image_url", ""), merged.get("product_code", ""),
+         now or utc_now_iso(), original["id"]),
+    )
+    product.update(merged)
+    return True
+
+
+def sync_reference_metadata_to_products(db, now=None):
+    """Backfill every placed product from the enriched catalogue by equivalent UPC."""
+    reference_index = build_reference_metadata_index(db)
+    if not reference_index:
+        return 0
+    linked = 0
+    rows = db.execute(
+        """SELECT id, barcode, brand, description, image_url, product_code
+           FROM products WHERE TRIM(COALESCE(barcode,'')) <> ''"""
+    ).fetchall()
+    for row in rows:
+        product = dict(row)
+        reference = reference_metadata_for_barcode(reference_index, product.get("barcode", ""))
+        if reference and update_product_metadata_from_reference(db, product, reference, now=now):
+            linked += 1
+    return linked
+
+
 # A coalescing queue keeps exactly one image worker alive. Repeated Client searches
 # can safely request the same missing UPCs without creating waiting background threads.
 _IMAGE_FILL_STATE_LOCK = threading.Lock()
@@ -1491,21 +1621,27 @@ def bulk_import_products():
     image_barcodes = []   # barcodes still missing an image → fetched in background
 
     # Prefetch once instead of querying per product (an import is 100+ rows):
-    #  - existing slot → product id (for this aisle+side)
+    #  - existing slot → product metadata (for safe same-UPC preservation)
     #  - any image already stored for a barcode, to reuse it without re-querying
     existing_slots = {}
     for r in db.execute(
-        "SELECT id, section, shelf, position FROM products WHERE aisle=? AND side=?", (aisle, side)
+        """SELECT id, section, shelf, position, barcode, brand, description, image_url,
+                  source_url, search_terms, usage_notes, alternative_suggestions, product_code
+           FROM products WHERE aisle=? AND side=?""", (aisle, side)
     ).fetchall():
         d = dict(r)
-        existing_slots[(str(d["section"]), str(d["shelf"]), str(d["position"]))] = d["id"]
+        existing_slots[(str(d["section"]), str(d["shelf"]), str(d["position"]))] = d
+    reference_index = build_reference_metadata_index(db)
     image_by_barcode = {}
     for r in db.execute(
         "SELECT barcode, image_url FROM products "
         "WHERE TRIM(COALESCE(image_url,'')) <> '' AND TRIM(COALESCE(barcode,'')) <> ''"
     ).fetchall():
         d = dict(r)
-        image_by_barcode.setdefault(str(d["barcode"]).strip(), d["image_url"])
+        for candidate in build_barcode_candidates(d.get("barcode", "")):
+            key = normalized_digits(candidate)
+            if key:
+                image_by_barcode.setdefault(key, d["image_url"])
 
     for (sec_no, shelf_no, pos_no, ln) in placements:
         p = ln["p"]
@@ -1524,37 +1660,50 @@ def bulk_import_products():
         notes    = "[PLANO]" if is_plano else "[HORS-PLANO]"
         in_stock = 0 if not p.get("en_stock", True) else 1
         try:
-            row_id = existing_slots.get((section_s, shelf_s, position_s))
-            if row_id is not None and not replace:
+            existing = existing_slots.get((section_s, shelf_s, position_s))
+            row_id = existing.get("id") if existing else None
+            if existing is not None and not replace:
                 skipped += 1
                 continue
-            # Plano rows carry no image — reuse one already stored for this barcode.
-            image_url = ""
+            reference = reference_metadata_for_barcode(reference_index, barcode)
+            metadata = planogram_metadata(existing, reference, barcode, product_code=code)
+            brand = metadata["brand"]
+            description = metadata["description"]
+            image_url = metadata["image_url"]
+            product_code = metadata["product_code"]
+            source_url = metadata["source_url"]
+            usage_notes = metadata["usage_notes"]
+            alternatives = metadata["alternative_suggestions"]
+
+            # Plano rows carry no image — reuse a verified image for the same UPC.
             for cand in build_barcode_candidates(barcode):
-                if cand in image_by_barcode:
-                    image_url = image_by_barcode[cand]
+                key = normalized_digits(cand)
+                if not image_url and key in image_by_barcode:
+                    image_url = image_by_barcode[key]
                     break
             if not image_url and barcode:
                 image_barcodes.append(barcode)   # fetch online in background
             if row_id is not None:
-                if image_url:
-                    db.execute(
-                        "UPDATE products SET name=?, barcode=?, product_code=?, facings=?, search_terms=?, is_plano=?, in_stock=?, flipped_label=?, image_url=?, modified_by=?, modified_at=? WHERE id=?",
-                        (name, barcode, code, facings, notes, is_plano, in_stock, flipped, image_url, username, now, row_id)
-                    )
-                else:
-                    db.execute(
-                        "UPDATE products SET name=?, barcode=?, product_code=?, facings=?, search_terms=?, is_plano=?, in_stock=?, flipped_label=?, modified_by=?, modified_at=? WHERE id=?",
-                        (name, barcode, code, facings, notes, is_plano, in_stock, flipped, username, now, row_id)
-                    )
+                db.execute(
+                    """UPDATE products SET name=?, brand=?, description=?, image_url=?, source_url=?,
+                       usage_notes=?, alternative_suggestions=?, barcode=?, product_code=?, facings=?,
+                       search_terms=?, is_plano=?, in_stock=?, flipped_label=?, modified_by=?, modified_at=?
+                       WHERE id=?""",
+                    (name, brand, description, image_url, source_url, usage_notes, alternatives,
+                     barcode, product_code, facings, notes, is_plano, in_stock, flipped,
+                     username, now, row_id)
+                )
             else:
                 db.execute(
                     """INSERT INTO products
-                       (name, barcode, product_code, facings, aisle, side, section, shelf, position,
-                        search_terms, is_plano, in_stock, flipped_label, image_url, created_by, created_at, modified_by, modified_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (name, barcode, code, facings, aisle, side, section_s, shelf_s, position_s,
-                     notes, is_plano, in_stock, flipped, image_url, username, now, username, now)
+                       (name, brand, description, image_url, source_url, usage_notes,
+                        alternative_suggestions, barcode, product_code, facings, aisle, side,
+                        section, shelf, position, search_terms, is_plano, in_stock, flipped_label,
+                        created_by, created_at, modified_by, modified_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (name, brand, description, image_url, source_url, usage_notes, alternatives,
+                     barcode, product_code, facings, aisle, side, section_s, shelf_s, position_s,
+                     notes, is_plano, in_stock, flipped, username, now, username, now)
                 )
             imported += 1
         except Exception:
@@ -1628,6 +1777,45 @@ def planogram_history():
     db = get_db()
     rows = db.execute("SELECT * FROM planogram_imports ORDER BY id DESC").fetchall()
     return jsonify([dict(r) for r in rows])
+
+
+_REFERENCE_SYNC_LOCK = threading.Lock()
+_REFERENCE_SYNC_STARTED = False
+
+
+def schedule_reference_metadata_sync():
+    """Backfill existing plans after deploy without delaying application startup."""
+    global _REFERENCE_SYNC_STARTED
+    with _REFERENCE_SYNC_LOCK:
+        if _REFERENCE_SYNC_STARTED:
+            return
+        _REFERENCE_SYNC_STARTED = True
+
+    def worker():
+        from database import connect_db
+
+        for attempt in range(3):
+            db = None
+            try:
+                db = connect_db()
+                linked = sync_reference_metadata_to_products(db)
+                db.commit()
+                if linked:
+                    print(f"[Catalogue] {linked} produit(s) placé(s) relié(s) à leur description/image.")
+                return
+            except Exception as exc:
+                if attempt == 2:
+                    print(f"[Catalogue] synchronisation des métadonnées impossible: {exc}")
+                else:
+                    time.sleep(5)
+            finally:
+                if db is not None:
+                    try:
+                        db.close()
+                    except Exception:
+                        pass
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def schedule_backfill_missing():

@@ -6,7 +6,10 @@ from flask import Flask, render_template, send_from_directory, jsonify, request
 from werkzeug.exceptions import HTTPException
 from database import close_db, get_backend_summary, get_db, init_db
 from auth import utc_now_iso
-from routes.products import products_bp, first_column, schedule_backfill_missing
+from routes.products import (
+    products_bp, first_column, schedule_backfill_missing,
+    schedule_reference_metadata_sync,
+)
 from routes.layout import layout_bp
 from routes.ai import ai_bp, configured_ai_provider, reference_count, maybe_resume_enrichment
 from routes.gist import gist_bp, _restore_from_gist_if_empty
@@ -206,6 +209,7 @@ def _start_self_keepalive():
 # ── Boot ───────────────────────────────────────────────────────────────────────
 
 _restore_from_gist_if_empty()
+schedule_reference_metadata_sync()  # connect enriched catalogue rows to placed UPCs
 schedule_backfill_missing()   # auto-fetch any missing product images in background
 _start_self_keepalive()
 

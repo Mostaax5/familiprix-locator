@@ -1922,7 +1922,10 @@ def reference_count_route():
 
 
 # ── Catalogue online-enrichment (fetch real descriptions + images, validated) ────
-_CATALOG_ENRICH = {"running": False, "done": 0, "total": 0, "updated": 0, "skipped": 0}
+_CATALOG_ENRICH = {
+    "running": False, "done": 0, "total": 0,
+    "updated": 0, "linked": 0, "skipped": 0,
+}
 
 
 _ENRICH_CHUNK = 20        # lookups submitted per batch — Stop reacts within one batch
@@ -1966,6 +1969,10 @@ def _catalog_enrich_worker():
     It only gives up after 5 consecutive attempts that made zero progress."""
     from concurrent.futures import ThreadPoolExecutor
     from database import connect_db
+    from routes.products import (
+        build_barcode_candidates, normalized_digits,
+        update_product_metadata_from_reference,
+    )
     import gc
 
     def _lookup(r):
@@ -1984,11 +1991,21 @@ def _catalog_enrich_worker():
                 # Only products not yet tried (no description AND no enrich tag) so
                 # re-runs and reconnects resume exactly where the run stopped.
                 rows = [dict(r) for r in db.execute(
-                    "SELECT barcode, name, brand FROM product_reference "
+                    "SELECT barcode, name, brand, image_url, product_code FROM product_reference "
                     "WHERE TRIM(COALESCE(description,'')) = '' AND TRIM(COALESCE(enrich_status,'')) = '' "
                     "AND TRIM(COALESCE(name,'')) <> ''").fetchall()]
                 if not rows:
                     break                      # everything processed — real Terminé
+                placed_by_barcode = {}
+                for product_row in db.execute(
+                    """SELECT id, barcode, brand, description, image_url, product_code
+                       FROM products WHERE TRIM(COALESCE(barcode,'')) <> ''"""
+                ).fetchall():
+                    product = dict(product_row)
+                    for candidate in build_barcode_candidates(product.get("barcode", "")):
+                        key = normalized_digits(candidate)
+                        if key:
+                            placed_by_barcode.setdefault(key, {})[product["id"]] = product
                 _CATALOG_ENRICH["total"] = _CATALOG_ENRICH["done"] + len(rows)
                 _CATALOG_ENRICH.pop("error", None)
                 _write_enrich_marker()
@@ -2012,6 +2029,7 @@ def _catalog_enrich_worker():
                             except Exception:
                                 matched = False
                             if matched:
+                                updated_at = utc_now_iso()
                                 db.execute(
                                     """UPDATE product_reference SET
                                          description   = CASE WHEN TRIM(COALESCE(description,'')) = '' THEN ? ELSE description END,
@@ -2019,8 +2037,24 @@ def _catalog_enrich_worker():
                                          brand         = CASE WHEN TRIM(COALESCE(brand,''))       = '' THEN ? ELSE brand END,
                                          enrich_status = 'done', updated_at = ?
                                        WHERE barcode = ?""",
-                                    (desc, img, brand, utc_now_iso(), bc),
+                                    (desc, img, brand, updated_at, bc),
                                 )
+                                reference = {
+                                    "brand": str(r.get("brand", "") or "").strip() or brand,
+                                    "description": desc,
+                                    "image_url": str(r.get("image_url", "") or "").strip() or img,
+                                    "product_code": str(r.get("product_code", "") or "").strip(),
+                                }
+                                matched_products = {}
+                                for candidate in build_barcode_candidates(bc):
+                                    key = normalized_digits(candidate)
+                                    for product_id, product in placed_by_barcode.get(key, {}).items():
+                                        matched_products[product_id] = product
+                                for product in matched_products.values():
+                                    if update_product_metadata_from_reference(
+                                            db, product, reference, now=updated_at
+                                    ):
+                                        _CATALOG_ENRICH["linked"] += 1
                                 db.commit()
                                 _CATALOG_ENRICH["updated"] += 1
                             else:
@@ -2070,7 +2104,7 @@ def catalog_enrich_start():
         total = row["n"] if isinstance(row, dict) else row[0]
     except Exception:
         total = 0
-    _CATALOG_ENRICH.update(running=True, done=0, updated=0, skipped=0,
+    _CATALOG_ENRICH.update(running=True, done=0, updated=0, linked=0, skipped=0,
                            total=int(total or 0), started_at=time.time())
     _CATALOG_ENRICH.pop("error", None)   # a fresh run must not display an old failure
     import threading
@@ -2091,7 +2125,7 @@ def maybe_resume_enrichment():
         marker = _read_enrich_marker()
         if not (marker and marker.get("running") and marker.get("pid") != os.getpid()):
             return False
-        _CATALOG_ENRICH.update(running=True, done=0, updated=0, skipped=0,
+        _CATALOG_ENRICH.update(running=True, done=0, updated=0, linked=0, skipped=0,
                                total=0, started_at=time.time())
         _CATALOG_ENRICH.pop("error", None)
         _write_enrich_marker()

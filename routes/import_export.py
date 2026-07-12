@@ -434,7 +434,7 @@ def import_planogram_catalog():
       1. Upserts every product into product_reference so UPC lookup instantly returns
          a real name/description — even for products that aren't placed yet.
       2. Enriches products already placed in the plan (matched by barcode) by filling
-         in ONLY blank fields (pharmacy code, façades) — never overwriting your data.
+         in ONLY blank metadata plus pharmacy code/facings — never overwriting edits.
     Accepts a JSON file upload (field 'file') or a raw JSON body: a list of planogram
     objects {meta:{name,...}, file, products:[{barcode,name,code_familiprix,facings}]}.
     """
@@ -455,7 +455,10 @@ def import_planogram_catalog():
     if not isinstance(payload, list):
         return jsonify({"success": False, "error": "Catalogue JSON invalide (liste de planogrammes attendue)."}), 400
 
-    from routes.products import build_barcode_candidates, normalized_digits
+    from routes.products import (
+        build_barcode_candidates, normalized_digits,
+        sync_reference_metadata_to_products,
+    )
     db = get_db()
     now = utc_now_iso()
 
@@ -483,20 +486,29 @@ def import_planogram_catalog():
                 continue
             products_seen += 1
             code = str(p.get("code_familiprix", "")).strip()
+            brand = str(p.get("brand", "") or "").strip()
+            description = str(p.get("description", "") or "").strip()
+            image_url = str(p.get("image_url", "") or "").strip()
 
-            # 1) reference catalogue — keep an existing real name/code, else use the
-            #    plano's. Storing the Familiprix code attaches it to the UPC for lookups.
+            # 1) Reference catalogue. Most generated plano JSON files contain only
+            # name/code/facings, but preserve richer metadata when a file has it.
             db.execute(
                 """INSERT INTO product_reference (barcode, name, brand, description, image_url, source, source_url, product_code, updated_at)
-                   VALUES (?, ?, '', '', '', ?, ?, ?, ?)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(barcode) DO UPDATE SET
                        name = CASE WHEN TRIM(COALESCE(product_reference.name, '')) = ''
                                    THEN excluded.name ELSE product_reference.name END,
+                       brand = CASE WHEN TRIM(COALESCE(product_reference.brand, '')) = ''
+                                   THEN excluded.brand ELSE product_reference.brand END,
+                       description = CASE WHEN TRIM(COALESCE(product_reference.description, '')) = ''
+                                   THEN excluded.description ELSE product_reference.description END,
+                       image_url = CASE WHEN TRIM(COALESCE(product_reference.image_url, '')) = ''
+                                   THEN excluded.image_url ELSE product_reference.image_url END,
                        product_code = CASE WHEN TRIM(COALESCE(product_reference.product_code, '')) = ''
                                    THEN excluded.product_code ELSE product_reference.product_code END,
                        source = excluded.source, source_url = excluded.source_url,
                        updated_at = excluded.updated_at""",
-                (barcode, name, source, source_url, code, now),
+                (barcode, name, brand, description, image_url, source, source_url, code, now),
             )
             ref_upserts += 1
 
@@ -512,16 +524,25 @@ def import_planogram_catalog():
             for d in matched.values():
                 changed = False
                 if code and not str(d.get("product_code", "")).strip():
-                    db.execute("UPDATE products SET product_code=? WHERE id=?", (code, d["id"]))
+                    db.execute(
+                        "UPDATE products SET product_code=?, modified_at=? WHERE id=?",
+                        (code, now, d["id"]),
+                    )
                     d["product_code"] = code
                     changed = True
                 if facings > 1 and int(d.get("facings") or 1) <= 1:
-                    db.execute("UPDATE products SET facings=? WHERE id=?", (facings, d["id"]))
+                    db.execute(
+                        "UPDATE products SET facings=?, modified_at=? WHERE id=?",
+                        (facings, now, d["id"]),
+                    )
                     d["facings"] = facings
                     changed = True
                 if changed:
                     enriched += 1
 
+    # Link descriptions/images that were enriched before this import to all
+    # already-placed copies of the same UPC. Existing/manual values win.
+    metadata_linked = sync_reference_metadata_to_products(db, now=now)
     db.commit()
     try:
         from routes.products import bump_reference_cache
@@ -534,4 +555,5 @@ def import_planogram_catalog():
         "products_seen": products_seen,
         "reference_upserts": ref_upserts,
         "enriched_products": enriched,
+        "metadata_linked_products": metadata_linked,
     })
