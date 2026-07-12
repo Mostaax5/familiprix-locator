@@ -4,6 +4,7 @@ let _clientRagController = null;
 let _clientImagePollTimer = null;
 let _latestClientResult = null;
 let _clientSelectedQuote = '';
+let _clientQuoteFocusProductId = '';
 let _clientFocusedProductId = '';
 let clientConversation = [];
 
@@ -66,6 +67,41 @@ function linkifyClientAnswer(answer, products) {
   }).join('');
 }
 
+function clientQuoteButton(quote, focusProductId='', label='Citer ce passage') {
+  const cleanQuote = String(quote || '').trim().replace(/\s+/g, ' ').slice(0, 500);
+  return `<button type="button" class="client-quote-action" data-quote="${encodeURIComponent(cleanQuote)}" data-focus-product="${esc(focusProductId)}" onclick="event.stopPropagation();quoteClientPassage(decodeURIComponent(this.dataset.quote),this.dataset.focusProduct)" title="${esc(label)}" aria-label="${esc(label)}">&#8220;</button>`;
+}
+
+function renderQuotableClientAnswer(answer, products=[]) {
+  const text = cleanClientAnswer(answer);
+  if (!text) return '';
+  const passages = [];
+  for (const line of text.split(/\n+/).map(item => item.trim()).filter(Boolean)) {
+    if (line.length <= 280) {
+      passages.push(line);
+      continue;
+    }
+    const sentences = line.match(/[^.!?]+[.!?]+(?:\s+|$)|[^.!?]+$/g) || [line];
+    let passage = '';
+    for (const rawSentence of sentences) {
+      const sentence = rawSentence.trim();
+      if (!sentence) continue;
+      if (passage && `${passage} ${sentence}`.length > 280) {
+        passages.push(passage);
+        passage = sentence;
+      } else {
+        passage = passage ? `${passage} ${sentence}` : sentence;
+      }
+    }
+    if (passage) passages.push(passage);
+  }
+  return passages.map(passage => `
+    <div class="client-answer-paragraph">
+      <div class="client-answer-paragraph-text">${linkifyClientAnswer(passage, products)}</div>
+      ${clientQuoteButton(passage)}
+    </div>`).join('');
+}
+
 function highlightedClientProducts(result) {
   const products = Array.isArray(result?.products) ? result.products : [];
   const ids = new Set((result?.highlighted_product_ids || []).map(String));
@@ -96,7 +132,7 @@ function renderLatestAssistantDetails(result) {
     <div class="client-response-mode ${result?.response_mode === 'lookup' ? 'is-fast' : 'is-detailed'}">
       ${result?.response_mode === 'lookup' ? 'Recherche rapide' : 'Réponse détaillée'}
     </div>
-    <div class="client-chat-answer">${linkifyClientAnswer(result?.answer || advice.summary || '', products)}</div>
+    <div class="client-chat-answer">${renderQuotableClientAnswer(result?.answer || advice.summary || '', products)}</div>
     ${links ? `<div class="client-answer-products"><span>Produits cités :</span> ${links}</div>` : ''}
     ${advice.follow_up_questions?.length ? `
       <div class="advice-section">
@@ -135,13 +171,15 @@ function renderClientConversation() {
         ${isLatestAssistant
           ? (_latestClientResult
               ? renderLatestAssistantDetails(_latestClientResult)
-              : `<div class="client-chat-answer">${esc(cleanClientAnswer(message.content))}</div>${clientDirectReplyMarkup()}`)
-          : `<div class="client-chat-answer">${esc(cleanClientAnswer(message.content))}</div>`}
+              : `<div class="client-chat-answer">${renderQuotableClientAnswer(message.content)}</div>${clientDirectReplyMarkup()}`)
+          : (message.role === 'assistant'
+              ? `<div class="client-chat-answer">${renderQuotableClientAnswer(message.content)}</div>`
+              : `<div class="client-chat-answer">${esc(cleanClientAnswer(message.content))}</div>`)}
       </div>`;
     }).join('')}
   </div>`;
-  target.onmouseup = captureClientAnswerSelection;
-  target.ontouchend = captureClientAnswerSelection;
+  target.onmouseup = captureClientTextSelection;
+  target.ontouchend = captureClientTextSelection;
 }
 
 function productInitials(product) {
@@ -172,6 +210,7 @@ function openClientProductDetails(candidateId) {
   const content = document.getElementById('clientProductDetailContent');
   if (!product || !modal || !content) return;
   _clientFocusedProductId = String(product.client_id || '');
+  modal.dataset.clientId = _clientFocusedProductId;
   const description = product.description || product.usage_notes || 'Aucune description détaillée disponible pour ce produit.';
   const searchTerms = Array.isArray(product.search_terms) ? product.search_terms.join(', ') : String(product.search_terms || '');
   content.innerHTML = `
@@ -194,10 +233,13 @@ function openClientProductDetails(candidateId) {
       <div class="client-result-locations">${clientProductLocations(product)}</div>
     </div>
     <div class="client-product-detail-section">
-      <div class="client-product-detail-label">Description</div>
+      <div class="client-product-detail-label-row">
+        <div class="client-product-detail-label">Description</div>
+        ${clientQuoteButton(`${product.name}: ${description}`, _clientFocusedProductId, 'Citer cette description')}
+      </div>
       <div class="client-product-detail-copy">${esc(description)}</div>
     </div>
-    ${product.usage_notes && product.usage_notes !== description ? `<div class="client-product-detail-section"><div class="client-product-detail-label">Aide client</div><div class="client-product-detail-copy">${esc(product.usage_notes)}</div></div>` : ''}
+    ${product.usage_notes && product.usage_notes !== description ? `<div class="client-product-detail-section"><div class="client-product-detail-label-row"><div class="client-product-detail-label">Aide client</div>${clientQuoteButton(`${product.name}: ${product.usage_notes}`, _clientFocusedProductId, 'Citer cette information')}</div><div class="client-product-detail-copy">${esc(product.usage_notes)}</div></div>` : ''}
     ${searchTerms ? `<div class="client-product-detail-section"><div class="client-product-detail-label">Termes associés</div><div class="client-product-detail-copy">${esc(searchTerms)}</div></div>` : ''}
     <div class="client-product-detail-codes">
       ${product.barcode ? `<span>UPC ${esc(product.barcode)}</span>` : ''}
@@ -207,6 +249,9 @@ function openClientProductDetails(candidateId) {
   if (input) input.value = '';
   modal.hidden = false;
   document.body.classList.add('modal-open');
+  content.onmouseup = captureClientTextSelection;
+  content.ontouchend = captureClientTextSelection;
+  updateClientQuotePreview();
   window.setTimeout(() => input?.focus(), 50);
 }
 
@@ -229,13 +274,15 @@ async function askAboutClientProduct() {
     return;
   }
   const focusProductId = _clientFocusedProductId;
+  const selectedText = _clientQuoteFocusProductId === focusProductId ? _clientSelectedQuote : '';
   closeClientProductDetails();
-  await runClientRequest(question, {followUp: true, focusProductId});
+  await runClientRequest(question, {followUp: true, focusProductId, selectedText});
 }
 
 function clientProductCard(product) {
   const description = product.usage_notes || product.description || '';
-  return `<article class="client-result-card${product.in_stock === 0 ? ' is-out-of-stock' : ''}" id="${clientProductDomId(product)}" data-client-id="${esc(product.client_id || '')}" role="button" tabindex="0" onclick="openClientProductDetails(this.dataset.clientId)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openClientProductDetails(this.dataset.clientId)}">
+  const productQuote = description ? `${product.name}: ${description}` : '';
+  return `<article class="client-result-card${product.in_stock === 0 ? ' is-out-of-stock' : ''}" id="${clientProductDomId(product)}" data-client-id="${esc(product.client_id || '')}" onclick="if(!(window.getSelection?.()?.toString()||'').trim())openClientProductDetails(this.dataset.clientId)">
     ${clientProductImage(product)}
     <div class="client-result-body">
       <div class="client-result-badges">
@@ -246,11 +293,11 @@ function clientProductCard(product) {
       <h3>${esc(product.name)}</h3>
       ${product.brand ? `<div class="client-result-brand">${esc(product.brand)}</div>` : ''}
       <div class="client-result-locations">${clientProductLocations(product)}</div>
-      ${description ? `<div class="client-result-description">${esc(description)}</div>` : ''}
+      ${description ? `<div class="client-result-description-row"><div class="client-result-description">${esc(description)}</div>${clientQuoteButton(productQuote, String(product.client_id || ''), 'Citer cette description')}</div>` : ''}
       <div class="client-result-codes">
         ${product.barcode ? `<span>UPC ${esc(product.barcode)}</span>` : ''}
         ${product.product_code ? `<span>Code ${esc(product.product_code)}</span>` : ''}
-        <span class="client-detail-affordance">Voir détails</span>
+        <button type="button" class="client-detail-affordance" onclick="event.stopPropagation();openClientProductDetails(this.closest('.client-result-card').dataset.clientId)">Voir détails</button>
       </div>
     </div>
   </article>`;
@@ -275,6 +322,8 @@ function renderClientMatches(matches) {
       <div class="client-results-list">${matches.map(clientProductCard).join('')}</div>
     </section>
   `;
+  target.onmouseup = captureClientTextSelection;
+  target.ontouchend = captureClientTextSelection;
 }
 
 function updateClientQuotePreview() {
@@ -282,14 +331,51 @@ function updateClientQuotePreview() {
   const text = document.getElementById('clientQuoteText');
   if (text) text.textContent = _clientSelectedQuote;
   if (preview) preview.hidden = !_clientSelectedQuote;
+  const productPreview = document.getElementById('clientProductQuotePreview');
+  const productText = document.getElementById('clientProductQuoteText');
+  const isFocusedProductQuote = Boolean(
+    _clientSelectedQuote && _clientQuoteFocusProductId &&
+    _clientQuoteFocusProductId === _clientFocusedProductId
+  );
+  if (productText) productText.textContent = isFocusedProductQuote ? _clientSelectedQuote : '';
+  if (productPreview) productPreview.hidden = !isFocusedProductQuote;
+
+  document.querySelectorAll('.client-quote-action').forEach(button => {
+    const quote = decodeURIComponent(button.dataset.quote || '');
+    const focus = button.dataset.focusProduct || '';
+    button.classList.toggle(
+      'is-active', quote === _clientSelectedQuote && focus === _clientQuoteFocusProductId
+    );
+  });
 }
 
 function clearClientSelectedQuote() {
   _clientSelectedQuote = '';
+  _clientQuoteFocusProductId = '';
   updateClientQuotePreview();
 }
 
-function captureClientAnswerSelection() {
+function quoteClientPassage(quote, focusProductId='') {
+  const cleaned = String(quote || '').trim().replace(/\s+/g, ' ').slice(0, 500);
+  if (!cleaned) return;
+  _clientSelectedQuote = cleaned;
+  _clientQuoteFocusProductId = String(focusProductId || '');
+  updateClientQuotePreview();
+
+  const modal = document.getElementById('clientProductModal');
+  const useProductReply = Boolean(
+    modal && !modal.hidden && _clientQuoteFocusProductId === _clientFocusedProductId
+  );
+  const input = document.getElementById(
+    useProductReply ? 'clientProductQuestion' : 'clientFollowupQuestion'
+  );
+  if (!useProductReply) {
+    input?.scrollIntoView({behavior: 'smooth', block: 'center'});
+  }
+  window.setTimeout(() => input?.focus(), 80);
+}
+
+function captureClientTextSelection() {
   window.setTimeout(() => {
     const selection = window.getSelection?.();
     const quote = String(selection?.toString() || '').trim().replace(/\s+/g, ' ').slice(0, 500);
@@ -297,10 +383,19 @@ function captureClientAnswerSelection() {
     const node = selection.getRangeAt(0).commonAncestorContainer;
     const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
     const answer = element?.closest?.('.client-message-assistant .client-chat-answer');
-    if (!answer || !document.getElementById('clientAdvice')?.contains(answer)) return;
-    _clientSelectedQuote = quote;
-    updateClientQuotePreview();
-    document.getElementById('clientFollowupQuestion')?.focus();
+    if (answer && document.getElementById('clientAdvice')?.contains(answer)) {
+      quoteClientPassage(quote);
+      return;
+    }
+    const productCopy = element?.closest?.('.client-result-description, .client-product-detail-copy');
+    if (!productCopy) return;
+    const card = element.closest?.('.client-result-card');
+    const modal = element.closest?.('#clientProductModal');
+    const candidateId = card?.dataset.clientId || modal?.dataset.clientId || '';
+    const product = currentClientMatches.find(
+      item => String(item.client_id || '') === String(candidateId)
+    );
+    quoteClientPassage(product ? `${product.name}: ${quote}` : quote, candidateId);
   }, 0);
 }
 
@@ -325,7 +420,11 @@ function submitClientFollowup() {
     input?.focus();
     return;
   }
-  return runClientRequest(question, {followUp: true, selectedText: _clientSelectedQuote});
+  return runClientRequest(question, {
+    followUp: true,
+    selectedText: _clientSelectedQuote,
+    focusProductId: _clientQuoteFocusProductId,
+  });
 }
 
 function resetClientSearchResults(showStatus=true) {
@@ -336,6 +435,7 @@ function resetClientSearchResults(showStatus=true) {
   if (_clientImagePollTimer) window.clearTimeout(_clientImagePollTimer);
   _latestClientResult = null;
   _clientSelectedQuote = '';
+  _clientQuoteFocusProductId = '';
   _clientFocusedProductId = '';
   currentClientMatches = [];
   clientConversation = [];
@@ -465,6 +565,7 @@ async function runClientRequest(question, options={}) {
   const followupInput = document.getElementById('clientFollowupQuestion');
   if (followupInput) followupInput.value = '';
   _clientSelectedQuote = '';
+  _clientQuoteFocusProductId = '';
   persistClientDraft();
   renderClientConversation();
   renderClientMatches(products);
