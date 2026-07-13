@@ -209,6 +209,36 @@ class PlanogramMetadataTests(unittest.TestCase):
         self.assertEqual(after_second["image_url"], "")
         self.assertEqual(after_second["product_code"], "NEW777")
 
+    def test_bulk_import_reports_overflow_shelves_and_products_separately(self):
+        db = self.make_plan_db()
+        app = Flask(__name__)
+        app.register_blueprint(products_bp)
+        payload = {
+            "aisle": "1", "side": "Gauche", "start_section": 1,
+            "start_tablette": 1, "tablette_start": 1, "tablette_end": 2,
+            "replace_existing": True,
+            "products": [
+                {"tablette": 1, "position": 1, "barcode": "111", "name": "FIRST"},
+                {"tablette": 2, "position": 1, "barcode": "222", "name": "SECOND"},
+                {"tablette": 2, "position": 2, "barcode": "333", "name": "THIRD"},
+            ],
+        }
+
+        with patch("routes.products.get_db", return_value=db), \
+             patch("auth.get_db", return_value=db), \
+             patch("routes.products.schedule_image_fill"), \
+             patch("routes.gist._schedule_gist_backup"):
+            with app.test_client() as client:
+                response = client.post("/api/products/bulk-import", json=payload)
+
+        result = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(result["imported"], 1)
+        self.assertEqual(result["overflow_shelves"], 1)
+        self.assertEqual(result["overflow_products"], 2)
+        self.assertEqual(result["skipped"], 2)
+        db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

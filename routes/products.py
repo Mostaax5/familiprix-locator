@@ -1616,6 +1616,7 @@ def bulk_import_products():
         lines.append({"tablette": tab, "position": pos, "p": p})
 
     placements, overflow = plan_planogram_flow(config, side, start_section, start_tablette, lines, shrink=replace)
+    overflow_products = max(0, len(lines) - len(placements))
 
     imported = skipped = 0
     image_barcodes = []   # barcodes still missing an image → fetched in background
@@ -1709,7 +1710,7 @@ def bulk_import_products():
         except Exception:
             errors += 1
 
-    skipped += overflow   # plano shelves past the end of the plan (tablettes never added)
+    skipped += overflow_products   # product rows on plano shelves past the physical plan
 
     # When replacing, positions follow the plano exactly — so a tablette that
     # shrank now has products sitting past its new end. Archive them (kept in the
@@ -1769,7 +1770,9 @@ def bulk_import_products():
     _schedule_gist_backup(db)
     schedule_image_fill(image_barcodes)   # fetch missing plano pictures automatically
     return jsonify({"success": True, "imported": imported, "skipped": skipped,
-                    "errors": errors, "overflow": overflow, "pruned": pruned})
+                    "errors": errors, "overflow": overflow,
+                    "overflow_shelves": overflow, "overflow_products": overflow_products,
+                    "pruned": pruned})
 
 
 @products_bp.route("/api/planograms/history", methods=["GET"])

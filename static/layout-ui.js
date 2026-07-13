@@ -140,9 +140,84 @@ function syncLayoutRecord(layout) {
   return layout;
 }
 
-function markLayoutDirty(aisle) { dirtyLayoutAisles.add(String(aisle)); }
+const _layoutAutoSaveTimers = new Map();
+const _layoutEditRevisions = new Map();
+const _layoutAutoSaveInFlight = new Set();
+const _layoutAutoSaveFailures = new Map();
+
+function setLayoutSaveState(aisle, state, message='') {
+  const el = document.getElementById(`aisleSaveState-${aisle}`);
+  if (!el) return;
+  const labels = {
+    waiting: 'En attente...',
+    saving: 'Enregistrement...',
+    saved: 'Sauvegarde automatique',
+    error: 'Echec - reessayer'
+  };
+  el.textContent = message || labels[state] || '';
+  el.dataset.state = state;
+  el.style.color = state === 'error' ? '#c8102e' : (state === 'saved' ? '#15803d' : '#d97706');
+}
+
+function scheduleLayoutAutoSave(aisle, delay=700) {
+  const key = String(aisle);
+  window.clearTimeout(_layoutAutoSaveTimers.get(key));
+  _layoutAutoSaveTimers.set(key, window.setTimeout(() => autoSaveAisleLayout(key), delay));
+}
+
+function markLayoutDirty(aisle) {
+  const key = String(aisle);
+  dirtyLayoutAisles.add(key);
+  _layoutAutoSaveFailures.set(key, 0);
+  _layoutEditRevisions.set(key, (_layoutEditRevisions.get(key) || 0) + 1);
+  setLayoutSaveState(key, 'waiting');
+  scheduleLayoutAutoSave(key);
+}
 function clearLayoutDirty(aisle) { dirtyLayoutAisles.delete(String(aisle)); }
 function hasDirtyLayouts() { return dirtyLayoutAisles.size > 0; }
+
+async function autoSaveAisleLayout(aisle) {
+  const key = String(aisle);
+  _layoutAutoSaveTimers.delete(key);
+  if (!dirtyLayoutAisles.has(key)) return;
+  if (_layoutAutoSaveInFlight.has(key)) {
+    scheduleLayoutAutoSave(key, 250);
+    return;
+  }
+  const layout = getMutableLayout(key);
+  if (!layout) return;
+  const revision = _layoutEditRevisions.get(key) || 0;
+  const config = readAisleLayoutConfig(key);
+  _layoutAutoSaveInFlight.add(key);
+  setLayoutSaveState(key, 'saving');
+  const data = await apiUpdateLayoutAisle(key, {config, enabled: true});
+  _layoutAutoSaveInFlight.delete(key);
+
+  if (!data.success) {
+    const failures = (_layoutAutoSaveFailures.get(key) || 0) + 1;
+    _layoutAutoSaveFailures.set(key, failures);
+    setLayoutSaveState(key, 'error', data.error || (failures < 3 ? 'Sauvegarde impossible - nouvel essai' : 'Sauvegarde impossible'));
+    if (failures < 3) scheduleLayoutAutoSave(key, 3000 * failures);
+    return;
+  }
+
+  _layoutAutoSaveFailures.set(key, 0);
+  layout.modified_by = loadEditorSession().username || layout.modified_by || '';
+  layout.modified_at = nowIsoWithoutMs();
+  if ((_layoutEditRevisions.get(key) || 0) === revision) {
+    clearLayoutDirty(key);
+    setLayoutSaveState(key, 'saved');
+  } else {
+    setLayoutSaveState(key, 'waiting');
+    scheduleLayoutAutoSave(key, 150);
+  }
+  savePlanSnapshot();
+
+  if (Number(data.removed_products || 0) > 0) {
+    await refreshProductsCache(true);
+    refreshPlanUi();
+  }
+}
 
 function compactPlanProduct(product) {
   if (!String(product?.aisle || '').trim()) return null;
@@ -1296,6 +1371,11 @@ function renderSection(aisle, side, sectionIndex, section) {
         <button class="btn btn-outline btn-inline" style="font-size:12px;color:#c8102e;border-color:#f1b8c2;margin-left:auto" onclick="removeSection('${esc(aisle)}','${side}',${sectionIndex})">✕ Supprimer section</button>
       </div>
       ${section.shelves.length ? '' : `<div class="small" style="padding:4px 0;color:#94a3b8">Aucune tablette — cliquez ➕ Tablette ci-dessus.</div>`}
+      <label class="small" style="display:flex;align-items:center;gap:6px;margin:4px 0 8px;font-weight:700;color:#475569">
+        Nombre de tablettes
+        <input type="number" min="0" max="60" value="${section.shelves.length}" style="width:58px;padding:5px;text-align:center"
+               onchange="setSectionShelfCount('${esc(aisle)}','${side}',${sectionIndex},this.value)"/>
+      </label>
       <div class="plan-shelf-grid">
         ${section.shelves.map((positions, shelfIndex) =>
           renderShelfCard(aisle, side, sectionIndex, shelfIndex, positions, (section.labels || [])[shelfIndex] || '')
@@ -1411,6 +1491,7 @@ function renderMapEditor() {
         </summary>
         <div class="tree-body">
         <div class="plan-actions" style="margin-top:8px">
+          <span id="aisleSaveState-${esc(layout.aisle)}" class="small" data-state="${dirty ? 'waiting' : 'saved'}" style="color:${dirty ? '#d97706' : '#15803d'}">${dirty ? 'En attente...' : 'Sauvegarde automatique'}</span>
           <button class="btn btn-inline" onclick="saveAisleLayout('${esc(layout.aisle)}')">Sauver</button>
           <button class="btn btn-outline btn-inline" onclick="applyAisleLayoutToCursor('${esc(layout.aisle)}')">Utiliser pour scan</button>
           <button class="btn btn-outline btn-inline" onclick="setPlanAisleTrees('${esc(layout.aisle)}', true)">Tout ouvrir</button>
@@ -1571,6 +1652,38 @@ function setShelfLabel(aisle, side, sectionIndex, shelfIndex, value) {
   markLayoutDirty(aisle);
 }
 
+function setSectionShelfCount(aisle, side, sectionIndex, rawValue) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const section = layout.config.sides[side]?.sections?.[sectionIndex];
+  if (!section) return;
+  const count = Math.min(60, Math.max(0, parseInt(rawValue) || 0));
+  const currentCount = section.shelves.length;
+  if (count === currentCount) return;
+
+  if (count < currentCount) {
+    const nextConfig = readAisleLayoutConfig(aisle);
+    nextConfig.sides[side].sections[sectionIndex].shelves.length = count;
+    nextConfig.sides[side].sections[sectionIndex].labels.length = count;
+    if (!confirmLayoutReduction(aisle, nextConfig, `Reduire la section ${sectionIndex + 1} a ${count} tablettes`)) {
+      rerenderSection(aisle, side, sectionIndex);
+      return;
+    }
+  }
+
+  const fallback = section.shelves[section.shelves.length - 1] ?? 8;
+  if (!Array.isArray(section.labels)) section.labels = [];
+  while (section.shelves.length < count) {
+    section.shelves.push(fallback);
+    section.labels.push('');
+  }
+  section.shelves.length = count;
+  section.labels.length = count;
+  syncLayoutRecord(layout);
+  markLayoutDirty(aisle);
+  rerenderSection(aisle, side, sectionIndex);
+}
+
 function addAccrocheToSection(aisle, side, sectionIndex) {
   const rawCount = prompt('Combien de produits sur cette accroche ?', '12');
   if (rawCount === null) return;
@@ -1698,8 +1811,17 @@ async function createAisleLayout() {
 
 async function saveAisleLayout(aisle) {
   if (!requireEditorSession('modifier le plan du magasin')) return;
+  const key = String(aisle);
+  window.clearTimeout(_layoutAutoSaveTimers.get(key));
+  _layoutAutoSaveTimers.delete(key);
+  if (_layoutAutoSaveInFlight.has(key)) {
+    setLayoutSaveState(key, 'waiting');
+    scheduleLayoutAutoSave(key, 150);
+    return;
+  }
   const layout = getMutableLayout(aisle);
   if (!layout) return;
+  const revision = _layoutEditRevisions.get(key) || 0;
   syncLayoutRecord(layout);
   const config = readAisleLayoutConfig(aisle);
   const data = await apiUpdateLayoutAisle(aisle, {config, enabled: true});
@@ -1709,7 +1831,13 @@ async function saveAisleLayout(aisle) {
     ? `Allée ${aisle} sauvee.${Number(data.removed_products || 0) ? ` ${data.removed_products} produit(s) supprime(s) car hors structure.` : ''}`
     : (data.error || 'Sauvegarde impossible.');
   if (data.success) {
-    clearLayoutDirty(aisle);
+    if ((_layoutEditRevisions.get(key) || 0) === revision) {
+      clearLayoutDirty(aisle);
+      setLayoutSaveState(aisle, 'saved');
+    } else {
+      setLayoutSaveState(key, 'waiting');
+      scheduleLayoutAutoSave(key, 150);
+    }
     await refreshProductsCache(true);
     layout.modified_by = loadEditorSession().username || layout.modified_by || '';
     layout.modified_at = nowIsoWithoutMs();
@@ -2538,7 +2666,7 @@ function onPlanoSideChange() {
 // Tablette COUNT per section is the plan's and never changes here. Returns a map
 // from product index → {section, shelf, position}, plus the set of overflow rows.
 function computePlanoFlow(config, side, startSection, startTablette, tabStart, tabEnd, skipNS) {
-  const out = { byIdx: {}, overflow: new Set(), placed: 0 };
+  const out = { byIdx: {}, overflow: new Set(), placed: 0, planoShelves: 0, availableShelves: 0, overflowShelves: 0 };
   const slots = [];   // [section_no, shelf_index] in fill order
   const fixture = _planoFixtureForSide(config, side);
   let singleSided = false;
@@ -2572,6 +2700,8 @@ function computePlanoFlow(config, side, startSection, startTablette, tabStart, t
     if (!byTab.has(p.tablette)) byTab.set(p.tablette, []);
     byTab.get(p.tablette).push(idx);
   });
+  out.planoShelves = byTab.size;
+  out.availableShelves = slots.length;
   // STORE CONVENTION (mirror of the server): positions always count from the
   // Façade A end toward Façade B, on BOTH côtés. A plano reads left→right facing
   // the shelf, which on Côté A runs B→A — so its positions are MIRRORED there.
@@ -2579,7 +2709,11 @@ function computePlanoFlow(config, side, startSection, startTablette, tabStart, t
   const mirrorPositions = (side === 'Gauche' && !singleSided);
   [...byTab.keys()].sort((a, b) => a - b).forEach((t, i) => {
     const idxs = byTab.get(t).slice().sort((a, b) => (planoData.products[a].position || 0) - (planoData.products[b].position || 0));
-    if (i >= slots.length) { idxs.forEach(idx => out.overflow.add(idx)); return; }
+    if (i >= slots.length) {
+      out.overflowShelves++;
+      idxs.forEach(idx => out.overflow.add(idx));
+      return;
+    }
     const [secNo, ti] = slots[i];
     const maxPos = Math.max(0, ...idxs.map(idx => planoData.products[idx].position || 0));
     idxs.forEach(idx => {
@@ -2690,13 +2824,18 @@ function updatePlanoPreview() {
     : '';
 
   preview.innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:7px 4px;border-bottom:1px solid #e2e8f0;font-size:12px;font-weight:700;color:#334155">
+      <span>PDF : ${flow.planoShelves} tablette${flow.planoShelves !== 1 ? 's' : ''}</span>
+      <span>Plan magasin disponible : ${flow.availableShelves}</span>
+      ${flow.overflowShelves ? `<span style="color:#c8102e">${flow.overflowShelves} tablette${flow.overflowShelves !== 1 ? 's' : ''} du PDF sans emplacement physique</span>` : '<span style="color:#15803d">Structure compatible</span>'}
+    </div>
     <div style="font-size:11px;color:#64748b;padding:4px 4px 6px">${(side === 'Gauche' && !planoSectionCount(aisle, 'Droite'))
       ? 'Allée à un seul côté (mur/comptoir) : <b>lecture simple de gauche à droite</b> — sections croissantes, positions telles quelles, rien d\'inversé.'
       : side === 'Gauche'
       ? 'Côté A : le plano remplit à partir de la section de départ <b>vers la Façade A</b> (sections décroissantes) et les positions sont <b>inversées</b>, car un planogramme se lit de gauche à droite face à la tablette. <b>Règle du magasin : sections ET positions comptent toujours de la Façade A vers la Façade B, sur les deux côtés.</b>'
       : side === 'Droite'
       ? 'Côté B : le plano remplit à partir de la section de départ <b>vers la Façade B</b> (sections croissantes).'
-      : `${esc(side)} : le plano remplit les tablettes de la façade à partir de la tablette de départ, vers le bas.`} Le nombre de tablettes du plan ne change pas — seul le nombre de positions par tablette s'ajuste.</div>
+      : `${esc(side)} : le plano remplit les tablettes de la façade à partir de la tablette de départ, vers le bas.`} Le plan physique du magasin reste prioritaire; seules les positions de ses tablettes sont ajustées.</div>
     ${rows || '<div style="padding:10px;font-size:12px;color:#64748b">Aucun produit dans cette sélection.</div>'}
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 4px;border-top:1px solid #e2e8f0;margin-top:4px;flex-wrap:wrap">
       <button class="btn btn-outline btn-inline" style="font-size:12px;width:auto;margin:0" onclick="planoAddLine()">➕ Ajouter une ligne</button>
@@ -2740,7 +2879,9 @@ async function importPlanogram() {
     });
     if (res.ok && data.success) {
       const errTxt  = data.errors > 0 ? `, ${data.errors} erreur(s)` : '';
-      const overTxt = data.overflow > 0 ? ` ⚠ ${data.overflow} produit(s) hors plan (pas assez de tablettes — le nombre de tablettes n'est pas modifié).` : '';
+      const overflowShelves = Number(data.overflow_shelves ?? data.overflow ?? 0);
+      const overflowProducts = Number(data.overflow_products ?? 0);
+      const overTxt = overflowShelves > 0 ? ` ⚠ ${overflowProducts} produit(s), sur ${overflowShelves} tablette(s) du PDF, n'ont pas d'emplacement physique dans le plan magasin.` : '';
       msg.innerHTML = `✅ <strong>${data.imported}</strong> importé(s), ${data.skipped} ignoré(s)${errTxt}.${overTxt} Les photos manquantes sont récupérées automatiquement.`;
       msg.style.color = '#16a34a';
       refreshProductsCache();
