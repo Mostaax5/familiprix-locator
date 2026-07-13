@@ -43,11 +43,31 @@ app.register_blueprint(gist_bp)
 app.register_blueprint(import_export_bp)
 
 
+def _asset_version():
+    """Stable per deployment so cached HTML only loads matching JS and CSS."""
+    render_commit = os.environ.get("RENDER_GIT_COMMIT", "").strip()
+    if render_commit:
+        return render_commit[:12]
+    tracked_assets = (
+        "templates/index.html", "static/style.css", "static/scanner.js",
+        "static/api.js", "static/config.js", "static/store.js", "static/lock.js",
+        "static/search.js", "static/gist-ui.js", "static/ai-ui.js",
+        "static/scan-ui.js", "static/layout-ui.js", "static/main.js",
+        "static/service-worker.js", "static/manifest.json", "static/icon.svg",
+    )
+    root = os.path.dirname(__file__)
+    newest = max(os.path.getmtime(os.path.join(root, path)) for path in tracked_assets)
+    return str(int(newest))
+
+
+ASSET_VERSION = _asset_version()
+
+
 # ── Core routes ────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", asset_version=ASSET_VERSION)
 
 
 @app.route("/manifest.json")

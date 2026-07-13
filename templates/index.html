@@ -1,6 +1,7 @@
 ﻿<!DOCTYPE html>
 <html lang="fr">
 <head>
+{% set asset_q = '?v=' ~ asset_version %}
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
 <meta name="theme-color" content="#c8102e"/>
@@ -8,10 +9,11 @@
 <meta name="apple-mobile-web-app-title" content="Localisateur"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 <meta name="format-detection" content="téléphone=no"/>
-<link rel="manifest" href="/manifest.json"/>
-<link rel="apple-touch-icon" href="/static/icon.svg"/>
+<link rel="manifest" href="/manifest.json{{ asset_q }}"/>
+<link rel="apple-touch-icon" href="/static/icon.svg{{ asset_q }}"/>
+<meta name="app-asset-version" content="{{ asset_version }}"/>
 <title>FamiliPrix - Localisateur</title>
-<link rel="stylesheet" href="/static/style.css"/>
+<link rel="stylesheet" href="/static/style.css{{ asset_q }}"/>
 </head>
 <body>
 
@@ -455,17 +457,17 @@
   </div>
 </div>
 
-<script src="/static/scanner.js"></script>
-<script src="/static/api.js"></script>
-<script src="/static/config.js"></script>
-<script src="/static/store.js"></script>
-<script src="/static/lock.js"></script>
-<script src="/static/search.js"></script>
-<script src="/static/gist-ui.js"></script>
-<script src="/static/ai-ui.js"></script>
-<script src="/static/scan-ui.js"></script>
-<script src="/static/layout-ui.js"></script>
-<script src="/static/main.js"></script>
+<script src="/static/scanner.js{{ asset_q }}"></script>
+<script src="/static/api.js{{ asset_q }}"></script>
+<script src="/static/config.js{{ asset_q }}"></script>
+<script src="/static/store.js{{ asset_q }}"></script>
+<script src="/static/lock.js{{ asset_q }}"></script>
+<script src="/static/search.js{{ asset_q }}"></script>
+<script src="/static/gist-ui.js{{ asset_q }}"></script>
+<script src="/static/ai-ui.js{{ asset_q }}"></script>
+<script src="/static/scan-ui.js{{ asset_q }}"></script>
+<script src="/static/layout-ui.js{{ asset_q }}"></script>
+<script src="/static/main.js{{ asset_q }}"></script>
 <!-- ── STORE SELECTION MODAL ── -->
 <div id="storeModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2100;align-items:center;justify-content:center">
   <div style="background:#fff;border-radius:18px;padding:30px 22px 22px;width:min(380px,92vw);box-shadow:0 12px 40px rgba(0,0,0,.35)">

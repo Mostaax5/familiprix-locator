@@ -20,6 +20,7 @@ const context = {
   }],
   dirtyLayoutAisles: new Set(),
   allProductsCache: [],
+  lastProductsRefreshAt: 0,
   STORAGE_KEYS: {planSnapshot: ''},
   document: {getElementById() { return null; }},
   localStorage: {setItem() {}, removeItem() {}},
@@ -55,6 +56,19 @@ async function run() {
   assert.strictEqual(saveCalls[0].aisle, '1');
   assert.deepStrictEqual(saveCalls[0].payload.config.sides.Gauche.sections[0].shelves, [4]);
   assert(!context.dirtyLayoutAisles.has('1'), 'a successful autosave should clear dirty state');
+
+  vm.runInContext(`
+    rerenderSection = () => {};
+    rerenderShelfCard = () => {};
+    addShelf('1', 'Gauche', 0);
+    setShelfPositionCount('1', 'Gauche', 0, 0, 6);
+    setSectionShelfCount('1', 'Gauche', 0, 3);
+  `, context);
+  assert.deepStrictEqual(
+    context.mapLayouts[0].config.sides.Gauche.sections[0].shelves,
+    [6, 4, 4],
+    'the tablet Plan buttons should update shelves and positions'
+  );
 
   const flow = vm.runInContext(`
     planoData = {products: Array.from({length: 22}, (_, index) => ({

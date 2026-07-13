@@ -133,6 +133,11 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:#c8102e;box-sh
 .slot-chip.active{background:#ecfdf5;border-color:#86efac;color:#166534}
 
 /* ── Plan tab ── */
+#mapContent button,#mapContent summary{touch-action:manipulation;-webkit-tap-highlight-color:rgba(200,16,46,.14)}
+#mapContent button{min-height:40px;pointer-events:auto;position:relative;z-index:1}
+#mapContent input[type="number"],#mapContent input[type="text"]{min-height:40px}
+#mapContent .plan-shelf-card button{min-width:40px}
+#mapContent summary{min-height:44px;user-select:none;-webkit-user-select:none}
 .plan-sides{display:flex;flex-direction:column;gap:8px;margin-top:8px}
 .plan-side{border:1px solid #e4e6ea;border-radius:10px;padding:10px;background:#fafbfc}
 .plan-section{border:1px solid #e4e6ea;border-radius:10px;padding:10px;background:white;margin-top:8px}
@@ -283,6 +288,11 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:#c8102e;box-sh
 
 /* ── Responsive ── */
 @media (min-width:860px){.content{max-width:900px}}
+@media (pointer:coarse){
+  #mapContent button{min-height:46px;min-width:46px;padding:8px 12px}
+  #mapContent input[type="number"],#mapContent input[type="text"]{min-height:46px}
+  #mapContent summary{min-height:48px;padding-top:13px;padding-bottom:13px}
+}
 @media (max-width:520px){
   .row2,.row3,.confirm-grid,.device-grid,.scan-tools,.btn-row{grid-template-columns:1fr}
   .rayon-grid{grid-template-columns:1fr 1fr}

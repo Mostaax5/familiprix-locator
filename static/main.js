@@ -141,7 +141,8 @@ async function switchTab(tab) {
 // ── Boot ──────────────────────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/service-worker.js').then(registration => {
+    const assetVersion = document.querySelector('meta[name="app-asset-version"]')?.content || 'current';
+    navigator.serviceWorker.register(`/service-worker.js?v=${encodeURIComponent(assetVersion)}`).then(registration => {
       registration.update().catch(() => {});
     }).catch(() => {});
   });
