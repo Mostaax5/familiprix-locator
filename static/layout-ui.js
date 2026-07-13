@@ -2873,6 +2873,30 @@ async function importPlanogram() {
   const msg = document.getElementById('planoImportMsg');
   msg.textContent = '';
 
+  // The manually entered shelf count is what defines every section boundary.
+  // Never import against an older server copy while an autosave is pending.
+  const aisleKey = String(aisle);
+  window.clearTimeout(_layoutAutoSaveTimers.get(aisleKey));
+  _layoutAutoSaveTimers.delete(aisleKey);
+  let saveWaits = 0;
+  while (_layoutAutoSaveInFlight.has(aisleKey) && saveWaits < 200) {
+    await new Promise(resolve => window.setTimeout(resolve, 50));
+    saveWaits++;
+  }
+  if (_layoutAutoSaveInFlight.has(aisleKey)) {
+    msg.textContent = 'La sauvegarde du plan prend trop de temps. Attendez un instant avant de relancer l’importation.';
+    msg.style.color = '#c8102e';
+    btn.disabled = false; btn.textContent = 'Importer dans le plan';
+    return;
+  }
+  if (dirtyLayoutAisles.has(aisleKey)) await autoSaveAisleLayout(aisleKey);
+  if (dirtyLayoutAisles.has(aisleKey)) {
+    msg.textContent = 'Le plan du magasin doit être sauvegardé avant l’importation. Réessayez lorsque la sauvegarde est terminée.';
+    msg.style.color = '#c8102e';
+    btn.disabled = false; btn.textContent = 'Importer dans le plan';
+    return;
+  }
+
   try {
     const {res, data} = await apiFetch('/api/products/bulk-import', {
       method: 'POST',
@@ -2897,7 +2921,13 @@ async function importPlanogram() {
       const overTxt = overflowShelves > 0 ? ` ⚠ ${overflowProducts} produit(s), sur ${overflowShelves} tablette(s) du PDF, n'ont pas d'emplacement physique dans le plan magasin.` : '';
       msg.innerHTML = `✅ <strong>${data.imported}</strong> importé(s), ${data.skipped} ignoré(s)${errTxt}.${overTxt} Les photos manquantes sont récupérées automatiquement.`;
       msg.style.color = '#16a34a';
-      refreshProductsCache();
+      // The import can adjust position counts, so reload the authoritative
+      // layout before another autosave can send stale browser state back.
+      await refreshLayoutsCache(true);
+      await refreshProductsCache(true);
+      savePlanSnapshot();
+      refreshPlanUi();
+      updatePlanoPreview();
       loadPlanogramHistory();
     } else {
       msg.textContent = data.error || 'Erreur lors de l’importation.';

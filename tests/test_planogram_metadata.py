@@ -8,6 +8,7 @@ from flask import Flask
 from routes.layout import build_default_layout_config
 from routes.products import (
     build_reference_metadata_index,
+    plan_planogram_flow,
     planogram_metadata,
     products_bp,
     reference_metadata_for_barcode,
@@ -238,6 +239,39 @@ class PlanogramMetadataTests(unittest.TestCase):
         self.assertEqual(result["overflow_products"], 2)
         self.assertEqual(result["skipped"], 2)
         db.close()
+
+    def test_planogram_flow_uses_manual_section_shelf_counts_as_boundaries(self):
+        config = {
+            "sides": {
+                "Gauche": {"sections": [{"shelves": [8]}]},
+                "Droite": {"sections": [
+                    {"shelves": [8] * 7},
+                    {"shelves": [8] * 7},
+                    {"shelves": [8] * 7},
+                ]},
+            },
+            "facade_a": {"shelves": [], "labels": []},
+            "facade_b": {"shelves": [], "labels": []},
+            "presentoirs": [],
+        }
+        lines = [
+            {"tablette": shelf, "position": 1, "p": {"name": f"SHELF {shelf}"}}
+            for shelf in range(1, 23)
+        ]
+
+        placements, overflow = plan_planogram_flow(
+            config, "Droite", start_section=1, start_tablette=1, lines=lines
+        )
+        destinations = [(section, shelf) for section, shelf, _position, _line in placements]
+
+        self.assertEqual(destinations[0], (1, 1))
+        self.assertEqual(destinations[6], (1, 7))
+        self.assertEqual(destinations[7], (2, 1))
+        self.assertEqual(destinations[13], (2, 7))
+        self.assertEqual(destinations[14], (3, 1))
+        self.assertEqual(destinations[20], (3, 7))
+        self.assertEqual(len(destinations), 21)
+        self.assertEqual(overflow, 1)
 
 
 if __name__ == "__main__":

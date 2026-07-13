@@ -57,7 +57,9 @@ async function run() {
   assert(!context.dirtyLayoutAisles.has('1'), 'a successful autosave should clear dirty state');
 
   const flow = vm.runInContext(`
-    planoData = {products: [{tablette: 1, position: 1, en_stock: true}]};
+    planoData = {products: Array.from({length: 22}, (_, index) => ({
+      tablette: index + 1, position: 1, en_stock: true
+    }))};
     computePlanoFlow({
       sides: {
         Gauche: {sections: [{shelves: [4]}]},
@@ -72,6 +74,12 @@ async function run() {
   assert.strictEqual(flow.startSectionShelves, 7, 'the starting section should show its physical shelf count');
   assert.strictEqual(flow.availableShelves, 21, 'the import path should total shelves across sections');
   assert.strictEqual(flow.availableSections, 3, 'the total should say how many sections it spans');
+  assert.deepStrictEqual([flow.byIdx[6].section, flow.byIdx[6].shelf], [1, 7]);
+  assert.deepStrictEqual([flow.byIdx[7].section, flow.byIdx[7].shelf], [2, 1]);
+  assert.deepStrictEqual([flow.byIdx[13].section, flow.byIdx[13].shelf], [2, 7]);
+  assert.deepStrictEqual([flow.byIdx[14].section, flow.byIdx[14].shelf], [3, 1]);
+  assert.deepStrictEqual([flow.byIdx[20].section, flow.byIdx[20].shelf], [3, 7]);
+  assert(flow.overflow.has(21), 'the 22nd PDF shelf should overflow after all 21 physical shelves');
   console.log('layout autosave tests passed');
 }
 
