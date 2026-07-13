@@ -1,4 +1,4 @@
-const CACHE_NAME = 'familiprix-locator-v22';
+const CACHE_NAME = 'familiprix-locator-v23';
 const OFFLINE_CACHE = [
   '/',
   '/manifest.json',

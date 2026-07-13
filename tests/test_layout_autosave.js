@@ -55,6 +55,23 @@ async function run() {
   assert.strictEqual(saveCalls[0].aisle, '1');
   assert.deepStrictEqual(saveCalls[0].payload.config.sides.Gauche.sections[0].shelves, [4]);
   assert(!context.dirtyLayoutAisles.has('1'), 'a successful autosave should clear dirty state');
+
+  const flow = vm.runInContext(`
+    planoData = {products: [{tablette: 1, position: 1, en_stock: true}]};
+    computePlanoFlow({
+      sides: {
+        Gauche: {sections: [{shelves: [4]}]},
+        Droite: {sections: [
+          {shelves: [8,8,8,8,8,8,8]},
+          {shelves: [8,8,8,8,8,8,8]},
+          {shelves: [8,8,8,8,8,8,8]}
+        ]}
+      }
+    }, 'Droite', 1, 1, 1, 99, false)
+  `, context);
+  assert.strictEqual(flow.startSectionShelves, 7, 'the starting section should show its physical shelf count');
+  assert.strictEqual(flow.availableShelves, 21, 'the import path should total shelves across sections');
+  assert.strictEqual(flow.availableSections, 3, 'the total should say how many sections it spans');
   console.log('layout autosave tests passed');
 }
 

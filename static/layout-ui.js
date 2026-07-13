@@ -2666,9 +2666,14 @@ function onPlanoSideChange() {
 // Tablette COUNT per section is the plan's and never changes here. Returns a map
 // from product index → {section, shelf, position}, plus the set of overflow rows.
 function computePlanoFlow(config, side, startSection, startTablette, tabStart, tabEnd, skipNS) {
-  const out = { byIdx: {}, overflow: new Set(), placed: 0, planoShelves: 0, availableShelves: 0, overflowShelves: 0 };
+  const out = {
+    byIdx: {}, overflow: new Set(), placed: 0, planoShelves: 0,
+    availableShelves: 0, availableSections: 0, startSectionShelves: 0,
+    overflowShelves: 0, isFixture: false
+  };
   const slots = [];   // [section_no, shelf_index] in fill order
   const fixture = _planoFixtureForSide(config, side);
+  out.isFixture = Boolean(fixture);
   let singleSided = false;
   if (fixture) {
     // Fixture sides (Façade A/B, présentoir façades) are one flat run of
@@ -2702,6 +2707,11 @@ function computePlanoFlow(config, side, startSection, startTablette, tabStart, t
   });
   out.planoShelves = byTab.size;
   out.availableShelves = slots.length;
+  out.availableSections = fixture ? 0 : new Set(slots.map(([sectionNo]) => sectionNo)).size;
+  if (!fixture) {
+    const sections = ((config && config.sides && config.sides[side]) ? config.sides[side].sections : []) || [];
+    out.startSectionShelves = ((sections[Math.max(0, startSection - 1)] || {}).shelves || []).length;
+  }
   // STORE CONVENTION (mirror of the server): positions always count from the
   // Façade A end toward Façade B, on BOTH côtés. A plano reads left→right facing
   // the shelf, which on Côté A runs B→A — so its positions are MIRRORED there.
@@ -2826,7 +2836,10 @@ function updatePlanoPreview() {
   preview.innerHTML = `
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:7px 4px;border-bottom:1px solid #e2e8f0;font-size:12px;font-weight:700;color:#334155">
       <span>PDF : ${flow.planoShelves} tablette${flow.planoShelves !== 1 ? 's' : ''}</span>
-      <span>Plan magasin disponible : ${flow.availableShelves}</span>
+      ${flow.isFixture
+        ? `<span>${esc(sideDisplayLabel(side))} : ${flow.availableShelves} tablette${flow.availableShelves !== 1 ? 's' : ''} disponible${flow.availableShelves !== 1 ? 's' : ''}</span>`
+        : `<span>Section ${startSection} : ${flow.startSectionShelves} tablette${flow.startSectionShelves !== 1 ? 's' : ''}</span>
+           <span>Parcours d'import : ${flow.availableShelves} tablette${flow.availableShelves !== 1 ? 's' : ''} répartie${flow.availableShelves !== 1 ? 's' : ''} sur ${flow.availableSections} section${flow.availableSections !== 1 ? 's' : ''}</span>`}
       ${flow.overflowShelves ? `<span style="color:#c8102e">${flow.overflowShelves} tablette${flow.overflowShelves !== 1 ? 's' : ''} du PDF sans emplacement physique</span>` : '<span style="color:#15803d">Structure compatible</span>'}
     </div>
     <div style="font-size:11px;color:#64748b;padding:4px 4px 6px">${(side === 'Gauche' && !planoSectionCount(aisle, 'Droite'))
