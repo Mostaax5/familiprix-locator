@@ -125,6 +125,26 @@ async function apiUpdateLayoutAisle(aisle, payload) {
   }
 }
 
+async function apiRemoveLayoutPart(aisle, endpoint, payload) {
+  try {
+    const {res, data} = await apiFetch(
+      `/api/layout/aisles/${encodeURIComponent(aisle)}/${endpoint}`,
+      {
+        method: 'POST',
+        headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+        body: JSON.stringify(payload)
+      }
+    );
+    if (res.ok && data?.success) return data;
+    return {
+      success: false,
+      error: (data && data.error) || 'Suppression impossible pour le moment.'
+    };
+  } catch (error) {
+    return {success: false, error: 'Suppression impossible pour le moment (réseau).'};
+  }
+}
+
 async function apiDeleteLayoutAisle(aisle) {
   try {
     const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}`, {

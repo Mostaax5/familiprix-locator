@@ -137,6 +137,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:#c8102e;box-sh
 #mapContent button{min-height:40px;pointer-events:auto;position:relative;z-index:1}
 #mapContent input[type="number"],#mapContent input[type="text"]{min-height:40px}
 #mapContent .plan-shelf-card button{min-width:40px}
+#mapContent .plan-delete-action[aria-busy="true"]{cursor:wait;opacity:.72;color:#7f1d1d;background:#fff7f7}
 #mapContent summary{min-height:44px;user-select:none;-webkit-user-select:none}
 .plan-sides{display:flex;flex-direction:column;gap:8px;margin-top:8px}
 .plan-side{border:1px solid #e4e6ea;border-radius:10px;padding:10px;background:#fafbfc}

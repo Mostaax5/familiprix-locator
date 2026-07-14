@@ -142,6 +142,8 @@ def _get_shelves_for_side(config, side):
 
 
 def product_fits_layout(product, config):
+    if not hasattr(product, "get"):
+        product = dict(product)
     side = str(product["side"]).strip()
     shelf_index = clamp_non_negative_int(product.get("shelf", "0")) - 1
     position_value = clamp_non_negative_int(product.get("position", "0"))
@@ -374,7 +376,8 @@ def _renumber_after_remove(db, username, now, aisle, side, field, removed, secti
         where += " AND section=?"
         params.append(section)
     # 1. delete products in the removed section/shelf
-    db.execute(f"DELETE FROM products WHERE {where} AND {field}=?", tuple(params + [str(removed)]))
+    delete_result = db.execute(f"DELETE FROM products WHERE {where} AND {field}=?", tuple(params + [str(removed)]))
+    removed_count = max(0, int(getattr(delete_result, "rowcount", 0) or 0))
     # 2. shift every higher number down by one. Process in ASCENDING order so each
     #    lower target slot is vacated before the next product shifts into it —
     #    otherwise the unique (aisle,side,section,shelf,position) index would clash.
@@ -392,6 +395,62 @@ def _renumber_after_remove(db, username, now, aisle, side, field, removed, secti
     for n, rid in sorted(shiftable):   # ascending → no slot collision
         db.execute(f"UPDATE products SET {field}=?, modified_by=?, modified_at=? WHERE id=?",
                    (str(n - 1), username, now, rid))
+    return removed_count
+
+
+def _config_for_removal(db, aisle, supplied_config):
+    """Build an atomic removal from the structure currently shown to the user."""
+    row = get_layout_row(db, aisle)
+    if not row:
+        return None, None
+    source = supplied_config if isinstance(supplied_config, dict) else row["config_json"]
+    return row, normalize_layout_config(
+        source, row["max_section"], row["max_shelf"], row["max_position"]
+    )
+
+
+def _remove_section_from_config(config, side, section_number):
+    if side not in ("Gauche", "Droite"):
+        return False
+    sections = config["sides"][side]["sections"]
+    index = clamp_non_negative_int(section_number) - 1
+    if index < 0 or index >= len(sections):
+        return False
+    sections.pop(index)
+    return True
+
+
+def _fixture_for_side(config, side):
+    if side == "Façade A":
+        return config.get("facade_a")
+    if side == "Façade B":
+        return config.get("facade_b")
+    for presentoir in config.get("presentoirs", []):
+        for facade in presentoir.get("facades", []):
+            if side == f"{presentoir.get('name', '')} - {facade.get('name', '')}":
+                return facade
+    return None
+
+
+def _remove_shelf_from_config(config, side, section_number, shelf_number):
+    shelf_index = clamp_non_negative_int(shelf_number) - 1
+    if shelf_index < 0:
+        return False
+    if side in ("Gauche", "Droite"):
+        section_index = clamp_non_negative_int(section_number) - 1
+        sections = config["sides"][side]["sections"]
+        if section_index < 0 or section_index >= len(sections):
+            return False
+        fixture = sections[section_index]
+    else:
+        fixture = _fixture_for_side(config, side)
+    if not fixture or shelf_index >= len(fixture.get("shelves", [])):
+        return False
+    fixture["shelves"].pop(shelf_index)
+    labels = fixture.get("labels", [])
+    if shelf_index < len(labels):
+        labels.pop(shelf_index)
+    return True
 
 
 @layout_bp.route("/api/layout/aisles/<aisle>/remove-section", methods=["POST"])
@@ -405,9 +464,17 @@ def remove_section(aisle):
     if not side or not section:
         return jsonify({"success": False, "error": "Paramètres invalides."}), 400
     db = get_db()
-    _renumber_after_remove(db, username, utc_now_iso(), aisle, side, "section", section)
+    _row, config = _config_for_removal(db, aisle, data.get("config"))
+    if config is None:
+        return jsonify({"success": False, "error": "Allée non trouvée."}), 404
+    if not _remove_section_from_config(config, side, section):
+        return jsonify({"success": False, "error": "Cette section n'existe plus."}), 409
+    now = utc_now_iso()
+    removed_products = _renumber_after_remove(db, username, now, aisle, side, "section", section)
+    removed_products += remove_products_outside_layout(db, aisle, config)
+    _persist_aisle_config(db, aisle, config, username, now)
     db.commit()
-    return jsonify({"success": True})
+    return jsonify({"success": True, "config": config, "removed_products": removed_products})
 
 
 @layout_bp.route("/api/layout/aisles/<aisle>/remove-shelf", methods=["POST"])
@@ -422,12 +489,22 @@ def remove_shelf(aisle):
     if not side or not shelf:
         return jsonify({"success": False, "error": "Paramètres invalides."}), 400
     db = get_db()
+    _row, config = _config_for_removal(db, aisle, data.get("config"))
+    if config is None:
+        return jsonify({"success": False, "error": "Allée non trouvée."}), 404
+    if not _remove_shelf_from_config(config, side, section, shelf):
+        return jsonify({"success": False, "error": "Cette tablette n'existe plus."}), 409
     # Fixture sides (Façade A/B, présentoir façades) carry no meaningful section
     # value on their products — match their shelves across all sections.
     section_scope = section if side in ("Gauche", "Droite") else None
-    _renumber_after_remove(db, username, utc_now_iso(), aisle, side, "shelf", shelf, section=section_scope)
+    now = utc_now_iso()
+    removed_products = _renumber_after_remove(
+        db, username, now, aisle, side, "shelf", shelf, section=section_scope
+    )
+    removed_products += remove_products_outside_layout(db, aisle, config)
+    _persist_aisle_config(db, aisle, config, username, now)
     db.commit()
-    return jsonify({"success": True})
+    return jsonify({"success": True, "config": config, "removed_products": removed_products})
 
 
 def _persist_aisle_config(db, aisle, config, username, now):

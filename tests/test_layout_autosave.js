@@ -4,6 +4,16 @@ const vm = require('vm');
 
 const scheduled = [];
 const saveCalls = [];
+const removalCalls = [];
+const planMessage = {className: '', textContent: ''};
+const deleteButton = {
+  dataset: {},
+  disabled: false,
+  textContent: '✕ Suppr.',
+  attributes: {},
+  setAttribute(name, value) { this.attributes[name] = value; },
+  removeAttribute(name) { delete this.attributes[name]; },
+};
 const context = {
   console,
   mapLayouts: [{
@@ -22,13 +32,26 @@ const context = {
   allProductsCache: [],
   lastProductsRefreshAt: 0,
   STORAGE_KEYS: {planSnapshot: ''},
-  document: {getElementById() { return null; }},
+  document: {getElementById(id) { return id === 'addMsg' ? planMessage : null; }},
   localStorage: {setItem() {}, removeItem() {}},
+  confirm() { return true; },
   loadEditorSession() { return {username: 'tester'}; },
   nowIsoWithoutMs() { return '2026-07-13T12:00:00'; },
   async apiUpdateLayoutAisle(aisle, payload) {
     saveCalls.push({aisle, payload});
     return {success: true, removed_products: 0};
+  },
+  async apiRemoveLayoutPart(aisle, endpoint, payload) {
+    removalCalls.push({aisle, endpoint, payload});
+    const config = JSON.parse(JSON.stringify(payload.config));
+    if (endpoint === 'remove-section') {
+      config.sides[payload.side].sections.splice(Number(payload.section) - 1, 1);
+    } else {
+      const section = config.sides[payload.side].sections[Number(payload.section) - 1];
+      section.shelves.splice(Number(payload.shelf) - 1, 1);
+      section.labels.splice(Number(payload.shelf) - 1, 1);
+    }
+    return {success: true, config, removed_products: 0};
   },
   window: {
     AppLayout: {},
@@ -69,6 +92,42 @@ async function run() {
     [6, 4, 4],
     'the tablet Plan buttons should update shelves and positions'
   );
+
+  vm.runInContext(`
+    refreshPlanUi = () => {};
+    savePlanSnapshot = () => {};
+  `, context);
+  await vm.runInContext("removeShelf('1', 'Gauche', 0, 0)", context);
+  assert.deepStrictEqual(
+    context.mapLayouts[0].config.sides.Gauche.sections[0].shelves,
+    [4, 4],
+    'the Suppr. button should remove its shelf immediately'
+  );
+  vm.runInContext(`
+    mapLayouts[0].config.sides.Gauche.sections.push({shelves: [2], labels: ['']});
+  `, context);
+  await vm.runInContext("removeSection('1', 'Gauche', 0)", context);
+  assert.strictEqual(
+    JSON.stringify(context.mapLayouts[0].config.sides.Gauche.sections),
+    JSON.stringify([{shelves: [2], labels: ['']}]),
+    'the Supprimer section button should remove its section immediately'
+  );
+  assert.deepStrictEqual(
+    removalCalls.map(call => call.endpoint),
+    ['remove-shelf', 'remove-section'],
+    'both delete controls should use the atomic removal API'
+  );
+  context.apiRemoveLayoutPart = async () => ({success: false, error: 'Server refused deletion'});
+  context.deleteButton = deleteButton;
+  await vm.runInContext("removeShelf('1', 'Gauche', 0, 0, deleteButton)", context);
+  assert.deepStrictEqual(
+    context.mapLayouts[0].config.sides.Gauche.sections[0].shelves,
+    [2],
+    'a failed deletion must leave the plan unchanged'
+  );
+  assert.strictEqual(deleteButton.disabled, false, 'the delete button should become usable again');
+  assert.strictEqual(deleteButton.textContent, '✕ Suppr.');
+  assert.strictEqual(planMessage.textContent, 'Server refused deletion');
 
   const flow = vm.runInContext(`
     planoData = {products: Array.from({length: 22}, (_, index) => ({

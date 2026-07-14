@@ -1297,7 +1297,7 @@ function renderShelfCard(aisle, side, sectionIndex, shelfIndex, positions, shelf
            <button title="Passer en mode libre (cosmétiques, presentoirs...)" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
                    onclick="setShelfPositionCount('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},0)">📦 Libre</button>`
       }
-      <button onclick="removeShelf('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex})" style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5" title="Supprimer cette tablette">✕ Suppr.</button>
+      <button type="button" class="plan-delete-action" onclick="removeShelf('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},this)" style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5" title="Supprimer cette tablette">✕ Suppr.</button>
     </div>
     <div style="display:flex;gap:6px;padding:5px 0 4px;border-top:1px solid rgba(0,0,0,.06);margin-top:4px">
       <button class="btn btn-outline btn-inline" style="font-size:12px;flex:1" onclick="moveShelf('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},-1)">↑ Monter</button>
@@ -1368,7 +1368,7 @@ function renderSection(aisle, side, sectionIndex, section) {
         <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${esc(aisle)}','${side}',${sectionIndex},-1)">↑ Monter</button>
         <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${esc(aisle)}','${side}',${sectionIndex},1)">↓ Descendre</button>
         <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="openMoveSection('${esc(aisle)}','${side}',${sectionIndex})">⇄ Autre allée</button>
-        <button class="btn btn-outline btn-inline" style="font-size:12px;color:#c8102e;border-color:#f1b8c2;margin-left:auto" onclick="removeSection('${esc(aisle)}','${side}',${sectionIndex})">✕ Supprimer section</button>
+        <button type="button" class="btn btn-outline btn-inline plan-delete-action" style="font-size:12px;color:#c8102e;border-color:#f1b8c2;margin-left:auto" onclick="removeSection('${esc(aisle)}','${side}',${sectionIndex},this)">✕ Supprimer section</button>
       </div>
       ${section.shelves.length ? '' : `<div class="small" style="padding:4px 0;color:#94a3b8">Aucune tablette — cliquez ➕ Tablette ci-dessus.</div>`}
       <label class="small" style="display:flex;align-items:center;gap:6px;margin:4px 0 8px;font-weight:700;color:#475569">
@@ -2006,6 +2006,116 @@ async function resetDatabase(wipeLayouts) {
 }
 
 // ── Direct section / shelf / position editing ─────────────────────────────────
+const _layoutRemovalInFlight = new Set();
+
+function copyLayoutConfig(config) {
+  return JSON.parse(JSON.stringify(config));
+}
+
+function setPlanDeleteBusy(button, busy) {
+  if (!button) return;
+  if (busy) {
+    button.dataset.deleteLabel = button.textContent;
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    button.textContent = 'Suppression...';
+  } else {
+    button.disabled = false;
+    button.removeAttribute('aria-busy');
+    button.textContent = button.dataset.deleteLabel || 'Supprimer';
+  }
+}
+
+function showPlanActionMessage(message, type='error') {
+  const target = document.getElementById('addMsg');
+  if (!target) return;
+  target.className = `msg ${type}`;
+  target.textContent = message;
+}
+
+function confirmPlanRemoval(subject, productCount) {
+  const suffix = productCount
+    ? `\n\n${productCount} produit(s) dans cet élément seront aussi retirés du plan.`
+    : '';
+  return confirm(`${subject} ?${suffix}`);
+}
+
+async function waitForLayoutSave(aisle) {
+  const key = String(aisle);
+  for (let attempt = 0; attempt < 80 && _layoutAutoSaveInFlight.has(key); attempt += 1) {
+    await new Promise(resolve => window.setTimeout(resolve, 50));
+  }
+  return !_layoutAutoSaveInFlight.has(key);
+}
+
+function applyLocalProductRemoval(aisle, side, field, removedNumber, sectionNumber=null) {
+  const removed = Number(removedNumber);
+  const kept = [];
+  for (const product of allProductsCache) {
+    const sameLocation = String(product.aisle) === String(aisle) && product.side === side &&
+      (field !== 'shelf' || sectionNumber === null || String(product.section) === String(sectionNumber));
+    if (!sameLocation) {
+      kept.push(product);
+      continue;
+    }
+    const value = Number(product[field]);
+    if (value === removed) continue;
+    if (value > removed) product[field] = String(value - 1);
+    kept.push(product);
+  }
+  allProductsCache = kept;
+  lastProductsRefreshAt = Date.now();
+}
+
+async function commitLayoutRemoval({aisle, endpoint, payload, nextConfig, button, productRemoval, successLabel}) {
+  const key = String(aisle);
+  if (_layoutRemovalInFlight.has(key)) return false;
+  _layoutRemovalInFlight.add(key);
+  setPlanDeleteBusy(button, true);
+  window.clearTimeout(_layoutAutoSaveTimers.get(key));
+  _layoutAutoSaveTimers.delete(key);
+  if (!await waitForLayoutSave(key)) {
+    _layoutRemovalInFlight.delete(key);
+    setPlanDeleteBusy(button, false);
+    showPlanActionMessage('Une sauvegarde est encore en cours. Réessayez dans quelques secondes.');
+    return false;
+  }
+
+  const data = await apiRemoveLayoutPart(aisle, endpoint, payload);
+  if (!data.success) {
+    _layoutRemovalInFlight.delete(key);
+    setPlanDeleteBusy(button, false);
+    showPlanActionMessage(data.error || 'Suppression impossible.');
+    if (dirtyLayoutAisles.has(key)) scheduleLayoutAutoSave(key);
+    return false;
+  }
+
+  const layout = getMutableLayout(aisle);
+  if (layout) {
+    layout.config = normalizeLayoutConfig(data.config || nextConfig);
+    syncLayoutRecord(layout);
+  }
+  productRemoval();
+  _layoutEditRevisions.set(key, (_layoutEditRevisions.get(key) || 0) + 1);
+  clearLayoutDirty(key);
+  setLayoutSaveState(key, 'saved');
+  lastLayoutsRefreshAt = Date.now();
+  savePlanSnapshot();
+  refreshPlanUi();
+  const removedCount = Number(data.removed_products || 0);
+  showPlanActionMessage(
+    `${successLabel}${removedCount ? ` ${removedCount} produit(s) retiré(s) du plan.` : ''}`,
+    'success'
+  );
+  _layoutRemovalInFlight.delete(key);
+
+  void refreshProductsCache(true).then(() => {
+    savePlanSnapshot();
+    refreshPlanUi();
+  });
+  return true;
+}
+
 function addSection(aisle, side) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
@@ -2022,22 +2132,28 @@ function addSection(aisle, side) {
   rerenderSide(aisle, side);   // a section was added to this side
 }
 
-async function removeSection(aisle, side, sectionIndex) {
+async function removeSection(aisle, side, sectionIndex, button=null) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
-  const sections = layout.config.sides[side].sections;
-  const hasProducts = allProductsCache.some(p =>
-    String(p.aisle) === String(aisle) && p.side === side && String(p.section) === String(sectionIndex + 1)
-  );
-  if (hasProducts && !confirm(`La section ${sectionIndex + 1} contient des produits. Supprimer quand même ?`)) return;
-  // Server deletes that section's products and shifts higher sections down by 1,
-  // keeping product numbering aligned with the config. Bail if it fails.
-  if (!await _swapCall(aisle, 'remove-section', {side, section: String(sectionIndex + 1)})) {
-    document.getElementById('addMsg').innerHTML = '<div class="msg error">Suppression impossible.</div>';
-    return;
-  }
+  const baseConfig = copyLayoutConfig(layout.config);
+  const nextConfig = copyLayoutConfig(layout.config);
+  const sections = nextConfig.sides[side]?.sections;
+  if (!sections || sectionIndex < 0 || sectionIndex >= sections.length) return;
   sections.splice(sectionIndex, 1);
-  await saveAisleLayout(aisle);   // persist config so DB + plan stay consistent
+  const productCount = allProductsCache.filter(product =>
+    String(product.aisle) === String(aisle) && product.side === side &&
+    String(product.section) === String(sectionIndex + 1)
+  ).length;
+  if (!confirmPlanRemoval(`Supprimer la section ${sectionIndex + 1}`, productCount)) return;
+  return commitLayoutRemoval({
+    aisle,
+    endpoint: 'remove-section',
+    payload: {side, section: String(sectionIndex + 1), config: baseConfig},
+    nextConfig,
+    button,
+    productRemoval: () => applyLocalProductRemoval(aisle, side, 'section', sectionIndex + 1),
+    successLabel: `Section ${sectionIndex + 1} supprimée.`
+  });
 }
 
 function addShelf(aisle, side, sectionIndex) {
@@ -2054,60 +2170,91 @@ function addShelf(aisle, side, sectionIndex) {
   rerenderSection(aisle, side, sectionIndex);   // only this section changed
 }
 
-async function removeShelf(aisle, side, sectionIndex, shelfIndex) {
+async function removeShelf(aisle, side, sectionIndex, shelfIndex, button=null) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
-  const section = layout.config.sides[side].sections[sectionIndex];
-  if (!section) return;
-  const hasProducts = allProductsCache.some(p =>
-    String(p.aisle) === String(aisle) && p.side === side &&
-    String(p.section) === String(sectionIndex + 1) && String(p.shelf) === String(shelfIndex + 1)
-  );
-  if (hasProducts && !confirm(`La tablette ${shelfIndex + 1} contient des produits. Supprimer quand même ?`)) return;
-  // Server deletes that shelf's products and shifts higher shelves (in this
-  // section) down by 1. Bail if it fails so config and DB don't diverge.
-  if (!await _swapCall(aisle, 'remove-shelf', {side, section: String(sectionIndex + 1), shelf: String(shelfIndex + 1)})) {
-    document.getElementById('addMsg').innerHTML = '<div class="msg error">Suppression impossible.</div>';
-    return;
-  }
+  const baseConfig = copyLayoutConfig(layout.config);
+  const nextConfig = copyLayoutConfig(layout.config);
+  const section = nextConfig.sides[side]?.sections?.[sectionIndex];
+  if (!section || shelfIndex < 0 || shelfIndex >= section.shelves.length) return;
   section.shelves.splice(shelfIndex, 1);
   if (section.labels) section.labels.splice(shelfIndex, 1);
-  await saveAisleLayout(aisle);
+  const productCount = allProductsCache.filter(product =>
+    String(product.aisle) === String(aisle) && product.side === side &&
+    String(product.section) === String(sectionIndex + 1) &&
+    String(product.shelf) === String(shelfIndex + 1)
+  ).length;
+  if (!confirmPlanRemoval(`Supprimer la tablette ${shelfIndex + 1}`, productCount)) return;
+  return commitLayoutRemoval({
+    aisle,
+    endpoint: 'remove-shelf',
+    payload: {
+      side,
+      section: String(sectionIndex + 1),
+      shelf: String(shelfIndex + 1),
+      config: baseConfig
+    },
+    nextConfig,
+    button,
+    productRemoval: () => applyLocalProductRemoval(
+      aisle, side, 'shelf', shelfIndex + 1, sectionIndex + 1
+    ),
+    successLabel: `Tablette ${shelfIndex + 1} supprimée.`
+  });
 }
 
 // Delete a tablette of a fixture side (Façade A/B or a présentoir façade): the
 // server removes its products and renumbers the shelves above (no section scoping
 // on fixture sides), then the config entry is removed and saved — same contract
 // as removeShelf for the aisle sides.
-async function _removeFixtureShelf(aisle, sideName, fixture, shelfIndex) {
-  const hasProducts = allProductsCache.some(p =>
-    String(p.aisle) === String(aisle) && p.side === sideName && String(p.shelf) === String(shelfIndex + 1)
-  );
-  if (hasProducts && !confirm(`La tablette ${shelfIndex + 1} contient des produits. Supprimer quand même ?`)) return;
-  if (!await _swapCall(aisle, 'remove-shelf', {side: sideName, shelf: String(shelfIndex + 1)})) {
-    document.getElementById('addMsg').innerHTML = '<div class="msg error">Suppression impossible.</div>';
-    return;
-  }
+async function _removeFixtureShelf(aisle, sideName, fixtureSelector, shelfIndex, button=null) {
+  const layout = getMutableLayout(aisle);
+  if (!layout) return;
+  const baseConfig = copyLayoutConfig(layout.config);
+  const nextConfig = copyLayoutConfig(layout.config);
+  const fixture = fixtureSelector(nextConfig);
+  if (!fixture || shelfIndex < 0 || shelfIndex >= fixture.shelves.length) return;
   fixture.shelves.splice(shelfIndex, 1);
   if (fixture.labels) fixture.labels.splice(shelfIndex, 1);
-  await saveAisleLayout(aisle);
+  const productCount = allProductsCache.filter(product =>
+    String(product.aisle) === String(aisle) && product.side === sideName &&
+    String(product.shelf) === String(shelfIndex + 1)
+  ).length;
+  if (!confirmPlanRemoval(`Supprimer la tablette ${shelfIndex + 1}`, productCount)) return;
+  return commitLayoutRemoval({
+    aisle,
+    endpoint: 'remove-shelf',
+    payload: {side: sideName, shelf: String(shelfIndex + 1), config: baseConfig},
+    nextConfig,
+    button,
+    productRemoval: () => applyLocalProductRemoval(aisle, sideName, 'shelf', shelfIndex + 1),
+    successLabel: `Tablette ${shelfIndex + 1} supprimée.`
+  });
 }
 
-async function removeFacadeShelf(aisle, facadeKey, shelfIndex) {
+async function removeFacadeShelf(aisle, facadeKey, shelfIndex, button=null) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
   if (!layout.config[facadeKey]) return;
   const sideName = facadeKey === 'facade_a' ? 'Façade A' : 'Façade B';
-  await _removeFixtureShelf(aisle, sideName, _fixFixture(layout.config[facadeKey]), shelfIndex);
+  return _removeFixtureShelf(
+    aisle, sideName, config => _fixFixture(config[facadeKey]), shelfIndex, button
+  );
 }
 
-async function removePresentoirShelf(aisle, presIndex, facadeIndex, shelfIndex) {
+async function removePresentoirShelf(aisle, presIndex, facadeIndex, shelfIndex, button=null) {
   const layout = getMutableLayout(aisle);
   if (!layout) return;
   const pres = layout.config.presentoirs?.[presIndex];
   const facade = pres?.facades?.[facadeIndex];
   if (!pres || !facade) return;
-  await _removeFixtureShelf(aisle, `${pres.name} - ${facade.name}`, _fixFixture(facade), shelfIndex);
+  return _removeFixtureShelf(
+    aisle,
+    `${pres.name} - ${facade.name}`,
+    config => _fixFixture(config.presentoirs?.[presIndex]?.facades?.[facadeIndex]),
+    shelfIndex,
+    button
+  );
 }
 
 async function _swapCall(aisle, endpoint, body) {
@@ -2302,7 +2449,7 @@ function _facadeShelfGrid(aisle, sideName, fk, shelves, labels) {
                onchange="setFacadeShelfPositions('${esc(aisle)}','${fk}',${shi},this.value)"/>
         <span style="font-size:10px;color:#94a3b8">pos</span>
         <span style="font-size:11px;color:#64748b">${filled} prod.</span>
-        <button onclick="removeFacadeShelf('${esc(aisle)}','${fk}',${shi})"
+        <button type="button" class="plan-delete-action" onclick="removeFacadeShelf('${esc(aisle)}','${fk}',${shi},this)"
                 style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5"
                 title="Supprimer cette tablette">✕ Suppr.</button>
       </div>
@@ -2382,7 +2529,7 @@ function renderPresentoirSection(aisle, config) {
           <div class="shelf-header" style="gap:4px">
             <span class="shelf-title">${title}</span>
             ${posCtrl}
-            <button onclick="removePresentoirShelf('${esc(aisle)}',${pi},${fi},${shi})"
+            <button type="button" class="plan-delete-action" onclick="removePresentoirShelf('${esc(aisle)}',${pi},${fi},${shi},this)"
                     style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5"
                     title="Supprimer cette tablette">✕ Suppr.</button>
           </div>
