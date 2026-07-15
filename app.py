@@ -178,6 +178,7 @@ def get_system_info():
         "duplicate_slots": int(first_column(duplicate_slots) or 0),
         "duplicate_barcodes": int(first_column(duplicate_barcodes) or 0),
         "reference_count": reference_count(),
+        "pool": pool_stats(),
         # Deploy diagnostics: which commit is live + whether the self-ping armed.
         # Guessing at "did the deploy actually land?" has burned us repeatedly.
         "version": os.environ.get("RENDER_GIT_COMMIT", "")[:7],

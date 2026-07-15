@@ -91,6 +91,8 @@ class DatabaseConnection:
 
 _PG_POOL = None
 _PG_POOL_LOCK = threading.Lock()
+_PG_POOL_DIRECT_FALLBACKS = 0
+_PG_POOL_WAIT_S = 0.5
 
 
 def _get_pg_pool():
@@ -98,18 +100,15 @@ def _get_pg_pool():
     if _PG_POOL is None:
         with _PG_POOL_LOCK:
             if _PG_POOL is None:
-                # Small pool: 4 gunicorn threads + a couple of background workers.
-                # min_size=0 so an idle app holds no connection open.
-                # open=False + timeout=15: connections open lazily PER REQUEST. With
-                # open=True the pool blocked 30s at import when the DB was unreachable
-                # (e.g. expired Render Postgres) and gunicorn crash-looped — the app
-                # must boot anyway so it can report the problem and recover once the
-                # database is back.
+                # Start one connection in the background so normal requests receive
+                # it immediately. open=True is non-blocking; getconn() below has a
+                # short deadline and falls back to a direct connection if the pool's
+                # background workers cannot connect.
                 pool = ConnectionPool(
-                    DATABASE_URL, min_size=0, max_size=6, max_idle=300, timeout=15,
-                    kwargs={"row_factory": dict_row}, open=False,
+                    DATABASE_URL, min_size=1, max_size=6, max_idle=300,
+                    timeout=_PG_POOL_WAIT_S, reconnect_timeout=15,
+                    kwargs={"row_factory": dict_row}, open=True,
                 )
-                pool.open(wait=False)   # non-blocking: getconn() waits (≤15s), boot never does
                 _PG_POOL = pool
     return _PG_POOL
 
@@ -119,24 +118,28 @@ def pool_stats():
     if _PG_POOL is None:
         return None
     try:
-        return _PG_POOL.get_stats()
+        return {**_PG_POOL.get_stats(), "direct_fallbacks": _PG_POOL_DIRECT_FALLBACKS}
     except Exception:
         return None
 
 
 def connect_db():
+    global _PG_POOL_DIRECT_FALLBACKS
     if DB_BACKEND == "postgres":
         if psycopg is None:
             raise RuntimeError("psycopg is required when DATABASE_URL is set.")
         if ConnectionPool is not None:
             pool = _get_pg_pool()
             try:
-                return DatabaseConnection(pool.getconn(), "postgres", pool=pool)
+                return DatabaseConnection(
+                    pool.getconn(timeout=_PG_POOL_WAIT_S), "postgres", pool=pool
+                )
             except Exception as exc:  # PoolTimeout/pool trouble — NEVER block the app on it
+                _PG_POOL_DIRECT_FALLBACKS += 1
                 print(f"[DB] pool indisponible ({exc}) — connexion directe de secours. stats={pool_stats()}")
-                conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=15)
+                conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=5)
                 return DatabaseConnection(conn, "postgres")
-        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=5)
         return DatabaseConnection(conn, "postgres")
 
     conn = sqlite3.connect(DB_PATH)
