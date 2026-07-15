@@ -6,4 +6,5 @@ services:
     # Server tuning lives in gunicorn.conf.py (auto-loaded); command-line flags
     # would silently override it, so keep the start command bare.
     startCommand: gunicorn app:app
+    healthCheckPath: /healthz
     plan: free

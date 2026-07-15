@@ -18,6 +18,9 @@ except ImportError:  # pragma: no cover - pool is optional (psycopg[pool])
 DB_PATH = os.path.join(os.path.dirname(__file__), "familiprix.db")
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 DB_BACKEND = "postgres" if DATABASE_URL and not DATABASE_URL.startswith("sqlite:///") else "sqlite"
+PG_POOL_ENABLED = os.environ.get("PG_POOL_ENABLED", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
 INTEGRITY_ERRORS = [sqlite3.IntegrityError]
 if psycopg is not None:
     INTEGRITY_ERRORS.append(psycopg.IntegrityError)
@@ -116,27 +119,33 @@ def _get_pg_pool():
 
 def pool_stats():
     """Live pool statistics (for /api/system/info diagnostics)."""
+    if not PG_POOL_ENABLED:
+        return {"enabled": False}
     if _PG_POOL is None:
-        return None
+        return {"enabled": True, "started": False}
     try:
-        return _PG_POOL.get_stats()
+        return {"enabled": True, **_PG_POOL.get_stats()}
     except Exception:
-        return None
+        return {"enabled": True, "stats_unavailable": True}
 
 
 def connect_db():
     if DB_BACKEND == "postgres":
         if psycopg is None:
             raise RuntimeError("psycopg is required when DATABASE_URL is set.")
-        if ConnectionPool is not None:
+        # Render's pool workers repeatedly timed out while the exact same direct
+        # connection succeeded, adding 15-40 seconds to every request. Keep the
+        # pool opt-in only; the default direct connection is bounded and closed at
+        # request teardown, so it cannot accumulate background worker threads.
+        if ConnectionPool is not None and PG_POOL_ENABLED:
             pool = _get_pg_pool()
             try:
                 return DatabaseConnection(pool.getconn(), "postgres", pool=pool)
             except Exception as exc:  # PoolTimeout/pool trouble — NEVER block the app on it
                 print(f"[DB] pool indisponible ({exc}) — connexion directe de secours. stats={pool_stats()}")
-                conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=15)
+                conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=5)
                 return DatabaseConnection(conn, "postgres")
-        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=5)
         return DatabaseConnection(conn, "postgres")
 
     conn = sqlite3.connect(DB_PATH)
