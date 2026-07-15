@@ -198,7 +198,11 @@ class PlanogramMetadataTests(unittest.TestCase):
                 after_second = dict(db.execute("SELECT * FROM products").fetchone())
 
         self.assertEqual(first_response.status_code, 200)
-        self.assertEqual(first_response.get_json()["errors"], 0)
+        first_result = first_response.get_json()
+        self.assertEqual(first_result["errors"], 0)
+        self.assertEqual(first_result["layout"]["aisle"], "1")
+        self.assertEqual(first_result["products"][0]["barcode"], "123456789012")
+        self.assertEqual(first_result["products"][0]["description"], "Reference description")
         self.assertEqual(after_first["description"], "Reference description")
         self.assertEqual(after_first["image_url"], "https://img.test/ref.jpg")
         self.assertEqual(after_first["brand"], "Reference Brand")

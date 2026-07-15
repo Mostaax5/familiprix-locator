@@ -46,12 +46,14 @@ function upsertCachedProduct(product) {
   const index = allProductsCache.findIndex(item => Number(item.id) === Number(normalized.id));
   if (index >= 0) allProductsCache[index] = normalized;
   else allProductsCache.push(normalized);
+  if (typeof invalidateProductSearchIndexes === 'function') invalidateProductSearchIndexes();
   lastProductsRefreshAt = Date.now();
   if (typeof savePlanSnapshot === 'function') savePlanSnapshot();
 }
 
 function removeCachedProduct(productId) {
   allProductsCache = allProductsCache.filter(item => Number(item.id) !== Number(productId));
+  if (typeof invalidateProductSearchIndexes === 'function') invalidateProductSearchIndexes();
   lastProductsRefreshAt = Date.now();
   if (typeof savePlanSnapshot === 'function') savePlanSnapshot();
 }
@@ -192,8 +194,7 @@ function getStartupTab() {
 function paintStartupTab(tab) {
   setActiveTabUi(tab);
   if (tab === 'add') {
-    const restored = (typeof restorePlanSnapshot === 'function') && restorePlanSnapshot();
-    if (restored) {
+    if (mapLayouts.length) {
       normalizeCursorToLayout();
       updateCursorUi();
       renderPlanStartEditor();
@@ -202,6 +203,17 @@ function paintStartupTab(tab) {
       showPlanLoading();
     }
   }
+}
+
+function runImmediateStartupEffects(tab) {
+  if (tab === 'add' && mapLayouts.length) refreshPlanUi();
+  if (tab === 'search' && document.getElementById('searchInput')?.value.trim()) doSearch();
+  if (tab === 'scan') {
+    if (typeof populateRayonAisleList === 'function') populateRayonAisleList();
+    window.setTimeout(focusScanInput, 50);
+  }
+  if (tab === 'client') window.setTimeout(() => document.getElementById('clientQuestion')?.focus(), 50);
+  if (tab === 'search') window.setTimeout(() => document.getElementById('searchInput')?.focus(), 50);
 }
 
 function runStartupTabEffects(tab) {
@@ -235,30 +247,28 @@ async function bootApp() {
   updateLockUi();
   ensureStoreSelected();
 
+  // Every employee tab uses the same mapped products. Restore the last compact
+  // server snapshot before the first network await so Plan, Search and Client
+  // are useful immediately even while Render is waking up.
+  if (typeof restorePlanSnapshot === 'function') restorePlanSnapshot();
+
   const startTab = getStartupTab();
   paintStartupTab(startTab);
+  runImmediateStartupEffects(startTab);
 
-  const [systemResult, productsResult, layoutsResult] = await Promise.allSettled([
-    apiGetSystemInfo(), apiGetProducts(), apiGetLayoutAisles()
+  await Promise.allSettled([
+    refreshProductsCache(true),
+    refreshLayoutsCache(true),
   ]);
-  if (systemResult.status === 'fulfilled') backendInfo = {...backendInfo, ...systemResult.value};
-  if (productsResult.status === 'fulfilled') {
-    allProductsCache = productsResult.value;
-    lastProductsRefreshAt = Date.now();
-  } else if (!allProductsCache.length) {
-    allProductsCache = [];
-  }
-  if (layoutsResult.status === 'fulfilled') {
-    mapLayouts = layoutsResult.value.map(layout => syncLayoutRecord({
-      ...layout,
-      config: normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position)
-    }));
-    sortMapLayouts();
-    dirtyLayoutAisles = new Set();
-    lastLayoutsRefreshAt = Date.now();
-  } else if (!mapLayouts.length) {
-    mapLayouts = [];
-  }
+
+  // Diagnostics include duplicate/reference counts. Start them only after the
+  // plan requests so a first-time device gives its database connection to the
+  // employee-facing data first.
+  void apiGetSystemInfo().then(info => {
+    backendInfo = {...backendInfo, ...info};
+    updateAppShellState();
+    updateNetworkStatus();
+  }).catch(() => {});
   normalizeCursorToLayout();
   updateCursorUi();
   renderPlanStartEditor();
@@ -271,9 +281,14 @@ async function bootApp() {
   if (activeTabAfterLoad === 'scan') focusScanInput();
 }
 
-bootApp().then(() => {
-  ensureQuaggaLoaded();
-});
+bootApp();
+// Scanner code is large and comes from a CDN. Warm it only after the browser is
+// idle so it cannot compete with the plan snapshot, search, or first interaction.
+if ('requestIdleCallback' in window) {
+  window.requestIdleCallback(() => ensureQuaggaLoaded(), {timeout: 5000});
+} else {
+  window.setTimeout(() => ensureQuaggaLoaded(), 3000);
+}
 
 // Enforce session expiry even with no navigation: every 30s, if the session has
 // expired while the user sits on a locked tab, re-lock the UI and leave the tab.

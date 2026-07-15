@@ -534,16 +534,55 @@ def find_existing_image_for_barcode(db, barcode, exclude_id=None):
 _REFERENCE_METADATA_FIELDS = ("brand", "description", "image_url", "product_code")
 
 
-def build_reference_metadata_index(db):
-    """Index trusted catalogue metadata by every equivalent UPC representation."""
+def _barcode_query_values(barcodes):
+    values = []
+    seen = set()
+    for barcode in barcodes or []:
+        for candidate in build_barcode_candidates(barcode):
+            value = str(candidate or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                values.append(value)
+    return values
+
+
+def _rows_for_barcodes(db, table, columns, barcodes):
+    """Fetch only relevant UPC rows, in bounded IN clauses for SQLite/Postgres."""
+    values = _barcode_query_values(barcodes)
+    if not values:
+        return []
+    rows = []
+    for start in range(0, len(values), 400):
+        chunk = values[start:start + 400]
+        placeholders = ",".join("?" for _ in chunk)
+        rows.extend(db.execute(
+            f"SELECT {columns} FROM {table} WHERE barcode IN ({placeholders})",
+            tuple(chunk),
+        ).fetchall())
+    return rows
+
+
+def build_reference_metadata_index(db, barcodes=None):
+    """Index trusted catalogue metadata by every equivalent UPC representation.
+
+    Planogram imports pass their UPCs so a 100-line import does not download and
+    normalize the entire reference catalogue from Postgres first.
+    """
     index = {}
 
     def quality(item):
         return sum(bool(str(item.get(field, "") or "").strip()) for field in _REFERENCE_METADATA_FIELDS)
 
-    rows = db.execute(
-        "SELECT barcode, brand, description, image_url, product_code FROM product_reference"
-    ).fetchall()
+    if barcodes is None:
+        rows = db.execute(
+            "SELECT barcode, brand, description, image_url, product_code FROM product_reference"
+        ).fetchall()
+    else:
+        rows = _rows_for_barcodes(
+            db, "product_reference",
+            "barcode, brand, description, image_url, product_code",
+            barcodes,
+        )
     for row in rows:
         item = dict(row)
         keys = {
@@ -745,29 +784,38 @@ def hydrate_candidate_images(products):
     """Attach any already-known UPC image to mapped Client results immediately,
     then queue only truly missing images for background lookup."""
     db = get_db()
-    unresolved = []
-    changed = False
-    now = utc_now_iso()
-    for product in products:
-        if str(product.get("image_url", "") or "").strip():
-            continue
+    missing = [
+        product for product in products
+        if not str(product.get("image_url", "") or "").strip()
+        and str(product.get("barcode", "") or "").strip()
+    ]
+    if not missing:
+        return products
+
+    barcodes = [product.get("barcode", "") for product in missing]
+    image_by_barcode = {}
+    for table in ("products", "product_reference"):
+        for row in _rows_for_barcodes(db, table, "barcode, image_url", barcodes):
+            item = dict(row)
+            image_url = str(item.get("image_url", "") or "").strip()
+            if not image_url:
+                continue
+            for candidate in build_barcode_candidates(item.get("barcode", "")):
+                key = normalized_digits(candidate)
+                if key:
+                    image_by_barcode.setdefault(key, image_url)
+
+    for product in missing:
         barcode = str(product.get("barcode", "") or "").strip()
-        if not barcode:
-            continue
-        image_url = find_existing_image_for_barcode(db, barcode, exclude_id=product.get("id"))
+        image_url = ""
+        for candidate in build_barcode_candidates(barcode):
+            image_url = image_by_barcode.get(normalized_digits(candidate), "")
+            if image_url:
+                break
         if image_url:
             product["image_url"] = image_url
-            if product.get("id") is not None:
-                db.execute(
-                    "UPDATE products SET image_url=?, modified_at=? WHERE id=?",
-                    (image_url, now, product["id"]),
-                )
-                changed = True
-        else:
-            unresolved.append(barcode)
-    if changed:
-        db.commit()
-    schedule_image_fill(unresolved)
+    # Persist reused images and resolve unknown ones off the request thread.
+    schedule_image_fill(barcodes)
     return products
 
 
@@ -1138,9 +1186,7 @@ def search_products():
 
 @products_bp.route("/api/client/find", methods=["GET"])
 def client_find():
-    """ONE ranked list for the Client tab: placed products (with location) AND catalogue
-    products (position à confirmer) scored together by the SAME rules, best match first.
-    Works with zero AI — this is the reliable core of the client helper."""
+    """Fast inventory-safe lookup from the current mapped store plan only."""
     query = request.args.get("q", "").strip()
     if not query:
         return jsonify([])
@@ -1154,32 +1200,23 @@ def client_find():
         return jsonify([])
     db = get_db()
     scored = []
-    seen_bc = set()
     # Minimum meaningful score for the CLIENT tab: every real signal clears it
     # (whole-word name token 470+, intent 200-300, brand 200, all-tokens-covered
     # 120+, barcode 500+). What it drops is partial-coverage-only noise (25/token)
     # — the "random products" that padded the list when little else matched.
     MIN_SCORE = 100
-    # Placed products first (tiebreak 0) — they carry a real shelf location. Scored
-    # from the pre-normalized in-memory corpus with the SAME rules as the catalogue,
-    # so the two lists compete fairly and a request costs milliseconds (the old
-    # per-request re-normalization took ~17s on Render and looked like "no results").
-    for item, prow in _products_corpus(db):
-        s = _fast_reference_score(prow, nq, dq, qtokens, intent_terms, abbrevs)
+    # The pre-normalized in-memory corpus keeps this endpoint in milliseconds.
+    # Imported-but-unplaced catalogue rows are excluded so they cannot be shown
+    # to an employee as current store inventory.
+    for document in _mapped_client_products(db):
+        item = document["item"]
+        prow = document["row"]
+        s = max(
+            _fast_reference_score(prow, nq, dq, qtokens, intent_terms, abbrevs),
+            _fuzzy_product_score(prow, qtokens),
+        )
         if s >= MIN_SCORE:
             scored.append((s, 0, item))
-            if prow["_bc"]:
-                seen_bc.add(prow["_bc"])
-    # Catalogue products (tiebreak 1) — from the cached, pre-normalized corpus (fast).
-    for row in _reference_corpus(db):
-        if row["_bc"] and row["_bc"] in seen_bc:
-            continue
-        s = _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs)
-        if s >= MIN_SCORE:
-            scored.append((s, 1, {"barcode": row["barcode"], "name": row["name"],
-                                   "brand": row["brand"], "description": row["description"],
-                                   "product_code": row["product_code"],
-                                   "catalog_only": True, "in_stock": 1}))
     scored.sort(key=lambda x: (-x[0], x[1], str(x[2].get("name", "")).lower()))
     return jsonify([it for _, _, it in scored[:limit]])
 
@@ -1632,13 +1669,15 @@ def bulk_import_products():
     ).fetchall():
         d = dict(r)
         existing_slots[(str(d["section"]), str(d["shelf"]), str(d["position"]))] = d
-    reference_index = build_reference_metadata_index(db)
+    incoming_barcodes = [ln["p"].get("barcode", "") for ln in lines]
+    reference_index = build_reference_metadata_index(db, incoming_barcodes)
     image_by_barcode = {}
-    for r in db.execute(
-        "SELECT barcode, image_url FROM products "
-        "WHERE TRIM(COALESCE(image_url,'')) <> '' AND TRIM(COALESCE(barcode,'')) <> ''"
-    ).fetchall():
+    for r in _rows_for_barcodes(
+        db, "products", "barcode, image_url", incoming_barcodes
+    ):
         d = dict(r)
+        if not str(d.get("image_url", "") or "").strip():
+            continue
         for candidate in build_barcode_candidates(d.get("barcode", "")):
             key = normalized_digits(candidate)
             if key:
@@ -1740,8 +1779,8 @@ def bulk_import_products():
 
     # Persist the plan with positions adjusted to the plano (tablette count is
     # unchanged — only the number of positions on a tablette changes).
+    ms, msh, mp = layout_metrics(config)
     try:
-        ms, msh, mp = layout_metrics(config)
         db.execute(
             "UPDATE aisle_layouts SET config_json=?, max_section=?, max_shelf=?, max_position=?, modified_by=?, modified_at=? WHERE aisle=?",
             (json.dumps(config), ms, msh, mp, username, now, aisle),
@@ -1766,13 +1805,39 @@ def bulk_import_products():
         pass
     db.commit()
 
+    # Return exactly the committed slice the browser must replace. This avoids
+    # two full-list downloads before the planogram can visibly update.
+    affected_products = [
+        row_to_product(product) for product in db.execute(
+            "SELECT * FROM products WHERE aisle=? AND side=?",
+            (aisle, side),
+        ).fetchall()
+    ]
+    affected_products.sort(key=location_sort_key)
+    aisle_product_count_row = db.execute(
+        "SELECT COUNT(*) AS n FROM products WHERE aisle=?", (aisle,)
+    ).fetchone()
+    aisle_product_count = int(first_column(aisle_product_count_row) or 0)
+    layout_payload = {
+        "aisle": aisle,
+        "max_section": ms,
+        "max_shelf": msh,
+        "max_position": mp,
+        "config": config,
+        "enabled": int(row.get("enabled", 1) if isinstance(row, dict) else row[5]),
+        "modified_by": username,
+        "modified_at": now,
+        "product_count": aisle_product_count,
+    }
+
     from routes.gist import _schedule_gist_backup
     _schedule_gist_backup(db)
     schedule_image_fill(image_barcodes)   # fetch missing plano pictures automatically
     return jsonify({"success": True, "imported": imported, "skipped": skipped,
                     "errors": errors, "overflow": overflow,
                     "overflow_shelves": overflow, "overflow_products": overflow_products,
-                    "pruned": pruned})
+                    "pruned": pruned, "layout": layout_payload,
+                    "products": affected_products})
 
 
 @products_bp.route("/api/planograms/history", methods=["GET"])
@@ -1797,6 +1862,9 @@ def schedule_reference_metadata_sync():
     def worker():
         from database import connect_db
 
+        # Let the web worker answer its first plan/products request before this
+        # catalogue-wide maintenance scan competes for Postgres and CPU.
+        time.sleep(12)
         for attempt in range(3):
             db = None
             try:
@@ -1835,17 +1903,21 @@ def schedule_backfill_missing():
             fh.write(str(time.time()))
     except OSError:
         pass
-    try:
-        from database import connect_db
-        db = connect_db()
+    def worker():
+        time.sleep(15)
         try:
-            rows = db.execute(
-                "SELECT DISTINCT barcode FROM products "
-                "WHERE TRIM(COALESCE(barcode,'')) <> '' AND TRIM(COALESCE(image_url,'')) = ''"
-            ).fetchall()
-            codes = [(r["barcode"] if isinstance(r, dict) else r[0]) for r in rows]
-        finally:
-            db.close()
-        schedule_image_fill(codes)
-    except Exception:
-        pass
+            from database import connect_db
+            db = connect_db()
+            try:
+                rows = db.execute(
+                    "SELECT DISTINCT barcode FROM products "
+                    "WHERE TRIM(COALESCE(barcode,'')) <> '' AND TRIM(COALESCE(image_url,'')) = ''"
+                ).fetchall()
+                codes = [(r["barcode"] if isinstance(r, dict) else r[0]) for r in rows]
+            finally:
+                db.close()
+            schedule_image_fill(codes)
+        except Exception:
+            pass
+
+    threading.Thread(target=worker, daemon=True).start()

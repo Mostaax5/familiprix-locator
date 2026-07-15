@@ -1,6 +1,7 @@
 // Client tab: AI interprets the conversation; deterministic retrieval returns
 // every matching product from the real mapped store plan.
 let _clientRagController = null;
+let _clientRequestSequence = 0;
 let _clientImagePollTimer = null;
 let _latestClientResult = null;
 let _clientSelectedQuote = '';
@@ -515,6 +516,7 @@ function clearClientHistory() {
 }
 
 function resetClientSearchResults(showStatus=true) {
+  _clientRequestSequence += 1;
   if (_clientRagController) {
     _clientRagController.abort();
     _clientRagController = null;
@@ -597,6 +599,42 @@ async function pollClientProductImages(attempt=0) {
   }
 }
 
+function localClientMatches(question, limit=60) {
+  if (typeof searchProductsFromCache !== 'function' || !allProductsCache.length) return [];
+  const rawMatches = searchProductsFromCache(question, Math.min(limit * 2, 100), 100);
+  const grouped = [];
+  const byKey = new Map();
+  for (const raw of rawMatches) {
+    const barcode = typeof normalizedDigits === 'function' ? normalizedDigits(raw.barcode) : String(raw.barcode || '');
+    const nameKey = typeof normalizeSearchText === 'function'
+      ? normalizeSearchText(`${raw.name || ''} ${raw.brand || ''}`)
+      : `${raw.name || ''}|${raw.brand || ''}`.toLowerCase();
+    const key = barcode ? `barcode:${barcode}` : `name:${nameKey}`;
+    const location = {
+      aisle: String(raw.aisle || ''), side: String(raw.side || 'Gauche'),
+      section: String(raw.section || '1'), shelf: String(raw.shelf || ''),
+      position: String(raw.position || ''),
+    };
+    if (byKey.has(key)) {
+      const product = byKey.get(key);
+      if (!product.locations.some(item => JSON.stringify(item) === JSON.stringify(location))) {
+        product.locations.push(location);
+      }
+      if (!product.image_url && raw.image_url) product.image_url = raw.image_url;
+      continue;
+    }
+    const product = normalizeProduct({
+      ...raw,
+      client_id: raw.client_id || (raw.id != null ? `product:${raw.id}` : key),
+      locations: [location],
+    });
+    byKey.set(key, product);
+    grouped.push(product);
+    if (grouped.length >= limit) break;
+  }
+  return grouped;
+}
+
 async function runClientRequest(question, options={}) {
   question = String(question || '').trim();
   const status = document.getElementById('clientHelpStatus');
@@ -610,14 +648,50 @@ async function runClientRequest(question, options={}) {
 
   if (_clientRagController) _clientRagController.abort();
   if (_clientImagePollTimer) window.clearTimeout(_clientImagePollTimer);
+  const requestId = ++_clientRequestSequence;
   const history = clientHistoryPayload();
+  const contextProductIds = currentClientMatches
+    .map(product => product.client_id).filter(Boolean).slice(0, 80);
   const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
   _clientRagController = controller;
   if (button) button.disabled = true;
   if (followupButton) followupButton.disabled = true;
-  if (status) status.textContent = options.followUp
-    ? `${aiProviderLabel()} approfondit la réponse avec les produits déjà affichés…`
-    : 'Recherche dans le plan actuel du magasin…';
+  if (!options.followUp) _latestClientResult = null;
+  let visibleProducts = options.followUp ? currentClientMatches : localClientMatches(question, 60);
+  if (!options.followUp) {
+    currentClientMatches = visibleProducts;
+    if (visibleProducts.length) {
+      renderClientMatches(visibleProducts);
+      persistClientDraft();
+    } else {
+      const matches = document.getElementById('clientMatches');
+      if (matches) matches.innerHTML = '';
+    }
+  }
+  if (status) {
+    status.textContent = options.followUp
+      ? `${aiProviderLabel()} approfondit la réponse avec les produits déjà affichés…`
+      : visibleProducts.length
+        ? `${visibleProducts.length} produit(s) affiché(s) depuis le plan. ${aiProviderLabel()} prépare la réponse…`
+        : 'Recherche dans le plan actuel du magasin…';
+  }
+
+  let requestFinalized = false;
+  const fastProductsPromise = options.followUp
+    ? Promise.resolve([])
+    : apiClientFind(question, 60, controller?.signal);
+  void fastProductsPromise.then(products => {
+    if (requestFinalized || requestId !== _clientRequestSequence) return;
+    const normalized = Array.isArray(products) ? products.map(normalizeProduct) : [];
+    if (!normalized.length && visibleProducts.length) return;
+    visibleProducts = normalized;
+    currentClientMatches = normalized;
+    renderClientMatches(normalized);
+    persistClientDraft();
+    if (status) status.textContent = normalized.length
+      ? `${normalized.length} produit(s) trouvé(s) dans le plan. ${aiProviderLabel()} prépare la réponse…`
+      : `${aiProviderLabel()} vérifie la demande…`;
+  });
 
   const result = await apiGenerateClientHelp({
     question,
@@ -625,14 +699,21 @@ async function runClientRequest(question, options={}) {
     follow_up: Boolean(options.followUp),
     selected_text: options.selectedText || '',
     focus_product_id: options.focusProductId || '',
-    context_product_ids: currentClientMatches.map(product => product.client_id).filter(Boolean).slice(0, 80),
+    context_product_ids: contextProductIds,
   }, controller?.signal);
-  if (controller && _clientRagController !== controller) return;
+  if (requestId !== _clientRequestSequence) return;
+  requestFinalized = true;
   _clientRagController = null;
   if (button) button.disabled = false;
   if (followupButton) followupButton.disabled = false;
   if (!result.success) {
-    if (status) status.textContent = result.error || 'Recherche indisponible pour le moment.';
+    if (status) {
+      const suffix = currentClientMatches.length
+        ? ` Les ${currentClientMatches.length} produit(s) trouvé(s) restent disponibles ci-dessous.`
+        : '';
+      status.textContent = `${result.error || 'Recherche indisponible pour le moment.'}${suffix}`;
+    }
+    persistClientDraft();
     return;
   }
 

@@ -73,6 +73,10 @@ _OPENAI_OUTPUT_COST_PER_M = 0.60
 
 _AI_RATE_LIMIT  = int(os.environ.get("AI_RATE_LIMIT",  "30"))
 _AI_RATE_WINDOW = int(os.environ.get("AI_RATE_WINDOW", "3600"))
+try:
+    _AI_REQUEST_TIMEOUT_SECONDS = min(30, max(5, int(os.environ.get("AI_REQUEST_TIMEOUT", "12"))))
+except (TypeError, ValueError):
+    _AI_REQUEST_TIMEOUT_SECONDS = 12
 _ai_rate_buckets: dict = defaultdict(list)
 
 # Auto AI-enrich of online UPC lookups is OFF by default so it can NEVER cost
@@ -994,9 +998,8 @@ def generate_client_help_payload_gemini(question, products):
         method="POST",
     )
     try:
-        # 20s (was 10): the richer 35-product context takes a moment longer to
-        # generate; a timeout here means NO answer at all, which is worse.
-        with urlopen(request_obj, timeout=20) as response:
+        # Keep employee-facing AI calls inside the configured response budget.
+        with urlopen(request_obj, timeout=_AI_REQUEST_TIMEOUT_SECONDS) as response:
             raw_response = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         body = ""
@@ -1059,7 +1062,7 @@ def generate_client_help_payload_openai(question, products):
         method="POST",
     )
     try:
-        with urlopen(request_obj, timeout=20) as response:
+        with urlopen(request_obj, timeout=_AI_REQUEST_TIMEOUT_SECONDS) as response:
             raw_response = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         body = ""
@@ -1104,7 +1107,7 @@ def _deepseek_json_request(messages, max_tokens, question_preview=""):
         method="POST",
     )
     try:
-        with urlopen(request_obj, timeout=20) as response:
+        with urlopen(request_obj, timeout=_AI_REQUEST_TIMEOUT_SECONDS) as response:
             raw_response = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         body = ""
@@ -1154,7 +1157,7 @@ def _gemini_structured_request(system_prompt, user_payload, max_tokens, question
         method="POST",
     )
     try:
-        with urlopen(request_obj, timeout=20) as response:
+        with urlopen(request_obj, timeout=_AI_REQUEST_TIMEOUT_SECONDS) as response:
             raw_response = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         _set_ai_error(f"Gemini a refusé la requête structurée (HTTP {exc.code}).")
@@ -1194,7 +1197,7 @@ def _openai_structured_request(system_prompt, user_payload, max_tokens,
         method="POST",
     )
     try:
-        with urlopen(request_obj, timeout=20) as response:
+        with urlopen(request_obj, timeout=_AI_REQUEST_TIMEOUT_SECONDS) as response:
             raw_response = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         _set_ai_error(f"OpenAI a refusé la requête structurée (HTTP {exc.code}).")
@@ -1410,7 +1413,7 @@ _CLIENT_VERIFICATION_INSTRUCTIONS = (
     "Si selected_text_from_previous_answer est fourni, réponds précisément à la question en reliant "
     "ce passage au contexte. Si focused_product_id est fourni, centre la réponse sur ce produit. "
     "Fais une réponse précise, facile à dire au client et suffisamment approfondie pour répondre à TOUTES "
-    "les dimensions demandées: 3 à 8 petits paragraphes, sans Markdown, sans **, et sans recopier "
+    "les dimensions demandées: 2 à 5 petits paragraphes, sans Markdown, sans **, et sans recopier "
     "une longue liste de produits. Pour une comparaison de formes, distingue explicitement les "
     "liquides/suspensions, comprimés/caplets, capsules liquides/liqui-gels et mini-gels quand ils "
     "sont présents. Explique les différences pratiques pertinentes: façon de les prendre, facilité "
@@ -1467,6 +1470,51 @@ def normalize_verified_client_answer(parsed, valid_ids):
     }
 
 
+def select_client_answer_candidates(candidates, limit=16):
+    """Keep the AI context small while retaining different product forms."""
+    from routes.products import normalize_search_text
+
+    family_markers = (
+        ("children", ("enf", "enfant", "pediat", "kids")),
+        ("suspension", ("suspension", "sirop", "sir ", " liquide")),
+        ("liqui_gel", ("liqui gel", "liq gel", "liquigel", "caps gel")),
+        ("mini_gel", ("mini gel", "mini caps")),
+        ("tablet", (" comprime", " caplet", " co ", " tablet")),
+        ("topical", (" creme", " onguent", " gel topique")),
+        ("combination", (" plus acet", " acetaminophene", " rhume", " sinus")),
+        ("extra_strength", ("extra fort", " x f ", " forte")),
+    )
+
+    def signature(product):
+        text = f" {normalize_search_text(' '.join([
+            str(product.get('name', '') or ''),
+            str(product.get('description', '') or ''),
+            str(product.get('usage_notes', '') or ''),
+        ]))} "
+        families = tuple(name for name, markers in family_markers if any(marker in text for marker in markers))
+        if families:
+            return families
+        tokens = [token for token in text.split() if not token.isdigit()]
+        return tuple(tokens[:3])
+
+    selected = []
+    seen = set()
+    for product in candidates:
+        key = signature(product)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(product)
+        if len(selected) >= limit:
+            return selected
+    for product in candidates:
+        if product not in selected:
+            selected.append(product)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
 def generate_verified_client_answer(question, query_plan, candidates, history=None,
                                     selected_text="", focus_product_id=""):
     contexts = [product_context_for_client_rag(product) for product in candidates]
@@ -1477,7 +1525,7 @@ def generate_verified_client_answer(question, query_plan, candidates, history=No
          "focused_product_id": focus_product_id,
          "query_plan": query_plan, "candidates": contexts,
          "required_schema": _CLIENT_VERIFICATION_SCHEMA},
-        max_tokens=1400,
+        max_tokens=800,
         schema_name="client_verified_answer",
         schema=_CLIENT_VERIFICATION_SCHEMA,
         question_preview=question,
@@ -2354,7 +2402,7 @@ def client_help():
             key=lambda product: 0 if str(product.get("client_id", "")) == focus_product_id else 1
         )
     # A smaller grounded context improves response time and keeps comparisons readable.
-    answer_candidates = answer_candidates[:30]
+    answer_candidates = select_client_answer_candidates(answer_candidates, limit=16)
     verified = generate_verified_client_answer(
         question, query_plan, answer_candidates, history,
         selected_text=selected_text, focus_product_id=focus_product_id,

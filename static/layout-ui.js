@@ -225,6 +225,11 @@ function compactPlanProduct(product) {
     id: product.id ?? null,
     name: String(product.name || ''),
     brand: String(product.brand || ''),
+    description: String(product.description || ''),
+    image_url: String(product.image_url || ''),
+    search_terms: String(product.search_terms || ''),
+    usage_notes: String(product.usage_notes || ''),
+    alternative_suggestions: String(product.alternative_suggestions || ''),
     barcode: String(product.barcode || ''),
     product_code: String(product.product_code || ''),
     aisle: String(product.aisle || ''),
@@ -255,12 +260,39 @@ function savePlanSnapshot() {
   }
   try {
     const products = allProductsCache.map(compactPlanProduct).filter(Boolean);
-    localStorage.setItem(STORAGE_KEYS.planSnapshot, JSON.stringify({
+    const snapshot = {
       savedAt: Date.now(),
       layouts: mapLayouts,
       products
-    }));
-  } catch (e) {}
+    };
+    let serialized = JSON.stringify(snapshot);
+    if (serialized.length > 3800000) {
+      snapshot.products = products.map(product => {
+        const {
+          description, image_url, search_terms, usage_notes,
+          alternative_suggestions, ...compact
+        } = product;
+        return compact;
+      });
+      serialized = JSON.stringify(snapshot);
+    }
+    localStorage.setItem(STORAGE_KEYS.planSnapshot, serialized);
+  } catch (e) {
+    // A compact location/name snapshot is still far better than a blank app on
+    // devices with a small localStorage quota.
+    try {
+      const products = allProductsCache.map(compactPlanProduct).filter(Boolean).map(product => {
+        const {
+          description, image_url, search_terms, usage_notes,
+          alternative_suggestions, ...compact
+        } = product;
+        return compact;
+      });
+      localStorage.setItem(STORAGE_KEYS.planSnapshot, JSON.stringify({
+        savedAt: Date.now(), layouts: mapLayouts, products
+      }));
+    } catch (_) {}
+  }
 }
 
 function restorePlanSnapshot() {
@@ -285,6 +317,38 @@ function restorePlanSnapshot() {
     localStorage.removeItem(STORAGE_KEYS.planSnapshot);
     return false;
   }
+}
+
+function applyPlanogramImportResult(aisle, side, data) {
+  const aisleKey = String(aisle);
+  const sideKey = String(side);
+
+  if (data?.layout && typeof data.layout === 'object') {
+    const nextLayout = syncLayoutRecord({
+      ...data.layout,
+      config: normalizeLayoutConfig(
+        data.layout.config,
+        data.layout.max_section,
+        data.layout.max_shelf,
+        data.layout.max_position
+      )
+    });
+    const layoutIndex = mapLayouts.findIndex(item => String(item.aisle) === aisleKey);
+    if (layoutIndex >= 0) mapLayouts[layoutIndex] = nextLayout;
+    else mapLayouts.push(nextLayout);
+    sortMapLayouts();
+    lastLayoutsRefreshAt = Date.now();
+  }
+
+  if (Array.isArray(data?.products)) {
+    const untouched = allProductsCache.filter(product => !(
+      String(product.aisle) === aisleKey && String(product.side) === sideKey
+    ));
+    allProductsCache = untouched.concat(data.products.map(normalizeProduct));
+    lastProductsRefreshAt = Date.now();
+  }
+
+  savePlanSnapshot();
 }
 
 function showPlanLoading(message='Chargement du plan...') {
@@ -440,31 +504,50 @@ function confirmLayoutReduction(aisle, nextConfig, subjectLabel) {
 }
 
 // ── Cache refresh ─────────────────────────────────────────────────────────────
+let _productsRefreshPromise = null;
+let _layoutsRefreshPromise = null;
+
 async function refreshProductsCache(force=false) {
   if (!force && allProductsCache.length && (Date.now() - lastProductsRefreshAt) < 30000) return allProductsCache;
+  if (_productsRefreshPromise) return _productsRefreshPromise;
+  _productsRefreshPromise = (async () => {
+    try {
+      allProductsCache = await apiGetProducts();
+      mapLayouts.forEach(layout => syncLayoutRecord(layout));
+      lastProductsRefreshAt = Date.now();
+      savePlanSnapshot();
+    } catch (e) {}
+    return allProductsCache;
+  })();
   try {
-    allProductsCache = await apiGetProducts();
-    mapLayouts.forEach(layout => syncLayoutRecord(layout));
-    lastProductsRefreshAt = Date.now();
-    savePlanSnapshot();
-  } catch (e) {}
-  return allProductsCache;
+    return await _productsRefreshPromise;
+  } finally {
+    _productsRefreshPromise = null;
+  }
 }
 
 async function refreshLayoutsCache(force=false) {
   if (!force && hasDirtyLayouts()) return mapLayouts;
   if (!force && mapLayouts.length && (Date.now() - lastLayoutsRefreshAt) < 30000) return mapLayouts;
+  if (_layoutsRefreshPromise) return _layoutsRefreshPromise;
+  _layoutsRefreshPromise = (async () => {
+    try {
+      mapLayouts = await apiGetLayoutAisles();
+      mapLayouts = mapLayouts.map(layout => syncLayoutRecord({
+        ...layout,
+        config: normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position)
+      }));
+      sortMapLayouts();
+      lastLayoutsRefreshAt = Date.now();
+      savePlanSnapshot();
+    } catch (e) {}
+    return mapLayouts;
+  })();
   try {
-    mapLayouts = await apiGetLayoutAisles();
-    mapLayouts = mapLayouts.map(layout => syncLayoutRecord({
-      ...layout,
-      config: normalizeLayoutConfig(layout.config, layout.max_section, layout.max_shelf, layout.max_position)
-    }));
-    sortMapLayouts();
-    lastLayoutsRefreshAt = Date.now();
-    savePlanSnapshot();
-  } catch (e) {}
-  return mapLayouts;
+    return await _layoutsRefreshPromise;
+  } finally {
+    _layoutsRefreshPromise = null;
+  }
 }
 
 // ── Cursor (used by the Plan-tab "point de départ" editor) ────────────────────
@@ -3068,14 +3151,19 @@ async function importPlanogram() {
       const overTxt = overflowShelves > 0 ? ` ⚠ ${overflowProducts} produit(s), sur ${overflowShelves} tablette(s) du PDF, n'ont pas d'emplacement physique dans le plan magasin.` : '';
       msg.innerHTML = `✅ <strong>${data.imported}</strong> importé(s), ${data.skipped} ignoré(s)${errTxt}.${overTxt} Les photos manquantes sont récupérées automatiquement.`;
       msg.style.color = '#16a34a';
-      // The import can adjust position counts, so reload the authoritative
-      // layout before another autosave can send stale browser state back.
-      await refreshLayoutsCache(true);
-      await refreshProductsCache(true);
-      savePlanSnapshot();
+      // The import response already carries the committed aisle and affected
+      // products. Paint it now; full-list revalidation can happen off-screen.
+      applyPlanogramImportResult(aisle, side, data);
       refreshPlanUi();
       updatePlanoPreview();
-      loadPlanogramHistory();
+      void loadPlanogramHistory();
+      void Promise.allSettled([
+        refreshLayoutsCache(true),
+        refreshProductsCache(true),
+      ]).then(() => {
+        savePlanSnapshot();
+        if (activeTab === 'add') refreshPlanUi();
+      });
     } else {
       msg.textContent = data.error || 'Erreur lors de l’importation.';
       msg.style.color = '#c8102e';

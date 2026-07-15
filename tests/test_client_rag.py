@@ -2,7 +2,11 @@ import unittest
 from unittest.mock import patch
 
 from app import app
-from routes.ai import classify_client_request, normalize_verified_client_answer
+from routes.ai import (
+    classify_client_request,
+    normalize_verified_client_answer,
+    select_client_answer_candidates,
+)
 from routes.products import (
     find_existing_image_for_barcode,
     hybrid_client_candidates,
@@ -72,6 +76,21 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(len(matches), 1)
         self.assertEqual(len(matches[0]["locations"]), 2)
 
+    def test_fast_client_lookup_handles_spoken_brand_typo(self):
+        advil = {"id": 1, "name": "Advil Extra Fort", "brand": "Advil", "barcode": "111"}
+        unrelated = {"id": 2, "name": "Tylenol Regular", "brand": "Tylenol", "barcode": "222"}
+        corpus = [
+            (advil, search_row(advil["name"], advil["brand"], barcode="111")),
+            (unrelated, search_row(unrelated["name"], unrelated["brand"], barcode="222")),
+        ]
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            with app.test_client() as client:
+                response = client.get("/api/client/find?q=Jai%20besoin%20dadvile")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item["name"] for item in response.get_json()], ["Advil Extra Fort"])
+
     def test_product_can_reuse_reference_catalogue_image_by_upc(self):
         class Result:
             def __init__(self, row):
@@ -125,6 +144,20 @@ class ClientRagTests(unittest.TestCase):
         }
         result = normalize_verified_client_answer(parsed, ["product:1"])
         self.assertEqual(result["selected_product_ids"], ["product:1"])
+
+    def test_small_ai_context_keeps_different_product_forms(self):
+        candidates = [
+            {"id": index, "name": f"Advil 200 mg liqui-gel {index}"}
+            for index in range(1, 12)
+        ] + [
+            {"id": 20, "name": "Advil enfants suspension liquide"},
+            {"id": 21, "name": "Advil comprimes 200 mg"},
+        ]
+
+        selected = select_client_answer_candidates(candidates, limit=4)
+
+        self.assertIn(20, [item["id"] for item in selected])
+        self.assertIn(21, [item["id"] for item in selected])
 
     def test_request_router_separates_fast_lookup_from_detailed_advice(self):
         self.assertEqual(classify_client_request("Advil"), "lookup")

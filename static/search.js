@@ -193,7 +193,75 @@ function scoreProductForQuery(product, query) {
 
 // minScore: 0 keeps every hit (Search tab — employees may type fragments);
 // the Client tab passes 100 so partial-coverage-only noise never shows to a client.
+let _barcodeIndexSource = null;
+let _barcodeExactIndex = new Map();
+let _barcodeSuffixIndex = new Map();
+
+function invalidateProductSearchIndexes() {
+  _barcodeIndexSource = null;
+}
+
+function addBarcodeIndexValue(index, key, product) {
+  if (!key) return;
+  const values = index.get(key);
+  if (values) values.push(product);
+  else index.set(key, [product]);
+}
+
+function ensureBarcodeSearchIndexes() {
+  if (_barcodeIndexSource === allProductsCache) return;
+  _barcodeExactIndex = new Map();
+  _barcodeSuffixIndex = new Map();
+  for (const product of allProductsCache) {
+    const barcode = normalizedDigits(product.barcode);
+    if (!barcode) continue;
+    addBarcodeIndexValue(_barcodeExactIndex, barcode, product);
+    for (let length = 4; length <= 6 && length <= barcode.length; length++) {
+      addBarcodeIndexValue(_barcodeSuffixIndex, `${length}:${barcode.slice(-length)}`, product);
+    }
+  }
+  _barcodeIndexSource = allProductsCache;
+}
+
+function barcodeExactVariants(digits) {
+  const values = new Set([digits]);
+  if (digits.length === 13 && digits.startsWith('0')) values.add(digits.slice(1));
+  if (digits.length === 12) values.add(`0${digits}`);
+  if (digits.length === 14 && digits.startsWith('00')) values.add(digits.slice(2));
+  const stripped = digits.replace(/^0+/, '');
+  if (stripped) {
+    values.add(stripped);
+    if (stripped.length === 12) values.add(`0${stripped}`);
+  }
+  return values;
+}
+
+function productsByBarcodeFromCache(query) {
+  const digits = normalizedDigits(query);
+  if (digits.length < 4) return [];
+  ensureBarcodeSearchIndexes();
+  if (digits.length <= 6) {
+    return (_barcodeSuffixIndex.get(`${digits.length}:${digits}`) || []).slice();
+  }
+  const products = [];
+  const seen = new Set();
+  for (const variant of barcodeExactVariants(digits)) {
+    for (const product of (_barcodeExactIndex.get(variant) || [])) {
+      const key = product.id ?? product;
+      if (!seen.has(key)) {
+        seen.add(key);
+        products.push(product);
+      }
+    }
+  }
+  return products;
+}
+
 function searchProductsFromCache(query, limit=40, minScore=0) {
+  if (/^\d{4,}$/.test(String(query || '').trim())) {
+    const barcodeMatches = productsByBarcodeFromCache(query);
+    if (barcodeMatches.length) return barcodeMatches.slice(0, limit);
+  }
   const variants = querySearchVariants(query);
   const intentTerms = intentExpansionTerms(query);
   const abbrevs = abbreviationTerms(query);
@@ -280,7 +348,7 @@ async function doSearch() {
 
 function scheduleSearch() {
   window.clearTimeout(searchTimer);
-  searchTimer = window.setTimeout(() => doSearch(), 180);
+  searchTimer = window.setTimeout(() => doSearch(), 70);
 }
 
 async function doSearchValue(q) {
@@ -307,8 +375,7 @@ async function doSearchValue(q) {
 
   if (looksLikeCompleteRetailBarcode(q)) {
     // Show ALL locations for this barcode from cache
-    const byCodes = build_barcode_candidates_js(q);
-    const allByBarcode = allProductsCache.filter(p => p.barcode && byCodes.includes(String(p.barcode).replace(/\s/g,'')));
+    const allByBarcode = productsByBarcodeFromCache(q);
     if (allByBarcode.length) {
       div.innerHTML = productCardMultiLocation(allByBarcode);
       return;
@@ -408,4 +475,7 @@ function productCardMultiLocation(entries) {
   </div>`;
 }
 
-window.AppSearch = { doSearch, doSearchValue, filterByHomeBrand, scheduleSearch, onSearchFieldChange };
+window.AppSearch = {
+  doSearch, doSearchValue, filterByHomeBrand, scheduleSearch, onSearchFieldChange,
+  searchProductsFromCache, productsByBarcodeFromCache, invalidateProductSearchIndexes,
+};
