@@ -7,4 +7,5 @@ services:
     # would silently override it, so keep the start command bare.
     startCommand: gunicorn app:app
     healthCheckPath: /healthz
+    autoDeployTrigger: commit
     plan: free

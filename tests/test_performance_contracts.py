@@ -12,6 +12,15 @@ class PerformanceContractTests(unittest.TestCase):
         self.assertIn("healthCheckPath: /healthz", render_config)
         self.assertIn('@app.route("/healthz")', app_source)
 
+    def test_render_runtime_and_port_are_explicit(self):
+        render_config = (ROOT / "render.yaml").read_text(encoding="utf-8")
+        gunicorn_config = (ROOT / "gunicorn.conf.py").read_text(encoding="utf-8")
+        python_version = (ROOT / ".python-version").read_text(encoding="ascii").strip()
+        self.assertEqual("3.13.7", python_version)
+        self.assertIn("autoDeployTrigger: commit", render_config)
+        self.assertIn("0.0.0.0", gunicorn_config)
+        self.assertIn("os.environ.get('PORT', '10000')", gunicorn_config)
+
     def test_planogram_replacement_is_enabled_by_default(self):
         source = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
         self.assertIn('id="planoReplace" checked', source)

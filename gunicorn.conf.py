@@ -1,3 +1,6 @@
+import os
+
+
 # Gunicorn auto-loads this file from the working directory, so these settings
 # apply even if the Render service's start command is just "gunicorn app:app".
 #
@@ -7,6 +10,10 @@
 # timeout: parsing a multi-MB planogram PDF takes well over gunicorn's default
 # 30s on Render's small CPU — the default killed the worker mid-parse and the
 # upload failed with "Erreur réseau". Normal requests finish in milliseconds.
+# Bind explicitly so Render can detect the web service immediately. Render sets
+# PORT for every web service; 10000 is its documented local/default value.
+bind = f"0.0.0.0:{os.environ.get('PORT', '10000')}"
+
 workers = 1          # Render free tier: one small CPU — more workers just swap
 # 4 threads (was 8): still lets a slow AI call run without blocking other phones,
 # but halves how many requests can pile up their working memory at once on the
