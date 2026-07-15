@@ -277,6 +277,42 @@ class PlanogramMetadataTests(unittest.TestCase):
         self.assertEqual(len(destinations), 21)
         self.assertEqual(overflow, 1)
 
+    def test_cote_a_descends_sections_without_reversing_product_positions(self):
+        def config():
+            return {
+                "sides": {
+                    "Gauche": {"sections": [{"shelves": [3]} for _ in range(9)]},
+                    "Droite": {"sections": [{"shelves": [3]} for _ in range(9)]},
+                },
+                "facade_a": {"shelves": [], "labels": []},
+                "facade_b": {"shelves": [], "labels": []},
+                "presentoirs": [],
+            }
+
+        lines = [
+            {"tablette": 1, "position": 1, "p": {"name": "SHELF 1 P1"}},
+            {"tablette": 1, "position": 2, "p": {"name": "SHELF 1 P2"}},
+            {"tablette": 2, "position": 1, "p": {"name": "SHELF 2 P1"}},
+            {"tablette": 2, "position": 2, "p": {"name": "SHELF 2 P2"}},
+        ]
+
+        cote_a, overflow_a = plan_planogram_flow(
+            config(), "Gauche", start_section=9, start_tablette=1, lines=lines
+        )
+        cote_b, overflow_b = plan_planogram_flow(
+            config(), "Droite", start_section=8, start_tablette=1, lines=lines
+        )
+
+        self.assertEqual(
+            [(section, shelf, position) for section, shelf, position, _line in cote_a],
+            [(9, 1, 1), (9, 1, 2), (8, 1, 1), (8, 1, 2)],
+        )
+        self.assertEqual(
+            [(section, shelf, position) for section, shelf, position, _line in cote_b],
+            [(8, 1, 1), (8, 1, 2), (9, 1, 1), (9, 1, 2)],
+        )
+        self.assertEqual((overflow_a, overflow_b), (0, 0))
+
 
 if __name__ == "__main__":
     unittest.main()

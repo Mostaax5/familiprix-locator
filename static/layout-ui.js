@@ -2916,9 +2916,8 @@ function computePlanoFlow(config, side, startSection, startTablette, tabStart, t
     // real Façade A/B ends: read PLAINLY left→right, nothing inverted.
     const other = side === 'Gauche' ? 'Droite' : 'Gauche';
     singleSided = !(((config && config.sides && config.sides[other]) || {}).sections || []).length;
-    // Direction mirrors the server's plan_planogram_flow: Côté A (Gauche) reads Façade B
-    // → Façade A, so it fills sections DESCENDING from the start section down to section 1;
-    // Côté B (Droite) fills ascending. Only the section order flips (tablettes stay top→bottom).
+    // Direction mirrors the server: Côté A travels from Façade B toward Façade A,
+    // so only its section numbers decrease. Tablettes keep their normal order.
     const startIdx = Math.min(Math.max(0, startSection - 1), Math.max(0, sections.length - 1));
     const pushSection = si => {
       const shelfCount = ((sections[si] || {}).shelves || []).length;
@@ -2942,11 +2941,8 @@ function computePlanoFlow(config, side, startSection, startTablette, tabStart, t
     const sections = ((config && config.sides && config.sides[side]) ? config.sides[side].sections : []) || [];
     out.startSectionShelves = ((sections[Math.max(0, startSection - 1)] || {}).shelves || []).length;
   }
-  // STORE CONVENTION (mirror of the server): positions always count from the
-  // Façade A end toward Façade B, on BOTH côtés. A plano reads left→right facing
-  // the shelf, which on Côté A runs B→A — so its positions are MIRRORED there.
-  // One-sided walls (no opposite côté) are read plainly: no mirroring.
-  const mirrorPositions = (side === 'Gauche' && !singleSided);
+  // Reversing Côté A's section path must never reverse products on a tablette.
+  // Positions always stay exactly as numbered in the planogram.
   [...byTab.keys()].sort((a, b) => a - b).forEach((t, i) => {
     const idxs = byTab.get(t).slice().sort((a, b) => (planoData.products[a].position || 0) - (planoData.products[b].position || 0));
     if (i >= slots.length) {
@@ -2955,10 +2951,9 @@ function computePlanoFlow(config, side, startSection, startTablette, tabStart, t
       return;
     }
     const [secNo, ti] = slots[i];
-    const maxPos = Math.max(0, ...idxs.map(idx => planoData.products[idx].position || 0));
     idxs.forEach(idx => {
       const raw = planoData.products[idx].position;
-      out.byIdx[idx] = { section: secNo, shelf: ti + 1, position: mirrorPositions ? (maxPos + 1 - raw) : raw };
+      out.byIdx[idx] = { section: secNo, shelf: ti + 1, position: raw };
       out.placed++;
     });
   });
@@ -3072,12 +3067,12 @@ function updatePlanoPreview() {
            <span>Parcours d'import : ${flow.availableShelves} tablette${flow.availableShelves !== 1 ? 's' : ''} répartie${flow.availableShelves !== 1 ? 's' : ''} sur ${flow.availableSections} section${flow.availableSections !== 1 ? 's' : ''}</span>`}
       ${flow.overflowShelves ? `<span style="color:#c8102e">${flow.overflowShelves} tablette${flow.overflowShelves !== 1 ? 's' : ''} du PDF sans emplacement physique</span>` : '<span style="color:#15803d">Structure compatible</span>'}
     </div>
-    <div style="font-size:11px;color:#64748b;padding:4px 4px 6px">${(side === 'Gauche' && !planoSectionCount(aisle, 'Droite'))
+    <div style="font-size:11px;color:#64748b;padding:4px 4px 6px">${((side === 'Gauche' || side === 'Droite') && !planoSectionCount(aisle, side === 'Gauche' ? 'Droite' : 'Gauche'))
       ? 'Allée à un seul côté (mur/comptoir) : <b>lecture simple de gauche à droite</b> — sections croissantes, positions telles quelles, rien d\'inversé.'
       : side === 'Gauche'
-      ? 'Côté A : le plano remplit à partir de la section de départ <b>vers la Façade A</b> (sections décroissantes) et les positions sont <b>inversées</b>, car un planogramme se lit de gauche à droite face à la tablette. <b>Règle du magasin : sections ET positions comptent toujours de la Façade A vers la Façade B, sur les deux côtés.</b>'
+      ? 'Côté A : le plano va de la <b>Façade B vers la Façade A</b>. Seules les sections sont inversées : elles diminuent à partir de la section de départ (ex. S9 → S8). Les tablettes et les positions des produits restent telles quelles.'
       : side === 'Droite'
-      ? 'Côté B : le plano remplit à partir de la section de départ <b>vers la Façade B</b> (sections croissantes).'
+      ? 'Côté B : le plano continue normalement à partir de la section de départ, avec des <b>sections croissantes</b>. Les tablettes et les positions des produits restent telles quelles.'
       : `${esc(side)} : le plano remplit les tablettes de la façade à partir de la tablette de départ, vers le bas.`} Le plan physique du magasin reste prioritaire; seules les positions de ses tablettes sont ajustées.</div>
     ${rows || '<div style="padding:10px;font-size:12px;color:#64748b">Aucun produit dans cette sélection.</div>'}
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 4px;border-top:1px solid #e2e8f0;margin-top:4px;flex-wrap:wrap">

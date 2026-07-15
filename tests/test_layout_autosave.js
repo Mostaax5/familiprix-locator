@@ -153,6 +153,31 @@ async function run() {
   assert.deepStrictEqual([flow.byIdx[14].section, flow.byIdx[14].shelf], [3, 1]);
   assert.deepStrictEqual([flow.byIdx[20].section, flow.byIdx[20].shelf], [3, 7]);
   assert(flow.overflow.has(21), 'the 22nd PDF shelf should overflow after all 21 physical shelves');
+
+  const coteAFlow = vm.runInContext(`
+    planoData = {products: [
+      {tablette: 1, position: 1, en_stock: true},
+      {tablette: 1, position: 2, en_stock: true},
+      {tablette: 2, position: 1, en_stock: true},
+      {tablette: 2, position: 2, en_stock: true}
+    ]};
+    computePlanoFlow({
+      sides: {
+        Gauche: {sections: Array.from({length: 9}, () => ({shelves: [3]}))},
+        Droite: {sections: Array.from({length: 9}, () => ({shelves: [3]}))}
+      }
+    }, 'Gauche', 9, 1, 1, 99, false)
+  `, context);
+  assert.deepStrictEqual(
+    [
+      coteAFlow.byIdx[0].section, coteAFlow.byIdx[0].position,
+      coteAFlow.byIdx[1].section, coteAFlow.byIdx[1].position,
+      coteAFlow.byIdx[2].section, coteAFlow.byIdx[2].position,
+      coteAFlow.byIdx[3].section, coteAFlow.byIdx[3].position,
+    ],
+    [9, 1, 9, 2, 8, 1, 8, 2],
+    'Cote A should descend S9 to S8 without reversing positions inside a shelf'
+  );
   console.log('layout autosave tests passed');
 }
 

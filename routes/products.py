@@ -1549,11 +1549,10 @@ def plan_planogram_flow(config, side, start_section, start_tablette, lines, shri
         # ascending sections and positions exactly as the planogram numbers them.
         # The Façade-anchored direction rule only applies to real two-sided aisles.
         single_sided = not ((sides_cfg.get(other, {}) or {}).get("sections", []))
-        # Direction: a planogram reads left→right, which for Côté A (Gauche) runs from the
-        # Façade B end toward Façade A — the OPPOSITE of the section numbering (section 1 is
-        # the Façade A end). So Côté A fills sections DESCENDING from the start section down
-        # to section 1; Côté B (Droite) fills ASCENDING (Façade A → Façade B). Tablettes are
-        # vertical shelves and keep their top-to-bottom order — only the section order flips.
+        # Côté A is traversed from Façade B toward Façade A, opposite the section
+        # numbering. It therefore continues through decreasing section numbers
+        # (for example S9, then S8). Côté B and one-sided aisles continue through
+        # increasing sections. Tablettes always keep their normal top-to-bottom order.
         start_idx = min(max(0, start_section - 1), max(0, len(sections) - 1))
         descending = (side == "Gauche" and not single_sided)
         section_indices = range(start_idx, -1, -1) if descending else range(start_idx, len(sections))
@@ -1570,12 +1569,8 @@ def plan_planogram_flow(config, side, start_section, start_tablette, lines, shri
 
     placements = []
     overflow = 0
-    # STORE CONVENTION: positions always count from the Façade A end toward the
-    # Façade B end, on BOTH côtés. A planogram reads left→right as you FACE the
-    # shelf, which on Côté A (Gauche) runs Façade B→A — so its positions must be
-    # MIRRORED within each tablette (plano position 1 becomes the last position).
-    # Côté B, one-sided walls and the fixture sides keep the plano's numbering.
-    mirror_positions = (side == "Gauche" and not single_sided)
+    # Section direction never changes the contents of a tablette. Product
+    # positions keep the planogram numbering on both côtés and every fixture.
     for idx, ptab in enumerate(sorted(by_tablette.keys())):
         shelf_lines = sorted(by_tablette[ptab], key=lambda l: l["position"])
         if idx >= len(slots):
@@ -1588,8 +1583,7 @@ def plan_planogram_flow(config, side, start_section, start_tablette, lines, shri
         if shrink or max_pos > container["shelves"][ti]:
             container["shelves"][ti] = max_pos
         for ln in shelf_lines:
-            pos = (max_pos + 1 - ln["position"]) if mirror_positions else ln["position"]
-            placements.append((sec_no, ti + 1, pos, ln))
+            placements.append((sec_no, ti + 1, ln["position"], ln))
     return placements, overflow
 
 
