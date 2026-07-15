@@ -481,17 +481,40 @@ def row_to_product(product):
 def archive_and_delete_product(db, product, username, now=None):
     """Soft delete: archive the full product (so we can still say what it was and
     where it used to be), then remove it from the active plan."""
+    return archive_and_delete_products(db, [product], username, now)
+
+
+def archive_and_delete_products(db, products, username, now=None):
+    """Archive and remove products in bounded batches to keep plano imports fast."""
     now = now or utc_now_iso()
-    pdict = dict(product)
-    last_loc = (f"Allée {pdict.get('aisle','')} {side_display_label(pdict.get('side',''))} "
-                f"S{pdict.get('section','')} T{pdict.get('shelf','')} P{pdict.get('position','')}").strip()
-    db.execute(
-        """INSERT INTO removed_products (removed_at, removed_by, barcode, name, last_location, product_json)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (now, username, str(pdict.get("barcode", "")), str(pdict.get("name", "")),
-         last_loc, json.dumps(pdict, ensure_ascii=False, default=str))
-    )
-    db.execute("DELETE FROM products WHERE id=?", (pdict.get("id"),))
+    items = [dict(product) for product in products]
+    for start in range(0, len(items), 100):
+        chunk = items[start:start + 100]
+        archive_values = []
+        for pdict in chunk:
+            last_loc = (
+                f"Allée {pdict.get('aisle', '')} {side_display_label(pdict.get('side', ''))} "
+                f"S{pdict.get('section', '')} T{pdict.get('shelf', '')} P{pdict.get('position', '')}"
+            ).strip()
+            archive_values.extend((
+                now, username, str(pdict.get("barcode", "")), str(pdict.get("name", "")),
+                last_loc, json.dumps(pdict, ensure_ascii=False, default=str),
+            ))
+        placeholders = ",".join("(?, ?, ?, ?, ?, ?)" for _item in chunk)
+        db.execute(
+            """INSERT INTO removed_products
+               (removed_at, removed_by, barcode, name, last_location, product_json)
+               VALUES """ + placeholders,
+            tuple(archive_values),
+        )
+        product_ids = [item.get("id") for item in chunk if item.get("id") is not None]
+        if product_ids:
+            id_placeholders = ",".join("?" for _id in product_ids)
+            db.execute(
+                f"DELETE FROM products WHERE id IN ({id_placeholders})",
+                tuple(product_ids),
+            )
+    return len(items)
 
 
 def find_product_at_position(db, aisle, side, section, shelf, position, exclude_id=None):
@@ -1655,14 +1678,36 @@ def bulk_import_products():
     # Prefetch once instead of querying per product (an import is 100+ rows):
     #  - existing slot → product metadata (for safe same-UPC preservation)
     #  - any image already stored for a barcode, to reuse it without re-querying
+    existing_rows = [
+        dict(r) for r in db.execute(
+            "SELECT * FROM products WHERE aisle=? AND side=?", (aisle, side)
+        ).fetchall()
+    ]
     existing_slots = {}
-    for r in db.execute(
-        """SELECT id, section, shelf, position, barcode, brand, description, image_url,
-                  source_url, search_terms, usage_notes, alternative_suggestions, product_code
-           FROM products WHERE aisle=? AND side=?""", (aisle, side)
-    ).fetchall():
-        d = dict(r)
+    existing_by_barcode = {}
+    for d in existing_rows:
         existing_slots[(str(d["section"]), str(d["shelf"]), str(d["position"]))] = d
+        metadata_quality = sum(bool(str(d.get(field, "") or "").strip()) for field in (
+            "brand", "description", "image_url", "source_url", "usage_notes",
+            "alternative_suggestions", "product_code",
+        ))
+        for candidate in build_barcode_candidates(d.get("barcode", "")):
+            key = normalized_digits(candidate)
+            current = existing_by_barcode.get(key) if key else None
+            if key and (
+                current is None or metadata_quality > current[0]
+            ):
+                existing_by_barcode[key] = (metadata_quality, d)
+
+    # Replacement is tablet-level, not position-level. Otherwise an old product
+    # survives whenever the new plano leaves a gap inside the same tablet. Keep a
+    # full snapshot above for metadata reuse, archive every old row in the
+    # destination tablets, then insert exactly what the new plano contains.
+    touched_shelves = {
+        (str(sec_no), str(shelf_no))
+        for sec_no, shelf_no, _pos_no, _ln in placements
+    }
+    touched_fixture_shelves = {shelf for _section, shelf in touched_shelves}
     incoming_barcodes = [ln["p"].get("barcode", "") for ln in lines]
     reference_index = build_reference_metadata_index(db, incoming_barcodes)
     image_by_barcode = {}
@@ -1676,6 +1721,23 @@ def bulk_import_products():
             key = normalized_digits(candidate)
             if key:
                 image_by_barcode.setdefault(key, d["image_url"])
+
+    replaced_removed = 0
+    if replace and touched_shelves:
+        replaced_rows = []
+        for existing in existing_rows:
+            section_s = str(existing.get("section", ""))
+            shelf_s = str(existing.get("shelf", ""))
+            is_touched = (
+                shelf_s in touched_fixture_shelves
+                if is_fixture
+                else (section_s, shelf_s) in touched_shelves
+            )
+            if is_touched:
+                replaced_rows.append(existing)
+        replaced_removed = archive_and_delete_products(
+            db, replaced_rows, username, now
+        )
 
     for (sec_no, shelf_no, pos_no, ln) in placements:
         p = ln["p"]
@@ -1695,12 +1757,34 @@ def bulk_import_products():
         in_stock = 0 if not p.get("en_stock", True) else 1
         try:
             existing = existing_slots.get((section_s, shelf_s, position_s))
-            row_id = existing.get("id") if existing else None
+            # In replace mode every destination tablet was cleared above. The
+            # old row is retained only as a metadata source, never as an UPDATE
+            # target after it has been archived.
+            row_id = existing.get("id") if existing and not replace else None
             if existing is not None and not replace:
                 skipped += 1
                 continue
             reference = reference_metadata_for_barcode(reference_index, barcode)
-            metadata = planogram_metadata(existing, reference, barcode, product_code=code)
+            metadata_source = existing
+            incoming_keys = {
+                normalized_digits(candidate)
+                for candidate in build_barcode_candidates(barcode)
+                if normalized_digits(candidate)
+            }
+            existing_keys = {
+                normalized_digits(candidate)
+                for candidate in build_barcode_candidates((existing or {}).get("barcode", ""))
+                if normalized_digits(candidate)
+            }
+            if not incoming_keys.intersection(existing_keys):
+                for key in incoming_keys:
+                    prior = existing_by_barcode.get(key)
+                    if prior:
+                        metadata_source = prior[1]
+                        break
+            metadata = planogram_metadata(
+                metadata_source, reference, barcode, product_code=code
+            )
             brand = metadata["brand"]
             description = metadata["description"]
             image_url = metadata["image_url"]
@@ -1745,31 +1829,8 @@ def bulk_import_products():
 
     skipped += overflow_products   # product rows on plano shelves past the physical plan
 
-    # When replacing, positions follow the plano exactly — so a tablette that
-    # shrank now has products sitting past its new end. Archive them (kept in the
-    # database, recoverable) so the plan stays consistent with the plano.
-    pruned = 0
-    if replace:
-        touched = {}
-        for (sec_no, shelf_no, pos_no, _ln) in placements:
-            key = (str(sec_no), str(shelf_no))
-            touched[key] = max(touched.get(key, 0), pos_no)
-        for (sec_s, shelf_s), new_max in touched.items():
-            # Fixture sides carry no meaningful section on their products —
-            # prune their shelves across all sections (same rule as remove-shelf).
-            if is_fixture:
-                prune_q = "SELECT * FROM products WHERE aisle=? AND side=? AND shelf=?"
-                prune_params = (aisle, side, shelf_s)
-            else:
-                prune_q = "SELECT * FROM products WHERE aisle=? AND side=? AND section=? AND shelf=?"
-                prune_params = (aisle, side, sec_s, shelf_s)
-            for r in db.execute(prune_q, prune_params).fetchall():
-                try:
-                    if int(str(dict(r).get("position", "0"))) > new_max:
-                        archive_and_delete_product(db, r, username, now)
-                        pruned += 1
-                except (TypeError, ValueError):
-                    continue
+    # Kept for older clients that display the former "pruned" response field.
+    pruned = replaced_removed
 
     # Persist the plan with positions adjusted to the plano (tablette count is
     # unchanged — only the number of positions on a tablette changes).
@@ -1830,7 +1891,8 @@ def bulk_import_products():
     return jsonify({"success": True, "imported": imported, "skipped": skipped,
                     "errors": errors, "overflow": overflow,
                     "overflow_shelves": overflow, "overflow_products": overflow_products,
-                    "pruned": pruned, "layout": layout_payload,
+                    "pruned": pruned, "replaced_removed": replaced_removed,
+                    "layout": layout_payload,
                     "products": affected_products})
 
 

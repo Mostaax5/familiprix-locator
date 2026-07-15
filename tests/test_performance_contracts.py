@@ -6,6 +6,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class PerformanceContractTests(unittest.TestCase):
+    def test_planogram_replacement_is_enabled_by_default(self):
+        source = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="planoReplace" checked', source)
+
     def test_startup_restores_local_plan_before_network_wait(self):
         source = (ROOT / "static" / "main.js").read_text(encoding="utf-8")
         boot = source.index("async function bootApp()")

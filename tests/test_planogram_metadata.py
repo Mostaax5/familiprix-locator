@@ -75,7 +75,14 @@ class PlanogramMetadataTests(unittest.TestCase):
                 tablette_end INTEGER, imported INTEGER, skipped INTEGER
             )"""
         )
-        config = build_default_layout_config(1, 1, 2)
+        db.execute(
+            """CREATE TABLE removed_products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, removed_at TEXT,
+                removed_by TEXT, barcode TEXT, name TEXT, last_location TEXT,
+                product_json TEXT
+            )"""
+        )
+        config = build_default_layout_config(1, 1, 3)
         db.execute(
             """INSERT INTO aisle_layouts
                (aisle, max_section, max_shelf, max_position, config_json, enabled)
@@ -213,6 +220,7 @@ class PlanogramMetadataTests(unittest.TestCase):
         self.assertEqual(after_second["description"], "")
         self.assertEqual(after_second["image_url"], "")
         self.assertEqual(after_second["product_code"], "NEW777")
+        db.close()
 
     def test_bulk_import_reports_overflow_shelves_and_products_separately(self):
         db = self.make_plan_db()
@@ -242,6 +250,64 @@ class PlanogramMetadataTests(unittest.TestCase):
         self.assertEqual(result["overflow_shelves"], 1)
         self.assertEqual(result["overflow_products"], 2)
         self.assertEqual(result["skipped"], 2)
+        db.close()
+
+    def test_bulk_replace_removes_old_products_from_gaps_on_target_tablet(self):
+        db = self.make_plan_db()
+        db.executemany(
+            """INSERT INTO products
+               (name, barcode, aisle, side, section, shelf, position)
+               VALUES (?, ?, '1', 'Gauche', '1', '1', ?)""",
+            [
+                ("OLD AT ONE", "111111111111", "1"),
+                ("OLD IN GAP", "222222222222", "2"),
+                ("OLD AT THREE", "333333333333", "3"),
+            ],
+        )
+        db.execute(
+            "UPDATE products SET image_url='https://img.test/moved.jpg', "
+            "description='Enriched description' "
+            "WHERE barcode='222222222222'"
+        )
+        app = Flask(__name__)
+        app.register_blueprint(products_bp)
+        payload = {
+            "aisle": "1", "side": "Gauche", "start_section": 1,
+            "start_tablette": 1, "tablette_start": 1, "tablette_end": 1,
+            "replace_existing": True,
+            "products": [
+                {"tablette": 1, "position": 1, "barcode": "444444444444", "name": "NEW ONE"},
+                {"tablette": 1, "position": 3, "barcode": "222222222222", "name": "NEW THREE"},
+            ],
+        }
+
+        with patch("routes.products.get_db", return_value=db), \
+             patch("auth.get_db", return_value=db), \
+             patch("routes.products.schedule_image_fill"), \
+             patch("routes.gist._schedule_gist_backup"):
+            with app.test_client() as client:
+                response = client.post("/api/products/bulk-import", json=payload)
+
+        result = response.get_json()
+        remaining = [
+            tuple(row) for row in db.execute(
+                "SELECT name, position FROM products ORDER BY CAST(position AS INTEGER)"
+            ).fetchall()
+        ]
+        archived = [
+            row[0] for row in db.execute(
+                "SELECT name FROM removed_products ORDER BY id"
+            ).fetchall()
+        ]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(result["errors"], 0)
+        self.assertEqual(result["replaced_removed"], 3)
+        self.assertEqual(remaining, [("NEW ONE", "1"), ("NEW THREE", "3")])
+        self.assertEqual(archived, ["OLD AT ONE", "OLD IN GAP", "OLD AT THREE"])
+        moved = db.execute("SELECT * FROM products WHERE position='3'").fetchone()
+        self.assertEqual(moved["image_url"], "https://img.test/moved.jpg")
+        self.assertEqual(moved["description"], "Enriched description")
         db.close()
 
     def test_planogram_flow_uses_manual_section_shelf_counts_as_boundaries(self):

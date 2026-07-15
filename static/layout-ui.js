@@ -3143,8 +3143,10 @@ async function importPlanogram() {
       const errTxt  = data.errors > 0 ? `, ${data.errors} erreur(s)` : '';
       const overflowShelves = Number(data.overflow_shelves ?? data.overflow ?? 0);
       const overflowProducts = Number(data.overflow_products ?? 0);
+      const replacedRemoved = Number(data.replaced_removed ?? data.pruned ?? 0);
+      const replacedTxt = replacedRemoved > 0 ? `, ${replacedRemoved} ancien(s) remplacé(s)` : '';
       const overTxt = overflowShelves > 0 ? ` ⚠ ${overflowProducts} produit(s), sur ${overflowShelves} tablette(s) du PDF, n'ont pas d'emplacement physique dans le plan magasin.` : '';
-      msg.innerHTML = `✅ <strong>${data.imported}</strong> importé(s), ${data.skipped} ignoré(s)${errTxt}.${overTxt} Les photos manquantes sont récupérées automatiquement.`;
+      msg.innerHTML = `✅ <strong>${data.imported}</strong> importé(s), ${data.skipped} ignoré(s)${replacedTxt}${errTxt}.${overTxt} Les photos manquantes sont récupérées automatiquement.`;
       msg.style.color = '#16a34a';
       // The import response already carries the committed aisle and affected
       // products. Paint it now; full-list revalidation can happen off-screen.
