@@ -252,6 +252,48 @@ class PlanogramMetadataTests(unittest.TestCase):
         self.assertEqual(result["skipped"], 2)
         db.close()
 
+    def test_bulk_import_reports_non_stock_products_excluded_by_filter(self):
+        db = self.make_plan_db()
+        app = Flask(__name__)
+        app.register_blueprint(products_bp)
+        payload = {
+            "aisle": "1", "side": "Gauche", "start_section": 1,
+            "start_tablette": 1, "tablette_start": 1, "tablette_end": 1,
+            "replace_existing": True, "skip_non_stock": True,
+            "products": [
+                {
+                    "tablette": 1, "position": 1, "barcode": "111111111111",
+                    "name": "IN STOCK", "en_stock": True,
+                },
+                {
+                    "tablette": 1, "position": 2, "barcode": "222222222222",
+                    "name": "OUT OF STOCK", "en_stock": False,
+                },
+            ],
+        }
+
+        with patch("routes.products.get_db", return_value=db), \
+             patch("auth.get_db", return_value=db), \
+             patch("routes.products.schedule_image_fill"), \
+             patch("routes.gist._schedule_gist_backup"):
+            with app.test_client() as client:
+                response = client.post("/api/products/bulk-import", json=payload)
+
+        result = response.get_json()
+        placed = db.execute("SELECT name, position FROM products").fetchall()
+        history = db.execute(
+            "SELECT imported, skipped FROM planogram_imports ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(result["selected_products"], 2)
+        self.assertEqual(result["filtered_non_stock"], 1)
+        self.assertEqual(result["imported"], 1)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual([tuple(row) for row in placed], [("IN STOCK", "1")])
+        self.assertEqual(tuple(history), (1, 1))
+        db.close()
+
     def test_bulk_replace_removes_old_products_from_gaps_on_target_tablet(self):
         db = self.make_plan_db()
         db.executemany(

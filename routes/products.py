@@ -1652,6 +1652,8 @@ def bulk_import_products():
     # Build the filtered plano lines (keep each row's full payload).
     now = utc_now_iso()
     errors = 0
+    selected_products = 0
+    filtered_non_stock = 0
     lines = []
     for p in products:
         try:
@@ -1662,17 +1664,20 @@ def bulk_import_products():
             continue
         if not (tablette_start <= tab <= tablette_end):
             continue
-        if skip_ns and not p.get("en_stock", True):
-            continue
         if not str(p.get("name", "")).strip():
             errors += 1
+            continue
+        selected_products += 1
+        if skip_ns and not p.get("en_stock", True):
+            filtered_non_stock += 1
             continue
         lines.append({"tablette": tab, "position": pos, "p": p})
 
     placements, overflow = plan_planogram_flow(config, side, start_section, start_tablette, lines, shrink=replace)
     overflow_products = max(0, len(lines) - len(placements))
 
-    imported = skipped = 0
+    imported = 0
+    skipped = filtered_non_stock
     image_barcodes = []   # barcodes still missing an image → fetched in background
 
     # Prefetch once instead of querying per product (an import is 100+ rows):
@@ -1891,6 +1896,8 @@ def bulk_import_products():
     return jsonify({"success": True, "imported": imported, "skipped": skipped,
                     "errors": errors, "overflow": overflow,
                     "overflow_shelves": overflow, "overflow_products": overflow_products,
+                    "selected_products": selected_products,
+                    "filtered_non_stock": filtered_non_stock,
                     "pruned": pruned, "replaced_removed": replaced_removed,
                     "layout": layout_payload,
                     "products": affected_products})

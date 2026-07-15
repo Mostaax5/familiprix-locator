@@ -154,6 +154,37 @@ async function run() {
   assert.deepStrictEqual([flow.byIdx[20].section, flow.byIdx[20].shelf], [3, 7]);
   assert(flow.overflow.has(21), 'the 22nd PDF shelf should overflow after all 21 physical shelves');
 
+  const filteredFlow = vm.runInContext(`
+    planoData = {products: [
+      {tablette: 1, position: 1, en_stock: true},
+      {tablette: 1, position: 2, en_stock: false},
+      {tablette: 1, position: 3, en_stock: false}
+    ]};
+    computePlanoFlow({
+      sides: {
+        Gauche: {sections: [{shelves: [3]}]},
+        Droite: {sections: []}
+      }
+    }, 'Gauche', 1, 1, 1, 1, true)
+  `, context);
+  assert.strictEqual(filteredFlow.placed, 1, 'only in-stock products should be placed when filtering');
+  assert.strictEqual(filteredFlow.filteredNonStock, 2, 'the preview must report every filtered product');
+
+  context.skipNonStockControl = {checked: true};
+  context.replaceControl = {checked: false};
+  vm.runInContext(`
+    document.getElementById = id => id === 'planoSkipNonStock'
+      ? skipNonStockControl
+      : (id === 'planoReplace' ? replaceControl : null);
+    updatePlanoPreview = () => {};
+    reimportCalled = false;
+    importPlanogram = () => { reimportCalled = true; };
+    reimportIncludingNonStock();
+  `, context);
+  assert.strictEqual(context.skipNonStockControl.checked, false, 'one-click recovery should include out-of-stock products');
+  assert.strictEqual(context.replaceControl.checked, true, 'one-click recovery should safely replace the partial tablet');
+  assert.strictEqual(context.reimportCalled, true, 'one-click recovery should immediately rerun this plano import');
+
   const coteAFlow = vm.runInContext(`
     planoData = {products: [
       {tablette: 1, position: 1, en_stock: true},

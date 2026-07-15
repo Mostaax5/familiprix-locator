@@ -1338,7 +1338,7 @@ function renderShelfProductList(aisle, side, section, shelf, positions) {
       html += `<div class="plan-product-item">
         <div class="plan-product-row1">
           <span class="plan-pos-badge">${pos}</span>
-          <span class="plan-slot-empty">vide</span>
+          <span class="plan-slot-empty" title="Aucun produit n'est enregistré à cette position">aucun produit importé</span>
         </div>
       </div>`;
     }
@@ -2899,7 +2899,7 @@ function computePlanoFlow(config, side, startSection, startTablette, tabStart, t
   const out = {
     byIdx: {}, overflow: new Set(), placed: 0, planoShelves: 0,
     availableShelves: 0, availableSections: 0, startSectionShelves: 0,
-    overflowShelves: 0, isFixture: false
+    overflowShelves: 0, isFixture: false, filteredNonStock: 0
   };
   const slots = [];   // [section_no, shelf_index] in fill order
   const fixture = _planoFixtureForSide(config, side);
@@ -2930,7 +2930,10 @@ function computePlanoFlow(config, side, startSection, startTablette, tabStart, t
   const byTab = new Map();
   (planoData.products || []).forEach((p, idx) => {
     if (p.tablette < tabStart || p.tablette > tabEnd) return;
-    if (skipNS && !p.en_stock) return;
+    if (skipNS && !p.en_stock) {
+      out.filteredNonStock++;
+      return;
+    }
     if (!byTab.has(p.tablette)) byTab.set(p.tablette, []);
     byTab.get(p.tablette).push(idx);
   });
@@ -3067,6 +3070,9 @@ function updatePlanoPreview() {
            <span>Parcours d'import : ${flow.availableShelves} tablette${flow.availableShelves !== 1 ? 's' : ''} répartie${flow.availableShelves !== 1 ? 's' : ''} sur ${flow.availableSections} section${flow.availableSections !== 1 ? 's' : ''}</span>`}
       ${flow.overflowShelves ? `<span style="color:#c8102e">${flow.overflowShelves} tablette${flow.overflowShelves !== 1 ? 's' : ''} du PDF sans emplacement physique</span>` : '<span style="color:#15803d">Structure compatible</span>'}
     </div>
+    ${flow.filteredNonStock ? `<div style="padding:8px 10px;background:#fffbeb;border-bottom:1px solid #fde68a;color:#92400e;font-size:12px">
+      <strong>${flow.filteredNonStock} produit(s) « En stock: non » seront exclus.</strong> Leurs positions resteront sans produit importé.
+    </div>` : ''}
     <div style="font-size:11px;color:#64748b;padding:4px 4px 6px">${((side === 'Gauche' || side === 'Droite') && !planoSectionCount(aisle, side === 'Gauche' ? 'Droite' : 'Gauche'))
       ? 'Allée à un seul côté (mur/comptoir) : <b>lecture simple de gauche à droite</b> — sections croissantes, positions telles quelles, rien d\'inversé.'
       : side === 'Gauche'
@@ -3081,6 +3087,15 @@ function updatePlanoPreview() {
     </div>`;
 }
 
+function reimportIncludingNonStock() {
+  const skip = document.getElementById('planoSkipNonStock');
+  const replace = document.getElementById('planoReplace');
+  if (skip) skip.checked = false;
+  if (replace) replace.checked = true;
+  updatePlanoPreview();
+  void importPlanogram();
+}
+
 async function importPlanogram() {
   if (!planoData) return;
   const aisle   = document.getElementById('planoAisle').value;
@@ -3092,6 +3107,15 @@ async function importPlanogram() {
   const tabEnd     = parseInt(document.getElementById('planoTabEnd').value)         || 99;
   const replace    = document.getElementById('planoReplace').checked;
   const skipNS     = document.getElementById('planoSkipNonStock').checked;
+
+  const filteredNonStock = skipNS
+    ? (planoData.products || []).filter(p =>
+        Number(p.tablette) >= tabStart && Number(p.tablette) <= tabEnd && !p.en_stock
+      ).length
+    : 0;
+  if (filteredNonStock && !window.confirm(
+    `${filteredNonStock} produit(s) marqués « En stock: non » ne seront pas importés et laisseront des positions vides. Continuer?`
+  )) return;
 
   const btn = document.getElementById('planoImportBtn');
   btn.disabled = true; btn.textContent = 'Importation…';
@@ -3143,11 +3167,18 @@ async function importPlanogram() {
       const errTxt  = data.errors > 0 ? `, ${data.errors} erreur(s)` : '';
       const overflowShelves = Number(data.overflow_shelves ?? data.overflow ?? 0);
       const overflowProducts = Number(data.overflow_products ?? 0);
+      const nonStockSkipped = Number(data.filtered_non_stock ?? 0);
+      const otherSkipped = Math.max(0, Number(data.skipped ?? 0) - nonStockSkipped);
+      const skippedTxt = otherSkipped > 0 ? `, ${otherSkipped} autre(s) ignoré(s)` : '';
+      const nonStockTxt = nonStockSkipped > 0 ? `, ${nonStockSkipped} hors stock non importé(s)` : '';
       const replacedRemoved = Number(data.replaced_removed ?? data.pruned ?? 0);
       const replacedTxt = replacedRemoved > 0 ? `, ${replacedRemoved} ancien(s) remplacé(s)` : '';
       const overTxt = overflowShelves > 0 ? ` ⚠ ${overflowProducts} produit(s), sur ${overflowShelves} tablette(s) du PDF, n'ont pas d'emplacement physique dans le plan magasin.` : '';
-      msg.innerHTML = `✅ <strong>${data.imported}</strong> importé(s), ${data.skipped} ignoré(s)${replacedTxt}${errTxt}.${overTxt} Les photos manquantes sont récupérées automatiquement.`;
-      msg.style.color = '#16a34a';
+      const recoveryAction = nonStockSkipped > 0
+        ? ` <button type="button" class="btn btn-outline btn-inline" style="width:auto;margin:5px 0 0;font-size:12px" onclick="reimportIncludingNonStock()">Importer aussi les ${nonStockSkipped} hors stock</button>`
+        : '';
+      msg.innerHTML = `✅ <strong>${data.imported}</strong> importé(s)${nonStockTxt}${skippedTxt}${replacedTxt}${errTxt}.${overTxt} Les photos manquantes sont récupérées automatiquement.${recoveryAction}`;
+      msg.style.color = nonStockSkipped > 0 ? '#92400e' : '#16a34a';
       // The import response already carries the committed aisle and affected
       // products. Paint it now; full-list revalidation can happen off-screen.
       applyPlanogramImportResult(aisle, side, data);
