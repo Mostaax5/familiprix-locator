@@ -9,6 +9,7 @@ import threading
 from flask import Blueprint, request, jsonify, Response
 from database import get_db, DatabaseIntegrityError
 from auth import require_editor, utc_now_iso
+from memory_guard import memory_intensive_task, release_unused_memory
 
 import_export_bp = Blueprint("import_export", __name__)
 
@@ -70,16 +71,13 @@ def _launch_parse_thread(job_id):
         json_path, pdf_path = _job_paths(job_id)
         try:
             import pdfplumber
-            import io as _io
-            with open(pdf_path, "rb") as fh:
-                pdf_bytes = fh.read()
             plano_meta = {"name": "", "number": "", "version": ""}
             parser = _PlanogramParser()
-            # One PDF at a time — two concurrent pdfplumber parses can exhaust
-            # the 512 MB instance. A queued job just waits here.
-            with _PDF_PARSE_LOCK:
-                with pdfplumber.open(_io.BytesIO(pdf_bytes)) as pdf:
-                    del pdf_bytes
+            # Pause image/catalogue maintenance while pdfplumber owns the memory
+            # budget. Open the file directly so the full PDF is not duplicated in
+            # a bytes object before pdfminer reads it.
+            with memory_intensive_task("planogram_pdf", priority=True):
+                with _PDF_PARSE_LOCK, pdfplumber.open(pdf_path) as pdf:
                     try:
                         head = pdf.pages[0].extract_text() or ""
                         m = re.search(r"PLANOGRAMME\s*:\s*([^\n]+)", head, re.IGNORECASE)
@@ -93,13 +91,15 @@ def _launch_parse_thread(job_id):
                     # Stream: parse then FREE each page so the whole PDF is never
                     # held in memory (this is what OOM'd the 512 MB instance).
                     for page in pdf.pages:
-                        for table in (page.extract_tables() or []):
+                        tables = page.extract_tables() or []
+                        for table in tables:
                             parser.feed_table(table)
+                        del tables
                         try:
-                            page.flush_cache()
-                            page.get_textmap.cache_clear()
+                            page.close()
                         except Exception:
                             pass
+                        gc.collect()
             products = parser.result()
             tablettes = {}
             for p in products:
@@ -120,7 +120,7 @@ def _launch_parse_thread(job_id):
             except OSError:
                 pass
         finally:
-            gc.collect()   # reclaim pdfplumber's many small objects now
+            release_unused_memory()
 
     threading.Thread(target=worker, daemon=True).start()
 

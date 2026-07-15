@@ -10,8 +10,19 @@ from urllib.request import Request, urlopen
 from flask import Blueprint, request, jsonify, Response
 from database import get_db
 from auth import require_editor, utc_now_iso, side_display_label
+from memory_guard import memory_intensive_task, release_unused_memory
 
 ai_bp = Blueprint("ai", __name__)
+
+# Every lookup used to create a fresh executor and return while its slower
+# requests were still running. Repeated imports could therefore leave hundreds
+# of source threads alive at once. One shared pool puts a hard process-wide cap
+# on those requests while preserving fast early results for interactive scans.
+_LOOKUP_SOURCE_WORKERS = 8
+_LOOKUP_SOURCE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_LOOKUP_SOURCE_WORKERS, thread_name_prefix="product-source"
+)
+_MAX_ONLINE_BODY_BYTES = 1_500_000
 
 
 def log_ai_interaction(kind, question, context, response):
@@ -215,17 +226,31 @@ def _product_quality_score(p):
     return score
 
 
-def best_lookup_result(tasks, max_workers=8, good_enough=None):
+def best_lookup_result(tasks, max_workers=8, good_enough=None, wait_for_cleanup=False):
     """Run all tasks, return (best_product, best_score) by quality score. Returns
     as soon as a result reaches `good_enough` instead of waiting for the slowest
     source (e.g. an 8s scraper timeout) — this is what makes scanning fast."""
     best, best_score = None, 0
     if not tasks:
         return None, 0
-    executor = ThreadPoolExecutor(max_workers=min(max_workers, len(tasks)))
-    futures = [executor.submit(task) for task in tasks]
+    worker_limit = min(max(1, int(max_workers or 1)), len(tasks), _LOOKUP_SOURCE_WORKERS)
+    task_iter = iter(tasks)
+    futures = set()
+
+    def submit_next():
+        try:
+            task = next(task_iter)
+        except StopIteration:
+            return False
+        futures.add(_LOOKUP_SOURCE_EXECUTOR.submit(task))
+        return True
+
+    for _ in range(worker_limit):
+        submit_next()
     try:
-        for future in as_completed(futures):
+        while futures:
+            future = next(as_completed(tuple(futures)))
+            futures.discard(future)
             try:
                 result = future.result()
             except Exception:
@@ -235,10 +260,26 @@ def best_lookup_result(tasks, max_workers=8, good_enough=None):
                 best, best_score = result, s
             if good_enough is not None and best_score >= good_enough:
                 break   # good enough — don't wait for slower sources
+            submit_next()
     finally:
-        # Don't block the response on still-running network calls; abandon them.
-        executor.shutdown(wait=False, cancel_futures=True)
+        running = []
+        for future in futures:
+            if not future.cancel():
+                running.append(future)
+        # Background maintenance waits for the few requests that already started,
+        # so releasing its memory slot really means the work is gone. Interactive
+        # scans still return immediately; the shared pool keeps their cleanup bounded.
+        if wait_for_cleanup:
+            for future in running:
+                try:
+                    future.result()
+                except Exception:
+                    pass
     return best, best_score
+
+
+def _read_limited_response(response, max_bytes=_MAX_ONLINE_BODY_BYTES):
+    return response.read(max_bytes + 1)[:max_bytes]
 
 
 def fetch_text(url):
@@ -252,7 +293,7 @@ def fetch_text(url):
     )
     try:
         with urlopen(request_obj, timeout=3) as response:
-            body = response.read().decode("utf-8", errors="ignore")
+            body = _read_limited_response(response).decode("utf-8", errors="ignore")
             return body, response.geturl()
     except (HTTPError, URLError, TimeoutError, UnicodeDecodeError):
         return None, None
@@ -574,7 +615,7 @@ def lookup_open_facts_product(source_name, base_url, barcode):
     request_obj = Request(url, headers={"User-Agent": "FamiliprixLocator/0.1 (local testing)", "Accept": "application/json"})
     try:
         with urlopen(request_obj, timeout=3) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            payload = json.loads(_read_limited_response(response).decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
         return None
     if payload.get("status") != 1:
@@ -606,7 +647,7 @@ def lookup_upcitemdb(barcode):
                           headers={"User-Agent": "FamiliprixLocator/0.1", "Accept": "application/json"})
     try:
         with urlopen(request_obj, timeout=5) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            payload = json.loads(_read_limited_response(response).decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
         return None
     items = payload.get("items") or []
@@ -634,7 +675,7 @@ def lookup_ean_search(barcode):
     )
     try:
         with urlopen(request_obj, timeout=5) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            payload = json.loads(_read_limited_response(response).decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
         return None
     items = payload if isinstance(payload, list) else []
@@ -660,7 +701,7 @@ def lookup_barcodelookup(barcode):
     })
     try:
         with urlopen(request_obj, timeout=8) as response:
-            html = response.read().decode("utf-8", errors="ignore")
+            html = _read_limited_response(response).decode("utf-8", errors="ignore")
     except (HTTPError, URLError, TimeoutError):
         return None
     candidates = build_barcode_candidates(barcode)
@@ -697,7 +738,7 @@ def lookup_go_upc(barcode):
     })
     try:
         with urlopen(request_obj, timeout=8) as response:
-            html = response.read().decode("utf-8", errors="ignore")
+            html = _read_limited_response(response).decode("utf-8", errors="ignore")
     except (HTTPError, URLError, TimeoutError):
         return None
     candidates = build_barcode_candidates(barcode)
@@ -722,7 +763,7 @@ def _fetch_json(url, timeout=5):
     req = Request(url, headers={"User-Agent": "FamiliprixLocator/0.1", "Accept": "application/json"})
     try:
         with urlopen(req, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8", errors="ignore"))
+            return json.loads(_read_limited_response(response).decode("utf-8", errors="ignore"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError):
         return None
 
@@ -1867,7 +1908,7 @@ def ai_grounded_product_lookup(barcode):
             "source": "Recherche IA", "source_url": "", "image_url": ""}
 
 
-def lookup_product_online(barcode, max_workers=None):
+def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False):
     """UPC lookup for a PHARMACY catalog (food, beauty, meds, vitamins, baby,
     bandages, eye care, Familiprix house brand…). Broad coverage but fast: it
     returns as soon as a trusted result is found (good_enough), so it doesn't wait
@@ -1897,7 +1938,10 @@ def lookup_product_online(barcode, max_workers=None):
         tasks.append(lambda c=bc: lookup_brocade(c))
         for sn, su in PRODUCT_LOOKUP_SOURCES:
             tasks.append(lambda c=bc, n=sn, u=su: lookup_open_facts_product(n, u, c))
-    best, best_score = best_lookup_result(tasks, max_workers=_cap(16), good_enough=GOOD_ENOUGH)
+    best, best_score = best_lookup_result(
+        tasks, max_workers=_cap(16), good_enough=GOOD_ENOUGH,
+        wait_for_cleanup=wait_for_cleanup,
+    )
 
     # Phase 2 — Familiprix catalog + barcode databases. The Familiprix scraper is
     # what finds house-brand and pharmacy-specific items the open DBs don't have.
@@ -1907,7 +1951,10 @@ def lookup_product_online(barcode, max_workers=None):
             tasks.append(lambda c=bc, cs=candidates: lookup_familiprix_product(c, cs))
             tasks.append(lambda c=bc: lookup_barcodelookup(c))
             tasks.append(lambda c=bc: lookup_go_upc(c))
-        p2, s2 = best_lookup_result(tasks, max_workers=_cap(8), good_enough=GOOD_ENOUGH)
+        p2, s2 = best_lookup_result(
+            tasks, max_workers=_cap(8), good_enough=GOOD_ENOUGH,
+            wait_for_cleanup=wait_for_cleanup,
+        )
         if s2 > best_score:
             best, best_score = p2, s2
 
@@ -1917,7 +1964,10 @@ def lookup_product_online(barcode, max_workers=None):
         for bc in candidates:
             for sn, su in PHARMACY_LOOKUP_SOURCES:
                 tasks.append(lambda c=bc, n=sn, u=su, cs=candidates: lookup_generic_pharmacy_product(n, u, c, cs))
-        p3, s3 = best_lookup_result(tasks, max_workers=_cap(6), good_enough=GOOD_ENOUGH)
+        p3, s3 = best_lookup_result(
+            tasks, max_workers=_cap(6), good_enough=GOOD_ENOUGH,
+            wait_for_cleanup=wait_for_cleanup,
+        )
         if s3 > best_score:
             best, best_score = p3, s3
 
@@ -1977,10 +2027,8 @@ _CATALOG_ENRICH = {
 
 
 _ENRICH_CHUNK = 20        # lookups submitted per batch — Stop reacts within one batch
-_ENRICH_WORKERS = 3       # parallel product lookups; each one is ALSO capped to
-_ENRICH_LOOKUP_FANOUT = 6 # 6 internal source-requests (an uncapped lookup fans out
-                          # to 16) — total ceiling 3×6=18 concurrent HTTP, which
-                          # fits Render's 512 MB. DB writes stay on one thread.
+_ENRICH_WORKERS = 2       # workers prepare rows, but the memory guard serializes
+_ENRICH_LOOKUP_FANOUT = 2 # background online parsing while PDFs get priority
 
 
 def _enrich_marker_path():
@@ -2021,11 +2069,14 @@ def _catalog_enrich_worker():
         build_barcode_candidates, normalized_digits,
         update_product_metadata_from_reference,
     )
-    import gc
-
     def _lookup(r):
         try:
-            return r, lookup_product_online(r.get("barcode", ""), max_workers=_ENRICH_LOOKUP_FANOUT)
+            with memory_intensive_task("catalog_enrichment"):
+                online = lookup_product_online(
+                    r.get("barcode", ""), max_workers=_ENRICH_LOOKUP_FANOUT,
+                    wait_for_cleanup=True,
+                )
+            return r, online
         except Exception:
             return r, None
 
@@ -2117,7 +2168,7 @@ def _catalog_enrich_worker():
                         _write_enrich_marker()   # once per batch — the resume checkpoint
                         # Free the batch's parsed online payloads NOW (some sources
                         # return hundreds of KB per product) — RSS creep OOM'd us once.
-                        gc.collect()
+                        release_unused_memory()
                 break                          # full pass completed
             except Exception as exc:           # DB blip, pool trouble… reconnect & continue
                 _CATALOG_ENRICH["error"] = f"{type(exc).__name__}: {exc}"[:200]

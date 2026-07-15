@@ -14,6 +14,7 @@ from routes.layout import layout_bp
 from routes.ai import ai_bp, configured_ai_provider, reference_count, maybe_resume_enrichment
 from routes.gist import gist_bp, _restore_from_gist_if_empty
 from routes.import_export import import_export_bp
+from memory_guard import memory_snapshot
 
 app = Flask(__name__)
 try:
@@ -143,6 +144,7 @@ def get_system_info():
             "db_unreachable": True,
             "db_error": f"{type(exc).__name__}: {DB_BOOT_ERROR or exc}",
             "pool": pool_stats(),
+            "memory": memory_snapshot(),
             "ai_enabled": bool(ai_provider["name"]),
             "ai_provider": ai_provider["name"],
             "ai_provider_label": ai_provider["label"],
@@ -181,6 +183,7 @@ def get_system_info():
         "version": os.environ.get("RENDER_GIT_COMMIT", "")[:7],
         "self_keepalive": _SELF_KEEPALIVE_ACTIVE,
         "recent_hits": list(_RECENT_HITS),
+        "memory": memory_snapshot(),
     })
 
 

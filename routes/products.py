@@ -13,6 +13,7 @@ from flask import Blueprint, request, jsonify
 from database import get_db, DatabaseIntegrityError
 from auth import require_editor, utc_now_iso, side_display_label
 from routes.layout import validate_layout_slot, aisle_sort_key
+from memory_guard import memory_intensive_task, release_unused_memory
 
 products_bp = Blueprint("products", __name__)
 
@@ -734,7 +735,6 @@ def schedule_image_fill(barcodes):
     """Fetch missing product images online in a background thread — fully
     automatic, no user action. Serialized (one fill at a time) and each lookup's
     internal fan-out is capped, so imports can be chained safely all day."""
-    import gc
     global _IMAGE_FILL_ACTIVE
     codes = {str(b).strip() for b in (barcodes or []) if str(b or "").strip()}
     if not codes:
@@ -764,7 +764,13 @@ def schedule_image_fill(barcodes):
                     # reference catalogue); only then fan out to online sources.
                     img = find_existing_image_for_barcode(db, bc)
                     if not img:
-                        product = lookup_product_online(bc, max_workers=6)
+                        # Online pages and parsers are the memory-heavy part. Keep
+                        # background lookups out of PDF parsing and wait for each
+                        # lookup's source requests to finish before starting another.
+                        with memory_intensive_task("product_image"):
+                            product = lookup_product_online(
+                                bc, max_workers=2, wait_for_cleanup=True
+                            )
                         img = str((product or {}).get("image_url", "")).strip()
                     if img:
                         now = utc_now_iso()
@@ -782,7 +788,7 @@ def schedule_image_fill(barcodes):
                     pass
                 processed += 1
                 if processed % 20 == 0:
-                    gc.collect()
+                    release_unused_memory()
         finally:
             try:
                 if db is not None:
@@ -798,7 +804,7 @@ def schedule_image_fill(barcodes):
                 pending_snapshot = list(_IMAGE_FILL_PENDING) if db is not None else []
             if pending_snapshot:
                 schedule_image_fill(pending_snapshot)
-            gc.collect()
+            release_unused_memory()
 
     threading.Thread(target=worker, daemon=True).start()
 
