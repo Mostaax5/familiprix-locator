@@ -1,4 +1,5 @@
 import json
+import hashlib
 import re
 import os
 import gc
@@ -237,6 +238,148 @@ def import_database():
         "imported_layouts": imported_layouts,
         "imported_products": imported_products,
         "skipped_products": skipped_products,
+    })
+
+
+@import_export_bp.route("/api/import/aisle-replace", methods=["POST"])
+def replace_aisle_from_backup():
+    """Atomically replace one aisle from a reviewed recovery payload.
+
+    This is deliberately stricter than the general import endpoint: callers must
+    provide the exact current row count and a confirmation phrase. Existing rows
+    are archived before replacement, and no other aisle is touched.
+    """
+    username, error = require_editor()
+    if error:
+        return error
+    payload = request.get_json(silent=True) or {}
+    aisle = str(payload.get("aisle", "")).strip()
+    expected_count = payload.get("expected_current_count")
+    expected_fingerprint = str(payload.get("expected_current_fingerprint", "")).strip()
+    confirm = str(payload.get("confirm", ""))
+    products = payload.get("products") or []
+    layout = payload.get("layout") or {}
+    if not aisle or confirm != f"REPLACE_AISLE_{aisle}" or not expected_fingerprint:
+        return jsonify({"success": False, "error": "Confirmation de récupération invalide."}), 400
+    try:
+        expected_count = int(expected_count)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Nombre actuel attendu invalide."}), 400
+    if not isinstance(products, list) or not isinstance(layout, dict):
+        return jsonify({"success": False, "error": "Contenu de récupération invalide."}), 400
+
+    from routes.layout import normalize_layout_config, layout_metrics, product_fits_layout
+    from routes.products import archive_and_delete_products, first_column
+
+    config_value = layout.get("config", layout.get("config_json", ""))
+    config = normalize_layout_config(
+        config_value,
+        layout.get("max_section", "0"),
+        layout.get("max_shelf", "0"),
+        layout.get("max_position", "0"),
+    )
+    max_section, max_shelf, max_position = layout_metrics(config)
+    seen_slots = set()
+    validated = []
+    for raw in products:
+        product = dict(raw or {})
+        product["aisle"] = str(product.get("aisle", "")).strip()
+        product["side"] = str(product.get("side", "")).strip()
+        product["section"] = str(product.get("section", "1")).strip() or "1"
+        product["shelf"] = str(product.get("shelf", "")).strip()
+        product["position"] = str(product.get("position", "")).strip()
+        if product["aisle"] != aisle or not str(product.get("name", "")).strip():
+            return jsonify({"success": False, "error": "Un produit n'appartient pas à l'allée restaurée."}), 400
+        slot = (product["side"], product["section"], product["shelf"], product["position"])
+        if slot in seen_slots:
+            return jsonify({"success": False, "error": f"Position en double dans la récupération: {slot}."}), 400
+        if not product_fits_layout(product, config):
+            return jsonify({"success": False, "error": f"Produit hors structure dans la récupération: {slot}."}), 400
+        seen_slots.add(slot)
+        validated.append(product)
+
+    db = get_db()
+    current_rows = [dict(row) for row in db.execute(
+        "SELECT * FROM products WHERE aisle=? ORDER BY id", (aisle,)
+    ).fetchall()]
+    current_fingerprint_rows = [
+        [
+            row.get("id"), str(row.get("name", "")), str(row.get("barcode", "")),
+            str(row.get("side", "")), str(row.get("section", "")),
+            str(row.get("shelf", "")), str(row.get("position", "")),
+            str(row.get("modified_at", "")),
+        ]
+        for row in current_rows
+    ]
+    current_fingerprint = hashlib.sha256(json.dumps(
+        current_fingerprint_rows, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+    if len(current_rows) != expected_count or current_fingerprint != expected_fingerprint:
+        return jsonify({
+            "success": False,
+            "error": "La récupération a été annulée car l'allée a changé depuis la sauvegarde.",
+            "expected_current_count": expected_count,
+            "actual_current_count": len(current_rows),
+            "actual_current_fingerprint": current_fingerprint,
+        }), 409
+
+    now = utc_now_iso()
+    archive_and_delete_products(db, current_rows, username, now)
+    db.execute(
+        """INSERT INTO aisle_layouts
+           (aisle, max_section, max_shelf, max_position, config_json, enabled, modified_by, modified_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(aisle) DO UPDATE SET
+             max_section=excluded.max_section, max_shelf=excluded.max_shelf,
+             max_position=excluded.max_position, config_json=excluded.config_json,
+             enabled=excluded.enabled, modified_by=excluded.modified_by,
+             modified_at=excluded.modified_at""",
+        (aisle, max_section, max_shelf, max_position, json.dumps(config),
+         int(layout.get("enabled", 1)), username, now),
+    )
+    for product in validated:
+        try:
+            facings = max(1, int(product.get("facings", 1) or 1))
+        except (TypeError, ValueError):
+            facings = 1
+        db.execute(
+            """INSERT INTO products
+               (name, brand, description, image_url, source_url, search_terms,
+                usage_notes, alternative_suggestions, barcode, product_code, facings,
+                aisle, side, section, shelf, position, is_plano, in_stock,
+                linked_position, flipped_label, underneath_label, created_by,
+                created_at, modified_by, modified_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(product.get("name", "")).strip(), str(product.get("brand", "")),
+                str(product.get("description", "")), str(product.get("image_url", "")),
+                str(product.get("source_url", "")), str(product.get("search_terms", "")),
+                str(product.get("usage_notes", "")), str(product.get("alternative_suggestions", "")),
+                str(product.get("barcode", "")), str(product.get("product_code", "")), facings,
+                aisle, product["side"], product["section"], product["shelf"], product["position"],
+                1 if product.get("is_plano") else 0,
+                0 if product.get("in_stock") in (0, "0", False) else 1,
+                str(product.get("linked_position", "")),
+                1 if product.get("flipped_label") else 0,
+                str(product.get("underneath_label", "")),
+                str(product.get("created_by", username)),
+                str(product.get("created_at", now) or now), username, now,
+            ),
+        )
+    restored_count = int(first_column(db.execute(
+        "SELECT COUNT(*) FROM products WHERE aisle=?", (aisle,)
+    ).fetchone()) or 0)
+    if restored_count != len(validated):
+        raise RuntimeError("Le nombre de produits restaurés ne correspond pas au contenu validé.")
+    db.commit()
+
+    from routes.gist import _schedule_gist_backup
+    _schedule_gist_backup(db)
+    return jsonify({
+        "success": True,
+        "aisle": aisle,
+        "archived_products": len(current_rows),
+        "restored_products": restored_count,
     })
 
 

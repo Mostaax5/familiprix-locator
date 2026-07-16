@@ -66,6 +66,12 @@ class LayoutDeletionTests(unittest.TestCase):
             with self.app.test_client() as client:
                 return client.post(path, json=payload, headers={"X-User-Name": "tester"})
 
+    def put(self, path, payload):
+        with patch("routes.layout.get_db", return_value=self.db), \
+             patch("auth.get_db", return_value=self.db):
+            with self.app.test_client() as client:
+                return client.put(path, json=payload, headers={"X-User-Name": "tester"})
+
     def stored_config(self):
         row = self.db.execute(
             "SELECT config_json FROM aisle_layouts WHERE aisle='A1'"
@@ -166,6 +172,35 @@ class LayoutDeletionTests(unittest.TestCase):
             "shelves": [3], "labels": ["High"]
         })
         self.assertEqual([(row["id"], row["shelf"]) for row in rows], [(5, "1")])
+
+    def test_generic_autosave_cannot_delete_products(self):
+        stale_config = json.loads(json.dumps(self.config))
+        stale_config["sides"]["Gauche"]["sections"] = [
+            {"shelves": [1], "labels": [""]}
+        ]
+
+        response = self.put(
+            "/api/layout/aisles/A1",
+            {"config": stale_config, "enabled": True},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["protected_products"], 2)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM products").fetchone()[0], 3)
+        self.assertEqual(self.stored_config(), self.config)
+
+    def test_free_shelf_does_not_make_products_outside_layout(self):
+        free_config = json.loads(json.dumps(self.config))
+        free_config["sides"]["Gauche"]["sections"][0]["shelves"][0] = 0
+
+        response = self.put(
+            "/api/layout/aisles/A1",
+            {"config": free_config, "enabled": True},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM products").fetchone()[0], 3)
+        self.assertEqual(self.stored_config()["sides"]["Gauche"]["sections"][0]["shelves"][0], 0)
 
 
 if __name__ == "__main__":

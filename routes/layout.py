@@ -156,15 +156,22 @@ def product_fits_layout(product, config):
         shelves = sections[section_index].get("shelves", [])
     if shelf_index < 0 or shelf_index >= len(shelves):
         return False
-    return 1 <= position_value <= clamp_non_negative_int(shelves[shelf_index])
+    capacity = clamp_non_negative_int(shelves[shelf_index])
+    # Zero is the explicit "tablette libre" mode: positions are not capped and
+    # existing products must never be treated as outside the layout.
+    return position_value >= 1 and (capacity == 0 or position_value <= capacity)
 
 
-def remove_products_outside_layout(db, aisle, config):
+def products_outside_layout(db, aisle, config):
     rows = db.execute(
         "SELECT id, side, section, shelf, position FROM products WHERE aisle=?",
         (str(aisle).strip(),),
     ).fetchall()
-    removable_ids = [int(row["id"]) for row in rows if not product_fits_layout(row, config)]
+    return [row for row in rows if not product_fits_layout(row, config)]
+
+
+def remove_products_outside_layout(db, aisle, config):
+    removable_ids = [int(row["id"]) for row in products_outside_layout(db, aisle, config)]
     if removable_ids:
         placeholders = ",".join("?" for _ in removable_ids)
         db.execute(f"DELETE FROM products WHERE id IN ({placeholders})", tuple(removable_ids))
@@ -271,6 +278,22 @@ def update_layout_aisle(aisle):
     max_section, max_shelf, max_position = layout_metrics(config)
     enabled = 1 if data.get("enabled", True) else 0
     db = get_db()
+    protected = products_outside_layout(db, aisle, config)
+    if protected:
+        # Autosave sends the entire aisle configuration. A stale phone snapshot
+        # once collapsed sections to one tablette and this endpoint silently
+        # deleted every product outside that stale shape. Generic saves are now
+        # strictly non-destructive; explicit remove-section/remove-shelf routes
+        # remain the only operations allowed to remove placements.
+        return jsonify({
+            "success": False,
+            "error": (
+                f"Sauvegarde refusée: cette structure masquerait ou supprimerait "
+                f"{len(protected)} produit(s). Rechargez le plan; utilisez les boutons "
+                "Supprimer uniquement pour une suppression volontaire."
+            ),
+            "protected_products": len(protected),
+        }), 409
     result = db.execute(
         """
         UPDATE aisle_layouts
@@ -279,11 +302,10 @@ def update_layout_aisle(aisle):
         """,
         (max_section, max_shelf, max_position, json.dumps(config), enabled, username, utc_now_iso(), aisle),
     )
-    removed_products = remove_products_outside_layout(db, aisle, config) if result.rowcount else 0
     db.commit()
     if result.rowcount == 0:
         return jsonify({"error": "Allée non trouvée."}), 404
-    return jsonify({"success": True, "removed_products": removed_products})
+    return jsonify({"success": True, "removed_products": 0})
 
 
 @layout_bp.route("/api/layout/aisles/<aisle>", methods=["DELETE"])
