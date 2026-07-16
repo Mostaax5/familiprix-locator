@@ -89,6 +89,7 @@ class PlanogramMetadataTests(unittest.TestCase):
                VALUES ('1', '1', '1', '2', ?, 1)""",
             (json.dumps(config),),
         )
+        db.commit()
         return db
 
     def test_catalogue_metadata_backfills_equivalent_upcs_without_overwriting_edits(self):
@@ -350,6 +351,128 @@ class PlanogramMetadataTests(unittest.TestCase):
         moved = db.execute("SELECT * FROM products WHERE position='3'").fetchone()
         self.assertEqual(moved["image_url"], "https://img.test/moved.jpg")
         self.assertEqual(moved["description"], "Enriched description")
+        db.close()
+
+    def test_bulk_replace_rejects_duplicate_destinations_without_touching_old_products(self):
+        db = self.make_plan_db()
+        db.execute(
+            """INSERT INTO products
+               (name, barcode, aisle, side, section, shelf, position)
+               VALUES ('OLD PRODUCT', '111', '1', 'Gauche', '1', '1', '1')"""
+        )
+        db.commit()
+        app = Flask(__name__)
+        app.register_blueprint(products_bp)
+        payload = {
+            "aisle": "1", "side": "Gauche", "start_section": 1,
+            "start_tablette": 1, "tablette_start": 1, "tablette_end": 1,
+            "replace_existing": True,
+            "products": [
+                {"tablette": 1, "position": 1, "barcode": "222", "name": "NEW ONE"},
+                {"tablette": 1, "position": 1, "barcode": "333", "name": "NEW TWO"},
+            ],
+        }
+
+        with patch("routes.products.get_db", return_value=db), \
+             patch("auth.get_db", return_value=db), \
+             patch("routes.products.schedule_image_fill"), \
+             patch("routes.gist._schedule_gist_backup"):
+            with app.test_client() as client:
+                response = client.post("/api/products/bulk-import", json=payload)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            [tuple(row) for row in db.execute("SELECT name, barcode FROM products").fetchall()],
+            [("OLD PRODUCT", "111")],
+        )
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM removed_products").fetchone()[0], 0)
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM planogram_imports").fetchone()[0], 0)
+        db.close()
+
+    def test_bulk_replace_rolls_back_old_products_when_an_insert_fails(self):
+        class FailingProductInsertDb:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def execute(self, query, params=()):
+                normalized = " ".join(str(query).lower().split())
+                if normalized.startswith("insert into products"):
+                    raise RuntimeError("simulated insert failure")
+                return self.connection.execute(query, tuple(params or ()))
+
+            def commit(self):
+                self.connection.commit()
+
+            def rollback(self):
+                self.connection.rollback()
+
+        connection = self.make_plan_db()
+        connection.execute(
+            """INSERT INTO products
+               (name, barcode, aisle, side, section, shelf, position)
+               VALUES ('OLD PRODUCT', '111', '1', 'Gauche', '1', '1', '1')"""
+        )
+        connection.commit()
+        db = FailingProductInsertDb(connection)
+        app = Flask(__name__)
+        app.register_blueprint(products_bp)
+        payload = {
+            "aisle": "1", "side": "Gauche", "start_section": 1,
+            "start_tablette": 1, "tablette_start": 1, "tablette_end": 1,
+            "replace_existing": True,
+            "products": [
+                {"tablette": 1, "position": 1, "barcode": "222", "name": "NEW PRODUCT"},
+            ],
+        }
+
+        with patch("routes.products.get_db", return_value=db), \
+             patch("auth.get_db", return_value=db), \
+             patch("routes.products.schedule_image_fill"), \
+             patch("routes.gist._schedule_gist_backup"):
+            with app.test_client() as client:
+                response = client.post("/api/products/bulk-import", json=payload)
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(
+            [tuple(row) for row in connection.execute("SELECT name, barcode FROM products").fetchall()],
+            [("OLD PRODUCT", "111")],
+        )
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM removed_products").fetchone()[0], 0)
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM planogram_imports").fetchone()[0], 0)
+        connection.close()
+
+    def test_bulk_import_refuses_a_stale_layout_version(self):
+        db = self.make_plan_db()
+        db.execute("UPDATE aisle_layouts SET modified_at='server-v2' WHERE aisle='1'")
+        db.execute(
+            """INSERT INTO products
+               (name, barcode, aisle, side, section, shelf, position)
+               VALUES ('OLD PRODUCT', '111', '1', 'Gauche', '1', '1', '1')"""
+        )
+        db.commit()
+        app = Flask(__name__)
+        app.register_blueprint(products_bp)
+        payload = {
+            "aisle": "1", "side": "Gauche", "start_section": 1,
+            "start_tablette": 1, "tablette_start": 1, "tablette_end": 1,
+            "replace_existing": True,
+            "expected_layout_modified_at": "phone-v1",
+            "products": [
+                {"tablette": 1, "position": 1, "barcode": "222", "name": "NEW PRODUCT"},
+            ],
+        }
+
+        with patch("routes.products.get_db", return_value=db), \
+             patch("auth.get_db", return_value=db), \
+             patch("routes.products.schedule_image_fill"), \
+             patch("routes.gist._schedule_gist_backup"):
+            with app.test_client() as client:
+                response = client.post("/api/products/bulk-import", json=payload)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["code"], "stale_layout")
+        self.assertEqual(db.execute("SELECT name FROM products").fetchone()[0], "OLD PRODUCT")
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM removed_products").fetchone()[0], 0)
         db.close()
 
     def test_planogram_flow_uses_manual_section_shelf_counts_as_boundaries(self):

@@ -30,6 +30,13 @@ class LayoutDeletionTests(unittest.TestCase):
         self.db.execute(
             "CREATE UNIQUE INDEX unique_slot ON products(aisle, side, section, shelf, position)"
         )
+        self.db.execute(
+            """CREATE TABLE removed_products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, removed_at TEXT,
+                removed_by TEXT, barcode TEXT, name TEXT,
+                last_location TEXT, product_json TEXT
+            )"""
+        )
         self.config = {
             "sides": {
                 "Gauche": {"sections": [
@@ -72,6 +79,12 @@ class LayoutDeletionTests(unittest.TestCase):
             with self.app.test_client() as client:
                 return client.put(path, json=payload, headers={"X-User-Name": "tester"})
 
+    def delete(self, path):
+        with patch("routes.layout.get_db", return_value=self.db), \
+             patch("auth.get_db", return_value=self.db):
+            with self.app.test_client() as client:
+                return client.delete(path, headers={"X-User-Name": "tester"})
+
     def stored_config(self):
         row = self.db.execute(
             "SELECT config_json FROM aisle_layouts WHERE aisle='A1'"
@@ -98,6 +111,9 @@ class LayoutDeletionTests(unittest.TestCase):
             (2, "1", "1"),
             (3, "2", "1"),
         ])
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM removed_products").fetchone()[0], 1
+        )
 
     def test_remove_section_updates_structure_and_products_in_one_request(self):
         response = self.post(
@@ -201,6 +217,77 @@ class LayoutDeletionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM products").fetchone()[0], 3)
         self.assertEqual(self.stored_config()["sides"]["Gauche"]["sections"][0]["shelves"][0], 0)
+
+    def test_stale_autosave_cannot_overwrite_a_newer_layout(self):
+        self.db.execute(
+            "UPDATE aisle_layouts SET modified_at='newer-version' WHERE aisle='A1'"
+        )
+        self.db.commit()
+        changed = json.loads(json.dumps(self.config))
+        changed["sides"]["Gauche"]["sections"][0]["shelves"][0] = 9
+
+        response = self.put(
+            "/api/layout/aisles/A1",
+            {
+                "config": changed,
+                "enabled": True,
+                "expected_modified_at": "older-version",
+            },
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["code"], "stale_layout")
+        self.assertEqual(self.stored_config(), self.config)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM products").fetchone()[0], 3)
+
+    def test_remove_shelf_ignores_stale_full_layout_snapshot(self):
+        stale = json.loads(json.dumps(self.config))
+        stale["sides"]["Gauche"]["sections"] = [
+            {"shelves": [3], "labels": ["Old phone copy"]}
+        ]
+
+        response = self.post(
+            "/api/layout/aisles/A1/remove-shelf",
+            {"side": "Gauche", "section": "1", "shelf": "1", "config": stale},
+        )
+        rows = self.db.execute(
+            "SELECT id, section, shelf FROM products ORDER BY id"
+        ).fetchall()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([(row["id"], row["section"], row["shelf"]) for row in rows], [
+            (2, "1", "1"),
+            (3, "2", "1"),
+        ])
+        self.assertEqual(len(self.stored_config()["sides"]["Gauche"]["sections"]), 2)
+
+    def test_stale_explicit_removal_is_refused(self):
+        self.db.execute(
+            "UPDATE aisle_layouts SET modified_at='server-v2' WHERE aisle='A1'"
+        )
+        self.db.commit()
+
+        response = self.post(
+            "/api/layout/aisles/A1/remove-shelf",
+            {
+                "side": "Gauche", "section": "1", "shelf": "1",
+                "expected_modified_at": "phone-v1",
+            },
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["code"], "stale_layout")
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM products").fetchone()[0], 3)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM removed_products").fetchone()[0], 0)
+        self.assertEqual(self.stored_config(), self.config)
+
+    def test_delete_aisle_archives_every_product(self):
+        response = self.delete("/api/layout/aisles/A1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM products").fetchone()[0], 0)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM aisle_layouts").fetchone()[0], 0)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM removed_products").fetchone()[0], 3)
 
 
 if __name__ == "__main__":

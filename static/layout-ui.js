@@ -190,20 +190,26 @@ async function autoSaveAisleLayout(aisle) {
   const config = readAisleLayoutConfig(key);
   _layoutAutoSaveInFlight.add(key);
   setLayoutSaveState(key, 'saving');
-  const data = await apiUpdateLayoutAisle(key, {config, enabled: true});
+  const data = await apiUpdateLayoutAisle(key, {
+    config,
+    enabled: true,
+    expected_modified_at: layout.modified_at || ''
+  });
   _layoutAutoSaveInFlight.delete(key);
 
   if (!data.success) {
     const failures = (_layoutAutoSaveFailures.get(key) || 0) + 1;
     _layoutAutoSaveFailures.set(key, failures);
     setLayoutSaveState(key, 'error', data.error || (failures < 3 ? 'Sauvegarde impossible - nouvel essai' : 'Sauvegarde impossible'));
-    if (failures < 3) scheduleLayoutAutoSave(key, 3000 * failures);
+    if (data.code !== 'stale_layout' && failures < 3) {
+      scheduleLayoutAutoSave(key, 3000 * failures);
+    }
     return;
   }
 
   _layoutAutoSaveFailures.set(key, 0);
   layout.modified_by = loadEditorSession().username || layout.modified_by || '';
-  layout.modified_at = nowIsoWithoutMs();
+  layout.modified_at = data.modified_at || layout.modified_at || nowIsoWithoutMs();
   if ((_layoutEditRevisions.get(key) || 0) === revision) {
     clearLayoutDirty(key);
     setLayoutSaveState(key, 'saved');
@@ -1272,10 +1278,28 @@ async function confirmMoveSection(aisle, side, sectionIndex) {
   const target_aisle = document.getElementById('msAisle').value;
   const target_side  = document.getElementById('msSide').value;
   const target_position = document.getElementById('msPosition')?.value || '';
+  const aisleKeys = [...new Set([String(aisle), String(target_aisle)])];
+  for (const key of aisleKeys) {
+    if (dirtyLayoutAisles.has(key)) await autoSaveAisleLayout(key);
+    if (dirtyLayoutAisles.has(key)) {
+      if (msg) msg.textContent = 'Sauvegardez ou rechargez les allées avant de déplacer cette section.';
+      return;
+    }
+  }
+  const sourceLayout = getMutableLayout(aisle);
+  const targetLayout = getMutableLayout(target_aisle);
+  if (!sourceLayout || !targetLayout) {
+    if (msg) msg.textContent = 'Rechargez le plan avant de déplacer cette section.';
+    return;
+  }
   try {
     const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}/move-section-to-aisle`, {
       method: 'POST', headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-      body: JSON.stringify({side, section_index: sectionIndex, target_aisle, target_side, target_position})
+      body: JSON.stringify({
+        side, section_index: sectionIndex, target_aisle, target_side, target_position,
+        expected_modified_at: sourceLayout.modified_at || '',
+        expected_target_modified_at: targetLayout.modified_at || ''
+      })
     });
     if (res.ok && data.success) {
       if (overlay) overlay.remove();
@@ -1872,7 +1896,7 @@ async function createAisleLayout() {
     mapLayouts.push(syncLayoutRecord({
       aisle: String(aisle), config, enabled: true,
       modified_by: loadEditorSession().username || '',
-      modified_at: nowIsoWithoutMs(), product_count: 0,
+      modified_at: data.modified_at || nowIsoWithoutMs(), product_count: 0,
       ...getLayoutMetrics(config)
     }));
     sortMapLayouts();
@@ -1907,13 +1931,18 @@ async function saveAisleLayout(aisle) {
   const revision = _layoutEditRevisions.get(key) || 0;
   syncLayoutRecord(layout);
   const config = readAisleLayoutConfig(aisle);
-  const data = await apiUpdateLayoutAisle(aisle, {config, enabled: true});
+  const data = await apiUpdateLayoutAisle(aisle, {
+    config,
+    enabled: true,
+    expected_modified_at: layout.modified_at || ''
+  });
   const msgDiv = document.getElementById('addMsg');
   msgDiv.className = data.success ? 'msg success' : 'msg error';
   msgDiv.textContent = data.success
     ? `Allée ${aisle} sauvee.${Number(data.removed_products || 0) ? ` ${data.removed_products} produit(s) supprime(s) car hors structure.` : ''}`
     : (data.error || 'Sauvegarde impossible.');
   if (data.success) {
+    layout.modified_at = data.modified_at || layout.modified_at || nowIsoWithoutMs();
     if ((_layoutEditRevisions.get(key) || 0) === revision) {
       clearLayoutDirty(aisle);
       setLayoutSaveState(aisle, 'saved');
@@ -1923,7 +1952,6 @@ async function saveAisleLayout(aisle) {
     }
     await refreshProductsCache(true);
     layout.modified_by = loadEditorSession().username || layout.modified_by || '';
-    layout.modified_at = nowIsoWithoutMs();
     syncLayoutRecord(layout);
     lastLayoutsRefreshAt = Date.now();
     savePlanSnapshot();
@@ -2164,7 +2192,25 @@ async function commitLayoutRemoval({aisle, endpoint, payload, nextConfig, button
     return false;
   }
 
-  const data = await apiRemoveLayoutPart(aisle, endpoint, payload);
+  if (dirtyLayoutAisles.has(key)) await autoSaveAisleLayout(key);
+  if (dirtyLayoutAisles.has(key)) {
+    _layoutRemovalInFlight.delete(key);
+    setPlanDeleteBusy(button, false);
+    showPlanActionMessage('Le plan doit être sauvegardé avant cette suppression. Rechargez-le si une autre personne vient de le modifier.');
+    return false;
+  }
+  const currentLayout = getMutableLayout(aisle);
+  if (!currentLayout) {
+    _layoutRemovalInFlight.delete(key);
+    setPlanDeleteBusy(button, false);
+    showPlanActionMessage('Le plan doit être rechargé avant cette suppression.');
+    return false;
+  }
+
+  const data = await apiRemoveLayoutPart(aisle, endpoint, {
+    ...payload,
+    expected_modified_at: currentLayout.modified_at || ''
+  });
   if (!data.success) {
     _layoutRemovalInFlight.delete(key);
     setPlanDeleteBusy(button, false);
@@ -2176,6 +2222,7 @@ async function commitLayoutRemoval({aisle, endpoint, payload, nextConfig, button
   const layout = getMutableLayout(aisle);
   if (layout) {
     layout.config = normalizeLayoutConfig(data.config || nextConfig);
+    layout.modified_at = data.modified_at || layout.modified_at || nowIsoWithoutMs();
     syncLayoutRecord(layout);
   }
   productRemoval();
@@ -2341,10 +2388,19 @@ async function removePresentoirShelf(aisle, presIndex, facadeIndex, shelfIndex, 
 }
 
 async function _swapCall(aisle, endpoint, body) {
+  const key = String(aisle);
+  if (dirtyLayoutAisles.has(key)) await autoSaveAisleLayout(key);
+  if (dirtyLayoutAisles.has(key)) return false;
+  const layout = getMutableLayout(key);
+  if (!layout) return false;
   try {
     const {res, data} = await apiFetch(
       `/api/layout/aisles/${encodeURIComponent(aisle)}/${endpoint}`,
-      {method:'POST', headers:{'Content-Type':'application/json',...getEditorHeaders()}, body:JSON.stringify(body)}
+      {
+        method:'POST',
+        headers:{'Content-Type':'application/json',...getEditorHeaders()},
+        body:JSON.stringify({...body, expected_modified_at: layout.modified_at || ''})
+      }
     );
     return res.ok && data.success;
   } catch (e) {
@@ -3145,6 +3201,13 @@ async function importPlanogram() {
     btn.disabled = false; btn.textContent = 'Importer dans le plan';
     return;
   }
+  const layout = getMutableLayout(aisleKey);
+  if (!layout) {
+    msg.textContent = 'Le plan de cette allée doit être rechargé avant l’importation.';
+    msg.style.color = '#c8102e';
+    btn.disabled = false; btn.textContent = 'Importer dans le plan';
+    return;
+  }
 
   try {
     const {res, data} = await apiFetch('/api/products/bulk-import', {
@@ -3157,6 +3220,7 @@ async function importPlanogram() {
         tablette_start: tabStart,
         tablette_end:   tabEnd,
         replace_existing: replace,
+        expected_layout_modified_at: layout.modified_at || '',
         skip_non_stock:   skipNS,
         products: planoData.products,
         plano: planoData.plano || {},

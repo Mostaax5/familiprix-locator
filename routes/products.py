@@ -1625,22 +1625,41 @@ def bulk_import_products():
     data           = request.get_json() or {}
     aisle          = str(data.get("aisle", "")).strip()
     side           = str(data.get("side", "Droite")).strip()
-    start_section  = max(1, int(data.get("start_section", data.get("section", 1)) or 1))
-    start_tablette = max(1, int(data.get("start_tablette", 1) or 1))
-    tablette_start = int(data.get("tablette_start", 1))
-    tablette_end   = int(data.get("tablette_end", 99))
+    try:
+        start_section  = max(1, int(data.get("start_section", data.get("section", 1)) or 1))
+        start_tablette = max(1, int(data.get("start_tablette", 1) or 1))
+        tablette_start = int(data.get("tablette_start", 1))
+        tablette_end   = int(data.get("tablette_end", 99))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Bornes du planogramme invalides."}), 400
     replace        = bool(data.get("replace_existing", False))
     skip_ns        = bool(data.get("skip_non_stock", False))
     products       = data.get("products", [])
 
     if not aisle:
         return jsonify({"success": False, "error": "Allée requise."}), 400
+    if tablette_start < 1 or tablette_end < tablette_start:
+        return jsonify({"success": False, "error": "Début ou fin de tablette invalide."}), 400
+    if not isinstance(products, list):
+        return jsonify({"success": False, "error": "Liste de produits invalide."}), 400
 
     from routes.layout import get_layout_row, normalize_layout_config, layout_metrics
     db = get_db()
     row = get_layout_row(db, aisle)
     if not row:
         return jsonify({"success": False, "error": f"L'allée {aisle} n'existe pas dans le plan. Créez d'abord l'allée."}), 400
+    if "expected_layout_modified_at" in data:
+        expected_layout_version = str(data.get("expected_layout_modified_at") or "")
+        current_layout_version = str(row["modified_at"] or "")
+        if expected_layout_version != current_layout_version:
+            return jsonify({
+                "success": False,
+                "code": "stale_layout",
+                "error": (
+                    "Importation annulée: le plan de cette allée a changé depuis "
+                    "l'aperçu. Rechargez le planogramme avant de continuer."
+                ),
+            }), 409
     config = normalize_layout_config(row["config_json"], row["max_section"], row["max_shelf"], row["max_position"])
     is_fixture = side not in ("Gauche", "Droite")
     if is_fixture:
@@ -1650,10 +1669,16 @@ def bulk_import_products():
         if not fixture.get("shelves"):
             return jsonify({"success": False,
                             "error": "Cette façade n'a aucune tablette. Ajoutez d'abord des tablettes dans l'onglet Plan (bouton Tablette)."}), 400
+        if start_tablette > len(fixture.get("shelves", [])):
+            return jsonify({"success": False, "error": "La tablette de départ n'existe pas sur cette façade."}), 400
     else:
         sections = ((config.get("sides", {}) or {}).get(side, {}) or {}).get("sections", [])
         if not sections:
             return jsonify({"success": False, "error": "Ce côté n'a aucune section dans le plan."}), 400
+        if start_section > len(sections):
+            return jsonify({"success": False, "error": "La section de départ n'existe pas dans le plan actuel."}), 400
+        if start_tablette > len(sections[start_section - 1].get("shelves", [])):
+            return jsonify({"success": False, "error": "La tablette de départ n'existe pas dans cette section."}), 400
 
     # Build the filtered plano lines (keep each row's full payload).
     now = utc_now_iso()
@@ -1670,7 +1695,7 @@ def bulk_import_products():
             continue
         if not (tablette_start <= tab <= tablette_end):
             continue
-        if not str(p.get("name", "")).strip():
+        if pos < 1 or not str(p.get("name", "")).strip():
             errors += 1
             continue
         selected_products += 1
@@ -1679,8 +1704,30 @@ def bulk_import_products():
             continue
         lines.append({"tablette": tab, "position": pos, "p": p})
 
+    if errors:
+        return jsonify({
+            "success": False,
+            "error": (
+                f"Importation annulée: {errors} ligne(s) sélectionnée(s) sont invalides. "
+                "Aucun produit n'a été modifié."
+            ),
+            "errors": errors,
+        }), 400
+
     placements, overflow = plan_planogram_flow(config, side, start_section, start_tablette, lines, shrink=replace)
     overflow_products = max(0, len(lines) - len(placements))
+    destination_slots = [
+        (str(section), str(shelf), str(position))
+        for section, shelf, position, _line in placements
+    ]
+    if len(destination_slots) != len(set(destination_slots)):
+        return jsonify({
+            "success": False,
+            "error": (
+                "Importation annulée: plusieurs produits visent la même position. "
+                "Corrigez les positions dans l'aperçu; aucun produit n'a été modifié."
+            ),
+        }), 409
 
     imported = 0
     skipped = filtered_non_stock
@@ -1835,13 +1882,57 @@ def bulk_import_products():
                      notes, is_plano, in_stock, flipped, username, now, username, now)
                 )
             imported += 1
-        except Exception:
-            errors += 1
+        except Exception as exc:
+            db.rollback()
+            print(f"[Planogramme] Import annulé avant validation finale: {exc}")
+            status = 409 if isinstance(exc, DatabaseIntegrityError) else 500
+            return jsonify({
+                "success": False,
+                "error": (
+                    "Importation annulée: un produit n'a pas pu être enregistré. "
+                    "Les anciennes tablettes ont été conservées sans aucun changement."
+                ),
+            }), status
 
     skipped += overflow_products   # product rows on plano shelves past the physical plan
 
     # Kept for older clients that display the former "pruned" response field.
     pruned = replaced_removed
+
+    # Verify the exact destination slice before committing. In replace mode the
+    # touched tablets must contain exactly the incoming placements, never a
+    # partial mix caused by an interrupted or malformed import.
+    final_side_rows = [
+        dict(product) for product in db.execute(
+            "SELECT * FROM products WHERE aisle=? AND side=?", (aisle, side)
+        ).fetchall()
+    ]
+    final_by_slot = {
+        (str(product.get("section", "")), str(product.get("shelf", "")),
+         str(product.get("position", ""))): product
+        for product in final_side_rows
+    }
+    missing_slots = [slot for slot in destination_slots if slot not in final_by_slot]
+    if replace:
+        final_touched_count = sum(
+            1 for product in final_side_rows
+            if (
+                str(product.get("shelf", "")) in touched_fixture_shelves
+                if is_fixture else
+                (str(product.get("section", "")), str(product.get("shelf", ""))) in touched_shelves
+            )
+        )
+    else:
+        final_touched_count = len(placements)
+    if missing_slots or (replace and final_touched_count != len(placements)):
+        db.rollback()
+        return jsonify({
+            "success": False,
+            "error": (
+                "Importation annulée pendant la vérification finale. "
+                "Les anciennes tablettes ont été conservées sans aucun changement."
+            ),
+        }), 409
 
     # Persist the plan with positions adjusted to the plano (tablette count is
     # unchanged — only the number of positions on a tablette changes).
@@ -1851,8 +1942,13 @@ def bulk_import_products():
             "UPDATE aisle_layouts SET config_json=?, max_section=?, max_shelf=?, max_position=?, modified_by=?, modified_at=? WHERE aisle=?",
             (json.dumps(config), ms, msh, mp, username, now, aisle),
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        db.rollback()
+        print(f"[Planogramme] Import annulé pendant la sauvegarde du plan: {exc}")
+        return jsonify({
+            "success": False,
+            "error": "Importation annulée: le plan n'a pas pu être sauvegardé. Aucun produit n'a été modifié.",
+        }), 500
 
     # Record this import in the planogram history.
     try:
@@ -1867,18 +1963,18 @@ def bulk_import_products():
              str(plano.get("name", "")), str(plano.get("number", "")), str(plano.get("version", "")),
              aisle, side, str(start_section), str(tablette_start), str(tablette_end), imported, skipped),
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        db.rollback()
+        print(f"[Planogramme] Import annulé pendant l'historique: {exc}")
+        return jsonify({
+            "success": False,
+            "error": "Importation annulée: l'historique n'a pas pu être enregistré. Aucun produit n'a été modifié.",
+        }), 500
     db.commit()
 
     # Return exactly the committed slice the browser must replace. This avoids
     # two full-list downloads before the planogram can visibly update.
-    affected_products = [
-        row_to_product(product) for product in db.execute(
-            "SELECT * FROM products WHERE aisle=? AND side=?",
-            (aisle, side),
-        ).fetchall()
-    ]
+    affected_products = [row_to_product(product) for product in final_side_rows]
     affected_products.sort(key=location_sort_key)
     aisle_product_count_row = db.execute(
         "SELECT COUNT(*) AS n FROM products WHERE aisle=?", (aisle,)

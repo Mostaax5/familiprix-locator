@@ -83,6 +83,9 @@ class DatabaseConnection:
     def commit(self):
         self.connection.commit()
 
+    def rollback(self):
+        self.connection.rollback()
+
     def close(self):
         # Pooled connections go back to the pool (rolled back + reset by putconn)
         # instead of paying a fresh TCP+TLS+auth handshake on the next request.

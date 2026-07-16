@@ -120,7 +120,9 @@ def layout_metrics(config):
 
 def get_layout_row(db, aisle):
     return db.execute(
-        "SELECT aisle, config_json, max_section, max_shelf, max_position, enabled FROM aisle_layouts WHERE aisle=?",
+        """SELECT aisle, config_json, max_section, max_shelf, max_position,
+                  enabled, modified_by, modified_at
+           FROM aisle_layouts WHERE aisle=?""",
         (str(aisle).strip(),),
     ).fetchone()
 
@@ -170,12 +172,17 @@ def products_outside_layout(db, aisle, config):
     return [row for row in rows if not product_fits_layout(row, config)]
 
 
-def remove_products_outside_layout(db, aisle, config):
-    removable_ids = [int(row["id"]) for row in products_outside_layout(db, aisle, config)]
-    if removable_ids:
-        placeholders = ",".join("?" for _ in removable_ids)
-        db.execute(f"DELETE FROM products WHERE id IN ({placeholders})", tuple(removable_ids))
-    return len(removable_ids)
+def remove_products_outside_layout(db, aisle, config, username, now=None):
+    outside = products_outside_layout(db, aisle, config)
+    if not outside:
+        return 0
+    removable_ids = [int(row["id"]) for row in outside]
+    placeholders = ",".join("?" for _ in removable_ids)
+    products = db.execute(
+        f"SELECT * FROM products WHERE id IN ({placeholders})", tuple(removable_ids)
+    ).fetchall()
+    from routes.products import archive_and_delete_products
+    return archive_and_delete_products(db, products, username, now)
 
 
 def validate_layout_slot(db, aisle, side, section, shelf, position):
@@ -257,15 +264,16 @@ def create_layout_aisle():
     exists = db.execute("SELECT aisle FROM aisle_layouts WHERE aisle=?", (aisle,)).fetchone()
     if exists:
         return jsonify({"error": f"L’allée {aisle} existe déjà."}), 409
+    now = utc_now_iso()
     db.execute(
         """
         INSERT INTO aisle_layouts (aisle, max_section, max_shelf, max_position, config_json, enabled, modified_by, modified_at)
         VALUES (?, ?, ?, ?, ?, 1, ?, ?)
         """,
-        (aisle, max_section, max_shelf, max_position, json.dumps(config), username, utc_now_iso()),
+        (aisle, max_section, max_shelf, max_position, json.dumps(config), username, now),
     )
     db.commit()
-    return jsonify({"success": True})
+    return jsonify({"success": True, "modified_at": now})
 
 
 @layout_bp.route("/api/layout/aisles/<aisle>", methods=["PUT"])
@@ -278,6 +286,22 @@ def update_layout_aisle(aisle):
     max_section, max_shelf, max_position = layout_metrics(config)
     enabled = 1 if data.get("enabled", True) else 0
     db = get_db()
+    current = get_layout_row(db, aisle)
+    if not current:
+        return jsonify({"error": "Allée non trouvée."}), 404
+    if "expected_modified_at" in data:
+        expected = str(data.get("expected_modified_at") or "")
+        actual = str(current["modified_at"] or "")
+        if expected != actual:
+            return jsonify({
+                "success": False,
+                "code": "stale_layout",
+                "error": (
+                    "Sauvegarde refusée: ce plan a été modifié depuis son ouverture. "
+                    "Rechargez-le avant de continuer afin de ne pas écraser les changements récents."
+                ),
+                "current_modified_at": actual,
+            }), 409
     protected = products_outside_layout(db, aisle, config)
     if protected:
         # Autosave sends the entire aisle configuration. A stale phone snapshot
@@ -294,18 +318,19 @@ def update_layout_aisle(aisle):
             ),
             "protected_products": len(protected),
         }), 409
+    now = utc_now_iso()
     result = db.execute(
         """
         UPDATE aisle_layouts
         SET max_section=?, max_shelf=?, max_position=?, config_json=?, enabled=?, modified_by=?, modified_at=?
         WHERE aisle=?
         """,
-        (max_section, max_shelf, max_position, json.dumps(config), enabled, username, utc_now_iso(), aisle),
+        (max_section, max_shelf, max_position, json.dumps(config), enabled, username, now, aisle),
     )
     db.commit()
     if result.rowcount == 0:
         return jsonify({"error": "Allée non trouvée."}), 404
-    return jsonify({"success": True, "removed_products": 0})
+    return jsonify({"success": True, "removed_products": 0, "modified_at": now})
 
 
 @layout_bp.route("/api/layout/aisles/<aisle>", methods=["DELETE"])
@@ -314,9 +339,13 @@ def delete_layout_aisle(aisle):
     if error:
         return error
     db = get_db()
-    from routes.products import first_column
-    removed_products = first_column(db.execute("SELECT COUNT(*) FROM products WHERE aisle=?", (aisle,)).fetchone()) or 0
-    db.execute("DELETE FROM products WHERE aisle=?", (aisle,))
+    if not get_layout_row(db, aisle):
+        return jsonify({"error": "Allée non trouvée."}), 404
+    from routes.products import archive_and_delete_products
+    products = db.execute("SELECT * FROM products WHERE aisle=?", (aisle,)).fetchall()
+    removed_products = archive_and_delete_products(
+        db, products, username, utc_now_iso()
+    )
     result = db.execute("DELETE FROM aisle_layouts WHERE aisle=?", (aisle,))
     db.commit()
     if result.rowcount == 0:
@@ -335,8 +364,14 @@ def swap_sections(aisle):
     sec_b = str(data.get("section_b", "")).strip()
     if not side or not sec_a or not sec_b or sec_a == sec_b:
         return jsonify({"success": False, "error": "Paramètres invalides."}), 400
-    now = utc_now_iso()
     db = get_db()
+    row = get_layout_row(db, aisle)
+    if not row:
+        return jsonify({"success": False, "error": "Allée introuvable."}), 404
+    stale = _stale_layout_response(row, data)
+    if stale:
+        return stale
+    now = utc_now_iso()
     db.execute("UPDATE products SET section='__sw__', modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=?", (username, now, aisle, side, sec_a))
     db.execute("UPDATE products SET section=?,       modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=?", (sec_a, username, now, aisle, side, sec_b))
     db.execute("UPDATE products SET section=?,       modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=?", (sec_b, username, now, aisle, side, "__sw__"))
@@ -356,8 +391,14 @@ def swap_shelves(aisle):
     sh_b    = str(data.get("shelf_b", "")).strip()
     if not side or not sh_a or not sh_b or sh_a == sh_b:
         return jsonify({"success": False, "error": "Paramètres invalides."}), 400
-    now = utc_now_iso()
     db = get_db()
+    row = get_layout_row(db, aisle)
+    if not row:
+        return jsonify({"success": False, "error": "Allée introuvable."}), 404
+    stale = _stale_layout_response(row, data)
+    if stale:
+        return stale
+    now = utc_now_iso()
     db.execute("UPDATE products SET shelf='__sw__', modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=? AND shelf=?", (username, now, aisle, side, section, sh_a))
     db.execute("UPDATE products SET shelf=?,        modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=? AND shelf=?", (sh_a, username, now, aisle, side, section, sh_b))
     db.execute("UPDATE products SET shelf=?,        modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=? AND shelf=?", (sh_b, username, now, aisle, side, section, "__sw__"))
@@ -378,8 +419,14 @@ def swap_positions_route(aisle):
     pos_b   = str(data.get("position_b", "")).strip()
     if not side or not shelf or not pos_a or not pos_b or pos_a == pos_b:
         return jsonify({"success": False, "error": "Paramètres invalides."}), 400
-    now = utc_now_iso()
     db = get_db()
+    row = get_layout_row(db, aisle)
+    if not row:
+        return jsonify({"success": False, "error": "Allée introuvable."}), 404
+    stale = _stale_layout_response(row, data)
+    if stale:
+        return stale
+    now = utc_now_iso()
     db.execute("UPDATE products SET position='__sw__', modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=? AND shelf=? AND position=?", (username, now, aisle, side, section, shelf, pos_a))
     db.execute("UPDATE products SET position=?,        modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=? AND shelf=? AND position=?", (pos_a, username, now, aisle, side, section, shelf, pos_b))
     db.execute("UPDATE products SET position=?,        modified_by=?, modified_at=? WHERE aisle=? AND side=? AND section=? AND shelf=? AND position=?", (pos_b, username, now, aisle, side, section, shelf, "__sw__"))
@@ -397,9 +444,13 @@ def _renumber_after_remove(db, username, now, aisle, side, field, removed, secti
     if field == "shelf" and section is not None:
         where += " AND section=?"
         params.append(section)
-    # 1. delete products in the removed section/shelf
-    delete_result = db.execute(f"DELETE FROM products WHERE {where} AND {field}=?", tuple(params + [str(removed)]))
-    removed_count = max(0, int(getattr(delete_result, "rowcount", 0) or 0))
+    # 1. archive products in the removed section/shelf, then remove them.
+    removed_rows = db.execute(
+        f"SELECT * FROM products WHERE {where} AND {field}=?",
+        tuple(params + [str(removed)]),
+    ).fetchall()
+    from routes.products import archive_and_delete_products
+    removed_count = archive_and_delete_products(db, removed_rows, username, now)
     # 2. shift every higher number down by one. Process in ASCENDING order so each
     #    lower target slot is vacated before the next product shifts into it —
     #    otherwise the unique (aisle,side,section,shelf,position) index would clash.
@@ -421,14 +472,37 @@ def _renumber_after_remove(db, username, now, aisle, side, field, removed, secti
 
 
 def _config_for_removal(db, aisle, supplied_config):
-    """Build an atomic removal from the structure currently shown to the user."""
+    """Build an atomic removal from the latest server-side structure.
+
+    A phone can keep an old full-aisle snapshot open for hours. Trusting that
+    snapshot here once made an explicit one-tablet removal collapse unrelated
+    sections. The request now identifies only what to remove; the database is
+    always the source of truth for everything else.
+    """
     row = get_layout_row(db, aisle)
     if not row:
         return None, None
-    source = supplied_config if isinstance(supplied_config, dict) else row["config_json"]
     return row, normalize_layout_config(
-        source, row["max_section"], row["max_shelf"], row["max_position"]
+        row["config_json"], row["max_section"], row["max_shelf"], row["max_position"]
     )
+
+
+def _stale_layout_response(row, data):
+    if "expected_modified_at" not in data:
+        return None
+    expected = str(data.get("expected_modified_at") or "")
+    actual = str(row["modified_at"] or "")
+    if expected == actual:
+        return None
+    return jsonify({
+        "success": False,
+        "code": "stale_layout",
+        "error": (
+            "Action refusée: ce plan a été modifié depuis son ouverture. "
+            "Rechargez-le afin de ne pas modifier la mauvaise section ou tablette."
+        ),
+        "current_modified_at": actual,
+    }), 409
 
 
 def _remove_section_from_config(config, side, section_number):
@@ -486,17 +560,23 @@ def remove_section(aisle):
     if not side or not section:
         return jsonify({"success": False, "error": "Paramètres invalides."}), 400
     db = get_db()
-    _row, config = _config_for_removal(db, aisle, data.get("config"))
+    row, config = _config_for_removal(db, aisle, data.get("config"))
     if config is None:
         return jsonify({"success": False, "error": "Allée non trouvée."}), 404
+    stale = _stale_layout_response(row, data)
+    if stale:
+        return stale
     if not _remove_section_from_config(config, side, section):
         return jsonify({"success": False, "error": "Cette section n'existe plus."}), 409
     now = utc_now_iso()
     removed_products = _renumber_after_remove(db, username, now, aisle, side, "section", section)
-    removed_products += remove_products_outside_layout(db, aisle, config)
+    removed_products += remove_products_outside_layout(db, aisle, config, username, now)
     _persist_aisle_config(db, aisle, config, username, now)
     db.commit()
-    return jsonify({"success": True, "config": config, "removed_products": removed_products})
+    return jsonify({
+        "success": True, "config": config,
+        "removed_products": removed_products, "modified_at": now,
+    })
 
 
 @layout_bp.route("/api/layout/aisles/<aisle>/remove-shelf", methods=["POST"])
@@ -511,9 +591,12 @@ def remove_shelf(aisle):
     if not side or not shelf:
         return jsonify({"success": False, "error": "Paramètres invalides."}), 400
     db = get_db()
-    _row, config = _config_for_removal(db, aisle, data.get("config"))
+    row, config = _config_for_removal(db, aisle, data.get("config"))
     if config is None:
         return jsonify({"success": False, "error": "Allée non trouvée."}), 404
+    stale = _stale_layout_response(row, data)
+    if stale:
+        return stale
     if not _remove_shelf_from_config(config, side, section, shelf):
         return jsonify({"success": False, "error": "Cette tablette n'existe plus."}), 409
     # Fixture sides (Façade A/B, présentoir façades) carry no meaningful section
@@ -523,10 +606,13 @@ def remove_shelf(aisle):
     removed_products = _renumber_after_remove(
         db, username, now, aisle, side, "shelf", shelf, section=section_scope
     )
-    removed_products += remove_products_outside_layout(db, aisle, config)
+    removed_products += remove_products_outside_layout(db, aisle, config, username, now)
     _persist_aisle_config(db, aisle, config, username, now)
     db.commit()
-    return jsonify({"success": True, "config": config, "removed_products": removed_products})
+    return jsonify({
+        "success": True, "config": config,
+        "removed_products": removed_products, "modified_at": now,
+    })
 
 
 def _persist_aisle_config(db, aisle, config, username, now):
@@ -582,6 +668,18 @@ def move_section_to_aisle(aisle):
     src_row, tgt_row = get_layout_row(db, aisle), get_layout_row(db, target_aisle)
     if not src_row or not tgt_row:
         return jsonify({"success": False, "error": "Allée introuvable."}), 404
+    if "expected_modified_at" in data:
+        stale = _stale_layout_response(src_row, {
+            "expected_modified_at": data.get("expected_modified_at")
+        })
+        if stale:
+            return stale
+    if "expected_target_modified_at" in data:
+        stale = _stale_layout_response(tgt_row, {
+            "expected_modified_at": data.get("expected_target_modified_at")
+        })
+        if stale:
+            return stale
     src_cfg = normalize_layout_config(src_row["config_json"], src_row["max_section"], src_row["max_shelf"], src_row["max_position"])
     src_sections = src_cfg["sides"][side]["sections"]
     if section_index < 0 or section_index >= len(src_sections):
@@ -594,7 +692,11 @@ def move_section_to_aisle(aisle):
         final = _bubble_section(db, username, now, src_cfg, aisle, side, section_index, to_index)
         _persist_aisle_config(db, aisle, src_cfg, username, now)
         db.commit()
-        return jsonify({"success": True, "target_aisle": str(aisle).strip(), "target_side": side, "target_section": final + 1})
+        return jsonify({
+            "success": True, "target_aisle": str(aisle).strip(),
+            "target_side": side, "target_section": final + 1,
+            "modified_at": now,
+        })
 
     # ── Other côté / allée: move there, then insert at the chosen position ──────
     tgt_cfg = normalize_layout_config(tgt_row["config_json"], tgt_row["max_section"], tgt_row["max_shelf"], tgt_row["max_position"])
@@ -615,4 +717,8 @@ def move_section_to_aisle(aisle):
     _persist_aisle_config(db, aisle, src_cfg, username, now)
     _persist_aisle_config(db, target_aisle, tgt_cfg, username, now)
     db.commit()
-    return jsonify({"success": True, "target_aisle": target_aisle, "target_side": target_side, "target_section": final_number})
+    return jsonify({
+        "success": True, "target_aisle": target_aisle,
+        "target_side": target_side, "target_section": final_number,
+        "modified_at": now,
+    })
