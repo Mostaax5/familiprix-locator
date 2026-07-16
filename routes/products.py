@@ -7,7 +7,7 @@ import math
 import tempfile
 import threading
 import unicodedata
-from collections import Counter
+from collections import Counter, deque
 from difflib import SequenceMatcher
 from flask import Blueprint, request, jsonify
 from database import get_db, DatabaseIntegrityError
@@ -727,29 +727,75 @@ def sync_reference_metadata_to_products(db, now=None):
 # A coalescing queue keeps exactly one image worker alive. Repeated Client searches
 # can safely request the same missing UPCs without creating waiting background threads.
 _IMAGE_FILL_STATE_LOCK = threading.Lock()
-_IMAGE_FILL_PENDING = set()
+_IMAGE_FILL_PENDING = deque()
+_IMAGE_FILL_QUEUED = set()
+_IMAGE_FILL_WORKING = set()
+_IMAGE_FILL_RETRY_AFTER = {}
 _IMAGE_FILL_ACTIVE = False
+_IMAGE_MISS_RETRY_SECONDS = 15 * 60
+_IMAGE_ERROR_RETRY_SECONDS = 30
 
 
-def schedule_image_fill(barcodes):
+def persist_image_for_barcode(db, barcode, image_url, now=None):
+    """Fill blank placed/reference images for every equivalent UPC spelling."""
+    image_url = str(image_url or "").strip()
+    if not image_url:
+        return 0
+    changed = 0
+    timestamp = now or utc_now_iso()
+    for candidate in build_barcode_candidates(barcode):
+        cursor = db.execute(
+            "UPDATE products SET image_url=?, modified_at=? "
+            "WHERE barcode=? AND TRIM(COALESCE(image_url,'')) = ''",
+            (image_url, timestamp, candidate),
+        )
+        changed += max(0, int(cursor.rowcount or 0))
+        reference_cursor = db.execute(
+            "UPDATE product_reference SET image_url=?, updated_at=? "
+            "WHERE barcode=? AND TRIM(COALESCE(image_url,'')) = ''",
+            (image_url, timestamp, candidate),
+        )
+        changed += max(0, int(reference_cursor.rowcount or 0))
+    return changed
+
+
+def schedule_image_fill(barcodes, priority=True):
     """Fetch missing product images online in a background thread — fully
     automatic, no user action. Serialized (one fill at a time) and each lookup's
     internal fan-out is capped, so imports can be chained safely all day."""
     global _IMAGE_FILL_ACTIVE
-    codes = {str(b).strip() for b in (barcodes or []) if str(b or "").strip()}
+    codes = []
+    seen = set()
+    for barcode in barcodes or []:
+        code = str(barcode or "").strip()
+        if code and code not in seen:
+            seen.add(code)
+            codes.append(code)
     if not codes:
         return
 
     with _IMAGE_FILL_STATE_LOCK:
-        _IMAGE_FILL_PENDING.update(codes)
+        iterable = reversed(codes) if priority else codes
+        for code in iterable:
+            if _IMAGE_FILL_RETRY_AFTER.get(code, 0) > time.time():
+                continue
+            if code in _IMAGE_FILL_QUEUED or code in _IMAGE_FILL_WORKING:
+                continue
+            if priority:
+                _IMAGE_FILL_PENDING.appendleft(code)
+            else:
+                _IMAGE_FILL_PENDING.append(code)
+            _IMAGE_FILL_QUEUED.add(code)
         if _IMAGE_FILL_ACTIVE:
+            return
+        if not _IMAGE_FILL_PENDING:
             return
         _IMAGE_FILL_ACTIVE = True
 
     def worker():
         global _IMAGE_FILL_ACTIVE
         from database import connect_db
-        from routes.ai import lookup_product_online
+        from routes.ai import lookup_product_online, online_matches_catalog
         db = None
         processed = 0
         try:
@@ -758,7 +804,9 @@ def schedule_image_fill(barcodes):
                 with _IMAGE_FILL_STATE_LOCK:
                     if not _IMAGE_FILL_PENDING:
                         break
-                    bc = _IMAGE_FILL_PENDING.pop()
+                    bc = _IMAGE_FILL_PENDING.popleft()
+                    _IMAGE_FILL_QUEUED.discard(bc)
+                    _IMAGE_FILL_WORKING.add(bc)
                 try:
                     # Reuse an image already known for this UPC (including the
                     # reference catalogue); only then fan out to online sources.
@@ -769,23 +817,48 @@ def schedule_image_fill(barcodes):
                         # lookup's source requests to finish before starting another.
                         with memory_intensive_task("product_image"):
                             product = lookup_product_online(
-                                bc, max_workers=2, wait_for_cleanup=True
+                                bc, max_workers=2, wait_for_cleanup=True,
+                                require_image=True,
                             )
                         img = str((product or {}).get("image_url", "")).strip()
+                        # Exact UPC sources are still checked against the imported
+                        # catalogue name before their image is attached.
+                        catalog_rows = _rows_for_barcodes(
+                            db, "product_reference", "barcode, name, brand", [bc]
+                        )
+                        if not catalog_rows:
+                            catalog_rows = _rows_for_barcodes(
+                                db, "products", "barcode, name, brand", [bc]
+                            )
+                        if img and catalog_rows:
+                            catalog = dict(catalog_rows[0])
+                            if not online_matches_catalog(
+                                catalog.get("name", ""), catalog.get("brand", ""), product
+                            ):
+                                img = ""
                     if img:
                         now = utc_now_iso()
-                        updated = False
-                        for candidate in build_barcode_candidates(bc):
-                            db.execute(
-                                "UPDATE products SET image_url=?, modified_at=? "
-                                "WHERE barcode=? AND TRIM(COALESCE(image_url,'')) = ''",
-                                (img, now, candidate),
-                            )
-                            updated = True
-                        if updated:
+                        # Save both on the shelf and in the reusable UPC catalogue
+                        # so a later re-import displays the picture immediately.
+                        changed = persist_image_for_barcode(db, bc, img, now=now)
+                        if changed:
                             db.commit()
-                except Exception:
-                    pass
+                        with _IMAGE_FILL_STATE_LOCK:
+                            _IMAGE_FILL_RETRY_AFTER.pop(bc, None)
+                    else:
+                        print(f"[Images] aucune photo verifiee pour UPC {bc}")
+                        with _IMAGE_FILL_STATE_LOCK:
+                            _IMAGE_FILL_RETRY_AFTER[bc] = time.time() + _IMAGE_MISS_RETRY_SECONDS
+                except Exception as exc:
+                    print(f"[Images] echec UPC {bc}: {type(exc).__name__}: {exc}")
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    with _IMAGE_FILL_STATE_LOCK:
+                        _IMAGE_FILL_RETRY_AFTER[bc] = time.time() + _IMAGE_ERROR_RETRY_SECONDS
+                with _IMAGE_FILL_STATE_LOCK:
+                    _IMAGE_FILL_WORKING.discard(bc)
                 processed += 1
                 if processed % 20 == 0:
                     release_unused_memory()
@@ -803,7 +876,7 @@ def schedule_image_fill(barcodes):
                 # The next normal scheduling event can retry after recovery.
                 pending_snapshot = list(_IMAGE_FILL_PENDING) if db is not None else []
             if pending_snapshot:
-                schedule_image_fill(pending_snapshot)
+                schedule_image_fill(pending_snapshot, priority=False)
             release_unused_memory()
 
     threading.Thread(target=worker, daemon=True).start()
@@ -1174,13 +1247,19 @@ def get_product_images():
     images = {}
     placeholders = ",".join("?" for _ in ids)
     rows = db.execute(
-        f"SELECT id, image_url FROM products WHERE id IN ({placeholders})", tuple(ids)
+        f"SELECT id, image_url, barcode FROM products WHERE id IN ({placeholders})", tuple(ids)
     ).fetchall()
+    missing_barcodes = []
     for row in rows:
         item = dict(row)
         value = str(item.get("image_url", "") or "").strip()
         if value:
             images[str(item["id"])] = value
+        elif str(item.get("barcode", "") or "").strip():
+            missing_barcodes.append(item["barcode"])
+    # A product the employee is actively viewing jumps ahead of the background
+    # backlog. The response stays instant; enrichment remains off-request.
+    schedule_image_fill(missing_barcodes)
     return jsonify({"images": images})
 
 
@@ -2075,13 +2154,14 @@ def schedule_backfill_missing():
             db = connect_db()
             try:
                 rows = db.execute(
-                    "SELECT DISTINCT barcode FROM products "
-                    "WHERE TRIM(COALESCE(barcode,'')) <> '' AND TRIM(COALESCE(image_url,'')) = ''"
+                    "SELECT barcode, MAX(COALESCE(created_at,'')) AS newest FROM products "
+                    "WHERE TRIM(COALESCE(barcode,'')) <> '' AND TRIM(COALESCE(image_url,'')) = '' "
+                    "GROUP BY barcode ORDER BY newest DESC"
                 ).fetchall()
                 codes = [(r["barcode"] if isinstance(r, dict) else r[0]) for r in rows]
             finally:
                 db.close()
-            schedule_image_fill(codes)
+            schedule_image_fill(codes, priority=False)
         except Exception:
             pass
 

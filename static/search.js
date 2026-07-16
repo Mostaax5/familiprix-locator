@@ -326,6 +326,54 @@ function onSearchFieldChange() {
 }
 
 // ── Search tab ────────────────────────────────────────────────────────────────
+let _searchImagePollTimer = null;
+let _searchImagePollGeneration = 0;
+
+function cancelSearchImagePolling() {
+  _searchImagePollGeneration += 1;
+  window.clearTimeout(_searchImagePollTimer);
+  _searchImagePollTimer = null;
+}
+
+function startSearchImagePolling(products) {
+  cancelSearchImagePolling();
+  const ids = [...new Set((products || [])
+    .filter(product => product?.id && !product.image_url)
+    .map(product => Number(product.id))
+    .filter(Number.isInteger))].slice(0, 100);
+  if (!ids.length || typeof apiGetProductImages !== 'function') return;
+
+  const generation = _searchImagePollGeneration;
+  const pending = new Set(ids);
+  const poll = async attempt => {
+    if (generation !== _searchImagePollGeneration) return;
+    const data = await apiGetProductImages(ids);
+    if (generation !== _searchImagePollGeneration) return;
+    const images = data?.images || {};
+    for (const [rawId, imageUrl] of Object.entries(images)) {
+      const id = Number(rawId);
+      if (!imageUrl || !Number.isInteger(id)) continue;
+      pending.delete(id);
+      for (const product of allProductsCache) {
+        if (Number(product.id) === id && !product.image_url) product.image_url = imageUrl;
+      }
+      document.querySelectorAll(`[data-product-image-id="${id}"]`).forEach(placeholder => {
+        const img = document.createElement('img');
+        img.className = 'product-thumb';
+        img.src = imageUrl;
+        img.alt = 'Image produit';
+        img.loading = 'lazy';
+        img.onerror = () => img.remove();
+        placeholder.replaceWith(img);
+      });
+    }
+    if (pending.size && attempt < 9) {
+      _searchImagePollTimer = window.setTimeout(() => poll(attempt + 1), 3000);
+    }
+  };
+  poll(0);
+}
+
 function filterByHomeBrand(brand) {
   const products = allProductsCache.filter(p => brand ? p.brand?.toLowerCase().startsWith(brand.toLowerCase()) : isHomeBrand(p.brand));
   const div = document.getElementById('searchResults');
@@ -339,6 +387,7 @@ function filterByHomeBrand(brand) {
     return aKey.localeCompare(bKey);
   });
   div.innerHTML = `<div class="card"><div class="section-title">★ ${brand || 'Marques maison'} — ${sorted.length} produit${sorted.length > 1 ? 's' : ''} cartographie${sorted.length > 1 ? 's' : ''}</div>${sorted.map(p => productCard(p, false, false)).join('')}</div>`;
+  startSearchImagePolling(sorted);
 }
 
 async function doSearch() {
@@ -353,7 +402,7 @@ function scheduleSearch() {
 
 async function doSearchValue(q) {
   const div = document.getElementById('searchResults');
-  if (!q) { div.innerHTML = ''; return; }
+  if (!q) { cancelSearchImagePolling(); div.innerHTML = ''; return; }
 
   // Explicit "Code" mode: match only the pharmacy code, never barcode/name.
   if (getSearchField() === 'code') {
@@ -378,11 +427,13 @@ async function doSearchValue(q) {
     const allByBarcode = productsByBarcodeFromCache(q);
     if (allByBarcode.length) {
       div.innerHTML = productCardMultiLocation(allByBarcode);
+      startSearchImagePolling(allByBarcode);
       return;
     }
     try {
       const product = await apiGetProductByBarcode(q);
       div.innerHTML = productCard(product, false);
+      startSearchImagePolling([product]);
       return;
     } catch (e) {
       if (e.status && e.status !== 404) {
@@ -435,6 +486,7 @@ async function appendReferenceMatches(q, div, placed) {
 }
 
 function groupAndRenderSearchResults(products) {
+  startSearchImagePolling(products);
   // Group products by barcode; products without barcode are shown individually
   const groups = [];
   const seenBarcodes = new Set();
@@ -460,7 +512,9 @@ function productCardMultiLocation(entries) {
   return `<div class="card">
     ${entries.some(p => isHomeBrand(p.brand)) ? `<div class="home-badge">★ Marque maison Familiprix</div>` : ''}
     <div class="product-layout">
-      ${primary.image_url ? `<img class="product-thumb" src="${esc(primary.image_url)}" alt="">` : ''}
+      ${primary.image_url
+        ? `<img class="product-thumb" src="${esc(primary.image_url)}" alt="Image produit">`
+        : (primary.id ? `<span class="product-thumb product-thumb-placeholder" data-product-image-id="${Number(primary.id)}" aria-label="Photo en attente"></span>` : '')}
       <div class="product-info">
         <div class="name">${esc(primary.name)}</div>
         ${primary.brand ? `<div class="product-brand">${esc(primary.brand)}</div>` : ''}
@@ -478,4 +532,5 @@ function productCardMultiLocation(entries) {
 window.AppSearch = {
   doSearch, doSearchValue, filterByHomeBrand, scheduleSearch, onSearchFieldChange,
   searchProductsFromCache, productsByBarcodeFromCache, invalidateProductSearchIndexes,
+  startSearchImagePolling, cancelSearchImagePolling,
 };

@@ -1068,7 +1068,9 @@ function productCard(p, showDelete=true, showAiButton=true) {
     ${showDelete && p.id && !catalogOnly ? `<button class="delete-btn" onclick="deleteProduct(${p.id})" title="Supprimer">✕</button>` : ''}
     ${isHomeBrand(p.brand) ? `<div class="home-badge">★ Marque maison Familiprix</div>` : ''}
     <div class="product-layout">
-      ${p.image_url ? `<img class="product-thumb" src="${esc(p.image_url)}" alt="Image produit">` : ''}
+      ${p.image_url
+        ? `<img class="product-thumb" src="${esc(p.image_url)}" alt="Image produit">`
+        : (p.id ? `<span class="product-thumb product-thumb-placeholder" data-product-image-id="${Number(p.id)}" aria-label="Photo en attente"></span>` : '')}
       <div class="product-info">
         <div style="margin-bottom:3px">${planoBadge}</div>
         <div class="name">${esc(p.name)}</div>

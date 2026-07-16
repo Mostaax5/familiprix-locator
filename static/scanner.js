@@ -133,14 +133,25 @@ async function startCamera() {
 
   resetCameraCandidate();
 
-  // Pre-load Tesseract NOW so OCR is ready the moment it's needed as a last resort.
-  // Without this, OCR fires later but Tesseract still takes 3-5s to download,
-  // so the first several OCR cycles silently return null.
-  ensureOcrLoaded().catch(() => {});
+  // Android Chrome exposes a fast OS-level barcode reader. Try it before loading
+  // any CDN decoder or OCR library so the camera opens and reads UPCs immediately.
+  if ('BarcodeDetector' in window) {
+    try {
+      await startNativeScan(video, status, button, reader);
+      return;
+    } catch (error) {
+      console.warn('[Scanner] Native BarcodeDetector failed, using web decoder:', error);
+      if (scannerStream) {
+        scannerStream.getTracks().forEach(track => track.stop());
+        scannerStream = null;
+        cameraTrack = null;
+        video.srcObject = null;
+      }
+    }
+  }
 
-  // PRIMARY engine: Quagga + ZXing. ZXing decodes the full-resolution frame and
-  // reads small/dense etiquette UPC bars best, so it's the main reader (Quagga runs
-  // alongside as a lightweight backup). This path works on iPhone WebKit too.
+  // iPhone/WebKit and older Android browsers use Quagga + ZXing. OCR remains a
+  // delayed last resort and is loaded only if the live barcode readers need it.
   try {
     await ensureQuaggaLoaded();
     if ('Quagga' in window) {
@@ -151,41 +162,62 @@ async function startCamera() {
       return;
     }
   } catch (error) {
-    console.warn('[Scanner] Quagga/ZXing path failed, trying native BarcodeDetector:', error);
+    console.warn('[Scanner] Quagga path failed, trying ZXing:', error);
   }
 
-  // FALLBACK: OS-level BarcodeDetector (Android Chrome / supported browsers) — only
-  // used if the Quagga/ZXing libraries can't load.
-  if ('BarcodeDetector' in window) {
-    try {
-      await startNativeScan(video, status, button, reader);
+  // Direct ZXing stream fallback if Quagga cannot initialize on this browser.
+  try {
+    if (await ensureZXingLoaded()) {
+      video.style.display = 'block';
+      if (reader) { reader.style.display = 'none'; reader.innerHTML = ''; }
+      await startZXingLiveScan(video, status, button);
       return;
-    } catch (err) {
-      console.warn('[Scanner] BarcodeDetector fallback also failed:', err);
     }
+  } catch (error) {
+    console.warn('[Scanner] ZXing fallback failed:', error);
   }
 
   status.textContent = 'Camera bloquee';
   showCameraHint('Impossible d ouvrir la camera. Sur telephone, utilisez une adresse HTTPS, ou entrez le code manuellement.');
 }
 
-async function startNativeScan(video, status, button, reader) {
-  const supported = await BarcodeDetector.getSupportedFormats();
-  const want = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf'];
-  const formats = want.filter(f => supported.includes(f));
-  const detector = new BarcodeDetector({formats: formats.length ? formats : ['ean_13', 'upc_a']});
-
-  const stream = await navigator.mediaDevices.getUserMedia({
+async function openEnvironmentCamera(idealWidth=1920, idealHeight=1080) {
+  const preferred = {
     video: {
-      facingMode: 'environment',
-      width: {ideal: 1920, min: 640},
-      height: {ideal: 1080, min: 480},
+      facingMode: {ideal: 'environment'},
+      width: {ideal: idealWidth, min: 640},
+      height: {ideal: idealHeight, min: 480},
       advanced: [{focusMode: 'continuous'}]
     }
-  });
+  };
+  try {
+    return await navigator.mediaDevices.getUserMedia(preferred);
+  } catch (error) {
+    // Some Android camera drivers reject one unsupported advanced constraint.
+    if (!['OverconstrainedError', 'NotFoundError', 'TypeError'].includes(error?.name)) {
+      throw error;
+    }
+    return navigator.mediaDevices.getUserMedia({
+      video: {facingMode: {ideal: 'environment'}}
+    });
+  }
+}
+
+async function startNativeScan(video, status, button, reader) {
+  let supported = [];
+  try {
+    supported = await BarcodeDetector.getSupportedFormats();
+  } catch (_) {}
+  const want = ['ean_13', 'ean_8', 'upc_a', 'upc_e'];
+  const formats = want.filter(f => supported.includes(f));
+  const detector = formats.length ? new BarcodeDetector({formats}) : new BarcodeDetector();
+
+  const stream = await openEnvironmentCamera(1920, 1080);
   scannerStream = stream;
   cameraTrack = stream.getVideoTracks()[0];
   video.srcObject = stream;
+  video.playsInline = true;
+  video.muted = true;
   video.style.display = 'block';
   if (reader) { reader.style.display = 'none'; reader.innerHTML = ''; }
   await video.play().catch(() => {});
@@ -228,7 +260,9 @@ function showCameraExtras() {
   const ids = cameraUsageMode === 'scan'
     ? ['torchButton', 'zoomSlider']
     : ['searchTorchButton', 'searchZoomSlider'];
-  const caps = cameraTrack ? cameraTrack.getCapabilities() : {};
+  const caps = cameraTrack && typeof cameraTrack.getCapabilities === 'function'
+    ? cameraTrack.getCapabilities()
+    : {};
 
   const torchEl = document.getElementById(ids[0]);
   if (torchEl) {
@@ -356,6 +390,35 @@ async function ensureZXingLoaded() {
   return zxingLibraryPromise;
 }
 
+function createZxingCanvasReader(includeIndustrial=false) {
+  const formats = [
+    ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
+    ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.UPC_E,
+  ];
+  if (includeIndustrial) {
+    formats.push(
+      ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.CODE_39,
+      ZXing.BarcodeFormat.ITF,
+    );
+  }
+  const hints = new Map();
+  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
+  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+  const reader = new ZXing.MultiFormatReader();
+  reader.setHints(hints);
+  return reader;
+}
+
+function decodeZxingCanvas(reader, canvas) {
+  const source = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
+  const bitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(source));
+  try {
+    return reader.decode(bitmap);
+  } finally {
+    try { reader.reset(); } catch (_) {}
+  }
+}
+
 // ── Smart two-stage scanner: localise barcode → read region + digit OCR ───────
 // Stage 1: findBarcodeRegion() locates the high-gradient bar area in the frame.
 // Stage 2a: ZXing decodes the bar pattern from that cropped region only.
@@ -364,14 +427,7 @@ async function ensureZXingLoaded() {
 let _smartBarcodeRegion = null;  // last located region, shared with OCR loop
 
 async function startSmartScan(video, status, button) {
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: {
-      facingMode: 'environment',
-      width:  {min: 640, ideal: 1280},
-      height: {min: 480, ideal: 720},
-      advanced: [{focusMode: 'continuous'}]
-    }
-  });
+  const stream = await openEnvironmentCamera(1280, 720);
   scannerStream = stream;
   cameraTrack = stream.getVideoTracks()[0];
   video.srcObject = stream;
@@ -393,13 +449,7 @@ async function startSmartScan(video, status, button) {
   const zxingLoaded = await ensureZXingLoaded().catch(() => false);
   let zxingReader = null;
   if (zxingLoaded && window.ZXing) {
-    const hints = new Map();
-    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-      ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
-      ZXing.BarcodeFormat.UPC_A,  ZXing.BarcodeFormat.UPC_E,
-    ]);
-    hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-    zxingReader = new ZXing.BrowserMultiFormatReader(hints);
+    zxingReader = createZxingCanvasReader();
   }
 
   const workCanvas = document.createElement('canvas');
@@ -432,7 +482,7 @@ async function startSmartScan(video, status, button) {
     if (zxingReader) {
       const bc = cropCanvas(workCanvas, region.x, region.y, region.w, region.h, 'grayscale(1) contrast(2.5)');
       try {
-        const r = zxingReader.decodeFromCanvas(bc);
+        const r = decodeZxingCanvas(zxingReader, bc);
         if (r && validateRetailBarcode(r.getText())) { onDecodedCode(r.getText()); return; }
       } catch (_) {}
     }
@@ -511,22 +561,9 @@ async function _smartOcrDigits(video, status) {
 // frame — same algorithm used in Android's native barcode scanning.
 // Also reads the human-readable digits printed under the barcode via OCR.
 async function startZXingLiveScan(video, status, button) {
-  const hints = new Map();
-  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-    ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
-    ZXing.BarcodeFormat.UPC_A,  ZXing.BarcodeFormat.UPC_E,
-  ]);
-  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-  const zxingReader = new ZXing.BrowserMultiFormatReader(hints);
+  const zxingReader = createZxingCanvasReader();
 
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: {
-      facingMode: 'environment',
-      width:  {min: 640, ideal: 1280},
-      height: {min: 480, ideal: 720},
-      advanced: [{focusMode: 'continuous'}]
-    }
-  });
+  const stream = await openEnvironmentCamera(1280, 720);
   scannerStream = stream;
   cameraTrack = stream.getVideoTracks()[0];
   video.srcObject = stream;
@@ -568,7 +605,7 @@ async function startZXingLiveScan(video, status, button) {
     ctx.filter = 'grayscale(1) contrast(1.6)';
     ctx.drawImage(video, cx, cy, cw, ch, 0, 0, ow, oh);
     try {
-      const result = zxingReader.decodeFromCanvas(scanCanvas);
+      const result = decodeZxingCanvas(zxingReader, scanCanvas);
       if (result && validateRetailBarcode(result.getText())) {
         onDecodedCode(result.getText());
       }
@@ -623,24 +660,9 @@ async function maybeRunOcrFallbackOnVideo(video, status) {
 
 // ── ZXing streaming (kept for photo use only — not called from startCamera) ───
 async function startZXingScan(video, status, button, reader) {
-  const hints = new Map();
-  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-    ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
-    ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.UPC_E,
-    ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.CODE_39,
-    ZXing.BarcodeFormat.ITF,
-  ]);
-  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-  const zxingReader = new ZXing.BrowserMultiFormatReader(hints);
+  const zxingReader = createZxingCanvasReader(true);
 
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: {
-      facingMode: 'environment',
-      width: {ideal: 1920, min: 640},
-      height: {ideal: 1080, min: 480},
-      advanced: [{focusMode: 'continuous'}]
-    }
-  });
+  const stream = await openEnvironmentCamera(1920, 1080);
   scannerStream = stream;
   cameraTrack = stream.getVideoTracks()[0];
   video.srcObject = stream;
@@ -688,7 +710,7 @@ async function startZXingScan(video, status, button, reader) {
     ctx.filter = 'grayscale(1) contrast(1.8)';
     ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, outW, outH);
     try {
-      const result = zxingReader.decodeFromCanvas(scanCanvas);
+      const result = decodeZxingCanvas(zxingReader, scanCanvas);
       if (result && validateRetailBarcode(result.getText())) {
         onDecodedCode(result.getText());
       }
@@ -870,14 +892,7 @@ async function scanFromPhoto(input, mode) {
     setStatus('Lecture code-barres...');
     const loaded = await ensureZXingLoaded();
     if (loaded) {
-      const hints = new Map();
-      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-        ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8,
-        ZXing.BarcodeFormat.UPC_A,  ZXing.BarcodeFormat.UPC_E,
-        ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.CODE_39, ZXing.BarcodeFormat.ITF,
-      ]);
-      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-      const reader = new ZXing.BrowserMultiFormatReader(hints);
+      const reader = createZxingCanvasReader(true);
       const attempts = [
         canvas,
         regionCanvas,
@@ -888,7 +903,7 @@ async function scanFromPhoto(input, mode) {
       for (const attempt of attempts) {
         if (code) break;
         try {
-          const r = reader.decodeFromCanvas(attempt);
+          const r = decodeZxingCanvas(reader, attempt);
           if (r && validateRetailBarcode(r.getText())) code = r.getText();
         } catch (_) {}
       }
@@ -1695,16 +1710,15 @@ function updateDeviceSupport() {
   cameraSupport.style.color = hasCamera && isSecure ? '#065f46' : '#991b1b';
 
   if (nativeScanActive && !zxingActive) {
-    // Native is only used as a fallback when the ZXing/Quagga libraries can't load.
-    scannerSupport.textContent = 'Natif (secours)';
+    scannerSupport.textContent = 'Natif (rapide)';
     scannerSupport.style.background = '#ecfdf5';
     scannerSupport.style.color = '#065f46';
-    if (supportHint) supportHint.textContent = 'Mode de secours : scanner natif du telephone (BarcodeDetector). Utilise seulement si ZXing n a pas pu se charger.';
+    if (supportHint) supportHint.textContent = 'Lecteur natif du telephone : detection UPC locale et immediate.';
   } else {
-    scannerSupport.textContent = 'ZXing (principal)';
+    scannerSupport.textContent = hasZXing ? 'ZXing' : (hasNative ? 'Natif disponible' : 'Chargement');
     scannerSupport.style.background = '#fefce8';
     scannerSupport.style.color = '#854d0e';
-    if (supportHint) supportHint.textContent = 'Lecteur principal : ZXing (lit le mieux les petits codes UPC d etiquette), avec Quagga en parallele. Le scanner natif sert de secours.';
+    if (supportHint) supportHint.textContent = 'Lecteur compatible iPhone et navigateurs sans scanner natif.';
   }
 
   if (!isSecure) {

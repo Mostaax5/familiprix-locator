@@ -9,6 +9,43 @@ from routes import ai
 
 
 class MemorySafetyTests(unittest.TestCase):
+    def test_image_lookup_does_not_stop_on_a_text_only_result(self):
+        text_only = {
+            "name": "Detailed razor product", "brand": "Example",
+            "source": "Familiprix", "image_url": "",
+        }
+        with_image = {
+            "name": "Razor", "brand": "", "source": "UPC Item DB",
+            "image_url": "https://img.test/razor.jpg",
+        }
+
+        fast, _ = ai.best_lookup_result(
+            [lambda: text_only, lambda: with_image],
+            max_workers=1, good_enough=1,
+        )
+        visual, _ = ai.best_lookup_result(
+            [lambda: text_only, lambda: with_image],
+            max_workers=1, good_enough=1, require_image=True,
+        )
+
+        self.assertIs(fast, text_only)
+        self.assertIs(visual, with_image)
+
+    def test_online_image_lookup_continues_to_familiprix_phase(self):
+        text_only = {"name": "Known razor", "image_url": ""}
+        with_image = {
+            "name": "Known razor", "image_url": "https://img.test/razor.jpg"
+        }
+        with patch.object(
+            ai, "best_lookup_result",
+            side_effect=[(text_only, 30), (with_image, 30)],
+        ) as lookup:
+            product = ai.lookup_product_online("063848966068", require_image=True)
+
+        self.assertEqual(product["image_url"], "https://img.test/razor.jpg")
+        self.assertEqual(lookup.call_count, 2)
+        self.assertTrue(all(call.kwargs["require_image"] for call in lookup.call_args_list))
+
     def test_lookup_sources_have_one_process_wide_concurrency_limit(self):
         active = 0
         peak = 0

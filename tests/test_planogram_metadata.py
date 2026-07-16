@@ -10,6 +10,7 @@ from routes.products import (
     build_reference_metadata_index,
     plan_planogram_flow,
     planogram_metadata,
+    persist_image_for_barcode,
     products_bp,
     reference_metadata_for_barcode,
     sync_reference_metadata_to_products,
@@ -26,7 +27,8 @@ class PlanogramMetadataTests(unittest.TestCase):
                 brand TEXT DEFAULT '',
                 description TEXT DEFAULT '',
                 image_url TEXT DEFAULT '',
-                product_code TEXT DEFAULT ''
+                product_code TEXT DEFAULT '',
+                updated_at TEXT DEFAULT ''
             )"""
         )
         db.execute(
@@ -41,6 +43,28 @@ class PlanogramMetadataTests(unittest.TestCase):
             )"""
         )
         return db
+
+    def test_found_image_is_saved_for_placed_product_and_future_reimports(self):
+        db = self.make_db()
+        db.execute(
+            "INSERT INTO product_reference (barcode) VALUES ('0063848966068')"
+        )
+        db.execute(
+            "INSERT INTO products (id, barcode) VALUES (1, '063848966068')"
+        )
+
+        changed = persist_image_for_barcode(
+            db, "063848966068", "https://img.test/razor.jpg",
+            now="2026-07-16T13:00:00+00:00",
+        )
+
+        placed = db.execute("SELECT image_url FROM products WHERE id=1").fetchone()[0]
+        reference = db.execute(
+            "SELECT image_url FROM product_reference WHERE barcode='0063848966068'"
+        ).fetchone()[0]
+        self.assertEqual(changed, 2)
+        self.assertEqual(placed, "https://img.test/razor.jpg")
+        self.assertEqual(reference, "https://img.test/razor.jpg")
 
     def make_plan_db(self):
         db = self.make_db()

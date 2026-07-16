@@ -226,7 +226,26 @@ def _product_quality_score(p):
     return score
 
 
-def best_lookup_result(tasks, max_workers=8, good_enough=None, wait_for_cleanup=False):
+def _lookup_has_image(product):
+    return bool(str((product or {}).get("image_url", "")).strip())
+
+
+def _prefer_lookup_result(current, current_score, candidate, candidate_score, require_image=False):
+    """Prefer a real image during image enrichment, then use normal quality."""
+    if not candidate:
+        return current, current_score
+    if require_image:
+        candidate_has_image = _lookup_has_image(candidate)
+        current_has_image = _lookup_has_image(current)
+        if candidate_has_image != current_has_image:
+            return (candidate, candidate_score) if candidate_has_image else (current, current_score)
+    if candidate_score > current_score:
+        return candidate, candidate_score
+    return current, current_score
+
+
+def best_lookup_result(tasks, max_workers=8, good_enough=None, wait_for_cleanup=False,
+                       require_image=False):
     """Run all tasks, return (best_product, best_score) by quality score. Returns
     as soon as a result reaches `good_enough` instead of waiting for the slowest
     source (e.g. an 8s scraper timeout) — this is what makes scanning fast."""
@@ -256,9 +275,11 @@ def best_lookup_result(tasks, max_workers=8, good_enough=None, wait_for_cleanup=
             except Exception:
                 result = None
             s = _product_quality_score(result)
-            if s > best_score:
-                best, best_score = result, s
-            if good_enough is not None and best_score >= good_enough:
+            best, best_score = _prefer_lookup_result(
+                best, best_score, result, s, require_image=require_image
+            )
+            if (good_enough is not None and best_score >= good_enough
+                    and (not require_image or _lookup_has_image(best))):
                 break   # good enough — don't wait for slower sources
             submit_next()
     finally:
@@ -1908,7 +1929,8 @@ def ai_grounded_product_lookup(barcode):
             "source": "Recherche IA", "source_url": "", "image_url": ""}
 
 
-def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False):
+def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False,
+                          require_image=False):
     """UPC lookup for a PHARMACY catalog (food, beauty, meds, vitamins, baby,
     bandages, eye care, Familiprix house brand…). Broad coverage but fast: it
     returns as soon as a trusted result is found (good_enough), so it doesn't wait
@@ -1929,6 +1951,15 @@ def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False):
     def _cap(n):
         return min(n, max_workers) if max_workers else n
 
+    def _satisfactory(product, score):
+        return score >= GOOD_ENOUGH and (not require_image or _lookup_has_image(product))
+
+    def _merge_candidate(product, score, candidate, candidate_score):
+        return _prefer_lookup_result(
+            product, score, candidate, candidate_score,
+            require_image=require_image,
+        )
+
     # Phase 1 — fast structured JSON databases: Open Facts (food / beauty / drug /
     # general) + UPC Item DB + Datakick + Brocade. Covers most everyday products.
     tasks = []
@@ -1941,11 +1972,12 @@ def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False):
     best, best_score = best_lookup_result(
         tasks, max_workers=_cap(16), good_enough=GOOD_ENOUGH,
         wait_for_cleanup=wait_for_cleanup,
+        require_image=require_image,
     )
 
     # Phase 2 — Familiprix catalog + barcode databases. The Familiprix scraper is
     # what finds house-brand and pharmacy-specific items the open DBs don't have.
-    if best_score < GOOD_ENOUGH:
+    if not _satisfactory(best, best_score):
         tasks = []
         for bc in candidates:
             tasks.append(lambda c=bc, cs=candidates: lookup_familiprix_product(c, cs))
@@ -1954,12 +1986,12 @@ def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False):
         p2, s2 = best_lookup_result(
             tasks, max_workers=_cap(8), good_enough=GOOD_ENOUGH,
             wait_for_cleanup=wait_for_cleanup,
+            require_image=require_image,
         )
-        if s2 > best_score:
-            best, best_score = p2, s2
+        best, best_score = _merge_candidate(best, best_score, p2, s2)
 
     # Phase 3 — pharmacy sites (Jean Coutu / Brunet / Pharmaprix), last resort.
-    if best_score < GOOD_ENOUGH:
+    if not _satisfactory(best, best_score):
         tasks = []
         for bc in candidates:
             for sn, su in PHARMACY_LOOKUP_SOURCES:
@@ -1967,9 +1999,9 @@ def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False):
         p3, s3 = best_lookup_result(
             tasks, max_workers=_cap(6), good_enough=GOOD_ENOUGH,
             wait_for_cleanup=wait_for_cleanup,
+            require_image=require_image,
         )
-        if s3 > best_score:
-            best, best_score = p3, s3
+        best, best_score = _merge_candidate(best, best_score, p3, s3)
 
     # Phase 4 — AI web-grounded identification (opt-in via AI_DEEP_LOOKUP, off by default).
     if not best:
