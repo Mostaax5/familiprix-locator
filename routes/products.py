@@ -779,7 +779,15 @@ def schedule_image_fill(barcodes, priority=True):
         for code in iterable:
             if _IMAGE_FILL_RETRY_AFTER.get(code, 0) > time.time():
                 continue
-            if code in _IMAGE_FILL_QUEUED or code in _IMAGE_FILL_WORKING:
+            if code in _IMAGE_FILL_WORKING:
+                continue
+            if code in _IMAGE_FILL_QUEUED:
+                if priority:
+                    try:
+                        _IMAGE_FILL_PENDING.remove(code)
+                    except ValueError:
+                        pass
+                    _IMAGE_FILL_PENDING.appendleft(code)
                 continue
             if priority:
                 _IMAGE_FILL_PENDING.appendleft(code)

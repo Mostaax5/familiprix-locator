@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from flask import Flask
 
+from routes import products as products_module
 from routes.layout import build_default_layout_config
 from routes.products import (
     build_reference_metadata_index,
@@ -65,6 +66,29 @@ class PlanogramMetadataTests(unittest.TestCase):
         self.assertEqual(changed, 2)
         self.assertEqual(placed, "https://img.test/razor.jpg")
         self.assertEqual(reference, "https://img.test/razor.jpg")
+
+    def test_visible_missing_image_moves_to_front_of_background_queue(self):
+        with products_module._IMAGE_FILL_STATE_LOCK:
+            original_active = products_module._IMAGE_FILL_ACTIVE
+            products_module._IMAGE_FILL_ACTIVE = True
+            products_module._IMAGE_FILL_PENDING.clear()
+            products_module._IMAGE_FILL_QUEUED.clear()
+            products_module._IMAGE_FILL_WORKING.clear()
+            products_module._IMAGE_FILL_RETRY_AFTER.clear()
+        try:
+            products_module.schedule_image_fill(["old-1", "visible", "old-2"], priority=False)
+            products_module.schedule_image_fill(["visible"], priority=True)
+            self.assertEqual(
+                list(products_module._IMAGE_FILL_PENDING),
+                ["visible", "old-1", "old-2"],
+            )
+        finally:
+            with products_module._IMAGE_FILL_STATE_LOCK:
+                products_module._IMAGE_FILL_PENDING.clear()
+                products_module._IMAGE_FILL_QUEUED.clear()
+                products_module._IMAGE_FILL_WORKING.clear()
+                products_module._IMAGE_FILL_RETRY_AFTER.clear()
+                products_module._IMAGE_FILL_ACTIVE = original_active
 
     def make_plan_db(self):
         db = self.make_db()
