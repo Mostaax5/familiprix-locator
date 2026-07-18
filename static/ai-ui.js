@@ -117,6 +117,9 @@ function clientResultForStorage(result) {
     highlighted_product_ids: Array.isArray(result.highlighted_product_ids)
       ? result.highlighted_product_ids.slice(0, 16).map(String)
       : [],
+    assortment_product_ids: Array.isArray(result.assortment_product_ids)
+      ? result.assortment_product_ids.slice(0, CLIENT_MAX_PRODUCTS_PER_EXCHANGE).map(String)
+      : [],
     products: (Array.isArray(result.products) ? result.products : [])
       .slice(0, CLIENT_MAX_PRODUCTS_PER_EXCHANGE)
       .map(product => clientProductForStorage(product, result.response_mode === 'lookup')),
@@ -1192,10 +1195,16 @@ function prepareClientResult(result) {
   let highlightedIds = Array.isArray(prepared.highlighted_product_ids)
     ? prepared.highlighted_product_ids.slice(0, 16).map(String)
     : [];
+  let assortmentIds = Array.isArray(prepared.assortment_product_ids)
+    ? prepared.assortment_product_ids.slice(0, CLIENT_MAX_PRODUCTS_PER_EXCHANGE).map(String)
+    : [];
   if (prepared.response_mode !== 'lookup') {
     const byId = new Map(products.map(product => [String(product.client_id || ''), product]));
-    products = highlightedIds.map(id => byId.get(id)).filter(Boolean);
-    highlightedIds = products.map(product => String(product.client_id || '')).filter(Boolean);
+    const displayIds = [...new Set([...highlightedIds, ...assortmentIds])];
+    products = displayIds.map(id => byId.get(id)).filter(Boolean);
+    const availableIds = new Set(products.map(product => String(product.client_id || '')));
+    highlightedIds = highlightedIds.filter(id => availableIds.has(id));
+    assortmentIds = assortmentIds.filter(id => availableIds.has(id));
   } else {
     products = products.slice(0, CLIENT_FAST_PRODUCT_LIMIT);
     highlightedIds = products.map(product => String(product.client_id || '')).filter(Boolean);
@@ -1208,6 +1217,7 @@ function prepareClientResult(result) {
     answer,
     products,
     highlighted_product_ids: highlightedIds,
+    assortment_product_ids: assortmentIds,
     advice: {
       ...advice,
       summary: cleanClientAnswer(advice.summary || answer),

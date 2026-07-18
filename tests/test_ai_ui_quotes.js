@@ -241,6 +241,25 @@ const storedFallback = context.__quoteTest.clientResultForStorage({
 });
 assert.strictEqual(storedFallback.degraded, true);
 assert.ok(storedFallback.warning.includes("DeepSeek"));
+const secondAssortmentProduct = {...savedProduct, id: 43, client_id: 'product:43', name: 'Deuxième produit'};
+const assortmentResult = context.__quoteTest.prepareClientResult({
+  ...documentedResult,
+  products: [savedProduct, secondAssortmentProduct],
+  highlighted_product_ids: ['product:42'],
+  assortment_product_ids: ['product:42', 'product:43'],
+});
+assert.deepStrictEqual(
+  JSON.parse(JSON.stringify(assortmentResult.products.map(product => product.client_id))),
+  ['product:42', 'product:43']
+);
+assert.deepStrictEqual(
+  JSON.parse(JSON.stringify(assortmentResult.highlighted_product_ids)),
+  ['product:42']
+);
+assert.strictEqual(
+  context.__quoteTest.clientResultForStorage(assortmentResult).assortment_product_ids.length,
+  2
+);
 
 const cottonGroups = context.__quoteTest.clientRequiredConceptGroups(
   'je cherche de la watte des petites boules de coton'
