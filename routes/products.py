@@ -608,7 +608,9 @@ def find_existing_image_for_barcode(db, barcode, exclude_id=None):
     return ""
 
 
-_REFERENCE_METADATA_FIELDS = ("brand", "description", "image_url", "product_code")
+_REFERENCE_METADATA_FIELDS = (
+    "brand", "description", "image_url", "product_code", "source_url",
+)
 
 
 def _barcode_query_values(barcodes):
@@ -652,12 +654,12 @@ def build_reference_metadata_index(db, barcodes=None):
 
     if barcodes is None:
         rows = db.execute(
-            "SELECT barcode, brand, description, image_url, product_code FROM product_reference"
+            "SELECT barcode, brand, description, image_url, product_code, source_url FROM product_reference"
         ).fetchall()
     else:
         rows = _rows_for_barcodes(
             db, "product_reference",
-            "barcode, brand, description, image_url, product_code",
+            "barcode, brand, description, image_url, product_code, source_url",
             barcodes,
         )
     for row in rows:
@@ -731,7 +733,7 @@ def planogram_metadata(existing, reference, barcode, product_code=""):
         "description": str(metadata.get("description", "") or "").strip(),
         "image_url": str(metadata.get("image_url", "") or "").strip(),
         "product_code": str(product_code or metadata.get("product_code", "") or "").strip(),
-        "source_url": str(prior.get("source_url", "") or "").strip(),
+        "source_url": str(metadata.get("source_url", "") or "").strip(),
         "usage_notes": str(prior.get("usage_notes", "") or "").strip(),
         "alternative_suggestions": str(
             prior.get("alternative_suggestions", "") or ""
@@ -749,10 +751,11 @@ def update_product_metadata_from_reference(db, product, reference, now=None):
     ):
         return False
     db.execute(
-        """UPDATE products SET brand=?, description=?, image_url=?, product_code=?, modified_at=?
+        """UPDATE products SET brand=?, description=?, image_url=?, product_code=?, source_url=?, modified_at=?
            WHERE id=?""",
         (merged.get("brand", ""), merged.get("description", ""),
          merged.get("image_url", ""), merged.get("product_code", ""),
+         merged.get("source_url", ""),
          now or utc_now_iso(), original["id"]),
     )
     product.update(merged)
@@ -766,7 +769,7 @@ def sync_reference_metadata_to_products(db, now=None):
         return 0
     linked = 0
     rows = db.execute(
-        """SELECT id, barcode, brand, description, image_url, product_code
+        """SELECT id, barcode, brand, description, image_url, product_code, source_url
            FROM products WHERE TRIM(COALESCE(barcode,'')) <> ''"""
     ).fetchall()
     for row in rows:

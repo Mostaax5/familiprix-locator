@@ -37,7 +37,7 @@ function modeButton(mode) {
     hasClass(name) { return classes.has(name); },
   };
 }
-const modeButtons = [modeButton('fast'), modeButton('ai')];
+const modeButtons = [modeButton('fast'), modeButton('ai'), modeButton('documented')];
 
 const context = {
   console,
@@ -90,6 +90,7 @@ vm.runInContext(`${source}\n;globalThis.__quoteTest = {
   buildFastClientResult,
   prepareClientResult,
   clientResultForStorage,
+  renderDocumentedClientDetails,
   getClientSearchStateForStorage,
   seedSearchState: (result, products, conversation) => {
     _latestClientResult = result;
@@ -190,6 +191,48 @@ assert.strictEqual(context.__quoteTest.getClientSearchMode(), 'ai');
 assert.strictEqual(modeButtons[0].ariaChecked, 'false');
 assert.strictEqual(modeButtons[1].ariaChecked, 'true');
 assert.strictEqual(context.__quoteTest.getClientSearchStateForStorage().mode, 'ai');
+
+context.__quoteTest.setClientSearchMode('documented');
+assert.strictEqual(context.__quoteTest.getClientSearchMode(), 'documented');
+assert.strictEqual(modeButtons[1].ariaChecked, 'false');
+assert.strictEqual(modeButtons[2].ariaChecked, 'true');
+assert.strictEqual(context.__quoteTest.getClientSearchStateForStorage().mode, 'documented');
+
+const documentedResult = context.__quoteTest.prepareClientResult({
+  response_mode: 'documented',
+  answer: 'Voici le point principal.',
+  highlighted_product_ids: ['product:42'],
+  products: [savedProduct],
+  advice: {
+    summary: 'Voici le point principal.',
+    documentation: {
+      key_points: [{
+        heading: 'Ingrédient', detail: 'Information vérifiée.',
+        source_ids: ['health-canada:12'],
+      }],
+      comparisons: [{
+        candidate_id: 'product:42', difference: 'Format comprimé.',
+        practical_note: 'Vérifier l’étiquette.', source_ids: ['health-canada:12'],
+      }],
+      useful_guidance: [{text: 'Confirmer le besoin.', source_ids: []}],
+      important_checks: [{text: 'Vérifier les interactions.', source_ids: ['health-canada:12']}],
+      sources: [{
+        source_id: 'health-canada:12', title: 'Santé Canada - Produit Exemple',
+        publisher: 'Santé Canada', url: 'https://example.test/source',
+        summary: 'Fiche réglementaire.', candidate_ids: ['product:42'],
+      }],
+    },
+  },
+});
+const documentedHtml = context.__quoteTest.renderDocumentedClientDetails(documentedResult, 'documented-1');
+assert.strictEqual(documentedResult.response_mode, 'documented');
+assert.ok(documentedHtml.includes('Points essentiels'));
+assert.ok(documentedHtml.includes('Différences entre les produits'));
+assert.ok(documentedHtml.includes('Sources consultées (1)'));
+assert.ok(documentedHtml.includes('Santé Canada - Produit Exemple'));
+const storedDocumented = context.__quoteTest.clientResultForStorage(documentedResult);
+assert.strictEqual(storedDocumented.response_mode, 'documented');
+assert.strictEqual(storedDocumented.advice.documentation.sources.length, 1);
 
 const cottonGroups = context.__quoteTest.clientRequiredConceptGroups(
   'je cherche de la watte des petites boules de coton'

@@ -17,6 +17,14 @@ const CLIENT_FAST_PRODUCT_LIMIT = 100;
 const CLIENT_CONTEXT_PRODUCT_LIMIT = 80;
 const CLIENT_MAX_PRODUCTS_PER_EXCHANGE = 100;
 
+function normalizeClientMode(mode) {
+  return ['fast', 'ai', 'documented'].includes(mode) ? mode : 'fast';
+}
+
+function normalizeClientResponseMode(mode) {
+  return ['lookup', 'detailed', 'documented'].includes(mode) ? mode : 'detailed';
+}
+
 function getClientQuestion() {
   return document.getElementById('clientQuestion')?.value.trim() || '';
 }
@@ -27,7 +35,7 @@ function getClientConversationForStorage() {
       role: message.role,
       content: String(message.content || ''),
       exchange_id: String(message.exchange_id || ''),
-      mode: message.mode === 'ai' ? 'ai' : 'fast',
+      mode: normalizeClientMode(message.mode),
     };
     if (message.role === 'assistant' && message.result) {
       stored.result = clientResultForStorage(message.result);
@@ -44,6 +52,7 @@ function clientProductForStorage(product, compact=false) {
     brand: String(product.brand || ''),
     description: String(product.description || '').slice(0, compact ? 700 : 1800),
     image_url: String(product.image_url || '').slice(0, 1600),
+    source_url: String(product.source_url || '').slice(0, 1600),
     search_terms: compact ? '' : String(product.search_terms || '').slice(0, 1200),
     usage_notes: String(product.usage_notes || '').slice(0, compact ? 700 : 1800),
     barcode: String(product.barcode || ''),
@@ -60,12 +69,47 @@ function clientProductForStorage(product, compact=false) {
   };
 }
 
+function clientDocumentationForStorage(documentation) {
+  const data = documentation && typeof documentation === 'object' ? documentation : {};
+  const sourceIds = value => Array.isArray(value)
+    ? value.slice(0, 4).map(item => String(item || '').slice(0, 120))
+    : [];
+  const textItems = value => (Array.isArray(value) ? value : []).slice(0, 6).map(item => ({
+    text: String(item?.text || '').slice(0, 1200),
+    source_ids: sourceIds(item?.source_ids),
+  })).filter(item => item.text);
+  return {
+    key_points: (Array.isArray(data.key_points) ? data.key_points : []).slice(0, 6).map(item => ({
+      heading: String(item?.heading || '').slice(0, 120),
+      detail: String(item?.detail || '').slice(0, 1400),
+      source_ids: sourceIds(item?.source_ids),
+    })).filter(item => item.heading && item.detail),
+    comparisons: (Array.isArray(data.comparisons) ? data.comparisons : []).slice(0, 8).map(item => ({
+      candidate_id: String(item?.candidate_id || '').slice(0, 120),
+      difference: String(item?.difference || '').slice(0, 1200),
+      practical_note: String(item?.practical_note || '').slice(0, 1200),
+      source_ids: sourceIds(item?.source_ids),
+    })).filter(item => item.candidate_id && (item.difference || item.practical_note)),
+    useful_guidance: textItems(data.useful_guidance),
+    important_checks: textItems(data.important_checks),
+    sources: (Array.isArray(data.sources) ? data.sources : []).slice(0, 15).map(source => ({
+      source_id: String(source?.source_id || '').slice(0, 120),
+      title: String(source?.title || '').slice(0, 280),
+      publisher: String(source?.publisher || '').slice(0, 160),
+      url: String(source?.url || '').slice(0, 1600),
+      summary: String(source?.summary || '').slice(0, 1200),
+      candidate_ids: Array.isArray(source?.candidate_ids)
+        ? source.candidate_ids.slice(0, 16).map(String) : [],
+    })).filter(source => source.source_id && source.title),
+  };
+}
+
 function clientResultForStorage(result) {
   if (!result || typeof result !== 'object') return null;
   const advice = result.advice || {};
   return {
     success: true,
-    response_mode: result.response_mode === 'lookup' ? 'lookup' : 'detailed',
+    response_mode: normalizeClientResponseMode(result.response_mode),
     answer: String(result.answer || advice.summary || '').slice(0, 6000),
     elapsed_ms: Number(result.elapsed_ms) || 0,
     highlighted_product_ids: Array.isArray(result.highlighted_product_ids)
@@ -82,6 +126,7 @@ function clientResultForStorage(result) {
         ? advice.safety_flags.slice(0, 5).map(String) : [],
       pharmacist_referral: Boolean(advice.pharmacist_referral),
       pharmacist_reason: String(advice.pharmacist_reason || '').slice(0, 1200),
+      documentation: clientDocumentationForStorage(advice.documentation),
     },
   };
 }
@@ -111,7 +156,7 @@ function getClientSearchStateForStorage() {
 
 function restoreClientSearchState(state) {
   if (!state || typeof state !== 'object') return;
-  setClientSearchMode(state.mode === 'ai' ? 'ai' : 'fast', false);
+  setClientSearchMode(normalizeClientMode(state.mode), false);
   const rawProducts = Array.isArray(state.products)
     ? state.products
     : (Array.isArray(state.latest_result?.products) ? state.latest_result.products : []);
@@ -157,7 +202,7 @@ function restoreClientConversation(messages) {
       role,
       content,
       exchange_id: exchangeId,
-      mode: raw.mode === 'ai' ? 'ai' : 'fast',
+      mode: normalizeClientMode(raw.mode),
     };
     if (role === 'assistant' && raw.result) {
       message.result = normalizeStoredClientResult(raw.result);
@@ -187,8 +232,14 @@ function getClientSearchMode() {
   return _clientSearchMode;
 }
 
+function clientModeLabel(mode) {
+  if (mode === 'documented') return 'Réponse documentée';
+  if (mode === 'ai') return 'Avec IA';
+  return 'Recherche rapide';
+}
+
 function setClientSearchMode(mode, shouldPersist=true) {
-  _clientSearchMode = mode === 'ai' ? 'ai' : 'fast';
+  _clientSearchMode = normalizeClientMode(mode);
   document.querySelectorAll('[data-client-mode]').forEach(button => {
     const active = button.dataset.clientMode === _clientSearchMode;
     button.classList.toggle('is-active', active);
@@ -196,9 +247,13 @@ function setClientSearchMode(mode, shouldPersist=true) {
   });
   if (!_clientRagController) {
     const status = document.getElementById('clientHelpStatus');
-    if (status) status.textContent = _clientSearchMode === 'ai'
-      ? `${aiProviderLabel()} répondra et vérifiera les produits du plan.`
-      : 'Recherche rapide : noms, images et emplacements du plan.';
+    if (status) {
+      status.textContent = _clientSearchMode === 'documented'
+        ? `${aiProviderLabel()} approfondira la réponse avec les fiches produit et les sources disponibles.`
+        : (_clientSearchMode === 'ai'
+          ? `${aiProviderLabel()} répondra et vérifiera les produits du plan.`
+          : 'Recherche rapide : noms, images et emplacements du plan.');
+    }
   }
   if (shouldPersist && typeof persistClientDraft === 'function') persistClientDraft();
 }
@@ -301,22 +356,133 @@ function clientProductsActionMarkup(result, exchangeId) {
   return `<button type="button" class="btn btn-outline btn-inline client-show-products" data-exchange-id="${esc(exchangeId)}" onclick="showClientHistoryProducts(this.dataset.exchangeId)">Voir ${count} produit${count > 1 ? 's' : ''}</button>`;
 }
 
-function renderClientResponseMode(result) {
-  return `<div class="client-response-mode ${result?.response_mode === 'lookup' ? 'is-fast' : 'is-detailed'}">
-    ${result?.response_mode === 'lookup' ? 'Recherche rapide' : 'Réponse avec IA'}
+function clientDocumentationSourceDomId(exchangeId, index) {
+  const key = String(exchangeId || 'current').replace(/[^a-zA-Z0-9_-]+/g, '-');
+  return `client-doc-source-${key}-${index}`;
+}
+
+function safeClientSourceUrl(value) {
+  const url = String(value || '').trim();
+  return /^https?:\/\//i.test(url) ? url : '';
+}
+
+function showClientDocumentationSource(exchangeId, index) {
+  const source = document.getElementById(clientDocumentationSourceDomId(exchangeId, index));
+  if (!source) return false;
+  const details = source.closest?.('details');
+  if (details) details.open = true;
+  window.setTimeout(() => source.scrollIntoView?.({behavior: 'smooth', block: 'center'}), 0);
+  return false;
+}
+
+function clientDocumentCitations(sourceIds, sourceNumbers, exchangeId) {
+  const numbers = [];
+  for (const sourceId of Array.isArray(sourceIds) ? sourceIds : []) {
+    const number = sourceNumbers.get(String(sourceId || ''));
+    if (number && !numbers.includes(number)) numbers.push(number);
+  }
+  if (!numbers.length) return '';
+  return `<span class="client-doc-citations">${numbers.map(number => `
+    <button type="button" class="client-doc-cite" aria-label="Voir la source ${number}" data-exchange-id="${esc(exchangeId)}" data-source-number="${number}" onclick="showClientDocumentationSource(this.dataset.exchangeId,Number(this.dataset.sourceNumber))">[${number}]</button>
+  `).join('')}</span>`;
+}
+
+function renderDocumentedClientDetails(result, exchangeId) {
+  if (result?.response_mode !== 'documented') return '';
+  const documentation = result?.advice?.documentation || {};
+  const sources = Array.isArray(documentation.sources) ? documentation.sources : [];
+  const sourceNumbers = new Map(sources.map((source, index) => [String(source.source_id || ''), index + 1]));
+  const products = Array.isArray(result.products) ? result.products : [];
+  const productsById = new Map(products.map(product => [String(product.client_id || ''), product]));
+  const keyPoints = Array.isArray(documentation.key_points) ? documentation.key_points : [];
+  const comparisons = Array.isArray(documentation.comparisons) ? documentation.comparisons : [];
+  const usefulGuidance = Array.isArray(documentation.useful_guidance) ? documentation.useful_guidance : [];
+  const importantChecks = Array.isArray(documentation.important_checks) ? documentation.important_checks : [];
+
+  const textSection = (title, items) => items.length ? `
+    <section class="client-doc-section">
+      <div class="client-doc-heading">${esc(title)}</div>
+      <div class="client-doc-list">${items.map(item => `
+        <div class="client-doc-item">
+          <div class="client-doc-item-copy">${esc(item.text || '')}${clientDocumentCitations(item.source_ids, sourceNumbers, exchangeId)}</div>
+          ${clientQuoteButton(item.text || '', '', 'Citer ce point')}
+        </div>
+      `).join('')}</div>
+    </section>` : '';
+
+  return `<div class="client-documented">
+    ${keyPoints.length ? `<section class="client-doc-section">
+      <div class="client-doc-heading">Points essentiels</div>
+      <div class="client-doc-list">${keyPoints.map(item => `
+        <div class="client-doc-item">
+          <div>
+            <div class="client-doc-item-heading">${esc(item.heading || '')}</div>
+            <div class="client-doc-item-copy">${esc(item.detail || '')}${clientDocumentCitations(item.source_ids, sourceNumbers, exchangeId)}</div>
+          </div>
+          ${clientQuoteButton(`${item.heading || ''}: ${item.detail || ''}`, '', 'Citer ce point')}
+        </div>
+      `).join('')}</div>
+    </section>` : ''}
+    ${comparisons.length ? `<section class="client-doc-section">
+      <div class="client-doc-heading">Différences entre les produits</div>
+      ${comparisons.map(item => {
+        const product = productsById.get(String(item.candidate_id || ''));
+        const productName = product?.name || 'Produit du plan';
+        const copy = [item.difference, item.practical_note].filter(Boolean).join(' ');
+        return `<div class="client-doc-comparison">
+          <div class="client-doc-comparison-product">${product ? clientProductLink(product, '', exchangeId) : esc(productName)}</div>
+          <div class="client-doc-comparison-copy">
+            ${item.difference ? `<div><strong>Différence :</strong> ${esc(item.difference)}</div>` : ''}
+            ${item.practical_note ? `<div><strong>En pratique :</strong> ${esc(item.practical_note)}</div>` : ''}
+            ${clientDocumentCitations(item.source_ids, sourceNumbers, exchangeId)}
+            ${clientQuoteButton(`${productName}: ${copy}`, item.candidate_id || '', 'Citer cette comparaison')}
+          </div>
+        </div>`;
+      }).join('')}
+    </section>` : ''}
+    ${textSection('Conseils pratiques', usefulGuidance)}
+    ${textSection('À vérifier', importantChecks)}
+    ${sources.length ? `<section class="client-doc-section">
+      <details class="client-doc-sources">
+        <summary>Sources consultées (${sources.length})</summary>
+        <div class="client-doc-source-list">${sources.map((source, index) => {
+          const number = index + 1;
+          const url = safeClientSourceUrl(source.url);
+          return `<div class="client-doc-source" id="${clientDocumentationSourceDomId(exchangeId, number)}">
+            <span class="client-doc-source-number">[${number}]</span>
+            <div class="client-doc-source-title">${url
+              ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(source.title || 'Source')}</a>`
+              : esc(source.title || 'Source')}</div>
+            ${source.publisher ? `<div>${esc(source.publisher)}</div>` : ''}
+            ${source.summary ? `<div class="client-doc-source-summary">${esc(source.summary)}</div>` : ''}
+          </div>`;
+        }).join('')}</div>
+      </details>
+    </section>` : ''}
   </div>`;
 }
 
-function renderLatestAssistantDetails(result, exchangeId) {
+function renderClientResponseMode(result) {
+  const mode = normalizeClientResponseMode(result?.response_mode);
+  const className = mode === 'lookup' ? 'is-fast' : (mode === 'documented' ? 'is-documented' : 'is-detailed');
+  const label = mode === 'lookup' ? 'Recherche rapide' : (mode === 'documented' ? 'Réponse documentée' : 'Réponse avec IA');
+  return `<div class="client-response-mode ${className}">
+    ${label}
+  </div>`;
+}
+
+function renderLatestAssistantDetails(result, exchangeId, includeActions=true) {
   const advice = result?.advice || {};
   const products = Array.isArray(result?.products) ? result.products : [];
   const highlighted = highlightedClientProducts(result);
   const links = highlighted.map(product => clientProductLink(product, '', exchangeId)).join('<span class="client-link-sep"> · </span>');
   return `
     ${renderClientResponseMode(result)}
+    ${result?.response_mode === 'documented' ? '<div class="client-doc-heading">À dire au client</div>' : ''}
     <div class="client-chat-answer">${renderQuotableClientAnswer(result?.answer || advice.summary || '', products, exchangeId)}</div>
     ${links ? `<div class="client-answer-products"><span>Produits cités :</span> ${links}</div>` : ''}
     ${clientProductsActionMarkup(result, exchangeId)}
+    ${renderDocumentedClientDetails(result, exchangeId)}
     ${advice.follow_up_questions?.length ? `
       <div class="advice-section">
         <span class="advice-label">À préciser avec le client</span>
@@ -329,12 +495,12 @@ function renderLatestAssistantDetails(result, exchangeId) {
       </div>` : ''}
     ${advice.pharmacist_referral ? `<div class="msg error client-referral">Orienter vers le pharmacien. ${esc(advice.pharmacist_reason || '')}</div>` : ''}
     ${!advice.pharmacist_referral && advice.pharmacist_reason ? `<div class="msg info client-referral">${esc(advice.pharmacist_reason)}</div>` : ''}
-    ${result?.response_mode !== 'lookup' ? `<div id="aiFeedbackRow" class="client-feedback-row">
+    ${includeActions && result?.response_mode !== 'lookup' ? `<div id="aiFeedbackRow" class="client-feedback-row">
       <span>Cette réponse aide ?</span>
       <button class="btn btn-outline btn-inline" onclick="sendAiFeedback('up')">Oui</button>
       <button class="btn btn-outline btn-inline" onclick="sendAiFeedback('down')">Non</button>
     </div>` : ''}
-    ${clientDirectReplyMarkup()}
+    ${includeActions ? clientDirectReplyMarkup() : ''}
   `;
 }
 
@@ -374,7 +540,7 @@ function clientConversationExchanges() {
     if (message.role === 'user') {
       pending = {
         id: String(message.exchange_id || `exchange-${exchanges.length}`),
-        mode: message.mode === 'ai' ? 'ai' : 'fast',
+        mode: normalizeClientMode(message.mode),
         user: message,
         assistant: null,
       };
@@ -383,12 +549,12 @@ function clientConversationExchanges() {
     }
     if (pending && !pending.assistant) {
       pending.assistant = message;
-      pending.mode = message.mode === 'ai' ? 'ai' : pending.mode;
+      pending.mode = normalizeClientMode(message.mode || pending.mode);
       pending = null;
     } else {
       exchanges.push({
         id: String(message.exchange_id || `exchange-${exchanges.length}`),
-        mode: message.mode === 'ai' ? 'ai' : 'fast',
+        mode: normalizeClientMode(message.mode),
         user: null,
         assistant: message,
       });
@@ -401,21 +567,20 @@ function renderHistoricalClientExchange(exchange) {
   const assistant = exchange.assistant;
   const result = assistant?.result || null;
   const products = Array.isArray(result?.products) ? result.products : [];
-  const answer = assistant?.content || result?.answer || '';
   return `<details class="client-history-item" data-exchange-id="${esc(exchange.id)}">
     <summary class="client-history-summary">
       <div class="client-history-summary-main">
         <div class="client-history-label">Demande précédente</div>
         <div class="client-history-question">${esc(cleanClientAnswer(exchange.user?.content || 'Réponse précédente'))}</div>
       </div>
-      <div class="client-history-meta"><span>${exchange.mode === 'ai' ? 'IA' : 'Rapide'}</span>${products.length ? `<span>· ${products.length} produit${products.length > 1 ? 's' : ''}</span>` : ''}</div>
+      <div class="client-history-meta"><span>${exchange.mode === 'documented' ? 'Documenté' : (exchange.mode === 'ai' ? 'IA' : 'Rapide')}</span>${products.length ? `<span>· ${products.length} produit${products.length > 1 ? 's' : ''}</span>` : ''}</div>
     </summary>
     <div class="client-history-body">
       <div class="client-message client-message-assistant">
         <div class="client-message-label">Réponse</div>
-        ${result ? renderClientResponseMode(result) : ''}
-        <div class="client-chat-answer">${renderQuotableClientAnswer(answer, products, exchange.id)}</div>
-        ${clientProductsActionMarkup(result, exchange.id)}
+        ${result
+          ? renderLatestAssistantDetails(result, exchange.id, false)
+          : `<div class="client-chat-answer">${renderQuotableClientAnswer(assistant?.content || '')}</div>`}
       </div>
     </div>
   </details>`;
@@ -724,12 +889,14 @@ function setClientWorking(active, mode=_clientSearchMode) {
   _clientWorkingStartedAt = Date.now();
   const update = () => {
     const elapsed = Math.max(0, Math.floor((Date.now() - _clientWorkingStartedAt) / 1000));
-    if (label) label.textContent = mode === 'ai'
-      ? `${aiProviderLabel()} analyse et vérifie les produits du plan · ${elapsed} s`
-      : 'Recherche dans le plan actuel du magasin…';
+    if (label) label.textContent = mode === 'documented'
+      ? `${aiProviderLabel()} consulte les fiches et prépare la réponse documentée · ${elapsed} s`
+      : (mode === 'ai'
+        ? `${aiProviderLabel()} analyse et vérifie les produits du plan · ${elapsed} s`
+        : 'Recherche dans le plan actuel du magasin…');
   };
   update();
-  if (mode === 'ai' && typeof window.setInterval === 'function') {
+  if (mode !== 'fast' && typeof window.setInterval === 'function') {
     _clientWorkingTimer = window.setInterval(update, 1000);
   }
 }
@@ -785,7 +952,7 @@ function onClientQuestionInput() {
     setClientWorking(false);
   }
   const status = document.getElementById('clientHelpStatus');
-  const selectedMode = _clientSearchMode === 'ai' ? 'Avec IA' : 'Recherche rapide';
+  const selectedMode = clientModeLabel(_clientSearchMode);
   if (status) status.textContent = clientConversation.length
     ? `${selectedMode} : cliquez sur « Trouver produits » pour envoyer cette question de suivi.`
     : `${selectedMode} : cliquez sur « Trouver produits » pour lancer la recherche.`;
@@ -954,7 +1121,7 @@ function prepareClientResult(result) {
   let highlightedIds = Array.isArray(prepared.highlighted_product_ids)
     ? prepared.highlighted_product_ids.slice(0, 16).map(String)
     : [];
-  if (prepared.response_mode === 'detailed') {
+  if (prepared.response_mode !== 'lookup') {
     const byId = new Map(products.map(product => [String(product.client_id || ''), product]));
     products = highlightedIds.map(id => byId.get(id)).filter(Boolean);
     highlightedIds = products.map(product => String(product.client_id || '')).filter(Boolean);
@@ -966,11 +1133,15 @@ function prepareClientResult(result) {
   return {
     ...prepared,
     success: true,
-    response_mode: prepared.response_mode === 'lookup' ? 'lookup' : 'detailed',
+    response_mode: normalizeClientResponseMode(prepared.response_mode),
     answer,
     products,
     highlighted_product_ids: highlightedIds,
-    advice: {...advice, summary: cleanClientAnswer(advice.summary || answer)},
+    advice: {
+      ...advice,
+      summary: cleanClientAnswer(advice.summary || answer),
+      documentation: clientDocumentationForStorage(advice.documentation),
+    },
   };
 }
 
@@ -1037,9 +1208,7 @@ async function runClientRequest(question, options={}) {
   if (_clientImagePollTimer) window.clearTimeout(_clientImagePollTimer);
   const requestId = ++_clientRequestSequence;
   const history = clientHistoryPayload();
-  const mode = options.mode === 'ai' || options.mode === 'fast'
-    ? options.mode
-    : _clientSearchMode;
+  const mode = options.mode ? normalizeClientMode(options.mode) : _clientSearchMode;
   const contextProductIds = currentClientMatches
     .map(product => product.client_id).filter(Boolean).slice(0, CLIENT_CONTEXT_PRODUCT_LIMIT);
   const previousQuestion = [...clientConversation].reverse()
@@ -1088,15 +1257,17 @@ async function runClientRequest(question, options={}) {
     );
     if (status) status.textContent = serverProducts.length
       ? `Recherche rapide : ${serverProducts.length} produit${serverProducts.length > 1 ? 's' : ''} trouvé${serverProducts.length > 1 ? 's' : ''} dans le plan.`
-      : 'Aucun produit proche trouvé dans le plan. Essayez « Avec IA » pour interpréter la demande.';
+      : 'Aucun produit proche trouvé dans le plan. Essayez « Avec IA » ou « Documenté » pour interpréter la demande.';
     return;
   }
 
-  if (status) status.textContent = `${aiProviderLabel()} analyse la demande et vérifiera chaque produit proposé.`;
+  if (status) status.textContent = mode === 'documented'
+    ? `${aiProviderLabel()} consulte les fiches produit et les sources disponibles.`
+    : `${aiProviderLabel()} analyse la demande et vérifiera chaque produit proposé.`;
   const result = await apiGenerateClientHelp({
     question,
     history,
-    mode: 'ai',
+    mode,
     follow_up: Boolean(options.followUp),
     selected_text: options.selectedText || '',
     focus_product_id: options.focusProductId || '',
@@ -1119,7 +1290,8 @@ async function runClientRequest(question, options={}) {
   appendClientExchange(question, prepared, mode, requestId);
   if (status) {
     const timing = result.elapsed_ms ? ` en ${(result.elapsed_ms / 1000).toFixed(1)} s` : '';
-    status.textContent = `Réponse avec IA${timing} : ${prepared.products.length} produit${prepared.products.length > 1 ? 's' : ''} vérifié${prepared.products.length > 1 ? 's' : ''}.`;
+    const responseLabel = mode === 'documented' ? 'Réponse documentée' : 'Réponse avec IA';
+    status.textContent = `${responseLabel}${timing} : ${prepared.products.length} produit${prepared.products.length > 1 ? 's' : ''} vérifié${prepared.products.length > 1 ? 's' : ''}.`;
   }
 }
 

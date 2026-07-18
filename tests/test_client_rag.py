@@ -4,6 +4,7 @@ from unittest.mock import patch
 from app import app
 from routes.ai import (
     classify_client_request,
+    normalize_documented_client_answer,
     normalize_verified_client_answer,
     select_client_answer_candidates,
 )
@@ -225,6 +226,32 @@ class ClientRagTests(unittest.TestCase):
         result = normalize_verified_client_answer(parsed, ["product:1"])
         self.assertEqual(result["selected_product_ids"], ["product:1"])
 
+    def test_documented_answer_rejects_invented_products_and_sources(self):
+        documents = [{"source_id": "store-plan"}, {"source_id": "health-canada:12"}]
+        parsed = {
+            "answer": "Réponse documentée.",
+            "selected_product_ids": ["product:1", "invented:9"],
+            "key_points": [{
+                "heading": "Ingrédient", "detail": "Ibuprofène 200 mg.",
+                "source_ids": ["health-canada:12", "invented-source"],
+            }],
+            "comparisons": [{
+                "candidate_id": "invented:9", "difference": "Fausse différence",
+                "practical_note": "", "source_ids": ["invented-source"],
+            }],
+            "useful_guidance": [], "important_checks": [],
+            "follow_up_questions": [], "safety_flags": [],
+            "pharmacist_referral": False, "pharmacist_reason": "",
+            "source_ids": ["health-canada:12", "invented-source"],
+        }
+
+        result = normalize_documented_client_answer(parsed, ["product:1"], documents)
+
+        self.assertEqual(result["selected_product_ids"], ["product:1"])
+        self.assertEqual(result["key_points"][0]["source_ids"], ["health-canada:12"])
+        self.assertEqual(result["comparisons"], [])
+        self.assertEqual(result["source_ids"], ["health-canada:12"])
+
     def test_small_ai_context_keeps_different_product_forms(self):
         candidates = [
             {"id": index, "name": f"Advil 200 mg liqui-gel {index}"}
@@ -380,6 +407,50 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(response.get_json()["response_mode"], "lookup")
         provider.assert_not_called()
         verifier.assert_not_called()
+
+    def test_explicit_documented_mode_returns_structured_sources(self):
+        candidate = {
+            "id": 1, "client_id": "product:1", "name": "Advil 200 mg",
+            "brand": "Advil", "description": "Comprimés", "barcode": "111",
+            "aisle": "2", "side": "Gauche", "section": "1", "shelf": "3",
+            "position": "2", "in_stock": 1,
+        }
+        documents = [{
+            "source_id": "health-canada:12", "title": "Santé Canada - ADVIL",
+            "publisher": "Santé Canada", "url": "https://example.test/source",
+            "evidence": "Ibuprofène 200 mg", "candidate_ids": ["product:1"],
+        }]
+        documented = {
+            "answer": "Ce format contient 200 mg d'ibuprofène.",
+            "selected_product_ids": ["product:1"],
+            "follow_up_questions": ["Quel âge a la personne?"],
+            "safety_flags": [], "pharmacist_referral": False,
+            "pharmacist_reason": "", "source_ids": ["health-canada:12"],
+            "key_points": [{
+                "heading": "Ingrédient", "detail": "Ibuprofène 200 mg",
+                "source_ids": ["health-canada:12"],
+            }],
+            "comparisons": [], "useful_guidance": [], "important_checks": [],
+        }
+        with patch("routes.products.hybrid_client_candidates", return_value=[candidate]), \
+             patch("routes.products.hydrate_candidate_images"), \
+             patch("routes.ai.configured_ai_provider", return_value={"name": "deepseek"}), \
+             patch("routes.ai._check_ai_rate_limit", return_value=True), \
+             patch("routes.ai.retrieve_client_documentation", return_value=documents) as retriever, \
+             patch("routes.ai.generate_documented_client_answer", return_value=documented) as generator, \
+             patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": "Explique-moi cet Advil en détail", "mode": "documented",
+                })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["response_mode"], "documented")
+        self.assertEqual(payload["advice"]["documentation"]["key_points"][0]["heading"], "Ingrédient")
+        self.assertEqual(payload["advice"]["documentation"]["sources"][0]["publisher"], "Santé Canada")
+        retriever.assert_called_once()
+        generator.assert_called_once()
 
 
 if __name__ == "__main__":

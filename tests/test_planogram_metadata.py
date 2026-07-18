@@ -29,6 +29,7 @@ class PlanogramMetadataTests(unittest.TestCase):
                 description TEXT DEFAULT '',
                 image_url TEXT DEFAULT '',
                 product_code TEXT DEFAULT '',
+                source_url TEXT DEFAULT '',
                 updated_at TEXT DEFAULT ''
             )"""
         )
@@ -40,6 +41,7 @@ class PlanogramMetadataTests(unittest.TestCase):
                 description TEXT DEFAULT '',
                 image_url TEXT DEFAULT '',
                 product_code TEXT DEFAULT '',
+                source_url TEXT DEFAULT '',
                 modified_at TEXT DEFAULT ''
             )"""
         )
@@ -144,9 +146,10 @@ class PlanogramMetadataTests(unittest.TestCase):
         db = self.make_db()
         db.execute(
             """INSERT INTO product_reference
-               (barcode, brand, description, image_url, product_code)
-               VALUES (?, ?, ?, ?, ?)""",
-            ("0123456789012", "Example", "Reference description", "https://img.test/p.jpg", "F123"),
+               (barcode, brand, description, image_url, product_code, source_url)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            ("0123456789012", "Example", "Reference description", "https://img.test/p.jpg",
+             "F123", "https://source.test/reference"),
         )
         db.execute("INSERT INTO products (id, barcode) VALUES (1, '123456789012')")
         db.execute(
@@ -163,6 +166,7 @@ class PlanogramMetadataTests(unittest.TestCase):
         self.assertEqual(first["description"], "Reference description")
         self.assertEqual(first["image_url"], "https://img.test/p.jpg")
         self.assertEqual(first["product_code"], "F123")
+        self.assertEqual(first["source_url"], "https://source.test/reference")
         self.assertEqual(second["description"], "Manual description")
         self.assertEqual(second["brand"], "Example")
         self.assertEqual(third["description"], "")
@@ -173,6 +177,7 @@ class PlanogramMetadataTests(unittest.TestCase):
             "description": "New product description",
             "image_url": "https://img.test/new.jpg",
             "product_code": "REF1",
+            "source_url": "https://source.test/new",
         }
         existing = {
             "barcode": "123456789012",
@@ -193,7 +198,7 @@ class PlanogramMetadataTests(unittest.TestCase):
         self.assertEqual(same["product_code"], "PDF1")
         self.assertEqual(changed["description"], "New product description")
         self.assertEqual(changed["usage_notes"], "")
-        self.assertEqual(changed["source_url"], "")
+        self.assertEqual(changed["source_url"], "https://source.test/new")
         self.assertEqual(changed["product_code"], "PDF2")
 
     def test_reference_index_prefers_the_richest_equivalent_upc_row(self):

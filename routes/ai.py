@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 from flask import Blueprint, request, jsonify, Response
 from database import get_db
@@ -31,6 +31,11 @@ def log_ai_interaction(kind, question, context, response):
     must not break the user-facing response."""
     try:
         prov = configured_ai_provider()
+        logged_model = (
+            DEEPSEEK_DOCUMENTED_MODEL
+            if kind == "client_documented_rag" and prov["name"] == "deepseek"
+            else prov["model"]
+        )
         body = request.get_json(silent=True) or {}
         store = str(body.get("store", "")).strip()
         employee = (request.headers.get("X-User-Name") or body.get("_username") or "").strip()
@@ -38,7 +43,7 @@ def log_ai_interaction(kind, question, context, response):
         db.execute(
             """INSERT INTO ai_logs (created_at, kind, provider, model, question, context_json, response_json, store, employee)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (utc_now_iso(), kind, prov["name"], prov["model"], str(question or ""),
+            (utc_now_iso(), kind, prov["name"], logged_model, str(question or ""),
              json.dumps(context, ensure_ascii=False) if context is not None else "",
              json.dumps(response, ensure_ascii=False) if response is not None else "",
              store, employee),
@@ -74,7 +79,11 @@ OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY",  "").strip()
 OPENAI_MODEL    = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-DEEPSEEK_MODEL   = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat").strip() or "deepseek-chat"
+DEEPSEEK_MODEL   = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash").strip() or "deepseek-v4-flash"
+DEEPSEEK_DOCUMENTED_MODEL = (
+    os.environ.get("DEEPSEEK_DOCUMENTED_MODEL", "deepseek-v4-pro").strip()
+    or "deepseek-v4-pro"
+)
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
 
 _GEMINI_INPUT_COST_PER_M  = 0.075
@@ -88,6 +97,12 @@ try:
     _AI_REQUEST_TIMEOUT_SECONDS = min(30, max(5, int(os.environ.get("AI_REQUEST_TIMEOUT", "12"))))
 except (TypeError, ValueError):
     _AI_REQUEST_TIMEOUT_SECONDS = 12
+try:
+    _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = min(
+        45, max(15, int(os.environ.get("AI_DOCUMENTED_REQUEST_TIMEOUT", "30")))
+    )
+except (TypeError, ValueError):
+    _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = 30
 _ai_rate_buckets: dict = defaultdict(list)
 
 # Auto AI-enrich of online UPC lookups is OFF by default so it can NEVER cost
@@ -138,7 +153,8 @@ def _try_simple_answer(question: str):
     return None
 
 
-def _log_ai_usage(provider: str, input_tokens: int, output_tokens: int, question_preview: str = "") -> None:
+def _log_ai_usage(provider: str, input_tokens: int, output_tokens: int,
+                  question_preview: str = "", model_override: str = "") -> None:
     if provider == "gemini":
         cost = (input_tokens * _GEMINI_INPUT_COST_PER_M + output_tokens * _GEMINI_OUTPUT_COST_PER_M) / 1_000_000
     elif provider == "openai":
@@ -146,8 +162,8 @@ def _log_ai_usage(provider: str, input_tokens: int, output_tokens: int, question
     else:
         cost = None
     preview = question_preview[:60].replace("\n", " ")
-    model = {"gemini": GEMINI_MODEL, "openai": OPENAI_MODEL,
-             "deepseek": DEEPSEEK_MODEL}.get(provider, "")
+    model = model_override or {"gemini": GEMINI_MODEL, "openai": OPENAI_MODEL,
+                               "deepseek": DEEPSEEK_MODEL}.get(provider, "")
     cost_text = f" cost=${cost:.6f}" if cost is not None else ""
     print(f"[AI-COST] provider={provider} model={model} in={input_tokens} out={output_tokens}"
           f"{cost_text} q=\"{preview}\"")
@@ -1152,15 +1168,21 @@ def generate_client_help_payload_openai(question, products):
     return normalize_client_help_payload(parsed)
 
 
-def _deepseek_json_request(messages, max_tokens, question_preview=""):
+def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mode=False):
     """Call DeepSeek's OpenAI-compatible chat endpoint and return parsed JSON."""
+    model = DEEPSEEK_DOCUMENTED_MODEL if quality_mode else DEEPSEEK_MODEL
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": model,
         "messages": messages,
-        "temperature": 0.2,
         "max_tokens": max_tokens,
         "response_format": {"type": "json_object"},
     }
+    if quality_mode:
+        payload["thinking"] = {"type": "enabled"}
+        payload["reasoning_effort"] = "high"
+    else:
+        payload["thinking"] = {"type": "disabled"}
+        payload["temperature"] = 0.2
     request_obj = Request(
         f"{DEEPSEEK_BASE_URL}/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
@@ -1169,7 +1191,11 @@ def _deepseek_json_request(messages, max_tokens, question_preview=""):
         method="POST",
     )
     try:
-        with urlopen(request_obj, timeout=_AI_REQUEST_TIMEOUT_SECONDS) as response:
+        timeout = (
+            _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS
+            if quality_mode else _AI_REQUEST_TIMEOUT_SECONDS
+        )
+        with urlopen(request_obj, timeout=timeout) as response:
             raw_response = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         body = ""
@@ -1177,7 +1203,7 @@ def _deepseek_json_request(messages, max_tokens, question_preview=""):
             body = exc.read().decode("utf-8", "replace")[:250]
         except Exception:
             pass
-        _set_ai_error(f"DeepSeek a refusé la requête (HTTP {exc.code}, modèle {DEEPSEEK_MODEL}). {body}")
+        _set_ai_error(f"DeepSeek a refusé la requête (HTTP {exc.code}, modèle {model}). {body}")
         return None
     except (URLError, TimeoutError) as exc:
         _set_ai_error(f"DeepSeek injoignable (réseau ou délai dépassé) : {exc}")
@@ -1188,7 +1214,8 @@ def _deepseek_json_request(messages, max_tokens, question_preview=""):
 
     usage = raw_response.get("usage", {})
     _log_ai_usage("deepseek", usage.get("prompt_tokens", 0),
-                  usage.get("completion_tokens", 0), question_preview)
+                  usage.get("completion_tokens", 0), question_preview,
+                  model_override=model)
     choices = raw_response.get("choices", [])
     raw_text = str(((choices[0] if choices else {}).get("message") or {}).get("content", "")).strip()
     if not raw_text:
@@ -1279,13 +1306,15 @@ def _openai_structured_request(system_prompt, user_payload, max_tokens,
 
 
 def _provider_structured_request(system_prompt, user_payload, max_tokens,
-                                 schema_name, schema, question_preview=""):
+                                 schema_name, schema, question_preview="",
+                                 quality_mode=False):
     provider = configured_ai_provider()["name"]
     if provider == "deepseek":
         return _deepseek_json_request([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-        ], max_tokens=max_tokens, question_preview=question_preview)
+        ], max_tokens=max_tokens, question_preview=question_preview,
+           quality_mode=quality_mode)
     if provider == "gemini":
         return _gemini_structured_request(
             system_prompt, user_payload, max_tokens, question_preview
@@ -1509,6 +1538,7 @@ def product_context_for_client_rag(product):
         "search_terms": str(product.get("search_terms", "") or "").strip(),
         "usage_notes": str(product.get("usage_notes", "") or "").strip(),
         "product_code": str(product.get("product_code", "") or "").strip(),
+        "source_url": str(product.get("source_url", "") or "").strip(),
     })
     return context
 
@@ -1597,6 +1627,512 @@ def generate_verified_client_answer(question, query_plan, candidates, history=No
         return None
     return normalize_verified_client_answer(
         parsed, [product.get("client_id", "") for product in candidates]
+    )
+
+
+_DOCUMENTED_SOURCE_IDS_SCHEMA = {
+    "type": "array", "items": {"type": "string"}, "maxItems": 4,
+}
+
+_CLIENT_DOCUMENTED_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "answer": {"type": "string"},
+        "key_points": {
+            "type": "array", "maxItems": 6,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "heading": {"type": "string"},
+                    "detail": {"type": "string"},
+                    "source_ids": _DOCUMENTED_SOURCE_IDS_SCHEMA,
+                },
+                "required": ["heading", "detail", "source_ids"],
+                "additionalProperties": False,
+            },
+        },
+        "comparisons": {
+            "type": "array", "maxItems": 8,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "candidate_id": {"type": "string"},
+                    "difference": {"type": "string"},
+                    "practical_note": {"type": "string"},
+                    "source_ids": _DOCUMENTED_SOURCE_IDS_SCHEMA,
+                },
+                "required": ["candidate_id", "difference", "practical_note", "source_ids"],
+                "additionalProperties": False,
+            },
+        },
+        "useful_guidance": {
+            "type": "array", "maxItems": 6,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "source_ids": _DOCUMENTED_SOURCE_IDS_SCHEMA,
+                },
+                "required": ["text", "source_ids"],
+                "additionalProperties": False,
+            },
+        },
+        "important_checks": {
+            "type": "array", "maxItems": 6,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "source_ids": _DOCUMENTED_SOURCE_IDS_SCHEMA,
+                },
+                "required": ["text", "source_ids"],
+                "additionalProperties": False,
+            },
+        },
+        "selected_product_ids": {
+            "type": "array", "items": {"type": "string"}, "maxItems": 16,
+        },
+        "follow_up_questions": {
+            "type": "array", "items": {"type": "string"}, "maxItems": 4,
+        },
+        "safety_flags": {
+            "type": "array", "items": {"type": "string"}, "maxItems": 5,
+        },
+        "pharmacist_referral": {"type": "boolean"},
+        "pharmacist_reason": {"type": "string"},
+        "source_ids": {
+            "type": "array", "items": {"type": "string"}, "maxItems": 16,
+        },
+    },
+    "required": [
+        "answer", "key_points", "comparisons", "useful_guidance",
+        "important_checks", "selected_product_ids", "follow_up_questions",
+        "safety_flags", "pharmacist_referral", "pharmacist_reason", "source_ids",
+    ],
+    "additionalProperties": False,
+}
+
+_CLIENT_DOCUMENTED_INSTRUCTIONS = (
+    "Tu produis une réponse documentée de très haute qualité pour un employé Familiprix. "
+    "Le but est de répondre exactement à la demande, puis de rendre les faits importants "
+    "repérables en quelques secondes. Les produits candidats proviennent uniquement du plan "
+    "actuel du magasin. Les documents fournis sont la seule preuve autorisée pour attribuer "
+    "un ingrédient, un dosage, une indication, une contre-indication, un âge, une interaction "
+    "ou une propriété à un produit précis. Les fiches Santé Canada ont priorité sur les fiches "
+    "de catalogue; les noms de planogramme et descriptions peuvent être abrégés ou incomplets. "
+    "Tu peux expliquer une différence générale entre des formes ou catégories, mais indique "
+    "clairement qu'elle est générale lorsqu'aucun document ne la confirme pour le produit. "
+    "N'invente jamais de dose, de durée, d'ingrédient, de bénéfice ou de source. "
+    "answer est une réponse directe de 1 à 3 phrases que l'employé peut dire au client. "
+    "key_points contient les faits décisifs, avec des titres très courts. comparisons explique "
+    "les différences réellement utiles entre les produits sélectionnés; utilise seulement des "
+    "candidate_id fournis. useful_guidance aide à choisir ou utiliser la catégorie sans poser "
+    "de diagnostic. important_checks rassemble ce qu'il faut vérifier avant de répondre. "
+    "Chaque affirmation fondée sur un document cite son source_id exact; une connaissance "
+    "générale non documentée garde source_ids vide. source_ids contient toutes les sources "
+    "effectivement utilisées. selected_product_ids garde tous les produits réellement liés, "
+    "jusqu'à 16, et aucun autre. Copie les noms de produits exactement lorsqu'ils apparaissent "
+    "dans le texte. Réponds dans answer_language, sans Markdown. Pour une demande médicale, "
+    "ne pose pas de diagnostic, ne remplace pas l'étiquette et oriente vers le pharmacien en "
+    "cas de grossesse, bébé, interaction, allergie, symptômes graves ou persistants, difficulté "
+    "respiratoire, ou incertitude clinique. Retourne uniquement le JSON demandé."
+)
+
+_HEALTH_CANADA_DPD_API = "https://health-products.canada.ca/api/drug"
+_HEALTH_CANADA_DPD_INFO = "https://health-products.canada.ca/dpd-bdpp/info"
+_HEALTH_CANADA_CACHE = {}
+_HEALTH_CANADA_CACHE_MAX = 64
+_DOCUMENTATION_SEARCH_STOPWORDS = {
+    "ca", "co", "caps", "gel", "liq", "mini", "mg", "ml", "un", "une",
+    "de", "des", "du", "le", "la", "les", "et", "pour", "format", "produit",
+}
+
+
+def _health_canada_json(endpoint, **params):
+    key = (endpoint, tuple(sorted((name, str(value)) for name, value in params.items())))
+    if key in _HEALTH_CANADA_CACHE:
+        return _HEALTH_CANADA_CACHE[key]
+    url = f"{_HEALTH_CANADA_DPD_API}/{endpoint}/?{urlencode(params)}"
+    data = _fetch_json(url, timeout=2.5)
+    if data is not None:
+        if endpoint == "drugproduct" and isinstance(data, list):
+            data = data[:120]
+        if len(_HEALTH_CANADA_CACHE) >= _HEALTH_CANADA_CACHE_MAX:
+            _HEALTH_CANADA_CACHE.pop(next(iter(_HEALTH_CANADA_CACHE)), None)
+        _HEALTH_CANADA_CACHE[key] = data
+    return data
+
+
+def _json_records(value):
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        return [value]
+    return []
+
+
+def _documentation_search_term(product):
+    from routes.products import normalize_search_text
+
+    for raw in (product.get("brand", ""), product.get("name", "")):
+        tokens = [
+            token for token in normalize_search_text(raw).split()
+            if len(token) >= 3 and not token.isdigit()
+            and token not in _DOCUMENTATION_SEARCH_STOPWORDS
+        ]
+        if tokens:
+            return " ".join(tokens[:2])
+    return ""
+
+
+def _dpd_match_score(product, record):
+    from routes.products import normalize_search_text
+
+    product_text = normalize_search_text(" ".join([
+        str(product.get("name", "") or ""), str(product.get("brand", "") or ""),
+    ]))
+    record_text = normalize_search_text(" ".join([
+        str(record.get("brand_name", "") or ""), str(record.get("descriptor", "") or ""),
+    ]))
+    product_tokens = set(product_text.split())
+    record_tokens = set(record_text.split())
+    shared = {
+        token for token in product_tokens & record_tokens
+        if len(token) >= 3 and token not in _DOCUMENTATION_SEARCH_STOPWORDS
+    }
+    score = len(shared) * 3
+    if record_text == product_text:
+        score += 8
+    elif len(product_tokens) >= 2 and record_text and (
+        record_text in product_text or product_text in record_text
+    ):
+        score += 8
+    equivalent_markers = (
+        ("enf", "enfant", "children", "junior", "pediatric"),
+        ("rhume", "cold", "grippe", "flu"),
+        ("nuit", "night"),
+        ("sinus",),
+        ("liq", "liqui", "capsule", "capsules"),
+        ("mini",),
+        ("sir", "sirop", "syrup", "suspension", "liquide", "liquid", "drops", "gouttes"),
+        ("co", "comprime", "comprimes", "tablet", "tablets", "caplet", "caplets"),
+        ("creme", "cream", "onguent", "ointment"),
+        ("extra", "fort", "strength", "xf"),
+    )
+    padded_product = f" {product_text} "
+    padded_record = f" {record_text} "
+    for markers in equivalent_markers:
+        product_has_marker = any(f" {marker} " in padded_product for marker in markers)
+        record_has_marker = any(f" {marker} " in padded_record for marker in markers)
+        if product_has_marker and record_has_marker:
+            score += 4
+    product_numbers = set(re.findall(r"\d+", product_text))
+    record_numbers = set(re.findall(r"\d+", record_text))
+    score += len(product_numbers & record_numbers) * 2
+    return score
+
+
+def _health_canada_document(match):
+    product, record = match
+    code = str(record.get("drug_code", "") or "").strip()
+    if not code:
+        return None
+    ingredients = _json_records(_health_canada_json(
+        "activeingredient", id=code, lang="fr", type="json"
+    ))
+    forms = _json_records(_health_canada_json("form", id=code, lang="fr", type="json"))
+    routes = _json_records(_health_canada_json("route", id=code, lang="fr", type="json"))
+    schedules = _json_records(_health_canada_json(
+        "schedule", id=code, lang="fr", type="json"
+    ))
+
+    ingredient_text = []
+    for item in ingredients[:5]:
+        name = str(item.get("ingredient_name", "") or "").strip()
+        strength = " ".join(str(item.get(field, "") or "").strip() for field in (
+            "strength", "strength_unit",
+        )).strip()
+        if name:
+            ingredient_text.append(f"{name} {strength}".strip())
+    form_text = [
+        str(item.get("pharmaceutical_form_name", "") or "").strip()
+        for item in forms[:4]
+        if str(item.get("pharmaceutical_form_name", "") or "").strip()
+    ]
+    route_text = [
+        str(item.get("route_of_administration_name", "") or "").strip()
+        for item in routes[:4]
+        if str(item.get("route_of_administration_name", "") or "").strip()
+    ]
+    schedule_text = [
+        str(item.get("schedule_name", "") or "").strip()
+        for item in schedules[:4]
+        if str(item.get("schedule_name", "") or "").strip()
+    ]
+    facts = [
+        f"Nom autorisé: {str(record.get('brand_name', '') or '').strip()}",
+        f"DIN: {str(record.get('drug_identification_number', '') or '').strip()}",
+        "Statut: commercialisé au Canada",
+    ]
+    descriptor = str(record.get("descriptor", "") or "").strip()
+    if descriptor:
+        facts.append(f"Description réglementaire: {descriptor}")
+    if ingredient_text:
+        facts.append(f"Ingrédient(s) actif(s): {', '.join(ingredient_text)}")
+    if form_text:
+        facts.append(f"Forme(s): {', '.join(form_text)}")
+    if route_text:
+        facts.append(f"Voie(s): {', '.join(route_text)}")
+    if schedule_text:
+        facts.append(f"Annexe(s): {', '.join(schedule_text)}")
+    return {
+        "source_id": f"health-canada:{code}",
+        "title": f"Santé Canada - {str(record.get('brand_name', '') or '').strip()}",
+        "publisher": "Santé Canada",
+        "url": f"{_HEALTH_CANADA_DPD_INFO}?{urlencode({'code': code, 'lang': 'fre'})}",
+        "evidence": ". ".join(fact for fact in facts if not fact.endswith(": "))[:1800],
+        "candidate_ids": [str(product.get("client_id", "") or "")],
+    }
+
+
+def health_canada_documents(products, limit=4):
+    """Return bounded official drug facts; failure leaves catalog RAG available."""
+    terms = []
+    for product in products:
+        term = _documentation_search_term(product)
+        if term and term not in terms:
+            terms.append(term)
+        if len(terms) >= 3:
+            break
+    records = []
+    seen_codes = set()
+    search_futures = {
+        _LOOKUP_SOURCE_EXECUTOR.submit(
+            _health_canada_json, "drugproduct",
+            brandname=term, status=2, lang="fr", type="json",
+        ) for term in terms
+    }
+    try:
+        for future in as_completed(search_futures, timeout=5):
+            try:
+                result = future.result()
+            except Exception:
+                result = None
+            for record in _json_records(result):
+                code = str(record.get("drug_code", "") or "").strip()
+                if code and code not in seen_codes:
+                    seen_codes.add(code)
+                    records.append(record)
+    except TimeoutError:
+        pass
+    for future in search_futures:
+        future.cancel()
+
+    ranked = []
+    for product in products:
+        for record in records:
+            score = _dpd_match_score(product, record)
+            if score >= 7:
+                ranked.append((score, product, record))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    matches = []
+    used_products = set()
+    used_codes = set()
+    for _score, product, record in ranked:
+        product_id = str(product.get("client_id", "") or "")
+        code = str(record.get("drug_code", "") or "")
+        if not product_id or product_id in used_products or code in used_codes:
+            continue
+        used_products.add(product_id)
+        used_codes.add(code)
+        matches.append((product, record))
+        if len(matches) >= limit:
+            break
+    if not matches:
+        return []
+
+    futures = {_LOOKUP_SOURCE_EXECUTOR.submit(_health_canada_document, match) for match in matches}
+    documents = []
+    try:
+        for future in as_completed(futures, timeout=9):
+            try:
+                document = future.result()
+            except Exception:
+                document = None
+            if document:
+                documents.append(document)
+    except TimeoutError:
+        pass
+    for future in futures:
+        future.cancel()
+    documents.sort(key=lambda item: item.get("title", ""))
+    return documents
+
+
+def retrieve_client_documentation(products):
+    product_names = [str(product.get("name", "") or "").strip() for product in products]
+    documents = [{
+        "source_id": "store-plan",
+        "title": "Plan actuel du magasin",
+        "publisher": "Familiprix Locator",
+        "url": "",
+        "evidence": (
+            "Produits réellement placés dans le plan actuel: "
+            + "; ".join(name for name in product_names if name)
+        )[:2200],
+        "candidate_ids": [
+            str(product.get("client_id", "") or "") for product in products
+            if product.get("client_id")
+        ],
+    }]
+    try:
+        documents.extend(health_canada_documents(products))
+    except Exception:
+        pass
+
+    for index, product in enumerate(products[:10], start=1):
+        description = str(product.get("description", "") or "").strip()
+        usage_notes = str(product.get("usage_notes", "") or "").strip()
+        source_url = str(product.get("source_url", "") or "").strip()
+        if not description and not usage_notes and not source_url:
+            continue
+        name = str(product.get("name", "") or "").strip()
+        evidence_parts = [f"Produit du plan: {name}"]
+        if description:
+            evidence_parts.append(f"Description: {description}")
+        if usage_notes and usage_notes != description:
+            evidence_parts.append(f"Notes: {usage_notes}")
+        barcode = str(product.get("barcode", "") or "").strip()
+        if barcode:
+            evidence_parts.append(f"UPC: {barcode}")
+        publisher = "Catalogue produit"
+        if source_url:
+            try:
+                publisher = urlparse(source_url).netloc.removeprefix("www.") or publisher
+            except ValueError:
+                source_url = ""
+        documents.append({
+            "source_id": f"catalog:{index}",
+            "title": f"Fiche produit - {name}",
+            "publisher": publisher,
+            "url": source_url if source_url.startswith(("https://", "http://")) else "",
+            "evidence": ". ".join(evidence_parts)[:1800],
+            "candidate_ids": [str(product.get("client_id", "") or "")],
+        })
+    return documents[:15]
+
+
+def _normalize_source_ids(values, valid_source_ids, limit=4):
+    selected = []
+    for raw in values if isinstance(values, list) else []:
+        source_id = str(raw or "").strip()
+        if source_id in valid_source_ids and source_id not in selected:
+            selected.append(source_id)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def normalize_documented_client_answer(parsed, valid_ids, documents):
+    parsed = parsed if isinstance(parsed, dict) else {}
+    base = normalize_verified_client_answer(parsed, valid_ids)
+    valid_ids = set(valid_ids)
+    valid_source_ids = {
+        str(document.get("source_id", "") or "") for document in documents
+    }
+
+    key_points = []
+    for item in parsed.get("key_points", []) if isinstance(parsed.get("key_points"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        heading = str(item.get("heading", "") or "").strip()[:100]
+        detail = str(item.get("detail", "") or "").strip()[:1000]
+        if heading and detail:
+            key_points.append({
+                "heading": heading,
+                "detail": detail,
+                "source_ids": _normalize_source_ids(item.get("source_ids"), valid_source_ids),
+            })
+        if len(key_points) >= 6:
+            break
+
+    comparisons = []
+    for item in parsed.get("comparisons", []) if isinstance(parsed.get("comparisons"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        candidate_id = str(item.get("candidate_id", "") or "").strip()
+        difference = str(item.get("difference", "") or "").strip()[:800]
+        practical_note = str(item.get("practical_note", "") or "").strip()[:800]
+        if candidate_id in valid_ids and (difference or practical_note):
+            comparisons.append({
+                "candidate_id": candidate_id,
+                "difference": difference,
+                "practical_note": practical_note,
+                "source_ids": _normalize_source_ids(item.get("source_ids"), valid_source_ids),
+            })
+        if len(comparisons) >= 8:
+            break
+
+    def normalize_text_items(key):
+        items = []
+        raw_items = parsed.get(key, []) if isinstance(parsed.get(key), list) else []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            value = str(item.get("text", "") or "").strip()[:900]
+            if value:
+                items.append({
+                    "text": value,
+                    "source_ids": _normalize_source_ids(item.get("source_ids"), valid_source_ids),
+                })
+            if len(items) >= 6:
+                break
+        return items
+
+    useful_guidance = normalize_text_items("useful_guidance")
+    important_checks = normalize_text_items("important_checks")
+    cited_source_ids = _normalize_source_ids(
+        parsed.get("source_ids"), valid_source_ids, limit=16
+    )
+    for item in key_points + comparisons + useful_guidance + important_checks:
+        for source_id in item.get("source_ids", []):
+            if source_id not in cited_source_ids:
+                cited_source_ids.append(source_id)
+    return {
+        **base,
+        "key_points": key_points,
+        "comparisons": comparisons,
+        "useful_guidance": useful_guidance,
+        "important_checks": important_checks,
+        "source_ids": cited_source_ids[:16],
+    }
+
+
+def generate_documented_client_answer(question, query_plan, candidates, documents,
+                                      history=None, selected_text="", focus_product_id=""):
+    contexts = [product_context_for_client_rag(product) for product in candidates]
+    parsed = _provider_structured_request(
+        _CLIENT_DOCUMENTED_INSTRUCTIONS,
+        {
+            "conversation": normalize_client_history(history),
+            "question": question,
+            "selected_text_from_previous_answer": selected_text,
+            "focused_product_id": focus_product_id,
+            "query_plan": query_plan,
+            "candidates": contexts,
+            "documents": documents,
+            "required_schema": _CLIENT_DOCUMENTED_SCHEMA,
+        },
+        max_tokens=3200,
+        schema_name="client_documented_answer",
+        schema=_CLIENT_DOCUMENTED_SCHEMA,
+        question_preview=question,
+        quality_mode=True,
+    )
+    if not isinstance(parsed, dict):
+        return None
+    return normalize_documented_client_answer(
+        parsed, [product.get("client_id", "") for product in candidates], documents
     )
 
 
@@ -2427,7 +2963,9 @@ def client_help():
 
     global _AI_LAST_ERROR
     _AI_LAST_ERROR = ""
-    if requested_mode == "ai":
+    if requested_mode == "documented":
+        response_mode = "documented"
+    elif requested_mode == "ai":
         response_mode = "detailed"
     elif requested_mode == "fast":
         response_mode = "lookup"
@@ -2493,13 +3031,21 @@ def client_help():
         )
     # A smaller grounded context improves response time and keeps comparisons readable.
     answer_candidates = select_client_answer_candidates(answer_candidates, limit=16)
-    verified = generate_verified_client_answer(
-        question, query_plan, answer_candidates, history,
-        selected_text=selected_text, focus_product_id=focus_product_id,
-    )
+    documents = []
+    if response_mode == "documented":
+        documents = retrieve_client_documentation(answer_candidates)
+        verified = generate_documented_client_answer(
+            question, query_plan, answer_candidates, documents, history,
+            selected_text=selected_text, focus_product_id=focus_product_id,
+        )
+    else:
+        verified = generate_verified_client_answer(
+            question, query_plan, answer_candidates, history,
+            selected_text=selected_text, focus_product_id=focus_product_id,
+        )
     if not verified:
         return jsonify({"success": False,
-                        "error": _AI_LAST_ERROR or "Impossible de vérifier les produits pour le moment."}), 502
+                        "error": _AI_LAST_ERROR or "Impossible de préparer la réponse pour le moment."}), 502
 
     by_id = {str(product.get("client_id", "")): product for product in answer_candidates}
     highlighted_products = [
@@ -2526,15 +3072,50 @@ def client_help():
         "pharmacist_referral": verified["pharmacist_referral"],
         "pharmacist_reason": verified["pharmacist_reason"],
     }
-    log_ai_interaction("client_rag", question, {
-        "history": history,
-        "selected_text": selected_text,
-        "focus_product_id": focus_product_id,
-        "query_plan": query_plan,
-        "retrieved": [product_context_for_client_rag(product) for product in answer_candidates],
-    }, advice)
+    if response_mode == "documented":
+        used_source_ids = set(verified.get("source_ids", []))
+        source_documents = [
+            document for document in documents
+            if document.get("source_id") == "store-plan"
+            or document.get("source_id") in used_source_ids
+        ]
+        if len(source_documents) == 1 and len(documents) > 1:
+            source_documents = documents
+        advice["documentation"] = {
+            "key_points": verified.get("key_points", []),
+            "comparisons": verified.get("comparisons", []),
+            "useful_guidance": verified.get("useful_guidance", []),
+            "important_checks": verified.get("important_checks", []),
+            "sources": [{
+                "source_id": str(document.get("source_id", "") or ""),
+                "title": str(document.get("title", "") or "")[:240],
+                "publisher": str(document.get("publisher", "") or "")[:120],
+                "url": str(document.get("url", "") or "")[:1600],
+                "summary": str(document.get("evidence", "") or "")[:900],
+                "candidate_ids": document.get("candidate_ids", [])[:16],
+            } for document in source_documents[:15]],
+        }
+    log_ai_interaction(
+        "client_documented_rag" if response_mode == "documented" else "client_rag",
+        question,
+        {
+            "history": history,
+            "selected_text": selected_text,
+            "focus_product_id": focus_product_id,
+            "query_plan": query_plan,
+            "retrieved": [
+                product_context_for_client_rag(product) for product in answer_candidates
+            ],
+            "documentation_sources": [{
+                "source_id": document.get("source_id", ""),
+                "title": document.get("title", ""),
+                "url": document.get("url", ""),
+            } for document in documents],
+        },
+        advice,
+    )
     elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-    return jsonify({"success": True, "response_mode": "detailed",
+    return jsonify({"success": True, "response_mode": response_mode,
                     "answer": answer, "products": highlighted_products,
                     "highlighted_product_ids": verified["selected_product_ids"],
                     "query_plan": query_plan, "advice": advice,

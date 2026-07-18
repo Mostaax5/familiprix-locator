@@ -55,7 +55,8 @@ class PerformanceContractTests(unittest.TestCase):
         self.assertLess(local_matches, ai_wait)
         self.assertLess(fast_lookup, ai_wait)
         self.assertLess(fast_return, ai_wait)
-        self.assertIn("mode: 'ai'", source[ai_wait - 500:ai_wait + 500])
+        self.assertIn("mode,", source[ai_wait - 500:ai_wait + 500])
+        self.assertIn("mode === 'documented'", source[ai_wait - 800:ai_wait + 200])
 
 
 if __name__ == "__main__":
