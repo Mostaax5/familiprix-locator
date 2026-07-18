@@ -42,14 +42,19 @@ class PerformanceContractTests(unittest.TestCase):
         self.assertLess(apply_delta, background_refresh)
         self.assertNotIn("await refreshProductsCache(true)", import_body)
 
-    def test_client_products_render_before_ai_answer_finishes(self):
+    def test_client_fast_mode_is_independent_from_ai_answer(self):
         source = (ROOT / "static" / "ai-ui.js").read_text(encoding="utf-8")
         start = source.index("async function runClientRequest")
-        local_matches = source.index("localClientMatches(question", start)
-        fast_lookup = source.index("apiClientFind(question", start)
+        fast_branch = source.index("if (mode === 'fast')", start)
+        local_matches = source.index("localClientMatches(retrievalQuestion", fast_branch)
+        fast_lookup = source.index("apiClientFind(retrievalQuestion", fast_branch)
         ai_wait = source.index("await apiGenerateClientHelp", start)
+        fast_return = source.index("return;", fast_lookup)
+        self.assertLess(fast_branch, ai_wait)
         self.assertLess(local_matches, ai_wait)
         self.assertLess(fast_lookup, ai_wait)
+        self.assertLess(fast_return, ai_wait)
+        self.assertIn("mode: 'ai'", source[ai_wait - 500:ai_wait + 500])
 
 
 if __name__ == "__main__":

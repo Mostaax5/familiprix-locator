@@ -11,6 +11,8 @@ const elements = {
   clientAdvice: {innerHTML: ''},
   clientMatches: {innerHTML: ''},
   clientFindButton: {disabled: false},
+  clientWorking: {hidden: true},
+  clientWorkingText: {textContent: ''},
   clientHelpStatus: {textContent: ''},
   clientClearHistoryButton: {hidden: true},
   clientQuestion: {
@@ -26,14 +28,35 @@ const elements = {
   },
 };
 
+function modeButton(mode) {
+  const classes = new Set(mode === 'fast' ? ['is-active'] : []);
+  return {
+    dataset: {clientMode: mode}, disabled: false, ariaChecked: mode === 'fast' ? 'true' : 'false',
+    classList: {toggle(name, active) { active ? classes.add(name) : classes.delete(name); }},
+    setAttribute(name, value) { if (name === 'aria-checked') this.ariaChecked = value; },
+    hasClass(name) { return classes.has(name); },
+  };
+}
+const modeButtons = [modeButton('fast'), modeButton('ai')];
+
 const context = {
   console,
   currentClientMatches: [],
   document: {
     getElementById(id) { return elements[id] || null; },
-    querySelectorAll() { return []; },
+    querySelectorAll(selector) { return selector === '[data-client-mode]' ? modeButtons : []; },
   },
   esc(value) { return String(value ?? ''); },
+  sideStaffLabel(value) { return String(value || ''); },
+  isHomeBrand() { return false; },
+  aiProviderLabel() { return 'DeepSeek'; },
+  normalizeSearchText(value) {
+    return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  },
+  productSearchText(product) {
+    return [product.name, product.brand, product.description].join(' ');
+  },
   persistClientDraft() {},
   window: {
     AppAI: {},
@@ -49,6 +72,21 @@ vm.runInContext(`${source}\n;globalThis.__quoteTest = {
   quoteClientPassage,
   clearClientSelectedQuote,
   clearClientHistory,
+  getClientConversationForStorage,
+  restoreClientConversation,
+  renderClientConversation,
+  setClientSearchMode,
+  getClientSearchMode,
+  showHistoryProducts: exchangeId => {
+    const originalRender = renderClientMatches;
+    const originalPoll = pollClientProductImages;
+    renderClientMatches = () => {};
+    pollClientProductImages = () => {};
+    try { return showClientHistoryProducts(exchangeId); }
+    finally { renderClientMatches = originalRender; pollClientProductImages = originalPoll; }
+  },
+  clientRequiredConceptGroups,
+  productMatchesClientConcepts,
   getClientSearchStateForStorage,
   seedSearchState: (result, products, conversation) => {
     _latestClientResult = result;
@@ -61,6 +99,7 @@ vm.runInContext(`${source}\n;globalThis.__quoteTest = {
     products: currentClientMatches.length,
     hasResult: Boolean(_latestClientResult),
   }),
+  currentProductNames: () => currentClientMatches.map(product => product.name),
 };`, context);
 
 const longAnswer = [
@@ -112,6 +151,64 @@ const savedState = context.__quoteTest.getClientSearchStateForStorage();
 assert.strictEqual(savedState.products.length, 1);
 assert.strictEqual(savedState.products[0].description, 'Description persistée');
 assert.strictEqual(savedState.latest_result.answer, 'Réponse sauvegardée');
+
+const firstResult = {
+  response_mode: 'detailed', answer: 'Première réponse',
+  highlighted_product_ids: ['product:1'],
+  products: [{...savedProduct, id: 1, client_id: 'product:1', name: 'Premier produit', image_url: '/one.jpg'}],
+  advice: {summary: 'Première réponse'},
+};
+const secondResult = {
+  response_mode: 'lookup', answer: 'Deuxième réponse',
+  highlighted_product_ids: ['product:2'],
+  products: [{...savedProduct, id: 2, client_id: 'product:2', name: 'Deuxième produit', image_url: '/two.jpg'}],
+  advice: {summary: 'Deuxième réponse'},
+};
+context.__quoteTest.restoreClientConversation([
+  {role: 'user', content: 'Première question', exchange_id: 'first', mode: 'ai'},
+  {role: 'assistant', content: 'Première réponse', exchange_id: 'first', mode: 'ai', result: firstResult},
+  {role: 'user', content: 'Deuxième question', exchange_id: 'second', mode: 'fast'},
+  {role: 'assistant', content: 'Deuxième réponse', exchange_id: 'second', mode: 'fast', result: secondResult},
+]);
+const conversationHtml = elements.clientAdvice.innerHTML;
+assert.ok(conversationHtml.indexOf('Deuxième question') < conversationHtml.indexOf('Première question'));
+assert.ok(conversationHtml.includes('client-history-item'));
+assert.ok(conversationHtml.includes('Voir 1 produit'));
+const storedConversation = context.__quoteTest.getClientConversationForStorage();
+assert.strictEqual(storedConversation[1].result.products[0].name, 'Premier produit');
+context.__quoteTest.showHistoryProducts('first');
+assert.deepStrictEqual(
+  JSON.parse(JSON.stringify(context.__quoteTest.currentProductNames())),
+  ['Premier produit']
+);
+
+context.__quoteTest.setClientSearchMode('ai');
+assert.strictEqual(context.__quoteTest.getClientSearchMode(), 'ai');
+assert.strictEqual(modeButtons[0].ariaChecked, 'false');
+assert.strictEqual(modeButtons[1].ariaChecked, 'true');
+assert.strictEqual(context.__quoteTest.getClientSearchStateForStorage().mode, 'ai');
+
+const cottonGroups = context.__quoteTest.clientRequiredConceptGroups(
+  'je cherche de la watte des petites boules de coton'
+);
+assert.strictEqual(
+  context.__quoteTest.productMatchesClientConcepts(
+    {name: 'PERSONNEL OUATE BOULES 100', brand: '', description: ''}, cottonGroups
+  ),
+  true
+);
+assert.strictEqual(
+  context.__quoteTest.productMatchesClientConcepts(
+    {name: 'CARTER PETITES PILULES LAX', brand: '', description: ''}, cottonGroups
+  ),
+  false
+);
+assert.strictEqual(
+  context.__quoteTest.productMatchesClientConcepts(
+    {name: 'Q-TIPS COTONS-TIGES 400', brand: '', description: ''}, cottonGroups
+  ),
+  false
+);
 
 context.__quoteTest.clearClientHistory();
 assert.deepStrictEqual(

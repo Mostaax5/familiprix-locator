@@ -63,6 +63,10 @@ const INTENT_LEXICON = [
    expand:['bebe','couche','pampers','huggies','tempra','tylenol bebe','penaten','creme fesses','lingette','ovol']},
   {triggers:['pansement','coupure','plaie','desinfectant','bandage','ampoule','echarde','eraflure','saignement'],
    expand:['pansement','band aid','polysporin','peroxyde','alcool','gaze','bandage','antiseptique','diachylon']},
+  {triggers:['membrane transparente','membrane transparent','pansement transparent','film transparent','opsite','upsite','upside'],
+   expand:['pansement transparent','film transparent','opsite','tegaderm','paramedic pans transp','transp']},
+  {triggers:['watte','ouate','boule de coton','boules de coton','cotton balls'],
+   expand:['ouate','boule coton','boules coton','coton','cotton']},
   {triggers:['sommeil','dormir','insomnie','stress','anxiete','relaxation','nervosite'],
    expand:['sommeil','melatonine','nytol','sleep','valeriane','unisom','tylenol nuit']},
 ];
@@ -90,6 +94,7 @@ const SEARCH_ABBREVIATIONS = {
   hydratant:['hydr','hyd'], hydratante:['hydr','hyd'],
   maquillage:['maq','maquill'], coloration:['color','col'], biberon:['bib'],
   serviette:['serv'], serviettes:['serv'], tampon:['tamp'], tampons:['tamp'],
+  transparent:['transp'], transparente:['transp'],
 };
 
 function abbreviationTerms(query) {

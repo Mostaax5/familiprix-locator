@@ -99,6 +99,14 @@ INTENT_LEXICON = [
                   "echarde", "eraflure", "saignement"],
      "expand": ["pansement", "band aid", "polysporin", "peroxyde", "alcool", "gaze",
                 "bandage", "antiseptique", "diachylon"]},
+    {"label": "Pansement transparent",
+     "triggers": ["membrane transparente", "membrane transparent", "pansement transparent",
+                  "film transparent", "opsite", "upsite", "upside"],
+     "expand": ["pansement transparent", "film transparent", "opsite", "tegaderm",
+                "paramedic pans transp", "transp"]},
+    {"label": "Ouate / boules de coton",
+     "triggers": ["watte", "ouate", "boule de coton", "boules de coton", "cotton balls"],
+     "expand": ["ouate", "boule coton", "boules coton", "coton", "cotton"]},
     {"label": "Sommeil / stress",
      "triggers": ["sommeil", "dormir", "insomnie", "stress", "anxiete", "relaxation", "nervosite"],
      "expand": ["sommeil", "melatonine", "nytol", "sleep", "valeriane", "unisom", "tylenol nuit"]},
@@ -146,6 +154,7 @@ SEARCH_ABBREVIATIONS = {
     "biberon": ["bib"],
     "serviette": ["serv"], "serviettes": ["serv"],
     "tampon": ["tamp"], "tampons": ["tamp"],
+    "transparent": ["transp"], "transparente": ["transp"],
 }
 
 
@@ -393,6 +402,50 @@ def intent_expansion_terms(query):
                     seen.add(term)
                     terms.append(term)
     return terms
+
+
+def client_required_concept_groups(query):
+    """Required semantic groups for a few high-risk spoken requests.
+
+    A strong match on a generic word such as ``petites`` or ``transparent`` must
+    not outrank the actual object. Each returned group requires at least one term
+    in the product metadata before the product can enter Client-tab results.
+    """
+    norm = normalize_search_text(query)
+    tokens = set(norm.split())
+    groups = []
+    cotton_ball_request = (
+        bool(tokens.intersection({"watte", "ouate"})) or
+        (bool(tokens.intersection({"coton", "cotton"})) and
+         bool(tokens.intersection({"boule", "boules", "ball", "balls"})))
+    )
+    if cotton_ball_request:
+        groups.extend([
+            ("coton", "cotons", "cotton", "ouate", "watte"),
+            ("boule", "boules", "ball", "balls", "ouate"),
+        ])
+
+    transparent_dressing_request = (
+        any(marker in norm for marker in (
+            "membrane transparent", "pansement transparent", "film transparent",
+        )) or bool(tokens.intersection({"opsite", "upsite", "upside"}))
+    )
+    if transparent_dressing_request:
+        groups.extend([
+            ("transparent", "transparente", "transp", "opsite", "tegaderm"),
+            ("pansement", "pans", "diach", "bandage", "band aid", "opsite", "tegaderm"),
+        ])
+    return groups
+
+
+def row_matches_client_concepts(row, groups):
+    if not groups:
+        return True
+    hay = f" {row.get('_hay', '')} "
+    for group in groups:
+        if not any(f" {normalize_search_text(term)} " in hay for term in group):
+            return False
+    return True
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -1115,6 +1168,7 @@ def hybrid_client_candidates(question, query_plan, limit=60):
     """
     db = get_db()
     documents = _mapped_client_products(db)
+    required_concepts = client_required_concept_groups(question)
 
     def clean_list(value, max_items=20):
         if not isinstance(value, list):
@@ -1183,6 +1237,8 @@ def hybrid_client_candidates(question, query_plan, limit=60):
     for document, token_data in zip(documents, tokenized_documents):
         counts, doc_length = token_data
         row = document["row"]
+        if not row_matches_client_concepts(row, required_concepts):
+            continue
         lexical = 0
         for nq, dq, qtokens, intent_terms, abbrevs in prepared_queries:
             lexical = max(lexical, _fast_reference_score(
@@ -1312,6 +1368,7 @@ def client_find():
     qtokens = list(dict.fromkeys(tokenize_search_query(query)))
     intent_terms = intent_expansion_terms(query)
     abbrevs = abbreviation_terms(query)
+    required_concepts = client_required_concept_groups(query)
     if not nq and not dq and not intent_terms:
         return jsonify([])
     db = get_db()
@@ -1327,6 +1384,8 @@ def client_find():
     for document in _mapped_client_products(db):
         item = document["item"]
         prow = document["row"]
+        if not row_matches_client_concepts(prow, required_concepts):
+            continue
         s = max(
             _fast_reference_score(prow, nq, dq, qtokens, intent_terms, abbrevs),
             _fuzzy_product_score(prow, qtokens),

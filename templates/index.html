@@ -196,16 +196,27 @@
 <div id="client" class="section content">
   <div class="card">
     <div class="section-title">Questions client</div>
-    <div class="section-note">Écrivez la demande complète. L’IA comprend la conversation; les produits viennent uniquement du plan actuel du magasin.</div>
+    <div class="section-note">Les produits proposés viennent uniquement du plan actuel du magasin.</div>
     <div class="field">
       <label class="label" for="clientQuestion">Demande du client</label>
       <textarea id="clientQuestion" placeholder="Ex: Quels Advil avons-nous et quelles sont les différences?" oninput="onClientQuestionInput()"></textarea>
+    </div>
+    <div class="client-mode-field">
+      <span class="label" id="clientModeLabel">Mode de réponse</span>
+      <div class="client-mode-switch" role="radiogroup" aria-labelledby="clientModeLabel">
+        <button type="button" class="client-mode-option is-active" data-client-mode="fast" role="radio" aria-checked="true" onclick="setClientSearchMode('fast')">Rapide</button>
+        <button type="button" class="client-mode-option" data-client-mode="ai" role="radio" aria-checked="false" onclick="setClientSearchMode('ai')">Avec IA</button>
+      </div>
     </div>
     <div class="tool-row">
       <button class="btn btn-inline" id="clientFindButton" onclick="findClientProducts()">Trouver produits</button>
       <button class="btn btn-outline btn-inline client-clear-history" id="clientClearHistoryButton" onclick="clearClientHistory()" hidden>Effacer l’historique</button>
     </div>
-    <div id="clientHelpStatus" class="inline-note">Après la réponse, posez une autre question pour préciser ou comparer.</div>
+    <div id="clientWorking" class="client-working" hidden aria-live="polite">
+      <span class="client-working-spinner" aria-hidden="true"></span>
+      <span id="clientWorkingText">Recherche en cours…</span>
+    </div>
+    <div id="clientHelpStatus" class="inline-note">Recherche rapide : noms, images et emplacements du plan.</div>
   </div>
   <div id="clientAdvice"></div>
   <div id="clientMatches"></div>

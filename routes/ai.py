@@ -1447,7 +1447,7 @@ _CLIENT_VERIFICATION_SCHEMA = {
     "properties": {
         "answer": {"type": "string"},
         "selected_product_ids": {
-            "type": "array", "items": {"type": "string"}, "maxItems": 8,
+            "type": "array", "items": {"type": "string"}, "maxItems": 16,
         },
         "follow_up_questions": {
             "type": "array", "items": {"type": "string"}, "maxItems": 4,
@@ -1466,8 +1466,9 @@ _CLIENT_VERIFICATION_SCHEMA = {
 _CLIENT_VERIFICATION_INSTRUCTIONS = (
     "Tu rédiges une réponse de travail claire pour un employé Familiprix. Les candidats viennent "
     "uniquement du plan réel du magasin et ont déjà été classés par un moteur déterministe. "
-    "selected_product_ids sert seulement à identifier les produits importants que tu mentionnes "
-    "dans la réponse; utilise uniquement des candidate_id fournis, sans en inventer. Pour une faute "
+    "selected_product_ids identifie tous les produits suffisamment liés à la demande qui doivent "
+    "rester dans le résultat final; utilise uniquement des candidate_id fournis, sans en inventer, "
+    "et écarte tous les candidats non pertinents. Pour une faute "
     "de marque, comprends la vraie marque correspondante. Une demande "
     "sur ce qu'il faut manger ne justifie pas automatiquement un analgésique. Ne prétends pas "
     "connaître une saveur, un ingrédient ou un dosage absent des données. Rédige answer dans "
@@ -1482,8 +1483,8 @@ _CLIENT_VERIFICATION_INSTRUCTIONS = (
     "à avaler, flexibilité de dose, clientèle/âge indiqué dans les données, ingrédient, dosage et "
     "format. Tu peux employer des connaissances générales de pharmacie pour expliquer une forme, "
     "mais présente-les comme générales et n'attribue jamais au produit un fait absent de sa fiche. "
-    "Si beaucoup de produits correspondent, résume les familles et choisis au maximum 6 produits "
-    "représentatifs; les cartes affichent la liste complète. "
+    "Si beaucoup de produits correspondent, résume les familles et sélectionne tous les produits "
+    "pertinents fournis, jusqu'à 16; seules les cartes sélectionnées seront affichées. "
     "Décode les abréviations de planogramme usuelles: ENF=enfants, CO=comprimés, CAPS=capsules, "
     "SIR=sirop, CR=crème, VAPO=vaporisateur, GTTE=gouttes, X/F=extra fort; les nombres indiquent "
     "souvent le dosage ou le format. "
@@ -1520,7 +1521,7 @@ def normalize_verified_client_answer(parsed, valid_ids):
         candidate_id = str(raw or "").strip()
         if candidate_id in valid_ids and candidate_id not in selected:
             selected.append(candidate_id)
-        if len(selected) >= 8:
+        if len(selected) >= 16:
             break
     return {
         "answer": str(parsed.get("answer", "") or "").strip(),
@@ -2413,6 +2414,7 @@ def client_help():
     follow_up = bool(data.get("follow_up", False))
     selected_text = str(data.get("selected_text", "") or "").strip()[:500]
     focus_product_id = str(data.get("focus_product_id", "") or "").strip()[:100]
+    requested_mode = str(data.get("mode", "auto") or "auto").strip().lower()
     context_product_ids = []
     for raw_id in data.get("context_product_ids", []) if isinstance(data.get("context_product_ids"), list) else []:
         candidate_id = str(raw_id or "").strip()[:100]
@@ -2425,10 +2427,15 @@ def client_help():
 
     global _AI_LAST_ERROR
     _AI_LAST_ERROR = ""
-    response_mode = classify_client_request(
-        question, follow_up=follow_up, focus_product_id=focus_product_id,
-        selected_text=selected_text,
-    )
+    if requested_mode == "ai":
+        response_mode = "detailed"
+    elif requested_mode == "fast":
+        response_mode = "lookup"
+    else:
+        response_mode = classify_client_request(
+            question, follow_up=follow_up, focus_product_id=focus_product_id,
+            selected_text=selected_text,
+        )
     query_plan = build_client_query_plan(question, response_mode)
 
     # Retrieval is immediate and inventory-safe: only mapped store-plan products
@@ -2528,7 +2535,7 @@ def client_help():
     }, advice)
     elapsed_ms = int((time.perf_counter() - started_at) * 1000)
     return jsonify({"success": True, "response_mode": "detailed",
-                    "answer": answer, "products": candidates,
+                    "answer": answer, "products": highlighted_products,
                     "highlighted_product_ids": verified["selected_product_ids"],
                     "query_plan": query_plan, "advice": advice,
                     "elapsed_ms": elapsed_ms})

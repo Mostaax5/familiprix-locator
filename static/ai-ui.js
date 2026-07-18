@@ -3,21 +3,35 @@
 let _clientRagController = null;
 let _clientRequestSequence = 0;
 let _clientImagePollTimer = null;
+let _clientWorkingTimer = null;
+let _clientWorkingStartedAt = 0;
 let _latestClientResult = null;
 let _clientSelectedQuote = '';
 let _clientQuoteFocusProductId = '';
 let _clientFocusedProductId = '';
+let _clientVisibleExchangeId = '';
+let _clientSearchMode = 'fast';
 let clientConversation = [];
+const CLIENT_MAX_MESSAGES = 12;
+const CLIENT_MAX_PRODUCTS_PER_EXCHANGE = 24;
 
 function getClientQuestion() {
   return document.getElementById('clientQuestion')?.value.trim() || '';
 }
 
 function getClientConversationForStorage() {
-  return clientConversation.slice(-12).map(message => ({
-    role: message.role,
-    content: message.content,
-  }));
+  return clientConversation.slice(-CLIENT_MAX_MESSAGES).map(message => {
+    const stored = {
+      role: message.role,
+      content: String(message.content || ''),
+      exchange_id: String(message.exchange_id || ''),
+      mode: message.mode === 'ai' ? 'ai' : 'fast',
+    };
+    if (message.role === 'assistant' && message.result) {
+      stored.result = clientResultForStorage(message.result);
+    }
+    return stored;
+  });
 }
 
 function clientProductForStorage(product) {
@@ -26,10 +40,10 @@ function clientProductForStorage(product) {
     client_id: String(product.client_id || ''),
     name: String(product.name || ''),
     brand: String(product.brand || ''),
-    description: String(product.description || ''),
-    image_url: String(product.image_url || ''),
-    search_terms: String(product.search_terms || ''),
-    usage_notes: String(product.usage_notes || ''),
+    description: String(product.description || '').slice(0, 1800),
+    image_url: String(product.image_url || '').slice(0, 1600),
+    search_terms: String(product.search_terms || '').slice(0, 1200),
+    usage_notes: String(product.usage_notes || '').slice(0, 1800),
     barcode: String(product.barcode || ''),
     product_code: String(product.product_code || ''),
     facings: Number(product.facings) || 1,
@@ -44,30 +58,56 @@ function clientProductForStorage(product) {
   };
 }
 
-function getClientSearchStateForStorage() {
-  const products = currentClientMatches.slice(0, 100).map(clientProductForStorage);
-  const advice = _latestClientResult?.advice || {};
-  const latestResult = _latestClientResult ? {
-    response_mode: _latestClientResult.response_mode || 'detailed',
-    answer: String(_latestClientResult.answer || advice.summary || ''),
-    highlighted_product_ids: Array.isArray(_latestClientResult.highlighted_product_ids)
-      ? _latestClientResult.highlighted_product_ids.slice(0, 12).map(String)
+function clientResultForStorage(result) {
+  if (!result || typeof result !== 'object') return null;
+  const advice = result.advice || {};
+  return {
+    success: true,
+    response_mode: result.response_mode === 'lookup' ? 'lookup' : 'detailed',
+    answer: String(result.answer || advice.summary || '').slice(0, 6000),
+    elapsed_ms: Number(result.elapsed_ms) || 0,
+    highlighted_product_ids: Array.isArray(result.highlighted_product_ids)
+      ? result.highlighted_product_ids.slice(0, 16).map(String)
       : [],
+    products: (Array.isArray(result.products) ? result.products : [])
+      .slice(0, CLIENT_MAX_PRODUCTS_PER_EXCHANGE).map(clientProductForStorage),
     advice: {
-      summary: String(advice.summary || ''),
+      summary: String(advice.summary || result.answer || '').slice(0, 6000),
       follow_up_questions: Array.isArray(advice.follow_up_questions)
         ? advice.follow_up_questions.slice(0, 4).map(String) : [],
       safety_flags: Array.isArray(advice.safety_flags)
         ? advice.safety_flags.slice(0, 5).map(String) : [],
       pharmacist_referral: Boolean(advice.pharmacist_referral),
-      pharmacist_reason: String(advice.pharmacist_reason || ''),
+      pharmacist_reason: String(advice.pharmacist_reason || '').slice(0, 1200),
     },
-  } : null;
-  return {products, latest_result: latestResult};
+  };
+}
+
+function normalizeStoredClientResult(result) {
+  const stored = clientResultForStorage(result);
+  if (!stored) return null;
+  stored.products = stored.products.map(product => (
+    typeof normalizeProduct === 'function' ? normalizeProduct(product) : {...product}
+  ));
+  return stored;
+}
+
+function getClientSearchStateForStorage() {
+  const products = currentClientMatches
+    .slice(0, CLIENT_MAX_PRODUCTS_PER_EXCHANGE).map(clientProductForStorage);
+  const latestResult = clientResultForStorage(_latestClientResult);
+  if (latestResult) delete latestResult.products;
+  return {
+    mode: _clientSearchMode,
+    visible_exchange_id: _clientVisibleExchangeId,
+    products,
+    latest_result: latestResult,
+  };
 }
 
 function restoreClientSearchState(state) {
   if (!state || typeof state !== 'object') return;
+  setClientSearchMode(state.mode === 'ai' ? 'ai' : 'fast', false);
   const rawProducts = Array.isArray(state.products)
     ? state.products
     : (Array.isArray(state.latest_result?.products) ? state.latest_result.products : []);
@@ -75,22 +115,59 @@ function restoreClientSearchState(state) {
     updateClientHistoryAction();
     return;
   }
-  const products = rawProducts.slice(0, 100).map(normalizeProduct);
-  currentClientMatches = products;
-  _latestClientResult = state.latest_result && typeof state.latest_result === 'object'
-    ? {...state.latest_result, products}
-    : null;
+  const products = rawProducts.slice(0, CLIENT_MAX_PRODUCTS_PER_EXCHANGE).map(product => (
+    typeof normalizeProduct === 'function' ? normalizeProduct(product) : {...product}
+  ));
+  const visibleMessage = findClientAssistantMessage(state.visible_exchange_id);
+  currentClientMatches = visibleMessage?.result?.products?.length
+    ? visibleMessage.result.products
+    : products;
+  _clientVisibleExchangeId = visibleMessage?.exchange_id || String(state.visible_exchange_id || '');
+  const latestAssistant = [...clientConversation].reverse().find(message => message.role === 'assistant');
+  if (latestAssistant?.result) {
+    _latestClientResult = latestAssistant.result;
+  } else if (state.latest_result && typeof state.latest_result === 'object') {
+    _latestClientResult = normalizeStoredClientResult({...state.latest_result, products});
+    if (latestAssistant && _latestClientResult) latestAssistant.result = _latestClientResult;
+  }
   renderClientConversation();
-  renderClientMatches(products);
-  if (products.length) pollClientProductImages();
+  renderClientMatches(currentClientMatches);
+  if (currentClientMatches.length) pollClientProductImages();
   updateClientHistoryAction();
 }
 
 function restoreClientConversation(messages) {
   if (!Array.isArray(messages)) return;
-  clientConversation = messages.slice(-12).filter(message =>
-    message && ['user', 'assistant'].includes(message.role) && String(message.content || '').trim()
-  ).map(message => ({role: message.role, content: String(message.content).trim()}));
+  let pendingExchangeId = '';
+  let restoredIndex = 0;
+  clientConversation = [];
+  for (const raw of messages.slice(-CLIENT_MAX_MESSAGES)) {
+    const role = String(raw?.role || '');
+    const content = String(raw?.content || '').trim();
+    if (!['user', 'assistant'].includes(role) || !content) continue;
+    if (role === 'user') {
+      pendingExchangeId = String(raw.exchange_id || `restored-${restoredIndex++}`);
+    }
+    const exchangeId = String(raw.exchange_id || pendingExchangeId || `restored-${restoredIndex++}`);
+    const message = {
+      role,
+      content,
+      exchange_id: exchangeId,
+      mode: raw.mode === 'ai' ? 'ai' : 'fast',
+    };
+    if (role === 'assistant' && raw.result) {
+      message.result = normalizeStoredClientResult(raw.result);
+    }
+    clientConversation.push(message);
+    if (role === 'assistant') pendingExchangeId = '';
+  }
+  const latestAssistant = [...clientConversation].reverse().find(message => message.role === 'assistant');
+  if (latestAssistant?.result) {
+    _latestClientResult = latestAssistant.result;
+    currentClientMatches = latestAssistant.result.products || [];
+    _clientVisibleExchangeId = latestAssistant.exchange_id;
+    renderClientMatches(currentClientMatches);
+  }
   renderClientConversation();
   updateClientHistoryAction();
 }
@@ -102,13 +179,36 @@ function clientHistoryPayload() {
   }));
 }
 
+function getClientSearchMode() {
+  return _clientSearchMode;
+}
+
+function setClientSearchMode(mode, shouldPersist=true) {
+  _clientSearchMode = mode === 'ai' ? 'ai' : 'fast';
+  document.querySelectorAll('[data-client-mode]').forEach(button => {
+    const active = button.dataset.clientMode === _clientSearchMode;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-checked', active ? 'true' : 'false');
+  });
+  if (!_clientRagController) {
+    const status = document.getElementById('clientHelpStatus');
+    if (status) status.textContent = _clientSearchMode === 'ai'
+      ? `${aiProviderLabel()} répondra et vérifiera les produits du plan.`
+      : 'Recherche rapide : noms, images et emplacements du plan.';
+  }
+  if (shouldPersist && typeof persistClientDraft === 'function') persistClientDraft();
+}
+
 function clientProductDomId(product) {
   const key = String(product.client_id || product.id || product.barcode || product.name || 'product');
   return `client-product-${key.replace(/[^a-zA-Z0-9_-]+/g, '-')}`;
 }
 
-function clientProductLink(product, label) {
-  return `<a class="client-product-link" href="#${clientProductDomId(product)}">${esc(label || product.name)}</a>`;
+function clientProductLink(product, label, exchangeId='') {
+  const historyAction = exchangeId
+    ? ` data-exchange-id="${esc(exchangeId)}" data-product-id="${esc(product.client_id || '')}" onclick="event.preventDefault();showClientHistoryProducts(this.dataset.exchangeId,this.dataset.productId)"`
+    : '';
+  return `<a class="client-product-link" href="#${clientProductDomId(product)}"${historyAction}>${esc(label || product.name)}</a>`;
 }
 
 function cleanClientAnswer(answer) {
@@ -119,7 +219,7 @@ function cleanClientAnswer(answer) {
     .trim();
 }
 
-function linkifyClientAnswer(answer, products) {
+function linkifyClientAnswer(answer, products, exchangeId='') {
   const text = cleanClientAnswer(answer);
   const named = [...products]
     .filter(product => String(product.name || '').trim())
@@ -131,7 +231,7 @@ function linkifyClientAnswer(answer, products) {
   const byName = new Map(named.map(product => [String(product.name).toLocaleLowerCase(), product]));
   return text.split(pattern).map(part => {
     const product = byName.get(String(part).toLocaleLowerCase());
-    return product ? clientProductLink(product, part) : esc(part);
+    return product ? clientProductLink(product, part, exchangeId) : esc(part);
   }).join('');
 }
 
@@ -140,7 +240,7 @@ function clientQuoteButton(quote, focusProductId='', label='Citer ce passage') {
   return `<button type="button" class="client-quote-action" data-quote="${encodeURIComponent(cleanQuote)}" data-focus-product="${esc(focusProductId)}" onclick="event.stopPropagation();quoteClientPassage(decodeURIComponent(this.dataset.quote),this.dataset.focusProduct)" title="${esc(label)}" aria-label="${esc(label)}">&#8220;</button>`;
 }
 
-function renderQuotableClientAnswer(answer, products=[]) {
+function renderQuotableClientAnswer(answer, products=[], exchangeId='') {
   const text = cleanClientAnswer(answer);
   if (!text) return '';
   const passages = [];
@@ -165,7 +265,7 @@ function renderQuotableClientAnswer(answer, products=[]) {
   }
   return passages.map(passage => `
     <div class="client-answer-paragraph">
-      <div class="client-answer-paragraph-text">${linkifyClientAnswer(passage, products)}</div>
+      <div class="client-answer-paragraph-text">${linkifyClientAnswer(passage, products, exchangeId)}</div>
       ${clientQuoteButton(passage)}
     </div>`).join('');
 }
@@ -191,17 +291,28 @@ function clientDirectReplyMarkup() {
     </div>`;
 }
 
-function renderLatestAssistantDetails(result) {
+function clientProductsActionMarkup(result, exchangeId) {
+  const count = Array.isArray(result?.products) ? result.products.length : 0;
+  if (!count) return '';
+  return `<button type="button" class="btn btn-outline btn-inline client-show-products" data-exchange-id="${esc(exchangeId)}" onclick="showClientHistoryProducts(this.dataset.exchangeId)">Voir ${count} produit${count > 1 ? 's' : ''}</button>`;
+}
+
+function renderClientResponseMode(result) {
+  return `<div class="client-response-mode ${result?.response_mode === 'lookup' ? 'is-fast' : 'is-detailed'}">
+    ${result?.response_mode === 'lookup' ? 'Recherche rapide' : 'Réponse avec IA'}
+  </div>`;
+}
+
+function renderLatestAssistantDetails(result, exchangeId) {
   const advice = result?.advice || {};
   const products = Array.isArray(result?.products) ? result.products : [];
   const highlighted = highlightedClientProducts(result);
-  const links = highlighted.map(product => clientProductLink(product)).join('<span class="client-link-sep"> · </span>');
+  const links = highlighted.map(product => clientProductLink(product, '', exchangeId)).join('<span class="client-link-sep"> · </span>');
   return `
-    <div class="client-response-mode ${result?.response_mode === 'lookup' ? 'is-fast' : 'is-detailed'}">
-      ${result?.response_mode === 'lookup' ? 'Recherche rapide' : 'Réponse détaillée'}
-    </div>
-    <div class="client-chat-answer">${renderQuotableClientAnswer(result?.answer || advice.summary || '', products)}</div>
+    ${renderClientResponseMode(result)}
+    <div class="client-chat-answer">${renderQuotableClientAnswer(result?.answer || advice.summary || '', products, exchangeId)}</div>
     ${links ? `<div class="client-answer-products"><span>Produits cités :</span> ${links}</div>` : ''}
+    ${clientProductsActionMarkup(result, exchangeId)}
     ${advice.follow_up_questions?.length ? `
       <div class="advice-section">
         <span class="advice-label">À préciser avec le client</span>
@@ -223,6 +334,105 @@ function renderLatestAssistantDetails(result) {
   `;
 }
 
+function findClientAssistantMessage(exchangeId) {
+  const wanted = String(exchangeId || '');
+  if (!wanted) return null;
+  return clientConversation.find(message => (
+    message.role === 'assistant' && String(message.exchange_id || '') === wanted
+  )) || null;
+}
+
+function showClientHistoryProducts(exchangeId, focusProductId='') {
+  const message = findClientAssistantMessage(exchangeId);
+  const products = Array.isArray(message?.result?.products) ? message.result.products : [];
+  if (!products.length) return false;
+  currentClientMatches = products;
+  _clientVisibleExchangeId = String(exchangeId || '');
+  renderClientMatches(products);
+  persistClientDraft();
+  pollClientProductImages();
+  window.setTimeout(() => {
+    const focusProduct = focusProductId
+      ? currentClientMatches.find(product => String(product.client_id || '') === String(focusProductId))
+      : null;
+    const target = focusProduct
+      ? document.getElementById(clientProductDomId(focusProduct))
+      : document.getElementById('clientMatches');
+    target?.scrollIntoView?.({behavior: 'smooth', block: 'start'});
+  }, 0);
+  return false;
+}
+
+function clientConversationExchanges() {
+  const exchanges = [];
+  let pending = null;
+  for (const message of clientConversation) {
+    if (message.role === 'user') {
+      pending = {
+        id: String(message.exchange_id || `exchange-${exchanges.length}`),
+        mode: message.mode === 'ai' ? 'ai' : 'fast',
+        user: message,
+        assistant: null,
+      };
+      exchanges.push(pending);
+      continue;
+    }
+    if (pending && !pending.assistant) {
+      pending.assistant = message;
+      pending.mode = message.mode === 'ai' ? 'ai' : pending.mode;
+      pending = null;
+    } else {
+      exchanges.push({
+        id: String(message.exchange_id || `exchange-${exchanges.length}`),
+        mode: message.mode === 'ai' ? 'ai' : 'fast',
+        user: null,
+        assistant: message,
+      });
+    }
+  }
+  return exchanges;
+}
+
+function renderHistoricalClientExchange(exchange) {
+  const assistant = exchange.assistant;
+  const result = assistant?.result || null;
+  const products = Array.isArray(result?.products) ? result.products : [];
+  const answer = assistant?.content || result?.answer || '';
+  return `<details class="client-history-item" data-exchange-id="${esc(exchange.id)}">
+    <summary class="client-history-summary">
+      <div class="client-history-summary-main">
+        <div class="client-history-label">Demande précédente</div>
+        <div class="client-history-question">${esc(cleanClientAnswer(exchange.user?.content || 'Réponse précédente'))}</div>
+      </div>
+      <div class="client-history-meta"><span>${exchange.mode === 'ai' ? 'IA' : 'Rapide'}</span>${products.length ? `<span>· ${products.length} produit${products.length > 1 ? 's' : ''}</span>` : ''}</div>
+    </summary>
+    <div class="client-history-body">
+      <div class="client-message client-message-assistant">
+        <div class="client-message-label">Réponse</div>
+        ${result ? renderClientResponseMode(result) : ''}
+        <div class="client-chat-answer">${renderQuotableClientAnswer(answer, products, exchange.id)}</div>
+        ${clientProductsActionMarkup(result, exchange.id)}
+      </div>
+    </div>
+  </details>`;
+}
+
+function renderLatestClientExchange(exchange) {
+  const assistant = exchange.assistant;
+  return `<div class="client-exchange" data-exchange-id="${esc(exchange.id)}">
+    ${exchange.user ? `<div class="client-message client-message-user">
+      <div class="client-message-label">Demande</div>
+      <div class="client-chat-answer">${esc(cleanClientAnswer(exchange.user.content))}</div>
+    </div>` : ''}
+    ${assistant ? `<div class="client-message client-message-assistant">
+      <div class="client-message-label">Réponse</div>
+      ${assistant.result
+        ? renderLatestAssistantDetails(assistant.result, exchange.id)
+        : `<div class="client-chat-answer">${renderQuotableClientAnswer(assistant.content)}</div>${clientDirectReplyMarkup()}`}
+    </div>` : ''}
+  </div>`;
+}
+
 function renderClientConversation() {
   const target = document.getElementById('clientAdvice');
   if (!target) return;
@@ -231,21 +441,12 @@ function renderClientConversation() {
     updateClientHistoryAction();
     return;
   }
-  const lastIndex = clientConversation.length - 1;
+  const exchanges = clientConversationExchanges();
+  const latest = exchanges[exchanges.length - 1];
+  const previous = exchanges.slice(0, -1).reverse();
   target.innerHTML = `<div class="client-conversation" aria-live="polite">
-    ${clientConversation.map((message, index) => {
-      const isLatestAssistant = index === lastIndex && message.role === 'assistant';
-      return `<div class="client-message client-message-${message.role}">
-        <div class="client-message-label">${message.role === 'user' ? 'Demande' : 'Réponse'}</div>
-        ${isLatestAssistant
-          ? (_latestClientResult
-              ? renderLatestAssistantDetails(_latestClientResult)
-              : `<div class="client-chat-answer">${renderQuotableClientAnswer(message.content)}</div>${clientDirectReplyMarkup()}`)
-          : (message.role === 'assistant'
-              ? `<div class="client-chat-answer">${renderQuotableClientAnswer(message.content)}</div>`
-              : `<div class="client-chat-answer">${esc(cleanClientAnswer(message.content))}</div>`)}
-      </div>`;
-    }).join('')}
+    ${latest ? renderLatestClientExchange(latest) : ''}
+    ${previous.map(renderHistoricalClientExchange).join('')}
   </div>`;
   target.onmouseup = captureClientTextSelection;
   target.ontouchend = captureClientTextSelection;
@@ -499,6 +700,36 @@ function submitClientFollowup() {
   });
 }
 
+function setClientWorking(active, mode=_clientSearchMode) {
+  if (_clientWorkingTimer && typeof window.clearInterval === 'function') {
+    window.clearInterval(_clientWorkingTimer);
+  }
+  _clientWorkingTimer = null;
+  const region = document.getElementById('clientWorking');
+  const label = document.getElementById('clientWorkingText');
+  const button = document.getElementById('clientFindButton');
+  const followupButton = document.getElementById('clientFollowupButton');
+  if (region) region.hidden = !active;
+  if (button) button.disabled = active;
+  if (followupButton) followupButton.disabled = active;
+  document.querySelectorAll('[data-client-mode]').forEach(option => {
+    option.disabled = active;
+  });
+  if (!active) return;
+
+  _clientWorkingStartedAt = Date.now();
+  const update = () => {
+    const elapsed = Math.max(0, Math.floor((Date.now() - _clientWorkingStartedAt) / 1000));
+    if (label) label.textContent = mode === 'ai'
+      ? `${aiProviderLabel()} analyse et vérifie les produits du plan · ${elapsed} s`
+      : 'Recherche dans le plan actuel du magasin…';
+  };
+  update();
+  if (mode === 'ai' && typeof window.setInterval === 'function') {
+    _clientWorkingTimer = window.setInterval(update, 1000);
+  }
+}
+
 function updateClientHistoryAction() {
   const button = document.getElementById('clientClearHistoryButton');
   if (!button) return;
@@ -522,18 +753,18 @@ function resetClientSearchResults(showStatus=true) {
     _clientRagController = null;
   }
   if (_clientImagePollTimer) window.clearTimeout(_clientImagePollTimer);
+  setClientWorking(false);
   _latestClientResult = null;
   _clientSelectedQuote = '';
   _clientQuoteFocusProductId = '';
   _clientFocusedProductId = '';
+  _clientVisibleExchangeId = '';
   currentClientMatches = [];
   clientConversation = [];
   const advice = document.getElementById('clientAdvice');
   const matches = document.getElementById('clientMatches');
   if (advice) advice.innerHTML = '';
   if (matches) matches.innerHTML = '';
-  const button = document.getElementById('clientFindButton');
-  if (button) button.disabled = false;
   if (showStatus) {
     const status = document.getElementById('clientHelpStatus');
     if (status) status.textContent = 'Écrivez une demande, puis cliquez sur « Trouver produits ».';
@@ -543,16 +774,17 @@ function resetClientSearchResults(showStatus=true) {
 }
 
 function onClientQuestionInput() {
+  _clientRequestSequence += 1;
   if (_clientRagController) {
     _clientRagController.abort();
     _clientRagController = null;
-    const button = document.getElementById('clientFindButton');
-    if (button) button.disabled = false;
+    setClientWorking(false);
   }
   const status = document.getElementById('clientHelpStatus');
+  const selectedMode = _clientSearchMode === 'ai' ? 'Avec IA' : 'Recherche rapide';
   if (status) status.textContent = clientConversation.length
-    ? 'Cliquez sur « Trouver produits » pour envoyer cette question de suivi.'
-    : 'Cliquez sur « Trouver produits » pour lancer la recherche.';
+    ? `${selectedMode} : cliquez sur « Trouver produits » pour envoyer cette question de suivi.`
+    : `${selectedMode} : cliquez sur « Trouver produits » pour lancer la recherche.`;
 }
 
 async function sendAiFeedback(rating) {
@@ -599,12 +831,56 @@ async function pollClientProductImages(attempt=0) {
   }
 }
 
+function clientRequiredConceptGroups(question) {
+  const normalized = typeof normalizeSearchText === 'function'
+    ? normalizeSearchText(question)
+    : String(question || '').toLowerCase();
+  const tokens = new Set(normalized.split(/\s+/).filter(Boolean));
+  const groups = [];
+  const cottonBalls = ['watte', 'ouate'].some(token => tokens.has(token)) || (
+    ['coton', 'cotton'].some(token => tokens.has(token)) &&
+    ['boule', 'boules', 'ball', 'balls'].some(token => tokens.has(token))
+  );
+  if (cottonBalls) {
+    groups.push(['coton', 'cotons', 'cotton', 'ouate', 'watte']);
+    groups.push(['boule', 'boules', 'ball', 'balls', 'ouate']);
+  }
+  const transparentDressing = [
+    'membrane transparent', 'pansement transparent', 'film transparent',
+  ].some(marker => normalized.includes(marker)) ||
+    ['opsite', 'upsite', 'upside'].some(token => tokens.has(token));
+  if (transparentDressing) {
+    groups.push(['transparent', 'transparente', 'transp', 'opsite', 'tegaderm']);
+    groups.push(['pansement', 'pans', 'diach', 'bandage', 'band aid', 'opsite', 'tegaderm']);
+  }
+  return groups;
+}
+
+function productMatchesClientConcepts(product, groups) {
+  if (!groups.length) return true;
+  const rawHay = typeof productSearchText === 'function'
+    ? productSearchText(product)
+    : [product.name, product.brand, product.description, product.search_terms, product.usage_notes].join(' ');
+  const normalizedHay = typeof normalizeSearchText === 'function'
+    ? normalizeSearchText(rawHay)
+    : String(rawHay || '').toLowerCase();
+  const padded = ` ${normalizedHay} `;
+  return groups.every(group => group.some(term => {
+    const normalizedTerm = typeof normalizeSearchText === 'function'
+      ? normalizeSearchText(term)
+      : term;
+    return padded.includes(` ${normalizedTerm} `);
+  }));
+}
+
 function localClientMatches(question, limit=60) {
   if (typeof searchProductsFromCache !== 'function' || !allProductsCache.length) return [];
   const rawMatches = searchProductsFromCache(question, Math.min(limit * 2, 100), 100);
+  const requiredConcepts = clientRequiredConceptGroups(question);
   const grouped = [];
   const byKey = new Map();
   for (const raw of rawMatches) {
+    if (!productMatchesClientConcepts(raw, requiredConcepts)) continue;
     const barcode = typeof normalizedDigits === 'function' ? normalizedDigits(raw.barcode) : String(raw.barcode || '');
     const nameKey = typeof normalizeSearchText === 'function'
       ? normalizeSearchText(`${raw.name || ''} ${raw.brand || ''}`)
@@ -635,11 +911,118 @@ function localClientMatches(question, limit=60) {
   return grouped;
 }
 
+function buildFastClientResult(products, elapsedMs=0) {
+  const matches = (Array.isArray(products) ? products : []).slice(0, 12);
+  const names = matches.slice(0, 4).map(product => String(product.name || '').trim()).filter(Boolean);
+  let answer = 'Aucun produit proche de cette demande n’a été trouvé dans le plan actuel du magasin.';
+  if (names.length === 1 && matches.length === 1) {
+    answer = `Produit trouvé dans le plan : ${names[0]}.`;
+  } else if (names.length) {
+    const remaining = Math.max(0, matches.length - names.length);
+    answer = `Produits les plus proches dans le plan : ${names.join(', ')}${remaining ? ` et ${remaining} autre${remaining > 1 ? 's' : ''}` : ''}.`;
+  }
+  const ids = matches.map(product => String(product.client_id || '')).filter(Boolean);
+  return {
+    success: true,
+    response_mode: 'lookup',
+    answer,
+    products: matches,
+    highlighted_product_ids: ids,
+    elapsed_ms: Math.max(0, Number(elapsedMs) || 0),
+    advice: {
+      summary: answer,
+      follow_up_questions: [],
+      safety_flags: [],
+      pharmacist_referral: false,
+      pharmacist_reason: '',
+    },
+  };
+}
+
+function prepareClientResult(result) {
+  const prepared = {...(result || {})};
+  const advice = prepared.advice && typeof prepared.advice === 'object' ? prepared.advice : {};
+  const rawProducts = Array.isArray(prepared.products) ? prepared.products : [];
+  const normalizedProducts = rawProducts.map(product => (
+    typeof normalizeProduct === 'function' ? normalizeProduct(product) : {...product}
+  ));
+  let products = normalizedProducts.slice(0, CLIENT_MAX_PRODUCTS_PER_EXCHANGE);
+  let highlightedIds = Array.isArray(prepared.highlighted_product_ids)
+    ? prepared.highlighted_product_ids.slice(0, 16).map(String)
+    : [];
+  if (prepared.response_mode === 'detailed') {
+    const byId = new Map(products.map(product => [String(product.client_id || ''), product]));
+    products = highlightedIds.map(id => byId.get(id)).filter(Boolean);
+    highlightedIds = products.map(product => String(product.client_id || '')).filter(Boolean);
+  } else {
+    products = products.slice(0, 12);
+    highlightedIds = products.map(product => String(product.client_id || '')).filter(Boolean);
+  }
+  const answer = cleanClientAnswer(prepared.answer || advice.summary || '');
+  return {
+    ...prepared,
+    success: true,
+    response_mode: prepared.response_mode === 'lookup' ? 'lookup' : 'detailed',
+    answer,
+    products,
+    highlighted_product_ids: highlightedIds,
+    advice: {...advice, summary: cleanClientAnswer(advice.summary || answer)},
+  };
+}
+
+function appendClientExchange(question, rawResult, mode, requestId) {
+  const result = prepareClientResult(rawResult);
+  const exchangeId = `client-${Date.now().toString(36)}-${requestId}`;
+  clientConversation.push({
+    role: 'user', content: question, exchange_id: exchangeId, mode,
+  });
+  clientConversation.push({
+    role: 'assistant', content: result.answer, exchange_id: exchangeId, mode, result,
+  });
+  clientConversation = clientConversation.slice(-CLIENT_MAX_MESSAGES);
+  _latestClientResult = result;
+  _clientVisibleExchangeId = exchangeId;
+  currentClientMatches = result.products;
+  const questionInput = document.getElementById('clientQuestion');
+  if (questionInput) questionInput.value = '';
+  const followupInput = document.getElementById('clientFollowupQuestion');
+  if (followupInput) followupInput.value = '';
+  _clientSelectedQuote = '';
+  _clientQuoteFocusProductId = '';
+  renderClientConversation();
+  renderClientMatches(currentClientMatches);
+  persistClientDraft();
+  if (currentClientMatches.length) pollClientProductImages();
+  window.setTimeout(() => {
+    document.querySelector?.('.client-exchange')?.scrollIntoView?.({behavior: 'smooth', block: 'start'});
+  }, 0);
+  return exchangeId;
+}
+
+function updateClientExchangeResult(exchangeId, rawResult) {
+  const assistant = findClientAssistantMessage(exchangeId);
+  if (!assistant) return;
+  const replyDraft = document.getElementById('clientFollowupQuestion')?.value || '';
+  const result = prepareClientResult(rawResult);
+  assistant.content = result.answer;
+  assistant.result = result;
+  if (clientConversation[clientConversation.length - 1] === assistant) {
+    _latestClientResult = result;
+  }
+  if (_clientVisibleExchangeId === exchangeId) {
+    currentClientMatches = result.products;
+    renderClientMatches(currentClientMatches);
+    if (currentClientMatches.length) pollClientProductImages();
+  }
+  renderClientConversation();
+  const replyInput = document.getElementById('clientFollowupQuestion');
+  if (replyInput && replyDraft) replyInput.value = replyDraft;
+  persistClientDraft();
+}
+
 async function runClientRequest(question, options={}) {
   question = String(question || '').trim();
   const status = document.getElementById('clientHelpStatus');
-  const button = document.getElementById('clientFindButton');
-  const followupButton = document.getElementById('clientFollowupButton');
   if (!question) {
     if (status) status.textContent = 'Écrivez d’abord la demande du client.';
     document.getElementById('clientQuestion')?.focus();
@@ -650,62 +1033,72 @@ async function runClientRequest(question, options={}) {
   if (_clientImagePollTimer) window.clearTimeout(_clientImagePollTimer);
   const requestId = ++_clientRequestSequence;
   const history = clientHistoryPayload();
+  const mode = options.mode === 'ai' || options.mode === 'fast'
+    ? options.mode
+    : _clientSearchMode;
   const contextProductIds = currentClientMatches
-    .map(product => product.client_id).filter(Boolean).slice(0, 80);
+    .map(product => product.client_id).filter(Boolean).slice(0, CLIENT_MAX_PRODUCTS_PER_EXCHANGE);
+  const previousQuestion = [...clientConversation].reverse()
+    .find(message => message.role === 'user')?.content || '';
+  const retrievalQuestion = options.followUp && mode === 'fast' && previousQuestion
+    ? `${previousQuestion} ${question}`
+    : question;
   const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
   _clientRagController = controller;
-  if (button) button.disabled = true;
-  if (followupButton) followupButton.disabled = true;
-  if (!options.followUp) _latestClientResult = null;
-  let visibleProducts = options.followUp ? currentClientMatches : localClientMatches(question, 60);
   if (!options.followUp) {
-    currentClientMatches = visibleProducts;
-    if (visibleProducts.length) {
-      renderClientMatches(visibleProducts);
-      persistClientDraft();
-    } else {
-      const matches = document.getElementById('clientMatches');
-      if (matches) matches.innerHTML = '';
+    currentClientMatches = [];
+    _clientVisibleExchangeId = '';
+    const matches = document.getElementById('clientMatches');
+    if (matches) matches.innerHTML = '';
+  }
+  setClientWorking(true, mode);
+
+  if (mode === 'fast') {
+    const startedAt = Date.now();
+    const localProducts = localClientMatches(retrievalQuestion, 12);
+    const serverPromise = apiClientFind(retrievalQuestion, 12, controller?.signal);
+    if (localProducts.length) {
+      const exchangeId = appendClientExchange(
+        question, buildFastClientResult(localProducts, Date.now() - startedAt), mode, requestId
+      );
+      setClientWorking(false);
+      _clientRagController = null;
+      if (status) status.textContent = `Recherche rapide : ${localProducts.length} produit${localProducts.length > 1 ? 's' : ''} affiché${localProducts.length > 1 ? 's' : ''}.`;
+      void serverPromise.then(serverProducts => {
+        if (requestId !== _clientRequestSequence || !serverProducts.length) return;
+        updateClientExchangeResult(
+          exchangeId, buildFastClientResult(serverProducts, Date.now() - startedAt)
+        );
+        if (status) status.textContent = `Recherche rapide : ${serverProducts.length} produit${serverProducts.length > 1 ? 's' : ''} trouvé${serverProducts.length > 1 ? 's' : ''} dans le plan.`;
+      });
+      return;
     }
-  }
-  if (status) {
-    status.textContent = options.followUp
-      ? `${aiProviderLabel()} approfondit la réponse avec les produits déjà affichés…`
-      : visibleProducts.length
-        ? `${visibleProducts.length} produit(s) affiché(s) depuis le plan. ${aiProviderLabel()} prépare la réponse…`
-        : 'Recherche dans le plan actuel du magasin…';
+    const serverProducts = await serverPromise;
+    if (requestId !== _clientRequestSequence) return;
+    _clientRagController = null;
+    setClientWorking(false);
+    appendClientExchange(
+      question, buildFastClientResult(serverProducts, Date.now() - startedAt), mode, requestId
+    );
+    if (status) status.textContent = serverProducts.length
+      ? `Recherche rapide : ${serverProducts.length} produit${serverProducts.length > 1 ? 's' : ''} trouvé${serverProducts.length > 1 ? 's' : ''} dans le plan.`
+      : 'Aucun produit proche trouvé dans le plan. Essayez « Avec IA » pour interpréter la demande.';
+    return;
   }
 
-  let requestFinalized = false;
-  const fastProductsPromise = options.followUp
-    ? Promise.resolve([])
-    : apiClientFind(question, 60, controller?.signal);
-  void fastProductsPromise.then(products => {
-    if (requestFinalized || requestId !== _clientRequestSequence) return;
-    const normalized = Array.isArray(products) ? products.map(normalizeProduct) : [];
-    if (!normalized.length && visibleProducts.length) return;
-    visibleProducts = normalized;
-    currentClientMatches = normalized;
-    renderClientMatches(normalized);
-    persistClientDraft();
-    if (status) status.textContent = normalized.length
-      ? `${normalized.length} produit(s) trouvé(s) dans le plan. ${aiProviderLabel()} prépare la réponse…`
-      : `${aiProviderLabel()} vérifie la demande…`;
-  });
-
+  if (status) status.textContent = `${aiProviderLabel()} analyse la demande et vérifiera chaque produit proposé.`;
   const result = await apiGenerateClientHelp({
     question,
     history,
+    mode: 'ai',
     follow_up: Boolean(options.followUp),
     selected_text: options.selectedText || '',
     focus_product_id: options.focusProductId || '',
     context_product_ids: contextProductIds,
   }, controller?.signal);
   if (requestId !== _clientRequestSequence) return;
-  requestFinalized = true;
   _clientRagController = null;
-  if (button) button.disabled = false;
-  if (followupButton) followupButton.disabled = false;
+  setClientWorking(false);
   if (!result.success) {
     if (status) {
       const suffix = currentClientMatches.length
@@ -716,37 +1109,12 @@ async function runClientRequest(question, options={}) {
     persistClientDraft();
     return;
   }
-
-  const products = Array.isArray(result.products) ? result.products.map(normalizeProduct) : [];
-  result.products = products;
-  if (result.response_mode === 'lookup') {
-    result.answer = products.length
-      ? `${products.length} produit(s) correspondant(s) sont dans le plan du magasin. Ouvrez une carte pour voir sa description, ses codes et tous ses emplacements.`
-      : 'Aucun produit correspondant n’est présent dans le plan actuel du magasin.';
-    result.advice = {...(result.advice || {}), summary: result.answer};
-  }
-  _latestClientResult = result;
-  currentClientMatches = products;
-  clientConversation.push({role: 'user', content: question});
-  clientConversation.push({role: 'assistant', content: result.answer || result.advice?.summary || ''});
-  clientConversation = clientConversation.slice(-12);
-  const input = document.getElementById('clientQuestion');
-  if (input) input.value = '';
-  const followupInput = document.getElementById('clientFollowupQuestion');
-  if (followupInput) followupInput.value = '';
-  _clientSelectedQuote = '';
-  _clientQuoteFocusProductId = '';
-  persistClientDraft();
-  renderClientConversation();
-  renderClientMatches(products);
-  pollClientProductImages();
+  const prepared = prepareClientResult(result);
+  appendClientExchange(question, prepared, mode, requestId);
   if (status) {
     const timing = result.elapsed_ms ? ` en ${(result.elapsed_ms / 1000).toFixed(1)} s` : '';
-    status.textContent = result.response_mode === 'lookup'
-      ? `Recherche rapide${timing} : ${products.length} produit(s) trouvé(s) dans le plan.`
-      : `Réponse détaillée${timing}. Vous pouvez répondre directement sous la réponse.`;
+    status.textContent = `Réponse avec IA${timing} : ${prepared.products.length} produit${prepared.products.length > 1 ? 's' : ''} vérifié${prepared.products.length > 1 ? 's' : ''}.`;
   }
-  document.getElementById('clientFollowupQuestion')?.focus();
 }
 
 function findClientProducts() {
@@ -762,4 +1130,5 @@ window.AppAI = {
   findClientProducts, resetClientSearchResults, onClientQuestionInput,
   getClientConversationForStorage, restoreClientConversation,
   getClientSearchStateForStorage, restoreClientSearchState, clearClientHistory,
+  getClientSearchMode, setClientSearchMode, showClientHistoryProducts,
 };

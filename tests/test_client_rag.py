@@ -91,6 +91,65 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual([item["name"] for item in response.get_json()], ["Advil Extra Fort"])
 
+    def test_fast_client_lookup_understands_transparent_dressing_language(self):
+        transparent = {
+            "id": 1, "name": "PARAMEDIC PANS TRANSP 5CMX1M", "brand": "Paramedic",
+            "barcode": "111",
+        }
+        unrelated = {"id": 2, "name": "BANDAGE ELASTIQUE", "brand": "Test", "barcode": "222"}
+        nasal_strip = {
+            "id": 3, "name": "BREATHE RIGHT BDE NAS TRANSP 30", "brand": "Breathe Right",
+            "barcode": "333",
+        }
+        cup = {"id": 4, "name": "TASSE TRANSPARENTE", "brand": "Test", "barcode": "444"}
+        corpus = [
+            (transparent, search_row(transparent["name"], transparent["brand"], barcode="111")),
+            (unrelated, search_row(unrelated["name"], unrelated["brand"], barcode="222")),
+            (nasal_strip, search_row(nasal_strip["name"], nasal_strip["brand"], barcode="333")),
+            (cup, search_row(cup["name"], cup["brand"], barcode="444")),
+        ]
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            with app.test_client() as client:
+                response = client.get(
+                    "/api/client/find?q=membrane%20transparente%20pour%20blessure"
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["name"] for item in response.get_json()],
+            ["PARAMEDIC PANS TRANSP 5CMX1M"],
+        )
+
+    def test_fast_client_lookup_understands_watte_as_cotton_balls(self):
+        cotton = {
+            "id": 1, "name": "PERSONNEL OUATE BOULES 100", "brand": "Personnelle",
+            "barcode": "111",
+        }
+        unrelated = {"id": 2, "name": "MOUCHOIRS 100", "brand": "Test", "barcode": "222"}
+        cotton_swabs = {"id": 3, "name": "Q-TIPS COTONS-TIGES 400", "brand": "Q-Tips", "barcode": "333"}
+        laxative = {"id": 4, "name": "CARTER PETITES PILULES LAX", "brand": "Carter", "barcode": "444"}
+        bowls = {"id": 5, "name": "MUNCHKIN PETITS BOLS", "brand": "Munchkin", "barcode": "555"}
+        corpus = [
+            (cotton, search_row(cotton["name"], cotton["brand"], barcode="111")),
+            (unrelated, search_row(unrelated["name"], unrelated["brand"], barcode="222")),
+            (cotton_swabs, search_row(cotton_swabs["name"], cotton_swabs["brand"], barcode="333")),
+            (laxative, search_row(laxative["name"], laxative["brand"], barcode="444")),
+            (bowls, search_row(bowls["name"], bowls["brand"], barcode="555")),
+        ]
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            with app.test_client() as client:
+                response = client.get(
+                    "/api/client/find?q=je%20cherche%20de%20la%20watte%20des%20petites%20boules"
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["name"] for item in response.get_json()],
+            ["PERSONNEL OUATE BOULES 100"],
+        )
+
     def test_product_can_reuse_reference_catalogue_image_by_upc(self):
         class Result:
             def __init__(self, row):
@@ -186,7 +245,7 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(matches, [])
         reference.assert_not_called()
 
-    def test_client_endpoint_returns_all_plan_matches_and_separate_highlights(self):
+    def test_client_endpoint_returns_only_ai_verified_products(self):
         candidate = {
             "id": 1, "client_id": "product:1", "name": "Advil", "brand": "Advil",
             "barcode": "111", "aisle": "2", "side": "Gauche", "section": "1",
@@ -227,10 +286,7 @@ class ClientRagTests(unittest.TestCase):
         payload = response.get_json()
         self.assertTrue(payload["success"])
         self.assertEqual(payload["response_mode"], "detailed")
-        self.assertEqual(
-            [item["client_id"] for item in payload["products"]],
-            ["product:1", "product:2"],
-        )
+        self.assertEqual([item["client_id"] for item in payload["products"]], ["product:1"])
         self.assertEqual(payload["highlighted_product_ids"], ["product:1"])
         old_planner.assert_not_called()
         verifier.assert_called_once()
@@ -252,6 +308,55 @@ class ClientRagTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["response_mode"], "lookup")
         self.assertEqual(payload["products"][0]["name"], "Advil")
+        provider.assert_not_called()
+        verifier.assert_not_called()
+
+    def test_explicit_ai_mode_forces_grounded_answer_for_simple_name(self):
+        candidate = {
+            "id": 1, "client_id": "product:1", "name": "Advil", "brand": "Advil",
+            "barcode": "111", "aisle": "2", "side": "Gauche", "section": "1",
+            "shelf": "3", "position": "2", "in_stock": 1,
+        }
+        verified = {
+            "answer": "Advil est disponible dans le plan.",
+            "selected_product_ids": ["product:1"],
+            "follow_up_questions": [], "safety_flags": [],
+            "pharmacist_referral": False, "pharmacist_reason": "",
+        }
+        with patch("routes.products.hybrid_client_candidates", return_value=[candidate]), \
+             patch("routes.products.hydrate_candidate_images"), \
+             patch("routes.ai.configured_ai_provider", return_value={"name": "deepseek"}), \
+             patch("routes.ai._check_ai_rate_limit", return_value=True), \
+             patch("routes.ai.generate_verified_client_answer", return_value=verified) as verifier, \
+             patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": "Advil", "mode": "ai",
+                })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["response_mode"], "detailed")
+        self.assertEqual([item["client_id"] for item in payload["products"]], ["product:1"])
+        verifier.assert_called_once()
+
+    def test_explicit_fast_mode_never_calls_ai_for_detailed_question(self):
+        candidate = {
+            "id": 1, "client_id": "product:1", "name": "Advil", "brand": "Advil",
+            "barcode": "111", "aisle": "2", "side": "Gauche", "section": "1",
+            "shelf": "3", "position": "2", "in_stock": 1,
+        }
+        with patch("routes.products.hybrid_client_candidates", return_value=[candidate]), \
+             patch("routes.products.hydrate_candidate_images"), \
+             patch("routes.ai.configured_ai_provider") as provider, \
+             patch("routes.ai.generate_verified_client_answer") as verifier:
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": "Quelle est la différence?", "mode": "fast",
+                })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["response_mode"], "lookup")
         provider.assert_not_called()
         verifier.assert_not_called()
 
