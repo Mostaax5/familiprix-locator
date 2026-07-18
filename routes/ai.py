@@ -99,10 +99,10 @@ except (TypeError, ValueError):
     _AI_REQUEST_TIMEOUT_SECONDS = 12
 try:
     _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = min(
-        24, max(8, int(os.environ.get("AI_DOCUMENTED_REQUEST_TIMEOUT", "12")))
+        24, max(6, int(os.environ.get("AI_DOCUMENTED_REQUEST_TIMEOUT", "8")))
     )
 except (TypeError, ValueError):
-    _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = 12
+    _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = 8
 _DEEPSEEK_DOCUMENTED_THINKING = (
     os.environ.get("DEEPSEEK_DOCUMENTED_THINKING", "").strip().lower()
     in {"1", "true", "yes", "on"}
@@ -2155,12 +2155,83 @@ def normalize_documented_client_answer(parsed, valid_ids, documents):
 
 def grounded_documented_fallback(query_plan, candidates, documents):
     """Return a useful, source-backed response when every AI attempt fails."""
+    from routes.products import normalize_search_text
+
     selected = [
         product for product in candidates
         if str(product.get("client_id", "") or "").strip()
     ][:16]
     selected_ids = [str(product.get("client_id", "") or "") for product in selected]
     names = [str(product.get("name", "") or "").strip() for product in selected]
+
+    form_markers = (
+        ("gommes", ("gum", "gomme", "gummies")),
+        ("liquide", ("liq", "liquide")),
+        ("vaporisateur", ("vapo", "spray")),
+        ("capsules", ("ca", "caps", "capsule")),
+        ("comprimés", ("co", "comprime", "tablet")),
+    )
+    flavor_markers = (
+        ("fraise", ("fraise", "strawberry")),
+        ("cerise", ("cerise", "cherry")),
+        ("raisin", ("raisin", "grape")),
+        ("fruits", ("saveur fruit", "fruit flavor", "fruit flavour")),
+        ("baies", ("baies", "berry")),
+        ("orange", ("orange",)),
+        ("menthe", ("menthe", "mint")),
+        ("citron", ("citron", "lemon")),
+    )
+    forms = []
+    doses = []
+    flavors = []
+    features = []
+    product_traits = {}
+    for product in selected:
+        candidate_id = str(product.get("client_id", "") or "")
+        name = str(product.get("name", "") or "").strip()
+        description = str(product.get("description", "") or "").strip()
+        usage_notes = str(product.get("usage_notes", "") or "").strip()
+        normalized_name = normalize_search_text(name)
+        normalized_details = normalize_search_text(f"{name} {description} {usage_notes}")
+        traits = []
+        for label, markers in form_markers:
+            if any(
+                re.search(rf"\b{re.escape(marker)}\d*\b", normalized_name)
+                for marker in markers
+            ):
+                if label not in forms:
+                    forms.append(label)
+                traits.append(label)
+                break
+        dose_match = re.search(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*mg\b", name, re.IGNORECASE)
+        if dose_match:
+            dose = dose_match.group(1).replace(",", ".")
+            dose_label = f"{dose} mg"
+            if dose_label not in doses:
+                doses.append(dose_label)
+            traits.append(dose_label)
+        for label, markers in flavor_markers:
+            if any(marker in normalized_details for marker in markers):
+                if label not in flavors:
+                    flavors.append(label)
+                traits.append(f"saveur {label}")
+                break
+        feature_checks = (
+            ("double action", "double action"),
+            ("dissolution rapide", "dis rap"),
+            ("sans sucre", "s sucre"),
+            ("force maximale", "force max"),
+            ("force maximale", "f max"),
+            ("force maximale", "x f"),
+        )
+        for label, marker in feature_checks:
+            if marker in normalized_details:
+                if label not in features:
+                    features.append(label)
+                if label not in traits:
+                    traits.append(label)
+        product_traits[candidate_id] = traits
+    doses.sort(key=lambda value: float(value.removesuffix(" mg")))
 
     source_ids_by_product = defaultdict(list)
     valid_source_ids = []
@@ -2176,15 +2247,23 @@ def grounded_documented_fallback(query_plan, candidates, documents):
                 source_ids_by_product[candidate_id].append(source_id)
 
     if names:
-        preview = ", ".join(names[:6])
-        remaining = len(names) - min(len(names), 6)
-        if remaining:
-            preview += f", et {remaining} autre{'s' if remaining > 1 else ''}"
+        summary_parts = []
+        if forms:
+            summary_parts.append(f"les formes repérées sont {', '.join(forms)}")
+        if doses:
+            summary_parts.append(f"les concentrations indiquées sont {', '.join(doses)}")
+        flavor_text = (
+            f"les saveurs explicitement nommées sont {', '.join(flavors)}"
+            if flavors else "les saveurs ne sont pas clairement précisées dans les fiches disponibles"
+        )
+        summary_parts.append(flavor_text)
         answer = (
-            f"J'ai trouvé {len(names)} produit{'s' if len(names) > 1 else ''} correspondant "
-            f"à la demande dans le plan actuel : {preview}. "
-            "La synthèse ci-dessous reprend uniquement les fiches disponibles; confirmez "
-            "les détails précis sur l'étiquette du produit."
+            f"J'ai trouvé {len(names)} produit{'s' if len(names) > 1 else ''} représentatif"
+            f"{'s' if len(names) > 1 else ''} dans le plan actuel : "
+            + "; ".join(summary_parts) + ". "
+            "Les mentions comme double action, dissolution rapide ou force maximale décrivent "
+            "des différences de formule ou de libération; le choix de concentration doit être "
+            "confirmé sur l'étiquette et avec le pharmacien selon la situation du client."
         )
     else:
         answer = (
@@ -2197,16 +2276,18 @@ def grounded_documented_fallback(query_plan, candidates, documents):
         candidate_id = str(product.get("client_id", "") or "")
         description = str(product.get("description", "") or "").strip()
         usage_notes = str(product.get("usage_notes", "") or "").strip()
-        details = []
-        if description:
-            details.append(description)
-        if usage_notes and usage_notes != description:
-            details.append(usage_notes)
+        traits = product_traits.get(candidate_id, [])
+        details = [", ".join(traits).capitalize()] if traits else []
+        evidence = description or usage_notes
+        if evidence:
+            first_sentence = re.split(r"(?<=[.!?])\s+", evidence, maxsplit=1)[0].strip()
+            if first_sentence:
+                details.append(first_sentence[:260])
         source_ids = source_ids_by_product.get(candidate_id, [])
         specific_sources = [source_id for source_id in source_ids if source_id != "store-plan"]
         comparisons.append({
             "candidate_id": candidate_id,
-            "difference": " ".join(details)[:800] or (
+            "difference": ". ".join(details)[:420] or (
                 f"Donnée disponible dans le plan : {str(product.get('name', '') or '').strip()}."
             ),
             "practical_note": f"Emplacement : {_recommendation_location(product)}",
@@ -2214,22 +2295,35 @@ def grounded_documented_fallback(query_plan, candidates, documents):
         })
 
     key_points = []
-    if names:
+    store_source = ["store-plan"] if "store-plan" in valid_source_ids else []
+    if forms:
         key_points.append({
-            "heading": "Produits en magasin",
-            "detail": "; ".join(names)[:1000],
-            "source_ids": ["store-plan"] if "store-plan" in valid_source_ids else [],
+            "heading": "Formes disponibles",
+            "detail": ", ".join(forms).capitalize(),
+            "source_ids": store_source,
+        })
+    if doses:
+        key_points.append({
+            "heading": "Concentrations repérées",
+            "detail": ", ".join(doses),
+            "source_ids": store_source,
         })
     key_points.append({
-        "heading": "Vérification",
+        "heading": "Saveurs",
         "detail": (
-            "DeepSeek n'a pas répondu dans le délai prévu. Cette réponse de secours ne "
-            "déduit aucun ingrédient, dosage ou usage absent des fiches disponibles."
+            ", ".join(flavors).capitalize()
+            if flavors else "Aucune saveur n'est explicitement confirmée dans les fiches examinées."
         ),
-        "source_ids": [],
+        "source_ids": store_source,
     })
+    if features:
+        key_points.append({
+            "heading": "Mentions particulières",
+            "detail": ", ".join(features).capitalize(),
+            "source_ids": store_source,
+        })
 
-    medical = bool(query_plan.get("medical", False))
+    medical = bool(query_plan.get("medical", False) or doses)
     return {
         "answer": answer,
         "selected_product_ids": selected_ids,

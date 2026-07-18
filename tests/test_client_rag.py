@@ -379,7 +379,7 @@ class ClientRagTests(unittest.TestCase):
         product = {
             "id": 7,
             "client_id": "product:7",
-            "name": "MELATONINE FRAISE 5 MG 60",
+            "name": "MELATONINE FRAISE 5 MG CO60",
             "description": "Comprimés à saveur de fraise.",
             "usage_notes": "Lire l'étiquette avant utilisation.",
             "aisle": "4", "side": "A", "section": "2", "shelf": "3", "position": "5",
@@ -402,8 +402,12 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertTrue(result["degraded"])
         self.assertEqual(result["selected_product_ids"], ["product:7"])
-        self.assertIn("MELATONINE FRAISE", result["answer"])
+        self.assertIn("comprimés", result["answer"])
+        self.assertIn("5 mg", result["answer"])
+        self.assertIn("fraise", result["answer"])
         self.assertEqual(result["comparisons"][0]["source_ids"], ["catalog:1"])
+        self.assertLessEqual(len(result["comparisons"][0]["difference"]), 420)
+        self.assertTrue(result["pharmacist_referral"])
 
     def test_melatonin_documentation_skips_the_inapplicable_drug_database(self):
         products = [
