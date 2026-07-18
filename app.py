@@ -1,6 +1,7 @@
 import os
 import time
 import traceback
+import encodings.idna  # noqa: F401 - preload hostname codec before Gunicorn threads
 from collections import deque
 from flask import Flask, render_template, send_from_directory, jsonify, request
 from werkzeug.exceptions import HTTPException
