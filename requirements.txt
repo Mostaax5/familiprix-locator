@@ -3,3 +3,4 @@ flask-compress
 gunicorn
 psycopg[binary,pool]
 pdfplumber
+idna==3.10

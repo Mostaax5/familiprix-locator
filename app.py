@@ -1,7 +1,7 @@
 import os
 import time
 import traceback
-import encodings.idna  # noqa: F401 - preload hostname codec before Gunicorn threads
+import codecs
 from collections import deque
 from flask import Flask, render_template, send_from_directory, jsonify, request
 from werkzeug.exceptions import HTTPException
@@ -16,6 +16,36 @@ from routes.ai import ai_bp, configured_ai_provider, reference_count, maybe_resu
 from routes.gist import gist_bp, _restore_from_gist_if_empty
 from routes.import_export import import_export_bp
 from memory_guard import memory_snapshot
+
+
+def _preload_idna_codec():
+    """Make hostname encoding available before Gunicorn starts request threads."""
+    try:
+        import encodings.idna  # noqa: F401
+        codecs.lookup("idna")
+        return
+    except (ImportError, LookupError):
+        # A damaged/minimal Python runtime can omit the stdlib codec. The small
+        # PyPI idna fallback keeps every Flask route from failing before dispatch.
+        import idna
+
+        def encode(value, errors="strict"):
+            return idna.encode(value, uts46=True), len(value)
+
+        def decode(value, errors="strict"):
+            raw = bytes(value)
+            return idna.decode(raw, uts46=True), len(raw)
+
+        def search(name):
+            if name.replace("_", "-") != "idna":
+                return None
+            return codecs.CodecInfo(name="idna", encode=encode, decode=decode)
+
+        codecs.register(search)
+        codecs.lookup("idna")
+
+
+_preload_idna_codec()
 
 app = Flask(__name__)
 try:
