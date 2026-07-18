@@ -8,6 +8,7 @@ from routes.ai import (
     _deepseek_json_request,
     build_client_query_plan,
     classify_client_request,
+    filter_client_answer_category,
     generate_documented_client_answer,
     health_canada_documents,
     normalize_documented_client_answer,
@@ -317,6 +318,24 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertEqual(len(matches), 30)
         self.assertTrue(all("MELATON" in product["name"] for product in matches))
+
+    def test_melatonin_comparison_excludes_bath_and_generic_sleep_products(self):
+        candidates = [
+            {"id": 1, "name": "WEBBER MELATON 5MG CO120"},
+            {"id": 2, "name": "DR TEALS B/MOUS MELATON 1000ML"},
+            {"id": 3, "name": "DR TEALS S/EPSOM MELATON 1.36KG"},
+            {"id": 4, "name": "NERVIVE SOUL NERFS SOIR CO30", "description": "Avec mélatonine"},
+        ]
+
+        supplements = filter_client_answer_category(
+            "Quels types de mélatonine avons-nous?", candidates,
+        )
+        bath_search = filter_client_answer_category(
+            "Quels produits de bain Dr Teals avec mélatonine avons-nous?", candidates,
+        )
+
+        self.assertEqual([product["id"] for product in supplements], [1])
+        self.assertIn(2, [product["id"] for product in bath_search])
 
     def test_verifier_can_only_return_real_candidate_ids(self):
         parsed = {

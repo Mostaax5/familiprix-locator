@@ -1639,6 +1639,33 @@ def select_client_answer_candidates(candidates, limit=16):
     return selected
 
 
+def filter_client_answer_category(question, candidates):
+    """Remove obvious cross-category matches before AI verification.
+
+    Product descriptions can legitimately mention an ingredient used by a very
+    different category. For example, Dr Teal's bath products mention melatonin
+    but must not appear in a supplement comparison unless bath use was requested.
+    """
+    from routes.products import normalize_search_text
+
+    normalized_question = normalize_search_text(question)
+    if "melaton" not in normalized_question:
+        return list(candidates)
+    bath_requested = any(marker in normalized_question for marker in (
+        "bain", "bath", "epsom", "mousse", "dr teals",
+    ))
+    if bath_requested:
+        return list(candidates)
+    bath_name_markers = ("dr teals", "epsom", "b mous", "bain", "bath")
+    focused = []
+    for product in candidates:
+        name = normalize_search_text(product.get("name", ""))
+        if "melaton" not in name or any(marker in name for marker in bath_name_markers):
+            continue
+        focused.append(product)
+    return focused or list(candidates)
+
+
 def generate_verified_client_answer(question, query_plan, candidates, history=None,
                                     selected_text="", focus_product_id=""):
     contexts = [product_context_for_client_rag(product) for product in candidates]
@@ -2260,6 +2287,16 @@ def grounded_documented_fallback(query_plan, candidates, documents):
 def generate_documented_client_answer(question, query_plan, candidates, documents,
                                       history=None, selected_text="", focus_product_id=""):
     contexts = [product_context_for_client_rag(product) for product in candidates]
+    for context in contexts:
+        context["notes"] = str(context.get("notes", "") or "")[:500]
+        context["description"] = str(context.get("description", "") or "")[:700]
+        context["search_terms"] = str(context.get("search_terms", "") or "")[:400]
+        context["usage_notes"] = str(context.get("usage_notes", "") or "")[:700]
+    document_contexts = [{
+        **document,
+        "evidence": str(document.get("evidence", "") or "")[:900],
+        "candidate_ids": (document.get("candidate_ids", []) or [])[:16],
+    } for document in documents[:12]]
     parsed = _provider_structured_request(
         _CLIENT_DOCUMENTED_INSTRUCTIONS,
         {
@@ -2269,10 +2306,10 @@ def generate_documented_client_answer(question, query_plan, candidates, document
             "focused_product_id": focus_product_id,
             "query_plan": query_plan,
             "candidates": contexts,
-            "documents": documents,
+            "documents": document_contexts,
             "required_schema": _CLIENT_DOCUMENTED_SCHEMA,
         },
-        max_tokens=3200,
+        max_tokens=2200,
         schema_name="client_documented_answer",
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,
@@ -3147,6 +3184,8 @@ def client_help():
                 retrieval_question = f"{previous_user} {question}"
                 query_plan = build_client_query_plan(retrieval_question, response_mode)
         candidates = hybrid_client_candidates(retrieval_question, query_plan, limit=candidate_limit)
+    if response_mode != "lookup":
+        candidates = filter_client_answer_category(question, candidates)
     hydrate_candidate_images(candidates)
 
     if response_mode == "lookup":
