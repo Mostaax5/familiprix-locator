@@ -409,6 +409,49 @@ class ClientRagTests(unittest.TestCase):
         self.assertLessEqual(len(result["comparisons"][0]["difference"]), 420)
         self.assertTrue(result["pharmacist_referral"])
 
+    def test_documented_toothbrush_fallback_compares_power_types(self):
+        products = [{
+            "client_id": "product:1", "name": "ORAL-B BR/DENTS A PILE 1",
+            "description": "Brosse à dents électrique à pile.",
+            "aisle": "3", "side": "A", "section": "5", "shelf": "2", "position": "1",
+        }, {
+            "client_id": "product:2", "name": "PHILIPS ONE BR/DENTS RECH NR 1",
+            "description": "Brosse à dents rechargeable.",
+            "aisle": "3", "side": "A", "section": "5", "shelf": "2", "position": "2",
+        }, {
+            "client_id": "product:3", "name": "ORAL-B TETE BR/DENTS S/G SPL 3",
+            "description": "Têtes de remplacement.",
+            "aisle": "3", "side": "A", "section": "5", "shelf": "2", "position": "3",
+        }]
+        documents = [{
+            "source_id": "store-plan", "title": "Plan actuel du magasin",
+            "candidate_ids": [product["client_id"] for product in products],
+        }]
+        query_plan = {
+            "corrected_query": (
+                "Quelle est la différence entre les brosses à dents électriques à pile "
+                "et rechargeables?"
+            ),
+            "medical": False,
+        }
+
+        with patch("routes.ai._provider_structured_request", return_value=None):
+            result = generate_documented_client_answer(
+                query_plan["corrected_query"], query_plan, products, documents,
+            )
+
+        self.assertTrue(result["degraded"])
+        self.assertIn("brosse à pile", result["answer"])
+        self.assertIn("brosse rechargeable", result["answer"])
+        self.assertIn("tête de remplacement", result["answer"])
+        self.assertNotIn("saveur", result["answer"].lower())
+        self.assertNotIn("concentration", result["answer"].lower())
+        self.assertFalse(result["pharmacist_referral"])
+        self.assertEqual(
+            [point["heading"] for point in result["key_points"]],
+            ["Modèles à pile", "Modèles rechargeables", "Têtes de remplacement"],
+        )
+
     def test_melatonin_documentation_skips_the_inapplicable_drug_database(self):
         products = [
             {"client_id": "product:1", "name": "A GAGNON MELATON 5MG GUM 120"},
@@ -692,6 +735,46 @@ class ClientRagTests(unittest.TestCase):
         self.assertFalse(payload["degraded"])
         self.assertIn("comprimés", payload["answer"])
         self.assertIn("2.5 mg, 3 mg, 5 mg, 10 mg", payload["answer"])
+        generator.assert_not_called()
+        provider.assert_not_called()
+        rate_limit.assert_not_called()
+
+    def test_documented_toothbrush_power_comparison_skips_ai_delay(self):
+        candidates = [{
+            "id": 1, "client_id": "product:1",
+            "name": "ORAL-B BR/DENTS A PILE 1", "barcode": "1001",
+            "aisle": "3", "side": "A", "section": "5", "shelf": "2", "position": "1",
+        }, {
+            "id": 2, "client_id": "product:2",
+            "name": "PHILIPS ONE BR/DENTS RECH NR 1", "barcode": "1002",
+            "aisle": "3", "side": "A", "section": "5", "shelf": "2", "position": "2",
+        }]
+        documents = [{
+            "source_id": "store-plan", "title": "Plan actuel",
+            "publisher": "Familiprix Locator", "url": "", "evidence": "",
+            "candidate_ids": [product["client_id"] for product in candidates],
+        }]
+        with patch("routes.products.hybrid_client_candidates", return_value=candidates), \
+             patch("routes.products.hydrate_candidate_images"), \
+             patch("routes.ai.retrieve_client_documentation", return_value=documents), \
+             patch("routes.ai.generate_documented_client_answer") as generator, \
+             patch("routes.ai.configured_ai_provider") as provider, \
+             patch("routes.ai._check_ai_rate_limit") as rate_limit, \
+             patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": (
+                        "Quelle est la différence entre les brosses à dents électriques "
+                        "à pile et rechargeables?"
+                    ),
+                    "mode": "documented",
+                })
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(payload["degraded"])
+        self.assertIn("brosse à pile", payload["answer"])
+        self.assertIn("brosse rechargeable", payload["answer"])
         generator.assert_not_called()
         provider.assert_not_called()
         rate_limit.assert_not_called()

@@ -2163,6 +2163,20 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
     ][:16]
     selected_ids = [str(product.get("client_id", "") or "") for product in selected]
     names = [str(product.get("name", "") or "").strip() for product in selected]
+    normalized_question = normalize_search_text(
+        str(query_plan.get("corrected_query", "") or "")
+    )
+    question_words = set(normalized_question.split())
+    is_toothbrush_query = bool(
+        question_words.intersection({"brosse", "brosses", "brush", "toothbrush"})
+        and (
+            question_words.intersection({"dent", "dents", "tooth", "teeth"})
+            or "toothbrush" in question_words
+        )
+    )
+    asks_flavors = bool(
+        question_words.intersection({"saveur", "saveurs", "gout", "gouts", "flavor", "flavors"})
+    )
 
     form_markers = (
         ("gommes", ("gum", "gomme", "gummies")),
@@ -2186,6 +2200,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
     flavors = []
     features = []
     product_traits = {}
+    toothbrush_groups = defaultdict(int)
     for product in selected:
         candidate_id = str(product.get("client_id", "") or "")
         name = str(product.get("name", "") or "").strip()
@@ -2194,42 +2209,57 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         normalized_name = normalize_search_text(name)
         normalized_details = normalize_search_text(f"{name} {description} {usage_notes}")
         traits = []
-        for label, markers in form_markers:
-            if any(
-                re.search(rf"\b{re.escape(marker)}\d*\b", normalized_name)
-                for marker in markers
-            ):
-                if label not in forms:
-                    forms.append(label)
-                traits.append(label)
-                break
-        dose_match = re.search(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*mg\b", name, re.IGNORECASE)
-        if dose_match:
-            dose = dose_match.group(1).replace(",", ".")
-            dose_label = f"{dose} mg"
-            if dose_label not in doses:
-                doses.append(dose_label)
-            traits.append(dose_label)
-        for label, markers in flavor_markers:
-            if any(marker in normalized_details for marker in markers):
-                if label not in flavors:
-                    flavors.append(label)
-                traits.append(f"saveur {label}")
-                break
-        feature_checks = (
-            ("double action", "double action"),
-            ("dissolution rapide", "dis rap"),
-            ("sans sucre", "s sucre"),
-            ("force maximale", "force max"),
-            ("force maximale", "f max"),
-            ("force maximale", "x f"),
-        )
-        for label, marker in feature_checks:
-            if marker in normalized_details:
-                if label not in features:
-                    features.append(label)
-                if label not in traits:
+        if is_toothbrush_query:
+            if "tete" in normalized_name:
+                role = "tête de remplacement"
+            elif "pile" in normalized_name:
+                role = "brosse à pile"
+            elif "rechargeable" in normalized_details or re.search(r"\brech\b", normalized_name):
+                role = "brosse rechargeable"
+            elif "elec" in normalized_name or "electri" in normalized_details:
+                role = "brosse électrique (alimentation à confirmer)"
+            else:
+                role = "type d'alimentation à confirmer"
+            traits.append(role)
+            toothbrush_groups[role] += 1
+        else:
+            for label, markers in form_markers:
+                if any(
+                    re.search(rf"\b{re.escape(marker)}\d*\b", normalized_name)
+                    for marker in markers
+                ):
+                    if label not in forms:
+                        forms.append(label)
                     traits.append(label)
+                    break
+        if not is_toothbrush_query:
+            dose_match = re.search(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*mg\b", name, re.IGNORECASE)
+            if dose_match:
+                dose = dose_match.group(1).replace(",", ".")
+                dose_label = f"{dose} mg"
+                if dose_label not in doses:
+                    doses.append(dose_label)
+                traits.append(dose_label)
+            for label, markers in flavor_markers:
+                if any(marker in normalized_details for marker in markers):
+                    if label not in flavors:
+                        flavors.append(label)
+                    traits.append(f"saveur {label}")
+                    break
+            feature_checks = (
+                ("double action", "double action"),
+                ("dissolution rapide", "dis rap"),
+                ("sans sucre", "s sucre"),
+                ("force maximale", "force max"),
+                ("force maximale", "f max"),
+                ("force maximale", "x f"),
+            )
+            for label, marker in feature_checks:
+                if marker in normalized_details:
+                    if label not in features:
+                        features.append(label)
+                    if label not in traits:
+                        traits.append(label)
         product_traits[candidate_id] = traits
     doses.sort(key=lambda value: float(value.removesuffix(" mg")))
 
@@ -2246,24 +2276,59 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             if source_id not in source_ids_by_product[candidate_id]:
                 source_ids_by_product[candidate_id].append(source_id)
 
-    if names:
+    if names and is_toothbrush_query:
+        group_parts = []
+        for label, singular, plural in (
+            ("brosse à pile", "brosse à pile", "brosses à pile"),
+            ("brosse rechargeable", "brosse rechargeable", "brosses rechargeables"),
+            (
+                "brosse électrique (alimentation à confirmer)",
+                "brosse électrique (alimentation à confirmer)",
+                "brosses électriques (alimentation à confirmer)",
+            ),
+            ("tête de remplacement", "tête de remplacement", "têtes de remplacement"),
+            (
+                "type d'alimentation à confirmer",
+                "type d'alimentation à confirmer",
+                "types d'alimentation à confirmer",
+            ),
+        ):
+            count = toothbrush_groups.get(label, 0)
+            if count:
+                group_parts.append(f"{count} {singular if count == 1 else plural}")
+        answer = (
+            f"J'ai trouvé {len(names)} produit{'s' if len(names) > 1 else ''} pertinent"
+            f"{'s' if len(names) > 1 else ''} dans le plan actuel : "
+            + ", ".join(group_parts) + ". "
+            "Une brosse à pile utilise des piles remplaçables; une brosse rechargeable se "
+            "recharge et convient généralement mieux à un usage régulier. Les produits indiqués "
+            "comme têtes sont des pièces de remplacement, pas des brosses complètes. Vérifiez la "
+            "compatibilité exacte de la tête et le type d'alimentation sur l'emballage."
+        )
+    elif names:
         summary_parts = []
         if forms:
             summary_parts.append(f"les formes repérées sont {', '.join(forms)}")
         if doses:
             summary_parts.append(f"les concentrations indiquées sont {', '.join(doses)}")
-        flavor_text = (
-            f"les saveurs explicitement nommées sont {', '.join(flavors)}"
-            if flavors else "les saveurs ne sont pas clairement précisées dans les fiches disponibles"
-        )
-        summary_parts.append(flavor_text)
+        if flavors:
+            summary_parts.append(f"les saveurs explicitement nommées sont {', '.join(flavors)}")
+        elif asks_flavors:
+            summary_parts.append(
+                "les saveurs ne sont pas clairement précisées dans les fiches disponibles"
+            )
+        if features:
+            summary_parts.append(f"les mentions particulières sont {', '.join(features)}")
+        if not summary_parts:
+            summary_parts.append(
+                "les différences confirmées sont présentées produit par produit ci-dessous"
+            )
         answer = (
             f"J'ai trouvé {len(names)} produit{'s' if len(names) > 1 else ''} représentatif"
             f"{'s' if len(names) > 1 else ''} dans le plan actuel : "
             + "; ".join(summary_parts) + ". "
-            "Les mentions comme double action, dissolution rapide ou force maximale décrivent "
-            "des différences de formule ou de libération; le choix de concentration doit être "
-            "confirmé sur l'étiquette et avec le pharmacien selon la situation du client."
+            "Les cartes ci-dessous donnent les caractéristiques confirmées et l'emplacement de "
+            "chaque produit; toute caractéristique absente doit être vérifiée sur l'emballage."
         )
     else:
         answer = (
@@ -2296,7 +2361,35 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
 
     key_points = []
     store_source = ["store-plan"] if "store-plan" in valid_source_ids else []
-    if forms:
+    if is_toothbrush_query:
+        if toothbrush_groups.get("brosse à pile"):
+            key_points.append({
+                "heading": "Modèles à pile",
+                "detail": (
+                    f"{toothbrush_groups['brosse à pile']} produit(s) explicitement identifié(s); "
+                    "les piles sont remplaçables."
+                ),
+                "source_ids": store_source,
+            })
+        if toothbrush_groups.get("brosse rechargeable"):
+            key_points.append({
+                "heading": "Modèles rechargeables",
+                "detail": (
+                    f"{toothbrush_groups['brosse rechargeable']} produit(s) explicitement "
+                    "identifié(s) comme rechargeable(s)."
+                ),
+                "source_ids": store_source,
+            })
+        if toothbrush_groups.get("tête de remplacement"):
+            key_points.append({
+                "heading": "Têtes de remplacement",
+                "detail": (
+                    f"{toothbrush_groups['tête de remplacement']} produit(s); vérifier la "
+                    "compatibilité avec le manche avant de les proposer."
+                ),
+                "source_ids": store_source,
+            })
+    elif forms:
         key_points.append({
             "heading": "Formes disponibles",
             "detail": ", ".join(forms).capitalize(),
@@ -2308,29 +2401,39 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             "detail": ", ".join(doses),
             "source_ids": store_source,
         })
-    key_points.append({
-        "heading": "Saveurs",
-        "detail": (
-            ", ".join(flavors).capitalize()
-            if flavors else "Aucune saveur n'est explicitement confirmée dans les fiches examinées."
-        ),
-        "source_ids": store_source,
-    })
-    if features:
+    if not is_toothbrush_query and (flavors or asks_flavors):
+        key_points.append({
+            "heading": "Saveurs",
+            "detail": (
+                ", ".join(flavors).capitalize()
+                if flavors else "Aucune saveur n'est explicitement confirmée dans les fiches examinées."
+            ),
+            "source_ids": store_source,
+        })
+    if not is_toothbrush_query and features:
         key_points.append({
             "heading": "Mentions particulières",
             "detail": ", ".join(features).capitalize(),
             "source_ids": store_source,
         })
 
-    medical = bool(query_plan.get("medical", False) or doses)
+    medical = bool(not is_toothbrush_query and (query_plan.get("medical", False) or doses))
+    generic_dimensions = []
+    if forms:
+        generic_dimensions.append("la forme")
+    if doses:
+        generic_dimensions.append("la concentration")
+    if flavors or asks_flavors:
+        generic_dimensions.append("la saveur")
+    generic_dimensions.extend(("le format", "le nombre d'unités"))
+    generic_guidance = "Comparer " + ", ".join(generic_dimensions) + " sur l'emballage."
     return {
         "answer": answer,
         "selected_product_ids": selected_ids,
         "follow_up_questions": [],
-        "safety_flags": [
+        "safety_flags": ([
             "Vérifier sur l'étiquette la concentration, la forme, les ingrédients, l'âge et les avertissements."
-        ],
+        ] if medical else []),
         "pharmacist_referral": medical,
         "pharmacist_reason": (
             "Consulter le pharmacien pour les interactions, la grossesse, l'allaitement, "
@@ -2340,13 +2443,20 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         "comparisons": comparisons,
         "useful_guidance": [{
             "text": (
-                "Comparer la forme, la concentration, la saveur et le nombre d'unités "
-                "exactement comme ils figurent sur l'emballage."
+                "Comparer le type d'alimentation, le contenu de l'emballage et la compatibilité "
+                "des têtes avant de proposer un modèle."
+                if is_toothbrush_query else
+                generic_guidance
             ),
             "source_ids": [],
         }],
         "important_checks": [{
-            "text": "Ne pas attribuer à un produit un usage qui n'apparaît pas sur sa fiche ou son étiquette.",
+            "text": (
+                "Ne pas confondre une tête de remplacement avec une brosse complète; confirmer "
+                "la compatibilité sur l'emballage."
+                if is_toothbrush_query else
+                "Ne pas attribuer à un produit un usage qui n'apparaît pas sur sa fiche ou son étiquette."
+            ),
             "source_ids": [],
         }],
         "source_ids": valid_source_ids[:16],
@@ -3285,10 +3395,21 @@ def client_help():
             "elapsed_ms": elapsed_ms,
         })
 
+    normalized_question = normalize_search_text(question)
+    question_words = set(normalized_question.split())
+    is_toothbrush_power_comparison = bool(
+        query_plan.get("needs_comparison")
+        and question_words.intersection({"brosse", "brosses", "brush", "toothbrush"})
+        and question_words.intersection({"dent", "dents", "tooth", "teeth"})
+        and question_words.intersection({"pile", "piles"})
+        and any(word.startswith("recharg") for word in question_words)
+    )
     use_local_documented_summary = bool(
         response_mode == "documented"
-        and query_plan.get("wants_all")
-        and "melaton" in normalize_search_text(question)
+        and (
+            (query_plan.get("wants_all") and "melaton" in normalized_question)
+            or is_toothbrush_power_comparison
+        )
     )
     if not use_local_documented_summary:
         if not configured_ai_provider()["name"]:
