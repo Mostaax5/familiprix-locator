@@ -1697,7 +1697,7 @@ _CLIENT_DOCUMENTED_SCHEMA = {
     "properties": {
         "answer": {"type": "string"},
         "key_points": {
-            "type": "array", "maxItems": 6,
+            "type": "array", "maxItems": 4,
             "items": {
                 "type": "object",
                 "properties": {
@@ -1710,7 +1710,7 @@ _CLIENT_DOCUMENTED_SCHEMA = {
             },
         },
         "comparisons": {
-            "type": "array", "maxItems": 8,
+            "type": "array", "maxItems": 6,
             "items": {
                 "type": "object",
                 "properties": {
@@ -1724,7 +1724,7 @@ _CLIENT_DOCUMENTED_SCHEMA = {
             },
         },
         "useful_guidance": {
-            "type": "array", "maxItems": 6,
+            "type": "array", "maxItems": 4,
             "items": {
                 "type": "object",
                 "properties": {
@@ -1736,7 +1736,7 @@ _CLIENT_DOCUMENTED_SCHEMA = {
             },
         },
         "important_checks": {
-            "type": "array", "maxItems": 6,
+            "type": "array", "maxItems": 4,
             "items": {
                 "type": "object",
                 "properties": {
@@ -1781,7 +1781,9 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "Tu peux expliquer une différence générale entre des formes ou catégories, mais indique "
     "clairement qu'elle est générale lorsqu'aucun document ne la confirme pour le produit. "
     "N'invente jamais de dose, de durée, d'ingrédient, de bénéfice ou de source. "
-    "answer est une réponse directe de 1 à 3 phrases que l'employé peut dire au client. "
+    "Reste concis: la réponse complète doit être lisible rapidement. answer est une réponse "
+    "directe de 1 à 3 phrases que l'employé peut dire au client. Donne au maximum 4 key_points, "
+    "6 comparisons, 4 useful_guidance et 4 important_checks; chaque élément fait au plus deux phrases. "
     "key_points contient les faits décisifs, avec des titres très courts. comparisons explique "
     "les différences réellement utiles entre les produits sélectionnés; utilise seulement des "
     "candidate_id fournis. useful_guidance aide à choisir ou utiliser la catégorie sans poser "
@@ -2309,7 +2311,7 @@ def generate_documented_client_answer(question, query_plan, candidates, document
             "documents": document_contexts,
             "required_schema": _CLIENT_DOCUMENTED_SCHEMA,
         },
-        max_tokens=2200,
+        max_tokens=1600,
         schema_name="client_documented_answer",
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,
