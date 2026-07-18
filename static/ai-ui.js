@@ -111,6 +111,8 @@ function clientResultForStorage(result) {
     success: true,
     response_mode: normalizeClientResponseMode(result.response_mode),
     answer: String(result.answer || advice.summary || '').slice(0, 6000),
+    degraded: Boolean(result.degraded),
+    warning: String(result.warning || '').slice(0, 500),
     elapsed_ms: Number(result.elapsed_ms) || 0,
     highlighted_product_ids: Array.isArray(result.highlighted_product_ids)
       ? result.highlighted_product_ids.slice(0, 16).map(String)
@@ -478,6 +480,7 @@ function renderLatestAssistantDetails(result, exchangeId, includeActions=true) {
   const links = highlighted.map(product => clientProductLink(product, '', exchangeId)).join('<span class="client-link-sep"> · </span>');
   return `
     ${renderClientResponseMode(result)}
+    ${result?.degraded ? `<div class="msg info client-ai-fallback">${esc(result.warning || 'Réponse de secours fondée sur les données disponibles.')}</div>` : ''}
     ${result?.response_mode === 'documented' ? '<div class="client-doc-heading">À dire au client</div>' : ''}
     <div class="client-chat-answer">${renderQuotableClientAnswer(result?.answer || advice.summary || '', products, exchangeId)}</div>
     ${links ? `<div class="client-answer-products"><span>Produits cités :</span> ${links}</div>` : ''}
@@ -1359,7 +1362,9 @@ async function runClientRequest(question, options={}) {
   if (status) {
     const timing = result.elapsed_ms ? ` en ${(result.elapsed_ms / 1000).toFixed(1)} s` : '';
     const responseLabel = mode === 'documented' ? 'Réponse documentée' : 'Réponse avec IA';
-    status.textContent = `${responseLabel}${timing} : ${prepared.products.length} produit${prepared.products.length > 1 ? 's' : ''} vérifié${prepared.products.length > 1 ? 's' : ''}.`;
+    status.textContent = result.degraded
+      ? `Réponse de secours${timing} : ${prepared.products.length} produit${prepared.products.length > 1 ? 's' : ''} du plan conservé${prepared.products.length > 1 ? 's' : ''}.`
+      : `${responseLabel}${timing} : ${prepared.products.length} produit${prepared.products.length > 1 ? 's' : ''} vérifié${prepared.products.length > 1 ? 's' : ''}.`;
   }
 }
 

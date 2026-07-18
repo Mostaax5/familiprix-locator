@@ -1,10 +1,13 @@
+import json
 import time
 import unittest
 from unittest.mock import patch
 
 from app import app
 from routes.ai import (
+    _deepseek_json_request,
     classify_client_request,
+    generate_documented_client_answer,
     normalize_documented_client_answer,
     normalize_verified_client_answer,
     select_client_answer_candidates,
@@ -309,6 +312,71 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(result["key_points"][0]["source_ids"], ["health-canada:12"])
         self.assertEqual(result["comparisons"], [])
         self.assertEqual(result["source_ids"], ["health-canada:12"])
+
+    def test_documented_answer_keeps_products_when_ai_is_unavailable(self):
+        product = {
+            "id": 7,
+            "client_id": "product:7",
+            "name": "MELATONINE FRAISE 5 MG 60",
+            "description": "Comprimés à saveur de fraise.",
+            "usage_notes": "Lire l'étiquette avant utilisation.",
+            "aisle": "4", "side": "A", "section": "2", "shelf": "3", "position": "5",
+        }
+        documents = [{
+            "source_id": "store-plan",
+            "title": "Plan actuel du magasin",
+            "candidate_ids": ["product:7"],
+        }, {
+            "source_id": "catalog:1",
+            "title": "Fiche produit",
+            "candidate_ids": ["product:7"],
+        }]
+
+        with patch("routes.ai._provider_structured_request", return_value=None):
+            result = generate_documented_client_answer(
+                "Quelles saveurs de mélatonine avons-nous?",
+                {"medical": False}, [product], documents,
+            )
+
+        self.assertTrue(result["degraded"])
+        self.assertEqual(result["selected_product_ids"], ["product:7"])
+        self.assertIn("MELATONINE FRAISE", result["answer"])
+        self.assertEqual(result["comparisons"][0]["source_ids"], ["catalog:1"])
+
+    def test_documented_deepseek_timeout_retries_fast_model_without_thinking(self):
+        response_payload = {
+            "usage": {"prompt_tokens": 12, "completion_tokens": 6},
+            "choices": [{"message": {"content": json.dumps({"answer": "ok"})}}],
+        }
+
+        class StubResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _type, _value, _traceback):
+                return False
+
+            def read(self):
+                return json.dumps(response_payload).encode("utf-8")
+
+        with patch("routes.ai.DEEPSEEK_DOCUMENTED_MODEL", "deepseek-v4-pro"), \
+             patch("routes.ai.DEEPSEEK_MODEL", "deepseek-v4-flash"), \
+             patch("routes.ai._DEEPSEEK_DOCUMENTED_THINKING", False), \
+             patch("routes.ai.urlopen", side_effect=[TimeoutError("slow"), StubResponse()]) as opener, \
+             patch("routes.ai._log_ai_usage"):
+            result = _deepseek_json_request(
+                [{"role": "user", "content": "test"}],
+                max_tokens=3200, quality_mode=True,
+            )
+
+        self.assertEqual(result, {"answer": "ok"})
+        self.assertEqual(opener.call_count, 2)
+        first_payload = json.loads(opener.call_args_list[0].args[0].data.decode("utf-8"))
+        second_payload = json.loads(opener.call_args_list[1].args[0].data.decode("utf-8"))
+        self.assertEqual(first_payload["model"], "deepseek-v4-pro")
+        self.assertEqual(first_payload["thinking"], {"type": "disabled"})
+        self.assertEqual(second_payload["model"], "deepseek-v4-flash")
+        self.assertEqual(second_payload["thinking"], {"type": "disabled"})
 
     def test_small_ai_context_keeps_different_product_forms(self):
         candidates = [

@@ -234,6 +234,13 @@ assert.ok(documentedHtml.includes('Santé Canada - Produit Exemple'));
 const storedDocumented = context.__quoteTest.clientResultForStorage(documentedResult);
 assert.strictEqual(storedDocumented.response_mode, 'documented');
 assert.strictEqual(storedDocumented.advice.documentation.sources.length, 1);
+const storedFallback = context.__quoteTest.clientResultForStorage({
+  ...documentedResult,
+  degraded: true,
+  warning: "DeepSeek n'a pas répondu à temps.",
+});
+assert.strictEqual(storedFallback.degraded, true);
+assert.ok(storedFallback.warning.includes("DeepSeek"));
 
 const cottonGroups = context.__quoteTest.clientRequiredConceptGroups(
   'je cherche de la watte des petites boules de coton'

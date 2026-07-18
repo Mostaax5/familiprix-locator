@@ -99,10 +99,14 @@ except (TypeError, ValueError):
     _AI_REQUEST_TIMEOUT_SECONDS = 12
 try:
     _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = min(
-        45, max(15, int(os.environ.get("AI_DOCUMENTED_REQUEST_TIMEOUT", "30")))
+        30, max(10, int(os.environ.get("AI_DOCUMENTED_REQUEST_TIMEOUT", "18")))
     )
 except (TypeError, ValueError):
-    _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = 30
+    _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = 18
+_DEEPSEEK_DOCUMENTED_THINKING = (
+    os.environ.get("DEEPSEEK_DOCUMENTED_THINKING", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 _ai_rate_buckets: dict = defaultdict(list)
 
 # Auto AI-enrich of online UPC lookups is OFF by default so it can NEVER cost
@@ -1177,7 +1181,7 @@ def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mo
         "max_tokens": max_tokens,
         "response_format": {"type": "json_object"},
     }
-    if quality_mode:
+    if quality_mode and _DEEPSEEK_DOCUMENTED_THINKING:
         payload["thinking"] = {"type": "enabled"}
         payload["reasoning_effort"] = "high"
     else:
@@ -1203,12 +1207,29 @@ def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mo
             body = exc.read().decode("utf-8", "replace")[:250]
         except Exception:
             pass
+        if quality_mode and DEEPSEEK_MODEL != model and (exc.code == 429 or exc.code >= 500):
+            print(f"[AI] DeepSeek documented model returned HTTP {exc.code}; retrying with {DEEPSEEK_MODEL}")
+            return _deepseek_json_request(
+                messages, max_tokens=min(max_tokens, 2400),
+                question_preview=question_preview, quality_mode=False,
+            )
         _set_ai_error(f"DeepSeek a refusé la requête (HTTP {exc.code}, modèle {model}). {body}")
         return None
     except (URLError, TimeoutError) as exc:
+        if quality_mode and DEEPSEEK_MODEL != model:
+            print(f"[AI] DeepSeek documented model timed out; retrying with {DEEPSEEK_MODEL}: {exc}")
+            return _deepseek_json_request(
+                messages, max_tokens=min(max_tokens, 2400),
+                question_preview=question_preview, quality_mode=False,
+            )
         _set_ai_error(f"DeepSeek injoignable (réseau ou délai dépassé) : {exc}")
         return None
     except json.JSONDecodeError:
+        if quality_mode and DEEPSEEK_MODEL != model:
+            return _deepseek_json_request(
+                messages, max_tokens=min(max_tokens, 2400),
+                question_preview=question_preview, quality_mode=False,
+            )
         _set_ai_error("DeepSeek a renvoyé une réponse illisible.")
         return None
 
@@ -1219,11 +1240,21 @@ def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mo
     choices = raw_response.get("choices", [])
     raw_text = str(((choices[0] if choices else {}).get("message") or {}).get("content", "")).strip()
     if not raw_text:
+        if quality_mode and DEEPSEEK_MODEL != model:
+            return _deepseek_json_request(
+                messages, max_tokens=min(max_tokens, 2400),
+                question_preview=question_preview, quality_mode=False,
+            )
         _set_ai_error("DeepSeek a renvoyé une réponse vide.")
         return None
     try:
         return json.loads(raw_text)
     except json.JSONDecodeError:
+        if quality_mode and DEEPSEEK_MODEL != model:
+            return _deepseek_json_request(
+                messages, max_tokens=min(max_tokens, 2400),
+                question_preview=question_preview, quality_mode=False,
+            )
         _set_ai_error("DeepSeek n'a pas renvoyé un JSON valide.")
         return None
 
@@ -2108,6 +2139,114 @@ def normalize_documented_client_answer(parsed, valid_ids, documents):
     }
 
 
+def grounded_documented_fallback(query_plan, candidates, documents):
+    """Return a useful, source-backed response when every AI attempt fails."""
+    selected = [
+        product for product in candidates
+        if str(product.get("client_id", "") or "").strip()
+    ][:16]
+    selected_ids = [str(product.get("client_id", "") or "") for product in selected]
+    names = [str(product.get("name", "") or "").strip() for product in selected]
+
+    source_ids_by_product = defaultdict(list)
+    valid_source_ids = []
+    for document in documents:
+        source_id = str(document.get("source_id", "") or "").strip()
+        if not source_id:
+            continue
+        if source_id not in valid_source_ids:
+            valid_source_ids.append(source_id)
+        for candidate_id in document.get("candidate_ids", []) or []:
+            candidate_id = str(candidate_id or "").strip()
+            if source_id not in source_ids_by_product[candidate_id]:
+                source_ids_by_product[candidate_id].append(source_id)
+
+    if names:
+        preview = ", ".join(names[:6])
+        remaining = len(names) - min(len(names), 6)
+        if remaining:
+            preview += f", et {remaining} autre{'s' if remaining > 1 else ''}"
+        answer = (
+            f"J'ai trouvé {len(names)} produit{'s' if len(names) > 1 else ''} correspondant "
+            f"à la demande dans le plan actuel : {preview}. "
+            "La synthèse ci-dessous reprend uniquement les fiches disponibles; confirmez "
+            "les détails précis sur l'étiquette du produit."
+        )
+    else:
+        answer = (
+            "Je n'ai trouvé aucun produit correspondant dans le plan actuel du magasin. "
+            "Précisez le nom, la forme, la saveur ou le besoin recherché."
+        )
+
+    comparisons = []
+    for product in selected[:8]:
+        candidate_id = str(product.get("client_id", "") or "")
+        description = str(product.get("description", "") or "").strip()
+        usage_notes = str(product.get("usage_notes", "") or "").strip()
+        details = []
+        if description:
+            details.append(description)
+        if usage_notes and usage_notes != description:
+            details.append(usage_notes)
+        source_ids = source_ids_by_product.get(candidate_id, [])
+        specific_sources = [source_id for source_id in source_ids if source_id != "store-plan"]
+        comparisons.append({
+            "candidate_id": candidate_id,
+            "difference": " ".join(details)[:800] or (
+                f"Donnée disponible dans le plan : {str(product.get('name', '') or '').strip()}."
+            ),
+            "practical_note": f"Emplacement : {_recommendation_location(product)}",
+            "source_ids": (specific_sources or source_ids or ["store-plan"])[:4],
+        })
+
+    key_points = []
+    if names:
+        key_points.append({
+            "heading": "Produits en magasin",
+            "detail": "; ".join(names)[:1000],
+            "source_ids": ["store-plan"] if "store-plan" in valid_source_ids else [],
+        })
+    key_points.append({
+        "heading": "Vérification",
+        "detail": (
+            "DeepSeek n'a pas répondu dans le délai prévu. Cette réponse de secours ne "
+            "déduit aucun ingrédient, dosage ou usage absent des fiches disponibles."
+        ),
+        "source_ids": [],
+    })
+
+    medical = bool(query_plan.get("medical", False))
+    return {
+        "answer": answer,
+        "selected_product_ids": selected_ids,
+        "follow_up_questions": [],
+        "safety_flags": [
+            "Vérifier sur l'étiquette la concentration, la forme, les ingrédients, l'âge et les avertissements."
+        ],
+        "pharmacist_referral": medical,
+        "pharmacist_reason": (
+            "Consulter le pharmacien pour les interactions, la grossesse, l'allaitement, "
+            "un enfant ou une situation médicale particulière."
+        ) if medical else "",
+        "key_points": key_points,
+        "comparisons": comparisons,
+        "useful_guidance": [{
+            "text": (
+                "Comparer la forme, la concentration, la saveur et le nombre d'unités "
+                "exactement comme ils figurent sur l'emballage."
+            ),
+            "source_ids": [],
+        }],
+        "important_checks": [{
+            "text": "Ne pas attribuer à un produit un usage qui n'apparaît pas sur sa fiche ou son étiquette.",
+            "source_ids": [],
+        }],
+        "source_ids": valid_source_ids[:16],
+        "degraded": True,
+        "warning": "DeepSeek n'a pas répondu à temps; les produits et sources du magasin restent disponibles.",
+    }
+
+
 def generate_documented_client_answer(question, query_plan, candidates, documents,
                                       history=None, selected_text="", focus_product_id=""):
     contexts = [product_context_for_client_rag(product) for product in candidates]
@@ -2130,10 +2269,13 @@ def generate_documented_client_answer(question, query_plan, candidates, document
         quality_mode=True,
     )
     if not isinstance(parsed, dict):
-        return None
-    return normalize_documented_client_answer(
+        return grounded_documented_fallback(query_plan, candidates, documents)
+    result = normalize_documented_client_answer(
         parsed, [product.get("client_id", "") for product in candidates], documents
     )
+    result["degraded"] = False
+    result["warning"] = ""
+    return result
 
 
 def generate_client_help_payload_deepseek(question, products):
@@ -3047,6 +3189,8 @@ def client_help():
         return jsonify({"success": False,
                         "error": _AI_LAST_ERROR or "Impossible de préparer la réponse pour le moment."}), 502
 
+    degraded = bool(verified.get("degraded", False))
+    warning = str(verified.get("warning", "") or "").strip()
     by_id = {str(product.get("client_id", "")): product for product in answer_candidates}
     highlighted_products = [
         by_id[candidate_id] for candidate_id in verified["selected_product_ids"]
@@ -3119,7 +3263,8 @@ def client_help():
                     "answer": answer, "products": highlighted_products,
                     "highlighted_product_ids": verified["selected_product_ids"],
                     "query_plan": query_plan, "advice": advice,
-                    "elapsed_ms": elapsed_ms})
+                    "elapsed_ms": elapsed_ms, "degraded": degraded,
+                    "warning": warning})
 
 
 @ai_bp.route("/api/ai/feedback", methods=["POST"])
