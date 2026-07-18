@@ -461,19 +461,28 @@ def client_required_concept_groups(query):
             ("electrique", "electric", "elec", "pile", "sonicare", "philips one",
              "tete br dent"),
         ])
-    return tuple(
-        tuple(tuple(normalize_search_text(term).split()) for term in group)
-        for group in groups
-    )
+    return tuple(_compile_client_concept_group(group) for group in groups)
 
 
 def client_excluded_concept_terms(query):
     if not _is_electric_toothbrush_request(query):
         return ()
-    return tuple(
-        tuple(normalize_search_text(term).split())
-        for term in ("irr", "irrigateur", "hydropulseur", "airfloss", "water flosser", "s fil")
-    )
+    return (_compile_client_concept_group(
+        ("irr", "irrigateur", "hydropulseur", "airfloss", "water flosser", "s fil")
+    ),)
+
+
+def _compile_client_concept_group(terms):
+    alternatives = []
+    for term in terms:
+        tokens = normalize_search_text(term).split()
+        if not tokens:
+            continue
+        alternatives.append(" ".join(
+            re.escape(token) + (r"[a-z0-9]*" if len(token) >= 4 else "")
+            for token in tokens
+        ))
+    return re.compile(r"(?<![a-z0-9])(?:" + "|".join(alternatives) + r")(?![a-z0-9])")
 
 
 def _concept_term_matches(hay_tokens, term):
@@ -492,18 +501,22 @@ def _concept_term_matches(hay_tokens, term):
 
 
 def row_matches_client_concepts(row, groups, excluded_name_terms=()):
-    if not groups:
-        required_match = True
-    else:
-        hay_tokens = str(row.get("_hay", "") or "").split()
-        required_match = all(
-            any(_concept_term_matches(hay_tokens, term) for term in group)
-            for group in groups
+    hay = str(row.get("_hay", "") or "")
+    required_match = all(
+        bool(group.search(hay)) if hasattr(group, "search") else any(
+            _concept_term_matches(hay.split(), term) for term in group
         )
+        for group in groups
+    )
     if not required_match:
         return False
-    name_tokens = str(row.get("_name", "") or "").split()
-    if any(_concept_term_matches(name_tokens, term) for term in excluded_name_terms):
+    name = str(row.get("_name", "") or "")
+    if any(
+        bool(group.search(name)) if hasattr(group, "search") else any(
+            _concept_term_matches(name.split(), term) for term in group
+        )
+        for group in excluded_name_terms
+    ):
         return False
     return True
 

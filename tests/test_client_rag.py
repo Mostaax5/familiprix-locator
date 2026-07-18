@@ -157,7 +157,11 @@ class ClientRagTests(unittest.TestCase):
         query = "brosse a dent electric"
         groups = client_required_concept_groups(query)
         excluded = client_excluded_concept_terms(query)
-        rows = [search_row(f"DENTA RINSE MENTHE {index}") for index in range(12000)]
+        description = "rince bouche menthe protection fraicheur quotidienne " * 12
+        rows = [
+            search_row(f"DENTA RINSE MENTHE {index}", description=description)
+            for index in range(12000)
+        ]
         rows.append(search_row("ORAL-B P100 BR/DENTS ELEC NR 1"))
 
         started = time.perf_counter()

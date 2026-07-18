@@ -1038,11 +1038,7 @@ function clientRequiredConceptGroups(question) {
       'tete br dent',
     ]);
   }
-  return groups.map(group => group.map(term => (
-    typeof normalizeSearchText === 'function'
-      ? normalizeSearchText(term).split(/\s+/).filter(Boolean)
-      : String(term || '').toLowerCase().split(/\s+/).filter(Boolean)
-  )));
+  return groups.map(compileClientConceptGroup);
 }
 
 function clientExcludedConceptTerms(question) {
@@ -1055,11 +1051,18 @@ function clientExcludedConceptTerms(question) {
   const tooth = compound || [...tokens].some(token => token.startsWith('dent') || token.startsWith('tooth'));
   const terms = electric && brush && tooth
     ? ['irr', 'irrigateur', 'hydropulseur', 'airfloss', 'water flosser', 's fil'] : [];
-  return terms.map(term => (
-    typeof normalizeSearchText === 'function'
-      ? normalizeSearchText(term).split(/\s+/).filter(Boolean)
-      : String(term || '').toLowerCase().split(/\s+/).filter(Boolean)
-  ));
+  return terms.length ? [compileClientConceptGroup(terms)] : [];
+}
+
+function compileClientConceptGroup(terms) {
+  const alternatives = terms.map(term => {
+    const normalized = typeof normalizeSearchText === 'function'
+      ? normalizeSearchText(term) : String(term || '').toLowerCase();
+    return normalized.split(/\s+/).filter(Boolean).map(token => (
+      token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + (token.length >= 4 ? '[a-z0-9]*' : '')
+    )).join(' ');
+  }).filter(Boolean);
+  return new RegExp(`(?:^| )(?:${alternatives.join('|')})(?= |$)`);
 }
 
 function clientConceptTermMatches(hayTokens, term) {
@@ -1082,18 +1085,25 @@ function productMatchesClientConcepts(product, groups, excludedNameTerms=[]) {
   const rawHay = typeof productSearchText === 'function'
     ? productSearchText(product)
     : [product.name, product.brand, product.description, product.search_terms, product.usage_notes].join(' ');
-  const normalizedHay = typeof normalizeSearchText === 'function'
+  const hasNormalizedSearchCache = Boolean(
+    product && product._sf && product._sf.haystack === rawHay
+  );
+  const normalizedHay = typeof normalizeSearchText === 'function' && !hasNormalizedSearchCache
     ? normalizeSearchText(rawHay)
     : String(rawHay || '').toLowerCase();
-  const hayTokens = normalizedHay.split(/\s+/).filter(Boolean);
   const requiredMatch = groups.every(
-    group => group.some(term => clientConceptTermMatches(hayTokens, term))
+    group => (group && typeof group.test === 'function')
+      ? group.test(normalizedHay)
+      : group.some(term => clientConceptTermMatches(normalizedHay.split(/\s+/), term))
   );
   if (!requiredMatch) return false;
   const normalizedName = typeof normalizeSearchText === 'function'
     ? normalizeSearchText(product.name || '') : String(product.name || '').toLowerCase();
-  const nameTokens = normalizedName.split(/\s+/).filter(Boolean);
-  return !excludedNameTerms.some(term => clientConceptTermMatches(nameTokens, term));
+  return !excludedNameTerms.some(group => (
+    group && typeof group.test === 'function'
+      ? group.test(normalizedName)
+      : group.some(term => clientConceptTermMatches(normalizedName.split(/\s+/), term))
+  ));
 }
 
 function localClientMatches(question, limit=60) {
