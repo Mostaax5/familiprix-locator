@@ -1177,12 +1177,8 @@ def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mo
         "max_tokens": max_tokens,
         "response_format": {"type": "json_object"},
     }
-    if quality_mode:
-        payload["thinking"] = {"type": "enabled"}
-        payload["reasoning_effort"] = "high"
-    else:
-        payload["thinking"] = {"type": "disabled"}
-        payload["temperature"] = 0.2
+    payload["thinking"] = {"type": "disabled"}
+    payload["temperature"] = 0.1 if quality_mode else 0.2
     request_obj = Request(
         f"{DEEPSEEK_BASE_URL}/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
@@ -2123,7 +2119,7 @@ def generate_documented_client_answer(question, query_plan, candidates, document
             "documents": documents,
             "required_schema": _CLIENT_DOCUMENTED_SCHEMA,
         },
-        max_tokens=3200,
+        max_tokens=2400,
         schema_name="client_documented_answer",
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,
