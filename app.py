@@ -31,11 +31,20 @@ except ImportError:
 # behind a dead site and blocked recovery. The failure is remembered and exposed
 # by /api/system/info so the phones can say WHY there is no data.
 DB_BOOT_ERROR = ""
-try:
-    init_db()
-except Exception as exc:  # noqa: BLE001 — any DB failure must not kill the boot
-    DB_BOOT_ERROR = str(exc)
-    print(f"[BOOT] Base de données injoignable au démarrage: {exc}")
+_ASYNC_RENDER_BOOT = bool(
+    os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+    or os.environ.get("RENDER", "").strip()
+)
+DB_BOOT_PENDING = _ASYNC_RENDER_BOOT
+
+# Keep local setup deterministic. On Render the same work runs below after the
+# app object is ready, so a busy PostgreSQL lock cannot block /healthz.
+if not _ASYNC_RENDER_BOOT:
+    try:
+        init_db()
+    except Exception as exc:  # noqa: BLE001 — any DB failure must not kill the boot
+        DB_BOOT_ERROR = str(exc)
+        print(f"[BOOT] Base de données injoignable au démarrage: {exc}")
 
 app.register_blueprint(products_bp)
 app.register_blueprint(layout_bp)
@@ -237,9 +246,32 @@ def _start_self_keepalive():
 
 # ── Boot ───────────────────────────────────────────────────────────────────────
 
-_restore_from_gist_if_empty()
-schedule_reference_metadata_sync()  # connect enriched catalogue rows to placed UPCs
-schedule_backfill_missing()   # auto-fetch any missing product images in background
+
+def _finish_persistence_boot():
+    global DB_BOOT_ERROR, DB_BOOT_PENDING
+    initialized = not _ASYNC_RENDER_BOOT
+    if _ASYNC_RENDER_BOOT:
+        try:
+            init_db()
+            initialized = True
+            DB_BOOT_ERROR = ""
+        except Exception as exc:  # noqa: BLE001 — health endpoint must stay alive
+            DB_BOOT_ERROR = str(exc)
+            print(f"[BOOT] Initialisation PostgreSQL différée impossible: {exc}")
+        finally:
+            DB_BOOT_PENDING = False
+
+    if initialized:
+        _restore_from_gist_if_empty()
+    schedule_reference_metadata_sync()  # connect catalogue metadata to placed UPCs
+    schedule_backfill_missing()  # fetch missing product images in background
+
+
+if _ASYNC_RENDER_BOOT:
+    import threading
+    threading.Thread(target=_finish_persistence_boot, daemon=True).start()
+else:
+    _finish_persistence_boot()
 _start_self_keepalive()
 
 if __name__ == "__main__":

@@ -179,16 +179,28 @@ def close_db(_error=None):
 
 def init_db():
     db = connect_db()
-    if db.backend == "postgres":
-        init_postgres_db(db)
-        print("Base de données partagee prete : PostgreSQL")
-    else:
-        init_sqlite_db(db)
-        print(f"Base de données prete : {DB_PATH}")
-    db.commit()
-    ensure_best_effort_unique_indexes(db)
-    db.commit()
-    db.close()
+    try:
+        if db.backend == "postgres":
+            # A deploy must never wait forever behind a transaction holding a
+            # schema lock. A later worker can retry a best-effort migration.
+            db.execute("SELECT set_config('lock_timeout', ?, false)", ("5s",))
+            db.execute("SELECT set_config('statement_timeout', ?, false)", ("30s",))
+            init_postgres_db(db)
+            print("Base de données partagee prete : PostgreSQL")
+        else:
+            init_sqlite_db(db)
+            print(f"Base de données prete : {DB_PATH}")
+        db.commit()
+        ensure_best_effort_unique_indexes(db)
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        db.close()
 
 
 def init_postgres_db(db):
