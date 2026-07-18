@@ -461,17 +461,23 @@ def client_required_concept_groups(query):
             ("electrique", "electric", "elec", "pile", "sonicare", "philips one",
              "tete br dent"),
         ])
-    return groups
+    return tuple(
+        tuple(tuple(normalize_search_text(term).split()) for term in group)
+        for group in groups
+    )
 
 
 def client_excluded_concept_terms(query):
     if not _is_electric_toothbrush_request(query):
         return ()
-    return ("irr", "irrigateur", "hydropulseur", "airfloss", "water flosser", "s fil")
+    return tuple(
+        tuple(normalize_search_text(term).split())
+        for term in ("irr", "irrigateur", "hydropulseur", "airfloss", "water flosser", "s fil")
+    )
 
 
 def _concept_term_matches(hay_tokens, term):
-    concept_tokens = normalize_search_text(term).split()
+    concept_tokens = term if isinstance(term, (tuple, list)) else normalize_search_text(term).split()
     if not concept_tokens or len(concept_tokens) > len(hay_tokens):
         return False
     width = len(concept_tokens)

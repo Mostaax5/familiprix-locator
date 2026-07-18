@@ -1,3 +1,4 @@
+import time
 import unittest
 from unittest.mock import patch
 
@@ -9,9 +10,12 @@ from routes.ai import (
     select_client_answer_candidates,
 )
 from routes.products import (
+    client_excluded_concept_terms,
+    client_required_concept_groups,
     find_existing_image_for_barcode,
     hybrid_client_candidates,
     normalize_search_text,
+    row_matches_client_concepts,
 )
 
 
@@ -148,6 +152,20 @@ class ClientRagTests(unittest.TestCase):
         self.assertNotIn("DENTA RINSE PRO .2% MENT 500ML", names)
         self.assertNotIn("SONICARE IRR S/FIL HX3826/23 1", names)
         self.assertNotIn("GUM PROXABRUSH RECH BROS LG 10", names)
+
+    def test_electric_toothbrush_concept_filter_is_precompiled_and_fast(self):
+        query = "brosse a dent electric"
+        groups = client_required_concept_groups(query)
+        excluded = client_excluded_concept_terms(query)
+        rows = [search_row(f"DENTA RINSE MENTHE {index}") for index in range(12000)]
+        rows.append(search_row("ORAL-B P100 BR/DENTS ELEC NR 1"))
+
+        started = time.perf_counter()
+        matches = [row for row in rows if row_matches_client_concepts(row, groups, excluded)]
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual(len(matches), 1)
+        self.assertLess(elapsed, 0.8)
 
     def test_fast_client_lookup_understands_transparent_dressing_language(self):
         transparent = {

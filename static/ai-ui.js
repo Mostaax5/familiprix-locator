@@ -1038,7 +1038,11 @@ function clientRequiredConceptGroups(question) {
       'tete br dent',
     ]);
   }
-  return groups;
+  return groups.map(group => group.map(term => (
+    typeof normalizeSearchText === 'function'
+      ? normalizeSearchText(term).split(/\s+/).filter(Boolean)
+      : String(term || '').toLowerCase().split(/\s+/).filter(Boolean)
+  )));
 }
 
 function clientExcludedConceptTerms(question) {
@@ -1049,15 +1053,20 @@ function clientExcludedConceptTerms(question) {
   const compound = tokens.has('toothbrush') || tokens.has('toothbrushes');
   const brush = compound || [...tokens].some(token => token.startsWith('bross') || token === 'brush');
   const tooth = compound || [...tokens].some(token => token.startsWith('dent') || token.startsWith('tooth'));
-  return electric && brush && tooth
-    ? ['irr', 'irrigateur', 'hydropulseur', 'airfloss', 'water flosser', 's fil']
-    : [];
+  const terms = electric && brush && tooth
+    ? ['irr', 'irrigateur', 'hydropulseur', 'airfloss', 'water flosser', 's fil'] : [];
+  return terms.map(term => (
+    typeof normalizeSearchText === 'function'
+      ? normalizeSearchText(term).split(/\s+/).filter(Boolean)
+      : String(term || '').toLowerCase().split(/\s+/).filter(Boolean)
+  ));
 }
 
 function clientConceptTermMatches(hayTokens, term) {
-  const conceptTokens = (typeof normalizeSearchText === 'function'
-    ? normalizeSearchText(term) : String(term || '').toLowerCase())
-    .split(/\s+/).filter(Boolean);
+  const conceptTokens = Array.isArray(term) ? term : (
+    typeof normalizeSearchText === 'function'
+      ? normalizeSearchText(term) : String(term || '').toLowerCase()
+  ).split(/\s+/).filter(Boolean);
   if (!conceptTokens.length || conceptTokens.length > hayTokens.length) return false;
   for (let start = 0; start <= hayTokens.length - conceptTokens.length; start += 1) {
     const matches = conceptTokens.every((expected, offset) => {
