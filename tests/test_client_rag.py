@@ -651,47 +651,6 @@ class ClientRagTests(unittest.TestCase):
         retriever.assert_called_once()
         generator.assert_called_once()
 
-    def test_documented_all_request_keeps_full_assortment_with_small_ai_context(self):
-        candidates = [{
-            "id": index,
-            "client_id": f"product:{index}",
-            "name": f"WEBBER MELATON {index}MG CO60",
-            "brand": "Webber", "barcode": str(1000 + index),
-            "aisle": "1", "side": "B", "section": "7", "shelf": "2",
-            "position": str(index), "in_stock": 1,
-        } for index in range(1, 21)]
-        documented = {
-            "answer": "Voici les principaux formats.",
-            "selected_product_ids": ["product:1", "product:2"],
-            "follow_up_questions": [], "safety_flags": [],
-            "pharmacist_referral": False, "pharmacist_reason": "",
-            "source_ids": ["store-plan"], "key_points": [],
-            "comparisons": [], "useful_guidance": [], "important_checks": [],
-        }
-        documents = [{
-            "source_id": "store-plan", "title": "Plan actuel",
-            "publisher": "Familiprix Locator", "url": "", "evidence": "",
-            "candidate_ids": [product["client_id"] for product in candidates],
-        }]
-        with patch("routes.products.hybrid_client_candidates", return_value=candidates), \
-             patch("routes.products.hydrate_candidate_images"), \
-             patch("routes.ai.configured_ai_provider", return_value={"name": "deepseek"}), \
-             patch("routes.ai._check_ai_rate_limit", return_value=True), \
-             patch("routes.ai.retrieve_client_documentation", return_value=documents), \
-             patch("routes.ai.generate_documented_client_answer", return_value=documented) as generator, \
-             patch("routes.ai.log_ai_interaction"):
-            with app.test_client() as client:
-                response = client.post("/api/client/help", json={
-                    "question": "Montre tous les types de mélatonine", "mode": "documented",
-                })
-
-        payload = response.get_json()
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(generator.call_args.args[2]), 8)
-        self.assertEqual(len(payload["products"]), 20)
-        self.assertEqual(len(payload["assortment_product_ids"]), 20)
-        self.assertEqual(payload["highlighted_product_ids"], ["product:1", "product:2"])
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -3192,15 +3192,13 @@ def client_help():
         return jsonify({"success": False, "error": "Trop de requetes IA. Reessayez dans une heure."}), 429
 
     query_plan["context_product_ids"] = context_product_ids
-    assortment_products = list(candidates) if query_plan.get("wants_all") else []
     answer_candidates = list(candidates)
     if focus_product_id:
         answer_candidates.sort(
             key=lambda product: 0 if str(product.get("client_id", "")) == focus_product_id else 1
         )
     # A smaller grounded context improves response time and keeps comparisons readable.
-    answer_limit = 8 if response_mode == "documented" else 16
-    answer_candidates = select_client_answer_candidates(answer_candidates, limit=answer_limit)
+    answer_candidates = select_client_answer_candidates(answer_candidates, limit=16)
     documents = []
     if response_mode == "documented":
         documents = retrieve_client_documentation(answer_candidates)
@@ -3223,20 +3221,6 @@ def client_help():
     highlighted_products = [
         by_id[candidate_id] for candidate_id in verified["selected_product_ids"]
         if candidate_id in by_id
-    ]
-    response_products = []
-    response_product_ids = set()
-    for product in highlighted_products + assortment_products:
-        candidate_id = str(product.get("client_id", "") or "")
-        if not candidate_id or candidate_id in response_product_ids:
-            continue
-        response_product_ids.add(candidate_id)
-        response_products.append(product)
-        if len(response_products) >= 100:
-            break
-    assortment_product_ids = [
-        str(product.get("client_id", "") or "") for product in assortment_products
-        if str(product.get("client_id", "") or "") in response_product_ids
     ]
     answer = verified["answer"] or (
         "Aucun produit suffisamment lié à cette demande n'a été trouvé dans la base."
@@ -3302,9 +3286,8 @@ def client_help():
     )
     elapsed_ms = int((time.perf_counter() - started_at) * 1000)
     return jsonify({"success": True, "response_mode": response_mode,
-                    "answer": answer, "products": response_products,
+                    "answer": answer, "products": highlighted_products,
                     "highlighted_product_ids": verified["selected_product_ids"],
-                    "assortment_product_ids": assortment_product_ids,
                     "query_plan": query_plan, "advice": advice,
                     "elapsed_ms": elapsed_ms, "degraded": degraded,
                     "warning": warning})
