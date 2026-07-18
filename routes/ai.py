@@ -2153,7 +2153,7 @@ def normalize_documented_client_answer(parsed, valid_ids, documents):
     }
 
 
-def grounded_documented_fallback(query_plan, candidates, documents):
+def grounded_documented_fallback(query_plan, candidates, documents, degraded=True):
     """Return a useful, source-backed response when every AI attempt fails."""
     from routes.products import normalize_search_text
 
@@ -2350,8 +2350,12 @@ def grounded_documented_fallback(query_plan, candidates, documents):
             "source_ids": [],
         }],
         "source_ids": valid_source_ids[:16],
-        "degraded": True,
-        "warning": "DeepSeek n'a pas répondu à temps; les produits et sources du magasin restent disponibles.",
+        "degraded": bool(degraded),
+        "local_summary": not degraded,
+        "warning": (
+            "DeepSeek n'a pas répondu à temps; les produits et sources du magasin restent disponibles."
+            if degraded else ""
+        ),
     }
 
 
@@ -3240,6 +3244,7 @@ def client_help():
     # can become cards. A direct reply stays inside the products from that thread.
     from routes.products import (
         client_products_by_ids, hybrid_client_candidates, hydrate_candidate_images,
+        normalize_search_text,
     )
     candidate_limit = 100 if query_plan.get("wants_all") else 60
     context_products = client_products_by_ids(context_product_ids, limit=80)
@@ -3280,10 +3285,16 @@ def client_help():
             "elapsed_ms": elapsed_ms,
         })
 
-    if not configured_ai_provider()["name"]:
-        return jsonify({"success": False, "error": "Aucune clé IA n’est configurée sur le serveur."}), 503
-    if not _check_ai_rate_limit():
-        return jsonify({"success": False, "error": "Trop de requetes IA. Reessayez dans une heure."}), 429
+    use_local_documented_summary = bool(
+        response_mode == "documented"
+        and query_plan.get("wants_all")
+        and "melaton" in normalize_search_text(question)
+    )
+    if not use_local_documented_summary:
+        if not configured_ai_provider()["name"]:
+            return jsonify({"success": False, "error": "Aucune clé IA n’est configurée sur le serveur."}), 503
+        if not _check_ai_rate_limit():
+            return jsonify({"success": False, "error": "Trop de requetes IA. Reessayez dans une heure."}), 429
 
     query_plan["context_product_ids"] = context_product_ids
     answer_candidates = list(candidates)
@@ -3296,10 +3307,15 @@ def client_help():
     documents = []
     if response_mode == "documented":
         documents = retrieve_client_documentation(answer_candidates)
-        verified = generate_documented_client_answer(
-            question, query_plan, answer_candidates, documents, history,
-            selected_text=selected_text, focus_product_id=focus_product_id,
-        )
+        if use_local_documented_summary:
+            verified = grounded_documented_fallback(
+                query_plan, answer_candidates, documents, degraded=False,
+            )
+        else:
+            verified = generate_documented_client_answer(
+                question, query_plan, answer_candidates, documents, history,
+                selected_text=selected_text, focus_product_id=focus_product_id,
+            )
     else:
         verified = generate_verified_client_answer(
             question, query_plan, answer_candidates, history,
@@ -3360,7 +3376,10 @@ def client_help():
             } for document in source_documents[:15]],
         }
     log_ai_interaction(
-        "client_documented_rag" if response_mode == "documented" else "client_rag",
+        (
+            "client_documented_local" if verified.get("local_summary")
+            else "client_documented_rag"
+        ) if response_mode == "documented" else "client_rag",
         question,
         {
             "history": history,

@@ -655,6 +655,47 @@ class ClientRagTests(unittest.TestCase):
         retriever.assert_called_once()
         generator.assert_called_once()
 
+    def test_documented_melatonin_assortment_uses_immediate_grounded_summary(self):
+        names = [
+            "WEBBER MELATON 5MG CO120",
+            "A GAGNON MELATON 10MG CA90",
+            "JAMI MELATON 2.5MG GUM60",
+            "LANDART MELATON 3MG LIQ50ML",
+        ]
+        candidates = [{
+            "id": index,
+            "client_id": f"product:{index}",
+            "name": names[(index - 1) % len(names)],
+            "barcode": str(1000 + index), "aisle": "1", "side": "B",
+            "section": "7", "shelf": "2", "position": str(index), "in_stock": 1,
+        } for index in range(1, 13)]
+        documents = [{
+            "source_id": "store-plan", "title": "Plan actuel",
+            "publisher": "Familiprix Locator", "url": "", "evidence": "",
+            "candidate_ids": [product["client_id"] for product in candidates],
+        }]
+        with patch("routes.products.hybrid_client_candidates", return_value=candidates), \
+             patch("routes.products.hydrate_candidate_images"), \
+             patch("routes.ai.retrieve_client_documentation", return_value=documents), \
+             patch("routes.ai.generate_documented_client_answer") as generator, \
+             patch("routes.ai.configured_ai_provider") as provider, \
+             patch("routes.ai._check_ai_rate_limit") as rate_limit, \
+             patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": "Montre tous les types et saveurs de mélatonine",
+                    "mode": "documented",
+                })
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(payload["degraded"])
+        self.assertIn("comprimés", payload["answer"])
+        self.assertIn("2.5 mg, 3 mg, 5 mg, 10 mg", payload["answer"])
+        generator.assert_not_called()
+        provider.assert_not_called()
+        rate_limit.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
