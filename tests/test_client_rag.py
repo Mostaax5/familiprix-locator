@@ -6,8 +6,10 @@ from unittest.mock import patch
 from app import app
 from routes.ai import (
     _deepseek_json_request,
+    build_client_query_plan,
     classify_client_request,
     generate_documented_client_answer,
+    health_canada_documents,
     normalize_documented_client_answer,
     normalize_verified_client_answer,
     select_client_answer_candidates,
@@ -19,6 +21,7 @@ from routes.products import (
     hybrid_client_candidates,
     normalize_search_text,
     row_matches_client_concepts,
+    tokenize_search_query,
 )
 
 
@@ -275,6 +278,46 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertEqual({item["name"] for item in matches}, {"Milk Strawberry", "Milk Banana"})
 
+    def test_long_melatonin_comparison_retrieves_the_product_not_answer_words(self):
+        question = (
+            "Peux tu me dire tout les type de melatonine les saveurs qu'on a en magasin "
+            "et les difference de context dans lequel les utiliser ?"
+        )
+        self.assertEqual(tokenize_search_query(question), ["melatonine"])
+        melatonin = [
+            {
+                "id": index, "name": f"WEBBER MELATON {index}MG CO60",
+                "brand": "Webber", "barcode": str(1000 + index),
+            }
+            for index in range(1, 31)
+        ]
+        unrelated = [
+            {
+                "id": 1000 + index, "name": f"PRODUIT DIVERS {index}",
+                "description": "Types, saveurs et contextes d'utilisation en magasin.",
+                "barcode": str(5000 + index),
+            }
+            for index in range(120)
+        ]
+        corpus = [
+            (
+                product,
+                search_row(
+                    product["name"], product.get("brand", ""),
+                    product.get("description", ""), product["barcode"],
+                ),
+            )
+            for product in melatonin + unrelated
+        ]
+        plan = build_client_query_plan(question, "documented")
+
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            matches = hybrid_client_candidates(question, plan, limit=100)
+
+        self.assertEqual(len(matches), 30)
+        self.assertTrue(all("MELATON" in product["name"] for product in matches))
+
     def test_verifier_can_only_return_real_candidate_ids(self):
         parsed = {
             "answer": "Advil",
@@ -342,6 +385,17 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(result["selected_product_ids"], ["product:7"])
         self.assertIn("MELATONINE FRAISE", result["answer"])
         self.assertEqual(result["comparisons"][0]["source_ids"], ["catalog:1"])
+
+    def test_melatonin_documentation_skips_the_inapplicable_drug_database(self):
+        products = [
+            {"client_id": "product:1", "name": "A GAGNON MELATON 5MG GUM 120"},
+            {"client_id": "product:2", "name": "WEBBER MELATON 10MG CO 120"},
+        ]
+        with patch("routes.ai._health_canada_json") as lookup:
+            documents = health_canada_documents(products)
+
+        self.assertEqual(documents, [])
+        lookup.assert_not_called()
 
     def test_documented_deepseek_timeout_retries_fast_model_without_thinking(self):
         response_payload = {

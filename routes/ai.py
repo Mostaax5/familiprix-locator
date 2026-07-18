@@ -81,8 +81,8 @@ OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
 DEEPSEEK_MODEL   = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash").strip() or "deepseek-v4-flash"
 DEEPSEEK_DOCUMENTED_MODEL = (
-    os.environ.get("DEEPSEEK_DOCUMENTED_MODEL", "deepseek-v4-pro").strip()
-    or "deepseek-v4-pro"
+    os.environ.get("DEEPSEEK_DOCUMENTED_MODEL", DEEPSEEK_MODEL).strip()
+    or DEEPSEEK_MODEL
 )
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
 
@@ -99,10 +99,10 @@ except (TypeError, ValueError):
     _AI_REQUEST_TIMEOUT_SECONDS = 12
 try:
     _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = min(
-        30, max(10, int(os.environ.get("AI_DOCUMENTED_REQUEST_TIMEOUT", "18")))
+        24, max(8, int(os.environ.get("AI_DOCUMENTED_REQUEST_TIMEOUT", "12")))
     )
 except (TypeError, ValueError):
-    _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = 18
+    _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = 12
 _DEEPSEEK_DOCUMENTED_THINKING = (
     os.environ.get("DEEPSEEK_DOCUMENTED_THINKING", "").strip().lower()
     in {"1", "true", "yes", "on"}
@@ -1928,6 +1928,16 @@ def _health_canada_document(match):
 
 def health_canada_documents(products, limit=4):
     """Return bounded official drug facts; failure leaves catalog RAG available."""
+    # Melatonin is licensed through Canada's natural-health-product system, not
+    # the Drug Product Database queried below. Waiting on three guaranteed-empty
+    # DPD searches added about five seconds to every melatonin comparison.
+    if products:
+        from routes.products import normalize_search_text
+        if all(
+            "melaton" in normalize_search_text(product.get("name", ""))
+            for product in products
+        ):
+            return []
     terms = []
     for product in products:
         term = _documentation_search_term(product)

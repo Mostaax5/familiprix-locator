@@ -20,7 +20,7 @@ products_bp = Blueprint("products", __name__)
 SEARCH_STOPWORDS = {
     "a", "an", "and", "au", "aux", "avec", "ce", "ces", "cette", "client", "comme",
     "dans", "de", "des", "du", "en", "et", "for", "how", "i", "il", "ils", "je",
-    "la", "le", "les", "mais", "mon", "my", "of", "on", "or", "ou", "par", "pas",
+    "la", "le", "les", "mais", "me", "moi", "mon", "my", "nous", "of", "on", "or", "ou", "par", "pas",
     "pour", "que", "qui", "sans", "si", "son", "sur", "the", "to", "un", "une",
     "with", "without", "y",
     # Filler words of a spoken client request ("quelque chose contre la toux",
@@ -31,6 +31,16 @@ SEARCH_STOPWORDS = {
     "meilleur", "meilleure", "monsieur", "peut", "peux", "plait", "prendre",
     "produit", "produits", "quelque", "quelques", "quoi", "recommande",
     "recommandez", "suggestion", "svp", "veut", "veux", "voudrais",
+    # Request-shaping words describe how to present an answer, not what product
+    # to retrieve. Keeping them in long questions flooded the candidate list.
+    "all", "available", "avoir", "avons", "context", "contexts", "contexte",
+    "contextes", "difference", "differences", "different", "differents",
+    "differentes", "dire", "dis", "dit", "explain", "explique", "expliquer",
+    "flavor", "flavors", "flavour", "flavours", "gout", "gouts", "have",
+    "laquelle", "lesquelles", "lequel", "lesquels", "magasin", "montrer",
+    "montre", "qu", "saveur", "saveurs", "show", "sorte", "sortes", "store",
+    "te", "tell", "tout", "tous", "toute", "toutes", "tu", "type", "types",
+    "usage", "usages", "use", "uses", "utiliser", "vous", "you",
 }
 
 # ── Intent lexicon ───────────────────────────────────────────────────────────────

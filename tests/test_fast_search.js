@@ -16,15 +16,28 @@ const products = Array.from({length: 12000}, (_, index) => ({
 products[450].barcode = '063848904961';
 products[900].barcode = '123456784961';
 
+const configSource = fs.readFileSync('static/config.js', 'utf8');
+const stopwordMatch = configSource.match(/const SEARCH_STOPWORDS = new Set\(\[([\s\S]*?)\]\);/);
+assert.ok(stopwordMatch, 'config.js must expose the shared search stopwords');
+const configContext = {};
+vm.runInNewContext(`result = new Set([${stopwordMatch[1]}]);`, configContext);
+
 const context = {
   console,
-  SEARCH_STOPWORDS: new Set(),
+  SEARCH_STOPWORDS: configContext.result,
   allProductsCache: products,
   window: {AppSearch: {}, clearTimeout() {}, setTimeout() {}},
 };
 
 vm.createContext(context);
 vm.runInContext(fs.readFileSync('static/search.js', 'utf8'), context);
+assert.deepStrictEqual(
+  Array.from(vm.runInContext(`tokenizeSearchQuery(
+    "Peux tu me dire tout les type de melatonine les saveurs qu'on a en magasin et les difference de context dans lequel les utiliser"
+  )`, context)),
+  ['melatonine'],
+  'browser retrieval must ignore answer-shaping words in a long client question'
+);
 
 const started = performance.now();
 const suffixMatches = context.window.AppSearch.searchProductsFromCache('4961', 40);
