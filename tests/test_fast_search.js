@@ -59,4 +59,35 @@ assert.strictEqual(
   'product edits should invalidate the barcode index'
 );
 
+for (let index = 0; index < 150; index += 1) {
+  products.push({
+    id: 13000 + index,
+    name: `AAA BROSSE DENT MANUELLE ${index}`,
+    brand: '', description: '', search_terms: '', usage_notes: '',
+    alternative_suggestions: '', barcode: `777777${String(index).padStart(6, '0')}`,
+    in_stock: 1,
+  });
+}
+const batteryBrush = {
+  id: 14000, name: 'ZZZ ORAL-B BR/DENTS A PILE 1', brand: 'Oral-B',
+  description: '', search_terms: '', usage_notes: '', alternative_suggestions: '',
+  barcode: '888888888888', in_stock: 1,
+};
+const replacementHeads = {
+  id: 14001, name: 'SONICARE RECH BROS HX9023 3', brand: 'Sonicare',
+  description: '', search_terms: '', usage_notes: '', alternative_suggestions: '',
+  barcode: '888888888889', in_stock: 1,
+};
+products.push(batteryBrush, replacementHeads);
+context.window.AppSearch.invalidateProductSearchIndexes();
+const electricCandidates = context.window.AppSearch.searchProductsFromCache(
+  'brosse a dent electric', 100, 100,
+  product => product.id === batteryBrush.id || product.id === replacementHeads.id
+);
+assert.deepStrictEqual(
+  new Set(Array.from(electricCandidates, product => product.id)),
+  new Set([batteryBrush.id, replacementHeads.id]),
+  'the Client predicate must run before the 100-result limit and retain battery brushes and heads'
+);
+
 console.log(`fast search tests passed (${elapsed.toFixed(1)} ms for 12k products)`);

@@ -1024,7 +1024,36 @@ function clientRequiredConceptGroups(question) {
     groups.push(['transparent', 'transparente', 'transp', 'opsite', 'tegaderm']);
     groups.push(['pansement', 'pans', 'diach', 'bandage', 'band aid', 'opsite', 'tegaderm']);
   }
+  const electric = [...tokens].some(token => token.startsWith('elect') || token === 'elec');
+  const compound = tokens.has('toothbrush') || tokens.has('toothbrushes');
+  const brush = compound || [...tokens].some(token => token.startsWith('bross') || token === 'brush');
+  const tooth = compound || [...tokens].some(token => token.startsWith('dent') || token.startsWith('tooth'));
+  if (electric && brush && tooth) {
+    groups.push([
+      'brosse dent', 'brosse dents', 'br dent', 'br dents', 'toothbrush',
+      'sonicare', 'philips one', 'tete br dent',
+    ]);
+    groups.push([
+      'electrique', 'electric', 'elec', 'pile', 'sonicare', 'philips one',
+      'tete br dent',
+    ]);
+  }
   return groups;
+}
+
+function clientConceptTermMatches(hayTokens, term) {
+  const conceptTokens = (typeof normalizeSearchText === 'function'
+    ? normalizeSearchText(term) : String(term || '').toLowerCase())
+    .split(/\s+/).filter(Boolean);
+  if (!conceptTokens.length || conceptTokens.length > hayTokens.length) return false;
+  for (let start = 0; start <= hayTokens.length - conceptTokens.length; start += 1) {
+    const matches = conceptTokens.every((expected, offset) => {
+      const actual = hayTokens[start + offset];
+      return actual === expected || (expected.length >= 4 && actual.startsWith(expected));
+    });
+    if (matches) return true;
+  }
+  return false;
 }
 
 function productMatchesClientConcepts(product, groups) {
@@ -1035,19 +1064,19 @@ function productMatchesClientConcepts(product, groups) {
   const normalizedHay = typeof normalizeSearchText === 'function'
     ? normalizeSearchText(rawHay)
     : String(rawHay || '').toLowerCase();
-  const padded = ` ${normalizedHay} `;
-  return groups.every(group => group.some(term => {
-    const normalizedTerm = typeof normalizeSearchText === 'function'
-      ? normalizeSearchText(term)
-      : term;
-    return padded.includes(` ${normalizedTerm} `);
-  }));
+  const hayTokens = normalizedHay.split(/\s+/).filter(Boolean);
+  return groups.every(group => group.some(term => clientConceptTermMatches(hayTokens, term)));
 }
 
 function localClientMatches(question, limit=60) {
   if (typeof searchProductsFromCache !== 'function' || !allProductsCache.length) return [];
-  const rawMatches = searchProductsFromCache(question, Math.min(limit * 2, 100), 100);
   const requiredConcepts = clientRequiredConceptGroups(question);
+  const predicate = requiredConcepts.length
+    ? product => productMatchesClientConcepts(product, requiredConcepts)
+    : null;
+  const rawMatches = searchProductsFromCache(
+    question, Math.min(limit * 2, 100), 100, predicate
+  );
   const grouped = [];
   const byKey = new Map();
   for (const raw of rawMatches) {

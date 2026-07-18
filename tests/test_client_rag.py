@@ -113,6 +113,32 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.get_json()), 75)
 
+    def test_fast_client_lookup_requires_an_electric_toothbrush_match(self):
+        products = [
+            {"id": 1, "name": "ORAL-B P100 BR/DENTS ELEC NR 1", "brand": "Oral-B", "barcode": "101"},
+            {"id": 2, "name": "ORAL-B D/C BR/DENTS A PILE 1", "brand": "Oral-B", "barcode": "102"},
+            {"id": 3, "name": "SONICARE BR/DENT BH1022/04 TE2", "brand": "Sonicare", "barcode": "103"},
+            {"id": 4, "name": "SONICARE RECH BROS HX9023/64 3", "brand": "Sonicare", "barcode": "104"},
+            {"id": 5, "name": "ORAL-B IO TETE BR/DENTS BLC 4", "brand": "Oral-B", "barcode": "105"},
+            {"id": 6, "name": "GUM BR/DENT CRAYOLA MARQ/ELEC1", "brand": "Gum", "barcode": "106"},
+            {"id": 7, "name": "CURAPROX BR/DENT SMART 1", "brand": "Curaprox", "barcode": "107"},
+            {"id": 8, "name": "DENTA RINSE PRO .2% MENT 500ML", "brand": "Denta", "barcode": "108"},
+        ]
+        corpus = [
+            (product, search_row(product["name"], product["brand"], barcode=product["barcode"]))
+            for product in products
+        ]
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            with app.test_client() as client:
+                response = client.get("/api/client/find?q=brosse%20a%20dent%20electric&limit=100")
+
+        self.assertEqual(response.status_code, 200)
+        names = {item["name"] for item in response.get_json()}
+        self.assertEqual(names, {product["name"] for product in products[:6]})
+        self.assertNotIn("CURAPROX BR/DENT SMART 1", names)
+        self.assertNotIn("DENTA RINSE PRO .2% MENT 500ML", names)
+
     def test_fast_client_lookup_understands_transparent_dressing_language(self):
         transparent = {
             "id": 1, "name": "PARAMEDIC PANS TRANSP 5CMX1M", "brand": "Paramedic",

@@ -97,6 +97,10 @@ const SEARCH_ABBREVIATIONS = {
   transparent:['transp'], transparente:['transp'],
 };
 
+const ELECTRIC_TOOTHBRUSH_EXPANSIONS = [
+  'elec', 'pile', 'sonicare', 'philips one', 'tete br dent',
+];
+
 function abbreviationTerms(query) {
   const terms = [], seen = new Set();
   for (const token of tokenizeSearchQuery(query)) {
@@ -117,6 +121,15 @@ function abbreviationHit(nameNorm, abbrevs) {
   return false;
 }
 
+function isElectricToothbrushRequest(query) {
+  const tokens = new Set(normalizeSearchText(query).split(' ').filter(Boolean));
+  const electric = [...tokens].some(token => token.startsWith('elect') || token === 'elec');
+  const compound = tokens.has('toothbrush') || tokens.has('toothbrushes');
+  const brush = compound || [...tokens].some(token => token.startsWith('bross') || token === 'brush');
+  const tooth = compound || [...tokens].some(token => token.startsWith('dent') || token.startsWith('tooth'));
+  return electric && brush && tooth;
+}
+
 function intentExpansionTerms(query) {
   const norm = normalizeSearchText(query);
   if (!norm) return [];
@@ -125,6 +138,11 @@ function intentExpansionTerms(query) {
   for (const entry of INTENT_LEXICON) {
     const hit = entry.triggers.some(t => t.includes(' ') ? norm.includes(t) : tokens.has(t));
     if (hit) for (const term of entry.expand) { if (!seen.has(term)) { seen.add(term); terms.push(term); } }
+  }
+  if (isElectricToothbrushRequest(norm)) {
+    for (const term of ELECTRIC_TOOTHBRUSH_EXPANSIONS) {
+      if (!seen.has(term)) { seen.add(term); terms.push(term); }
+    }
   }
   return terms;
 }
@@ -262,7 +280,7 @@ function productsByBarcodeFromCache(query) {
   return products;
 }
 
-function searchProductsFromCache(query, limit=40, minScore=0) {
+function searchProductsFromCache(query, limit=40, minScore=0, predicate=null) {
   if (/^\d{4,}$/.test(String(query || '').trim())) {
     const barcodeMatches = productsByBarcodeFromCache(query);
     if (barcodeMatches.length) return barcodeMatches.slice(0, limit);
@@ -273,6 +291,7 @@ function searchProductsFromCache(query, limit=40, minScore=0) {
   if (!variants.length && !intentTerms.length) return [];
   const ranked = [];
   for (const product of allProductsCache) {
+    if (typeof predicate === 'function' && !predicate(product)) continue;
     let bestScore = 0;
     for (const variant of variants) bestScore = Math.max(bestScore, scoreProductForQuery(product, variant));
     if (intentTerms.length) {

@@ -256,6 +256,35 @@ assert.strictEqual(
   false
 );
 
+const electricBrushGroups = context.__quoteTest.clientRequiredConceptGroups(
+  'Brosse a dent electric'
+);
+for (const name of [
+  'ORAL-B P100 BR/DENTS ELEC NR 1',
+  'ORAL-B D/C BR/DENTS A PILE 1',
+  'SONICARE BR/DENT BH1022/04 TE2',
+  'SONICARE RECH BROS HX9023/64 3',
+  'ORAL-B IO TETE BR/DENTS BLC 4',
+  'GUM BR/DENT CRAYOLA MARQ/ELEC1',
+]) {
+  assert.strictEqual(
+    context.__quoteTest.productMatchesClientConcepts(
+      {name, brand: '', description: ''}, electricBrushGroups
+    ),
+    true,
+    `${name} should match the electric-toothbrush intent`
+  );
+}
+for (const name of ['CURAPROX BR/DENT SMART 1', 'DENTA RINSE PRO .2% MENT 500ML']) {
+  assert.strictEqual(
+    context.__quoteTest.productMatchesClientConcepts(
+      {name, brand: '', description: ''}, electricBrushGroups
+    ),
+    false,
+    `${name} should not match the electric-toothbrush intent`
+  );
+}
+
 const manyFastProducts = Array.from({length: 75}, (_, index) => ({
   id: index + 100,
   client_id: `product:${index + 100}`,

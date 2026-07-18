@@ -157,6 +157,10 @@ SEARCH_ABBREVIATIONS = {
     "transparent": ["transp"], "transparente": ["transp"],
 }
 
+ELECTRIC_TOOTHBRUSH_EXPANSIONS = (
+    "elec", "pile", "sonicare", "philips one", "tete br dent",
+)
+
 
 def abbreviation_terms(query):
     """Short forms implied by the full words in the query (shampoing -> shp)."""
@@ -401,7 +405,22 @@ def intent_expansion_terms(query):
                 if term not in seen:
                     seen.add(term)
                     terms.append(term)
+    if _is_electric_toothbrush_request(norm):
+        for term in ELECTRIC_TOOTHBRUSH_EXPANSIONS:
+            if term not in seen:
+                seen.add(term)
+                terms.append(term)
     return terms
+
+
+def _is_electric_toothbrush_request(query):
+    norm = normalize_search_text(query)
+    tokens = set(norm.split())
+    electric = any(token.startswith("elect") or token == "elec" for token in tokens)
+    compound = bool(tokens.intersection({"toothbrush", "toothbrushes"}))
+    brush = compound or any(token.startswith("bross") or token == "brush" for token in tokens)
+    tooth = compound or any(token.startswith("dent") or token.startswith("tooth") for token in tokens)
+    return electric and brush and tooth
 
 
 def client_required_concept_groups(query):
@@ -435,15 +454,37 @@ def client_required_concept_groups(query):
             ("transparent", "transparente", "transp", "opsite", "tegaderm"),
             ("pansement", "pans", "diach", "bandage", "band aid", "opsite", "tegaderm"),
         ])
+    if _is_electric_toothbrush_request(norm):
+        groups.extend([
+            ("brosse dent", "brosse dents", "br dent", "br dents", "toothbrush",
+             "sonicare", "philips one", "tete br dent"),
+            ("electrique", "electric", "elec", "pile", "sonicare", "philips one",
+             "tete br dent"),
+        ])
     return groups
+
+
+def _concept_term_matches(hay_tokens, term):
+    concept_tokens = normalize_search_text(term).split()
+    if not concept_tokens or len(concept_tokens) > len(hay_tokens):
+        return False
+    width = len(concept_tokens)
+    for start in range(len(hay_tokens) - width + 1):
+        window = hay_tokens[start:start + width]
+        if all(
+            actual == expected or (len(expected) >= 4 and actual.startswith(expected))
+            for actual, expected in zip(window, concept_tokens)
+        ):
+            return True
+    return False
 
 
 def row_matches_client_concepts(row, groups):
     if not groups:
         return True
-    hay = f" {row.get('_hay', '')} "
+    hay_tokens = str(row.get("_hay", "") or "").split()
     for group in groups:
-        if not any(f" {normalize_search_text(term)} " in hay for term in group):
+        if not any(_concept_term_matches(hay_tokens, term) for term in group):
             return False
     return True
 
