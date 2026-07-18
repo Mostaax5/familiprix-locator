@@ -1710,7 +1710,7 @@ _CLIENT_DOCUMENTED_SCHEMA = {
             },
         },
         "comparisons": {
-            "type": "array", "maxItems": 6,
+            "type": "array", "maxItems": 4,
             "items": {
                 "type": "object",
                 "properties": {
@@ -1720,30 +1720,6 @@ _CLIENT_DOCUMENTED_SCHEMA = {
                     "source_ids": _DOCUMENTED_SOURCE_IDS_SCHEMA,
                 },
                 "required": ["candidate_id", "difference", "practical_note", "source_ids"],
-                "additionalProperties": False,
-            },
-        },
-        "useful_guidance": {
-            "type": "array", "maxItems": 4,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string"},
-                    "source_ids": _DOCUMENTED_SOURCE_IDS_SCHEMA,
-                },
-                "required": ["text", "source_ids"],
-                "additionalProperties": False,
-            },
-        },
-        "important_checks": {
-            "type": "array", "maxItems": 4,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string"},
-                    "source_ids": _DOCUMENTED_SOURCE_IDS_SCHEMA,
-                },
-                "required": ["text", "source_ids"],
                 "additionalProperties": False,
             },
         },
@@ -1763,8 +1739,7 @@ _CLIENT_DOCUMENTED_SCHEMA = {
         },
     },
     "required": [
-        "answer", "key_points", "comparisons", "useful_guidance",
-        "important_checks", "selected_product_ids", "follow_up_questions",
+        "answer", "key_points", "comparisons", "selected_product_ids", "follow_up_questions",
         "safety_flags", "pharmacist_referral", "pharmacist_reason", "source_ids",
     ],
     "additionalProperties": False,
@@ -1782,12 +1757,12 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "clairement qu'elle est générale lorsqu'aucun document ne la confirme pour le produit. "
     "N'invente jamais de dose, de durée, d'ingrédient, de bénéfice ou de source. "
     "Reste concis: la réponse complète doit être lisible rapidement. answer est une réponse "
-    "directe de 1 à 3 phrases que l'employé peut dire au client. Donne au maximum 4 key_points, "
-    "6 comparisons, 4 useful_guidance et 4 important_checks; chaque élément fait au plus deux phrases. "
+    "directe de 1 à 3 phrases que l'employé peut dire au client. Donne au maximum 4 key_points "
+    "et 4 comparisons; chaque élément fait au plus deux phrases. "
     "key_points contient les faits décisifs, avec des titres très courts. comparisons explique "
     "les différences réellement utiles entre les produits sélectionnés; utilise seulement des "
-    "candidate_id fournis. useful_guidance aide à choisir ou utiliser la catégorie sans poser "
-    "de diagnostic. important_checks rassemble ce qu'il faut vérifier avant de répondre. "
+    "candidate_id fournis. Place les conseils de choix dans key_points et les vérifications "
+    "médicales dans safety_flags. "
     "Chaque affirmation fondée sur un document cite son source_id exact; une connaissance "
     "générale non documentée garde source_ids vide. source_ids contient toutes les sources "
     "effectivement utilisées. selected_product_ids garde tous les produits réellement liés, "
@@ -2311,7 +2286,7 @@ def generate_documented_client_answer(question, query_plan, candidates, document
             "documents": document_contexts,
             "required_schema": _CLIENT_DOCUMENTED_SCHEMA,
         },
-        max_tokens=1600,
+        max_tokens=1000,
         schema_name="client_documented_answer",
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,
