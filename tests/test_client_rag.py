@@ -91,6 +91,27 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual([item["name"] for item in response.get_json()], ["Advil Extra Fort"])
 
+    def test_fast_client_lookup_can_return_more_than_sixty_matches(self):
+        corpus = []
+        for index in range(75):
+            product = {
+                "id": index + 1,
+                "name": f"Advil variante {index + 1}",
+                "brand": "Advil",
+                "barcode": str(100000 + index),
+            }
+            corpus.append((
+                product,
+                search_row(product["name"], product["brand"], barcode=product["barcode"]),
+            ))
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            with app.test_client() as client:
+                response = client.get("/api/client/find?q=Advil&limit=100")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.get_json()), 75)
+
     def test_fast_client_lookup_understands_transparent_dressing_language(self):
         transparent = {
             "id": 1, "name": "PARAMEDIC PANS TRANSP 5CMX1M", "brand": "Paramedic",

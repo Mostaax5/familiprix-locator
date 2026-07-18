@@ -13,7 +13,9 @@ let _clientVisibleExchangeId = '';
 let _clientSearchMode = 'fast';
 let clientConversation = [];
 const CLIENT_MAX_MESSAGES = 12;
-const CLIENT_MAX_PRODUCTS_PER_EXCHANGE = 24;
+const CLIENT_FAST_PRODUCT_LIMIT = 100;
+const CLIENT_CONTEXT_PRODUCT_LIMIT = 80;
+const CLIENT_MAX_PRODUCTS_PER_EXCHANGE = 100;
 
 function getClientQuestion() {
   return document.getElementById('clientQuestion')?.value.trim() || '';
@@ -34,16 +36,16 @@ function getClientConversationForStorage() {
   });
 }
 
-function clientProductForStorage(product) {
+function clientProductForStorage(product, compact=false) {
   return {
     id: product.id ?? null,
     client_id: String(product.client_id || ''),
     name: String(product.name || ''),
     brand: String(product.brand || ''),
-    description: String(product.description || '').slice(0, 1800),
+    description: String(product.description || '').slice(0, compact ? 700 : 1800),
     image_url: String(product.image_url || '').slice(0, 1600),
-    search_terms: String(product.search_terms || '').slice(0, 1200),
-    usage_notes: String(product.usage_notes || '').slice(0, 1800),
+    search_terms: compact ? '' : String(product.search_terms || '').slice(0, 1200),
+    usage_notes: String(product.usage_notes || '').slice(0, compact ? 700 : 1800),
     barcode: String(product.barcode || ''),
     product_code: String(product.product_code || ''),
     facings: Number(product.facings) || 1,
@@ -70,7 +72,8 @@ function clientResultForStorage(result) {
       ? result.highlighted_product_ids.slice(0, 16).map(String)
       : [],
     products: (Array.isArray(result.products) ? result.products : [])
-      .slice(0, CLIENT_MAX_PRODUCTS_PER_EXCHANGE).map(clientProductForStorage),
+      .slice(0, CLIENT_MAX_PRODUCTS_PER_EXCHANGE)
+      .map(product => clientProductForStorage(product, result.response_mode === 'lookup')),
     advice: {
       summary: String(advice.summary || result.answer || '').slice(0, 6000),
       follow_up_questions: Array.isArray(advice.follow_up_questions)
@@ -94,7 +97,8 @@ function normalizeStoredClientResult(result) {
 
 function getClientSearchStateForStorage() {
   const products = currentClientMatches
-    .slice(0, CLIENT_MAX_PRODUCTS_PER_EXCHANGE).map(clientProductForStorage);
+    .slice(0, CLIENT_MAX_PRODUCTS_PER_EXCHANGE)
+    .map(product => clientProductForStorage(product, true));
   const latestResult = clientResultForStorage(_latestClientResult);
   if (latestResult) delete latestResult.products;
   return {
@@ -912,7 +916,7 @@ function localClientMatches(question, limit=60) {
 }
 
 function buildFastClientResult(products, elapsedMs=0) {
-  const matches = (Array.isArray(products) ? products : []).slice(0, 12);
+  const matches = (Array.isArray(products) ? products : []).slice(0, CLIENT_FAST_PRODUCT_LIMIT);
   const names = matches.slice(0, 4).map(product => String(product.name || '').trim()).filter(Boolean);
   let answer = 'Aucun produit proche de cette demande n’a été trouvé dans le plan actuel du magasin.';
   if (names.length === 1 && matches.length === 1) {
@@ -955,7 +959,7 @@ function prepareClientResult(result) {
     products = highlightedIds.map(id => byId.get(id)).filter(Boolean);
     highlightedIds = products.map(product => String(product.client_id || '')).filter(Boolean);
   } else {
-    products = products.slice(0, 12);
+    products = products.slice(0, CLIENT_FAST_PRODUCT_LIMIT);
     highlightedIds = products.map(product => String(product.client_id || '')).filter(Boolean);
   }
   const answer = cleanClientAnswer(prepared.answer || advice.summary || '');
@@ -1037,7 +1041,7 @@ async function runClientRequest(question, options={}) {
     ? options.mode
     : _clientSearchMode;
   const contextProductIds = currentClientMatches
-    .map(product => product.client_id).filter(Boolean).slice(0, CLIENT_MAX_PRODUCTS_PER_EXCHANGE);
+    .map(product => product.client_id).filter(Boolean).slice(0, CLIENT_CONTEXT_PRODUCT_LIMIT);
   const previousQuestion = [...clientConversation].reverse()
     .find(message => message.role === 'user')?.content || '';
   const retrievalQuestion = options.followUp && mode === 'fast' && previousQuestion
@@ -1055,8 +1059,10 @@ async function runClientRequest(question, options={}) {
 
   if (mode === 'fast') {
     const startedAt = Date.now();
-    const localProducts = localClientMatches(retrievalQuestion, 12);
-    const serverPromise = apiClientFind(retrievalQuestion, 12, controller?.signal);
+    const localProducts = localClientMatches(retrievalQuestion, CLIENT_FAST_PRODUCT_LIMIT);
+    const serverPromise = apiClientFind(
+      retrievalQuestion, CLIENT_FAST_PRODUCT_LIMIT, controller?.signal
+    );
     if (localProducts.length) {
       const exchangeId = appendClientExchange(
         question, buildFastClientResult(localProducts, Date.now() - startedAt), mode, requestId

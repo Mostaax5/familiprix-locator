@@ -87,6 +87,9 @@ vm.runInContext(`${source}\n;globalThis.__quoteTest = {
   },
   clientRequiredConceptGroups,
   productMatchesClientConcepts,
+  buildFastClientResult,
+  prepareClientResult,
+  clientResultForStorage,
   getClientSearchStateForStorage,
   seedSearchState: (result, products, conversation) => {
     _latestClientResult = result;
@@ -209,6 +212,21 @@ assert.strictEqual(
   ),
   false
 );
+
+const manyFastProducts = Array.from({length: 75}, (_, index) => ({
+  id: index + 100,
+  client_id: `product:${index + 100}`,
+  name: `Produit rapide ${index + 1}`,
+  description: 'Description rapide',
+  search_terms: 'termes détaillés',
+  image_url: `/product-${index + 1}.jpg`,
+}));
+const completeFastResult = context.__quoteTest.buildFastClientResult(manyFastProducts, 10);
+assert.strictEqual(completeFastResult.products.length, 75);
+assert.strictEqual(context.__quoteTest.prepareClientResult(completeFastResult).products.length, 75);
+const storedFastResult = context.__quoteTest.clientResultForStorage(completeFastResult);
+assert.strictEqual(storedFastResult.products.length, 75);
+assert.strictEqual(storedFastResult.products[0].search_terms, '');
 
 context.__quoteTest.clearClientHistory();
 assert.deepStrictEqual(

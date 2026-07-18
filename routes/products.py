@@ -1362,7 +1362,7 @@ def client_find():
     query = request.args.get("q", "").strip()
     if not query:
         return jsonify([])
-    limit = min(max(clamp_non_negative_int(request.args.get("limit", "30"), 30), 1), 60)
+    limit = min(max(clamp_non_negative_int(request.args.get("limit", "30"), 30), 1), 100)
     nq = normalize_search_text(query)
     dq = normalized_digits(query)
     qtokens = list(dict.fromkeys(tokenize_search_query(query)))

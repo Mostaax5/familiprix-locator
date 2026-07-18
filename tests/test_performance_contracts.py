@@ -44,10 +44,11 @@ class PerformanceContractTests(unittest.TestCase):
 
     def test_client_fast_mode_is_independent_from_ai_answer(self):
         source = (ROOT / "static" / "ai-ui.js").read_text(encoding="utf-8")
+        self.assertIn("const CLIENT_FAST_PRODUCT_LIMIT = 100", source)
         start = source.index("async function runClientRequest")
         fast_branch = source.index("if (mode === 'fast')", start)
         local_matches = source.index("localClientMatches(retrievalQuestion", fast_branch)
-        fast_lookup = source.index("apiClientFind(retrievalQuestion", fast_branch)
+        fast_lookup = source.index("const serverPromise = apiClientFind(", fast_branch)
         ai_wait = source.index("await apiGenerateClientHelp", start)
         fast_return = source.index("return;", fast_lookup)
         self.assertLess(fast_branch, ai_wait)
