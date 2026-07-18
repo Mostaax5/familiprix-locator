@@ -1031,7 +1031,7 @@ function clientRequiredConceptGroups(question) {
   if (electric && brush && tooth) {
     groups.push([
       'brosse dent', 'brosse dents', 'br dent', 'br dents', 'toothbrush',
-      'sonicare', 'philips one', 'tete br dent',
+      'rech bros', 'recharge bros', 'soni rech', 'tete br dent',
     ]);
     groups.push([
       'electrique', 'electric', 'elec', 'pile', 'sonicare', 'philips one',
@@ -1039,6 +1039,19 @@ function clientRequiredConceptGroups(question) {
     ]);
   }
   return groups;
+}
+
+function clientExcludedConceptTerms(question) {
+  const normalized = typeof normalizeSearchText === 'function'
+    ? normalizeSearchText(question) : String(question || '').toLowerCase();
+  const tokens = new Set(normalized.split(/\s+/).filter(Boolean));
+  const electric = [...tokens].some(token => token.startsWith('elect') || token === 'elec');
+  const compound = tokens.has('toothbrush') || tokens.has('toothbrushes');
+  const brush = compound || [...tokens].some(token => token.startsWith('bross') || token === 'brush');
+  const tooth = compound || [...tokens].some(token => token.startsWith('dent') || token.startsWith('tooth'));
+  return electric && brush && tooth
+    ? ['irr', 'irrigateur', 'hydropulseur', 'airfloss', 'water flosser', 's fil']
+    : [];
 }
 
 function clientConceptTermMatches(hayTokens, term) {
@@ -1056,8 +1069,7 @@ function clientConceptTermMatches(hayTokens, term) {
   return false;
 }
 
-function productMatchesClientConcepts(product, groups) {
-  if (!groups.length) return true;
+function productMatchesClientConcepts(product, groups, excludedNameTerms=[]) {
   const rawHay = typeof productSearchText === 'function'
     ? productSearchText(product)
     : [product.name, product.brand, product.description, product.search_terms, product.usage_notes].join(' ');
@@ -1065,14 +1077,22 @@ function productMatchesClientConcepts(product, groups) {
     ? normalizeSearchText(rawHay)
     : String(rawHay || '').toLowerCase();
   const hayTokens = normalizedHay.split(/\s+/).filter(Boolean);
-  return groups.every(group => group.some(term => clientConceptTermMatches(hayTokens, term)));
+  const requiredMatch = groups.every(
+    group => group.some(term => clientConceptTermMatches(hayTokens, term))
+  );
+  if (!requiredMatch) return false;
+  const normalizedName = typeof normalizeSearchText === 'function'
+    ? normalizeSearchText(product.name || '') : String(product.name || '').toLowerCase();
+  const nameTokens = normalizedName.split(/\s+/).filter(Boolean);
+  return !excludedNameTerms.some(term => clientConceptTermMatches(nameTokens, term));
 }
 
 function localClientMatches(question, limit=60) {
   if (typeof searchProductsFromCache !== 'function' || !allProductsCache.length) return [];
   const requiredConcepts = clientRequiredConceptGroups(question);
-  const predicate = requiredConcepts.length
-    ? product => productMatchesClientConcepts(product, requiredConcepts)
+  const excludedConcepts = clientExcludedConceptTerms(question);
+  const predicate = requiredConcepts.length || excludedConcepts.length
+    ? product => productMatchesClientConcepts(product, requiredConcepts, excludedConcepts)
     : null;
   const rawMatches = searchProductsFromCache(
     question, Math.min(limit * 2, 100), 100, predicate
@@ -1080,7 +1100,7 @@ function localClientMatches(question, limit=60) {
   const grouped = [];
   const byKey = new Map();
   for (const raw of rawMatches) {
-    if (!productMatchesClientConcepts(raw, requiredConcepts)) continue;
+    if (!productMatchesClientConcepts(raw, requiredConcepts, excludedConcepts)) continue;
     const barcode = typeof normalizedDigits === 'function' ? normalizedDigits(raw.barcode) : String(raw.barcode || '');
     const nameKey = typeof normalizeSearchText === 'function'
       ? normalizeSearchText(`${raw.name || ''} ${raw.brand || ''}`)

@@ -86,6 +86,7 @@ vm.runInContext(`${source}\n;globalThis.__quoteTest = {
     finally { renderClientMatches = originalRender; pollClientProductImages = originalPoll; }
   },
   clientRequiredConceptGroups,
+  clientExcludedConceptTerms,
   productMatchesClientConcepts,
   buildFastClientResult,
   prepareClientResult,
@@ -259,6 +260,9 @@ assert.strictEqual(
 const electricBrushGroups = context.__quoteTest.clientRequiredConceptGroups(
   'Brosse a dent electric'
 );
+const electricBrushExclusions = context.__quoteTest.clientExcludedConceptTerms(
+  'Brosse a dent electric'
+);
 for (const name of [
   'ORAL-B P100 BR/DENTS ELEC NR 1',
   'ORAL-B D/C BR/DENTS A PILE 1',
@@ -275,6 +279,14 @@ for (const name of [
     `${name} should match the electric-toothbrush intent`
   );
 }
+assert.strictEqual(
+  context.__quoteTest.productMatchesClientConcepts({
+    name: 'PHILIPS SONI RECH HX6012/77 2', brand: 'Philips',
+    description: 'Compatible avec tous les manches Sonicare.',
+  }, electricBrushGroups, electricBrushExclusions),
+  true,
+  'an abbreviated Philips Sonicare replacement head should remain included'
+);
 for (const name of ['CURAPROX BR/DENT SMART 1', 'DENTA RINSE PRO .2% MENT 500ML']) {
   assert.strictEqual(
     context.__quoteTest.productMatchesClientConcepts(
@@ -284,6 +296,14 @@ for (const name of ['CURAPROX BR/DENT SMART 1', 'DENTA RINSE PRO .2% MENT 500ML'
     `${name} should not match the electric-toothbrush intent`
   );
 }
+assert.strictEqual(
+  context.__quoteTest.productMatchesClientConcepts({
+    name: 'SONICARE IRR S/FIL HX3826/23 1', brand: 'Sonicare',
+    description: 'Utilisé en complément d’une brosse à dents manuelle.',
+  }, electricBrushGroups, electricBrushExclusions),
+  false,
+  'a Sonicare irrigator must not become a toothbrush because its description compares both products'
+);
 
 const manyFastProducts = Array.from({length: 75}, (_, index) => ({
   id: index + 100,

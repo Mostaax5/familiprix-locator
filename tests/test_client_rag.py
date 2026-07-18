@@ -121,11 +121,19 @@ class ClientRagTests(unittest.TestCase):
             {"id": 4, "name": "SONICARE RECH BROS HX9023/64 3", "brand": "Sonicare", "barcode": "104"},
             {"id": 5, "name": "ORAL-B IO TETE BR/DENTS BLC 4", "brand": "Oral-B", "barcode": "105"},
             {"id": 6, "name": "GUM BR/DENT CRAYOLA MARQ/ELEC1", "brand": "Gum", "barcode": "106"},
+            {"id": 11, "name": "PHILIPS SONI RECH HX6012/77 2", "brand": "Philips", "barcode": "111",
+             "description": "Compatible avec les manches Sonicare."},
             {"id": 7, "name": "CURAPROX BR/DENT SMART 1", "brand": "Curaprox", "barcode": "107"},
             {"id": 8, "name": "DENTA RINSE PRO .2% MENT 500ML", "brand": "Denta", "barcode": "108"},
+            {"id": 9, "name": "SONICARE IRR S/FIL HX3826/23 1", "brand": "Sonicare", "barcode": "109",
+             "description": "Utilisé en complément d'une brosse à dents manuelle."},
+            {"id": 10, "name": "GUM PROXABRUSH RECH BROS LG 10", "brand": "Gum", "barcode": "110"},
         ]
         corpus = [
-            (product, search_row(product["name"], product["brand"], barcode=product["barcode"]))
+            (product, search_row(
+                product["name"], product["brand"], product.get("description", ""),
+                barcode=product["barcode"],
+            ))
             for product in products
         ]
         with patch("routes.products.get_db", return_value=object()), \
@@ -135,9 +143,11 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         names = {item["name"] for item in response.get_json()}
-        self.assertEqual(names, {product["name"] for product in products[:6]})
+        self.assertEqual(names, {product["name"] for product in products[:7]})
         self.assertNotIn("CURAPROX BR/DENT SMART 1", names)
         self.assertNotIn("DENTA RINSE PRO .2% MENT 500ML", names)
+        self.assertNotIn("SONICARE IRR S/FIL HX3826/23 1", names)
+        self.assertNotIn("GUM PROXABRUSH RECH BROS LG 10", names)
 
     def test_fast_client_lookup_understands_transparent_dressing_language(self):
         transparent = {

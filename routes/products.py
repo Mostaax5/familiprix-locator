@@ -457,11 +457,17 @@ def client_required_concept_groups(query):
     if _is_electric_toothbrush_request(norm):
         groups.extend([
             ("brosse dent", "brosse dents", "br dent", "br dents", "toothbrush",
-             "sonicare", "philips one", "tete br dent"),
+             "rech bros", "recharge bros", "soni rech", "tete br dent"),
             ("electrique", "electric", "elec", "pile", "sonicare", "philips one",
              "tete br dent"),
         ])
     return groups
+
+
+def client_excluded_concept_terms(query):
+    if not _is_electric_toothbrush_request(query):
+        return ()
+    return ("irr", "irrigateur", "hydropulseur", "airfloss", "water flosser", "s fil")
 
 
 def _concept_term_matches(hay_tokens, term):
@@ -479,13 +485,20 @@ def _concept_term_matches(hay_tokens, term):
     return False
 
 
-def row_matches_client_concepts(row, groups):
+def row_matches_client_concepts(row, groups, excluded_name_terms=()):
     if not groups:
-        return True
-    hay_tokens = str(row.get("_hay", "") or "").split()
-    for group in groups:
-        if not any(_concept_term_matches(hay_tokens, term) for term in group):
-            return False
+        required_match = True
+    else:
+        hay_tokens = str(row.get("_hay", "") or "").split()
+        required_match = all(
+            any(_concept_term_matches(hay_tokens, term) for term in group)
+            for group in groups
+        )
+    if not required_match:
+        return False
+    name_tokens = str(row.get("_name", "") or "").split()
+    if any(_concept_term_matches(name_tokens, term) for term in excluded_name_terms):
+        return False
     return True
 
 
@@ -1213,6 +1226,7 @@ def hybrid_client_candidates(question, query_plan, limit=60):
     db = get_db()
     documents = _mapped_client_products(db)
     required_concepts = client_required_concept_groups(question)
+    excluded_concepts = client_excluded_concept_terms(question)
 
     def clean_list(value, max_items=20):
         if not isinstance(value, list):
@@ -1281,7 +1295,7 @@ def hybrid_client_candidates(question, query_plan, limit=60):
     for document, token_data in zip(documents, tokenized_documents):
         counts, doc_length = token_data
         row = document["row"]
-        if not row_matches_client_concepts(row, required_concepts):
+        if not row_matches_client_concepts(row, required_concepts, excluded_concepts):
             continue
         lexical = 0
         for nq, dq, qtokens, intent_terms, abbrevs in prepared_queries:
@@ -1413,6 +1427,7 @@ def client_find():
     intent_terms = intent_expansion_terms(query)
     abbrevs = abbreviation_terms(query)
     required_concepts = client_required_concept_groups(query)
+    excluded_concepts = client_excluded_concept_terms(query)
     if not nq and not dq and not intent_terms:
         return jsonify([])
     db = get_db()
@@ -1428,7 +1443,7 @@ def client_find():
     for document in _mapped_client_products(db):
         item = document["item"]
         prow = document["row"]
-        if not row_matches_client_concepts(prow, required_concepts):
+        if not row_matches_client_concepts(prow, required_concepts, excluded_concepts):
             continue
         s = max(
             _fast_reference_score(prow, nq, dq, qtokens, intent_terms, abbrevs),
