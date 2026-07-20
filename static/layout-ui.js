@@ -1180,6 +1180,335 @@ async function enrichStoredProductWithAi(productId) {
 
 // ── Plan editor ───────────────────────────────────────────────────────────────
 
+const planSelectedProductIds = new Set();
+let planMoveMode = false;
+let planBulkActionBusy = false;
+let _planScopeIndexVersion = -1;
+let _planScopeIndex = null;
+
+function _planScopeKey(...parts) {
+  return parts.map(part => String(part ?? '')).join('\x1f');
+}
+
+function planScopeIndex() {
+  if (_planScopeIndex && _planScopeIndexVersion === lastProductsRefreshAt) return _planScopeIndex;
+  const index = {
+    aisle: new Map(), side: new Map(), section: new Map(), shelf: new Map(), validIds: new Set()
+  };
+  const add = (map, key, id) => {
+    let ids = map.get(key);
+    if (!ids) { ids = []; map.set(key, ids); }
+    ids.push(id);
+  };
+  for (const product of allProductsCache) {
+    const id = Number(product.id);
+    if (!Number.isInteger(id) || id <= 0 || !String(product.aisle || '').trim()) continue;
+    const aisle = String(product.aisle);
+    const side = String(product.side);
+    const section = String(product.section || '1');
+    const shelf = String(product.shelf);
+    index.validIds.add(id);
+    add(index.aisle, _planScopeKey(aisle), id);
+    add(index.side, _planScopeKey(aisle, side), id);
+    add(index.section, _planScopeKey(aisle, side, section), id);
+    add(index.shelf, _planScopeKey(aisle, side, section, shelf), id);
+  }
+  _planScopeIndex = index;
+  _planScopeIndexVersion = lastProductsRefreshAt;
+  return index;
+}
+
+function _planScopeValue(source, name, fallback='') {
+  if (!source) return fallback;
+  const datasetName = 'select' + name.charAt(0).toUpperCase() + name.slice(1);
+  return source.dataset ? (source.dataset[datasetName] ?? fallback) : (source[name] ?? fallback);
+}
+
+function planScopeProductIds(kind, source={}) {
+  const index = planScopeIndex();
+  const normalizedKind = String(kind || _planScopeValue(source, 'kind')).toLowerCase();
+  if (normalizedKind === 'product') {
+    const id = Number(_planScopeValue(source, 'productId'));
+    return index.validIds.has(id) ? [id] : [];
+  }
+  const aisle = String(_planScopeValue(source, 'aisle'));
+  const side = String(_planScopeValue(source, 'side'));
+  const section = String(_planScopeValue(source, 'section', '1'));
+  const shelf = String(_planScopeValue(source, 'shelf'));
+  if (normalizedKind === 'aisle') return index.aisle.get(_planScopeKey(aisle)) || [];
+  if (normalizedKind === 'side') return index.side.get(_planScopeKey(aisle, side)) || [];
+  if (normalizedKind === 'section') return index.section.get(_planScopeKey(aisle, side, section)) || [];
+  if (normalizedKind === 'shelf') return index.shelf.get(_planScopeKey(aisle, side, section, shelf)) || [];
+  return [];
+}
+
+function planSelectionDataAttrs(kind, aisle, side='', section='1', shelf='', productId='') {
+  return `data-select-kind="${esc(kind)}" data-select-aisle="${esc(aisle)}" data-select-side="${esc(side)}" `
+    + `data-select-section="${esc(section)}" data-select-shelf="${esc(shelf)}" data-select-product-id="${esc(productId)}"`;
+}
+
+function renderPlanSelectionCheckbox(kind, aisle, side='', section='1', shelf='', productId='', label='Sélectionner') {
+  const source = {kind, aisle, side, section, shelf, productId};
+  const ids = planScopeProductIds(kind, source);
+  const checked = ids.length > 0 && ids.every(id => planSelectedProductIds.has(id));
+  return `<input type="checkbox" class="plan-select-checkbox" ${planSelectionDataAttrs(kind, aisle, side, section, shelf, productId)}
+    aria-label="${esc(label)}" title="${esc(label)}" ${checked ? 'checked' : ''} ${ids.length ? '' : 'disabled'}
+    onclick="event.stopPropagation()" onchange="togglePlanSelectionFromInput(this,event)">`;
+}
+
+function togglePlanSelectionFromInput(input, event) {
+  if (event) event.stopPropagation();
+  const ids = planScopeProductIds(input.dataset.selectKind, input);
+  for (const id of ids) {
+    if (input.checked) planSelectedProductIds.add(id);
+    else planSelectedProductIds.delete(id);
+  }
+  syncPlanSelectionUi();
+}
+
+function _planSelectionWrapper(input) {
+  const kind = input?.dataset?.selectKind;
+  if (kind === 'product') return input.closest('.plan-product-item');
+  if (kind === 'shelf') return input.closest('.plan-shelf-card');
+  if (kind === 'section') return input.closest('.plan-section');
+  if (kind === 'side') return input.closest('.plan-side') || input.closest('.plan-section');
+  if (kind === 'aisle') return input.closest('.plan-aisle-node');
+  return null;
+}
+
+function syncPlanSelectionUi() {
+  const index = planScopeIndex();
+  for (const id of [...planSelectedProductIds]) {
+    if (!index.validIds.has(id)) planSelectedProductIds.delete(id);
+  }
+  if (!planSelectedProductIds.size) planMoveMode = false;
+  if (typeof document.querySelectorAll !== 'function') return;
+  document.querySelectorAll('.plan-select-checkbox').forEach(input => {
+    const ids = planScopeProductIds(input.dataset.selectKind, input);
+    const selectedCount = ids.reduce((count, id) => count + (planSelectedProductIds.has(id) ? 1 : 0), 0);
+    input.checked = ids.length > 0 && selectedCount === ids.length;
+    input.indeterminate = selectedCount > 0 && selectedCount < ids.length;
+    input.disabled = planBulkActionBusy || ids.length === 0;
+    const wrapper = _planSelectionWrapper(input);
+    if (wrapper?.classList) {
+      wrapper.classList.toggle('plan-scope-selected', input.checked);
+      wrapper.classList.toggle('plan-scope-partial', input.indeterminate);
+    }
+  });
+  const count = planSelectedProductIds.size;
+  const toolbar = document.getElementById('planBulkToolbar');
+  if (toolbar) {
+    toolbar.hidden = count === 0;
+    toolbar.classList.toggle('is-busy', planBulkActionBusy);
+    toolbar.setAttribute('aria-busy', planBulkActionBusy ? 'true' : 'false');
+  }
+  const countEl = document.getElementById('planSelectedCount');
+  if (countEl) countEl.textContent = `${count} produit${count !== 1 ? 's' : ''} sélectionné${count !== 1 ? 's' : ''}`;
+  const hint = document.getElementById('planSelectionHint');
+  if (hint) hint.textContent = planMoveMode ? 'Destination à choisir' : 'Sélection active';
+  const moveButton = document.getElementById('planSelectionMove');
+  if (moveButton) {
+    moveButton.disabled = planBulkActionBusy || count === 0;
+    moveButton.setAttribute('aria-pressed', planMoveMode ? 'true' : 'false');
+    moveButton.textContent = planMoveMode ? 'Annuler destination' : 'Déplacer';
+  }
+  const deleteButton = document.getElementById('planSelectionDelete');
+  if (deleteButton) deleteButton.disabled = planBulkActionBusy || count === 0;
+  const clearButton = document.getElementById('planSelectionClear');
+  if (clearButton) clearButton.disabled = planBulkActionBusy || count === 0;
+  const map = document.getElementById('mapContent');
+  if (map?.classList) map.classList.toggle('plan-move-mode', planMoveMode && count > 0);
+}
+
+function renderPlanBulkToolbar() {
+  return `<div id="planBulkToolbar" class="plan-bulk-toolbar" hidden aria-live="polite"
+      draggable="true" ondragstart="beginPlanSelectionDrag(event)" ondragend="endPlanSelectionDrag()">
+    <div class="plan-bulk-status">
+      <strong id="planSelectedCount">0 produit sélectionné</strong>
+      <span id="planSelectionHint">Sélection active</span>
+    </div>
+    <div class="plan-bulk-actions">
+      <button type="button" id="planSelectionMove" class="btn btn-inline" onclick="togglePlanMoveMode()">Déplacer</button>
+      <button type="button" id="planSelectionDelete" class="btn btn-outline btn-inline plan-bulk-delete" onclick="deleteSelectedPlanProducts()">Supprimer sélection</button>
+      <button type="button" id="planSelectionClear" class="btn btn-outline btn-inline" onclick="clearPlanSelection()">Effacer sélection</button>
+    </div>
+  </div>`;
+}
+
+function clearPlanSelection() {
+  if (planBulkActionBusy) return;
+  planSelectedProductIds.clear();
+  planMoveMode = false;
+  syncPlanSelectionUi();
+}
+
+function togglePlanMoveMode() {
+  if (!planSelectedProductIds.size || planBulkActionBusy) return;
+  planMoveMode = !planMoveMode;
+  syncPlanSelectionUi();
+}
+
+function beginPlanSelectionDrag(event, productId=null) {
+  if (planBulkActionBusy) { event.preventDefault(); return; }
+  const id = Number(productId);
+  if (Number.isInteger(id) && id > 0 && !planSelectedProductIds.has(id)) {
+    planSelectedProductIds.add(id);
+  }
+  if (!planSelectedProductIds.size) { event.preventDefault(); return; }
+  planMoveMode = false;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', [...planSelectedProductIds].join(','));
+  }
+  document.getElementById('mapContent')?.classList.add('plan-dragging');
+  syncPlanSelectionUi();
+}
+
+function endPlanSelectionDrag() {
+  document.getElementById('mapContent')?.classList.remove('plan-dragging');
+}
+
+function allowPlanSelectionDrop(event) {
+  if (!planSelectedProductIds.size || planBulkActionBusy) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+}
+
+function planDropTargetAttrs(aisle, side, section='1', shelf='', mode='shelf') {
+  return `data-drop-aisle="${esc(aisle)}" data-drop-side="${esc(side)}" data-drop-section="${esc(section)}" `
+    + `data-drop-shelf="${esc(shelf)}" data-drop-mode="${esc(mode)}" `
+    + 'ondragover="allowPlanSelectionDrop(event)" ondrop="dropPlanSelectionOnElement(event,this)"';
+}
+
+function renderPlanDropButton(aisle, side, section='1', shelf='', mode='shelf') {
+  return `<button type="button" class="plan-drop-action" ${planDropTargetAttrs(aisle, side, section, shelf, mode)}
+    onclick="movePlanSelectionFromElement(this,event)">Déposer ici</button>`;
+}
+
+function _planDropTarget(element) {
+  return {
+    aisle: String(element?.dataset?.dropAisle || ''),
+    side: String(element?.dataset?.dropSide || ''),
+    section: String(element?.dataset?.dropSection || '1'),
+    shelf: String(element?.dataset?.dropShelf || ''),
+    mode: String(element?.dataset?.dropMode || 'shelf'),
+  };
+}
+
+function dropPlanSelectionOnElement(event, element) {
+  event.preventDefault();
+  event.stopPropagation();
+  endPlanSelectionDrag();
+  movePlanSelection(_planDropTarget(element));
+}
+
+function movePlanSelectionFromElement(element, event) {
+  if (event) { event.preventDefault(); event.stopPropagation(); }
+  movePlanSelection(_planDropTarget(element));
+}
+
+function _selectedProductVersions(productIds) {
+  const selected = new Set(productIds.map(Number));
+  return Object.fromEntries(allProductsCache
+    .filter(product => selected.has(Number(product.id)))
+    .map(product => [String(product.id), String(product.modified_at || '')]));
+}
+
+function _applyBulkProductUpdates(products) {
+  const updates = new Map((products || []).map(product => [Number(product.id), product]));
+  allProductsCache = allProductsCache.map(product => {
+    const update = updates.get(Number(product.id));
+    return update ? normalizeProduct({...product, ...update}) : product;
+  });
+  if (typeof invalidateProductSearchIndexes === 'function') invalidateProductSearchIndexes();
+  lastProductsRefreshAt = Date.now();
+  savePlanSnapshot();
+}
+
+function setPlanBulkBusy(busy) {
+  planBulkActionBusy = Boolean(busy);
+  syncPlanSelectionUi();
+}
+
+async function movePlanSelection(target) {
+  const productIds = [...planSelectedProductIds];
+  if (!productIds.length || planBulkActionBusy) return;
+  if (!requireEditorSession('deplacer les produits selectionnes')) return;
+  const aisle = String(target.aisle || '');
+  await waitForLayoutSave(aisle);
+  if (dirtyLayoutAisles.has(aisle)) await autoSaveAisleLayout(aisle);
+  await waitForLayoutSave(aisle);
+  if (dirtyLayoutAisles.has(aisle)) {
+    showPlanActionMessage('La destination doit etre sauvegardee avant le deplacement.');
+    return;
+  }
+  const layout = getMutableLayout(aisle);
+  if (!layout) {
+    showPlanActionMessage('Destination introuvable. Rechargez le plan.');
+    return;
+  }
+  setPlanBulkBusy(true);
+  const data = await apiBulkMoveLayoutProducts({
+    product_ids: productIds,
+    target,
+    expected_layout_modified_at: layout.modified_at || '',
+    expected_products: _selectedProductVersions(productIds),
+  });
+  setPlanBulkBusy(false);
+  if (!data.success) {
+    showPlanActionMessage(data.error || 'Deplacement impossible. Aucun produit n a ete modifie.');
+    return;
+  }
+  _applyBulkProductUpdates(data.product_updates || data.products || []);
+  planSelectedProductIds.clear();
+  planMoveMode = false;
+  refreshPlanUi();
+  showPlanActionMessage(`${Number(data.moved_products || productIds.length)} produit(s) deplace(s).`, 'success');
+}
+
+function renderPlanScopeDeleteButton(kind, aisle, side='', section='1', shelf='', count=0) {
+  if (!Number(count)) return '';
+  return `<button type="button" class="btn btn-outline btn-inline plan-products-only-delete"
+    ${planSelectionDataAttrs(kind, aisle, side, section, shelf, '')}
+    onclick="deletePlanScopeProductsFromElement(this,event)">Vider produits (${Number(count)})</button>`;
+}
+
+function deletePlanScopeProductsFromElement(element, event) {
+  if (event) { event.preventDefault(); event.stopPropagation(); }
+  const ids = planScopeProductIds(element.dataset.selectKind, element);
+  deletePlanProducts(ids, 'cette zone');
+}
+
+function deleteSelectedPlanProducts() {
+  deletePlanProducts([...planSelectedProductIds], 'la selection');
+}
+
+async function deletePlanProducts(productIds, scopeLabel='cette zone') {
+  const ids = [...new Set((productIds || []).map(Number).filter(id => Number.isInteger(id) && id > 0))];
+  if (!ids.length || planBulkActionBusy) return;
+  if (!requireEditorSession('supprimer des produits du plan')) return;
+  if (!confirm(`Supprimer ${ids.length} produit(s) de ${scopeLabel} ?\n\nLa structure du plan restera intacte.`)) return;
+  setPlanBulkBusy(true);
+  const data = await apiBulkDeleteLayoutProducts({
+    product_ids: ids,
+    expected_products: _selectedProductVersions(ids),
+  });
+  setPlanBulkBusy(false);
+  if (!data.success) {
+    showPlanActionMessage(data.error || 'Suppression impossible. Aucun produit n a ete retire.');
+    return;
+  }
+  const deleted = new Set((data.deleted_product_ids || ids).map(Number));
+  allProductsCache = allProductsCache.filter(product => !deleted.has(Number(product.id)));
+  for (const id of deleted) planSelectedProductIds.delete(id);
+  if (typeof invalidateProductSearchIndexes === 'function') invalidateProductSearchIndexes();
+  lastProductsRefreshAt = Date.now();
+  savePlanSnapshot();
+  planMoveMode = false;
+  refreshPlanUi();
+  showPlanActionMessage(`${Number(data.removed_products || deleted.size)} produit(s) supprime(s); structure conservee.`, 'success');
+}
+
 // Products grouped by exact shelf, built once per cache version. Rendering a
 // plan asks for dozens of shelves; without this each shelf scanned the whole
 // product list (O(shelves × products)). The index auto-rebuilds whenever the
@@ -1335,8 +1664,11 @@ function renderShelfProductList(aisle, side, section, shelf, positions) {
       <div style="font-size:10px;color:#8b5cf6;font-weight:600;padding:3px 0 4px">📦 ${filled} produit${filled!==1?'s':''} libre${filled!==1?'s':''}</div>
       ${products.map(p => `<div class="plan-product-item">
         <div class="plan-product-row1">
+          ${renderPlanSelectionCheckbox('product', aisle, side, section, shelf, p.id, `Sélectionner ${p.name}`)}
           <span class="plan-product-name">${esc(p.name)}${p.brand ? ` <span class="plan-product-brand">${esc(p.brand)}</span>` : ''}</span>
-          <button title="Déplacer (autre allée/position)" onclick="openMoveProduct(${p.id})" style="margin-left:auto;flex-shrink:0;border:1px solid #cbd5e1;color:#334155;background:#f8fafc;border-radius:5px;padding:2px 7px;cursor:pointer;font-size:11px">⇄</button>
+          <button class="plan-drag-handle" draggable="true" title="Glisser ou choisir une position exacte" onclick="openMoveProduct(${p.id})"
+                  ondragstart="beginPlanSelectionDrag(event,${p.id})" ondragend="endPlanSelectionDrag()"
+                  style="margin-left:auto;flex-shrink:0;border:1px solid #cbd5e1;color:#334155;background:#f8fafc;border-radius:5px;padding:2px 7px;cursor:grab;font-size:11px">⇄</button>
           <button title="Retirer ce produit" onclick="deleteProduct(${p.id})" style="flex-shrink:0;border:1px solid #f1b8c2;color:#c8102e;background:#fff;border-radius:5px;padding:2px 7px;cursor:pointer;font-size:11px">✕</button>
         </div>
         <div class="plan-product-row2">${p.barcode ? esc(p.barcode) : '—'}${p.product_code ? ` · code ${esc(p.product_code)}` : ''}</div>
@@ -1357,11 +1689,14 @@ function renderShelfProductList(aisle, side, section, shelf, positions) {
       html += `<div class="plan-product-item">
         <div class="plan-product-row1">
           <span class="plan-pos-badge">${pos}</span>
+          ${renderPlanSelectionCheckbox('product', aisle, side, section, shelf, p.id, `Sélectionner ${p.name}`)}
           <span class="plan-product-name">${esc(p.name)}${p.brand ? ` <span class="plan-product-brand">${esc(p.brand)}</span>` : ''}</span>
           <span style="display:flex;gap:4px;margin-left:auto;flex-shrink:0">
             <button title="Échanger avec la position précédente" style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;padding:4px 9px;font-size:14px;line-height:1;${canUp?'':'opacity:.25;cursor:default'}" onclick="swapPositions(${swapArgs},${pos},${pos-1})" ${canUp?'':'disabled'}>↑</button>
             <button title="Échanger avec la position suivante" style="background:#f8fafc;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;padding:4px 9px;font-size:14px;line-height:1;${canDown?'':'opacity:.25;cursor:default'}" onclick="swapPositions(${swapArgs},${pos},${pos+1})" ${canDown?'':'disabled'}>↓</button>
-            <button title="Déplacer (autre allée/position)" style="background:#f8fafc;border:1px solid #cbd5e1;color:#334155;border-radius:6px;cursor:pointer;padding:4px 9px;font-size:13px;line-height:1" onclick="openMoveProduct(${p.id})">⇄</button>
+            <button class="plan-drag-handle" draggable="true" title="Glisser ou choisir une position exacte"
+                    style="background:#f8fafc;border:1px solid #cbd5e1;color:#334155;border-radius:6px;cursor:grab;padding:4px 9px;font-size:13px;line-height:1"
+                    onclick="openMoveProduct(${p.id})" ondragstart="beginPlanSelectionDrag(event,${p.id})" ondragend="endPlanSelectionDrag()">⇄</button>
             <button title="Retirer ce produit" style="background:#fff;border:1px solid #f1b8c2;color:#c8102e;border-radius:6px;cursor:pointer;padding:4px 9px;font-size:13px;line-height:1" onclick="deleteProduct(${p.id})">✕</button>
           </span>
         </div>
@@ -1380,7 +1715,11 @@ function renderShelfProductList(aisle, side, section, shelf, positions) {
     html += `<div class="plan-product-item" style="background:#fff5f5;border-radius:4px;padding:5px 4px">
       <div class="plan-product-row1">
         <span class="plan-pos-badge" style="color:#c8102e">${esc(String(p.position))}</span>
+        ${renderPlanSelectionCheckbox('product', aisle, side, section, shelf, p.id, `Sélectionner ${p.name}`)}
         <span class="plan-product-name" style="color:#c8102e">${esc(p.name)} <span class="plan-product-brand">hors limite</span></span>
+        <button class="plan-drag-handle" draggable="true" title="Glisser ou deplacer ce produit"
+                onclick="openMoveProduct(${p.id})" ondragstart="beginPlanSelectionDrag(event,${p.id})" ondragend="endPlanSelectionDrag()">⇄</button>
+        <button title="Retirer ce produit" onclick="deleteProduct(${p.id})">✕</button>
       </div>
       <div class="plan-product-row2" style="color:#f87171">${p.barcode ? esc(p.barcode) : '—'}</div>
     </div>`;
@@ -1397,9 +1736,12 @@ function renderShelfCard(aisle, side, sectionIndex, shelfIndex, positions, shelf
   const isLibre = positions === 0;
   const shelfTitle = shelfLabel ? `${isLibre ? '📦 ' : '📎 '}${esc(shelfLabel)}` : (isLibre ? `📦 T${shelfIndex + 1} Libre` : `T${shelfIndex + 1}`);
   const cardBg = isLibre ? 'background:#faf5ff;border-color:#a78bfa' : (shelfLabel ? 'background:#fffbf0;border-color:#fbbf24' : '');
-  return `<div class="plan-shelf-card" id="shelfcard-${esc(aisle)}|${esc(side)}|${sectionIndex}|${shelfIndex}" style="${cardBg}">
+  return `<div class="plan-shelf-card" id="shelfcard-${esc(aisle)}|${esc(side)}|${sectionIndex}|${shelfIndex}"
+    ${planDropTargetAttrs(aisle, side, sectionIndex + 1, shelfIndex + 1, 'shelf')} style="${cardBg}">
     <div class="shelf-header" style="gap:4px">
+      ${renderPlanSelectionCheckbox('shelf', aisle, side, sectionIndex + 1, shelfIndex + 1, '', `Sélectionner la tablette ${shelfIndex + 1}`)}
       <span class="shelf-title">${shelfTitle}</span>
+      ${renderPlanDropButton(aisle, side, sectionIndex + 1, shelfIndex + 1, 'shelf')}
       ${isLibre
         ? `<span style="font-size:10px;color:#8b5cf6;font-weight:700">LIBRE · ${shelfFilled} prod.</span>
            <button title="Définir un nombre fixe de positions" style="background:none;border:1px solid #a78bfa;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
@@ -1415,9 +1757,10 @@ function renderShelfCard(aisle, side, sectionIndex, shelfIndex, positions, shelf
       }
       <button type="button" class="plan-delete-action" onclick="removeShelf('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},this)" style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5" title="Supprimer cette tablette">✕ Suppr.</button>
     </div>
-    <div style="display:flex;gap:6px;padding:5px 0 4px;border-top:1px solid rgba(0,0,0,.06);margin-top:4px">
+    <div style="display:flex;gap:6px;padding:5px 0 4px;border-top:1px solid rgba(0,0,0,.06);margin-top:4px;flex-wrap:wrap">
       <button class="btn btn-outline btn-inline" style="font-size:12px;flex:1" onclick="moveShelf('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},-1)">↑ Monter</button>
       <button class="btn btn-outline btn-inline" style="font-size:12px;flex:1" onclick="moveShelf('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},1)">↓ Descendre</button>
+      ${renderPlanScopeDeleteButton('shelf', aisle, side, sectionIndex + 1, shelfIndex + 1, shelfFilled)}
     </div>
     <details class="struct-details">
       <summary class="struct-toggle" style="font-size:11px">⚙ Nom / étiquette</summary>
@@ -1461,18 +1804,22 @@ function renderSection(aisle, side, sectionIndex, section) {
   const sectionNodeId = `planSection-${aisle}-${side}-${sectionIndex}`;
   const attrs = `data-plan-kind="section" data-aisle="${esc(aisle)}" data-side="${esc(side)}" data-section-index="${sectionIndex}" data-node-id="${sectionNodeId}"`;
   if (!isPlanNodeOpen(sectionNodeId)) {
-    return `<details class="tree-node plan-section" ${attrs}${detailsOpenAttr(sectionNodeId)}>
+    return `<details class="tree-node plan-section" ${attrs} ${planDropTargetAttrs(aisle, side, sectionIndex + 1, '', 'section')}${detailsOpenAttr(sectionNodeId)}>
     <summary>
+      ${renderPlanSelectionCheckbox('section', aisle, side, sectionIndex + 1, '', '', `Sélectionner la section ${sectionIndex + 1}`)}
       <span>Section ${sectionIndex + 1}</span>
       <span class="tree-meta">${sectionProducts} prod. · ${section.shelves.length} T${sectionHome ? ` · <span style="color:#c8102e">★${sectionHome}</span>` : ''}</span>
+      ${renderPlanDropButton(aisle, side, sectionIndex + 1, '', 'section')}
     </summary>
     <div class="tree-body plan-lazy-body" data-lazy-empty="1"></div>
   </details>`;
   }
-  return `<details class="tree-node plan-section" ${attrs}${detailsOpenAttr(sectionNodeId)}>
+  return `<details class="tree-node plan-section" ${attrs} ${planDropTargetAttrs(aisle, side, sectionIndex + 1, '', 'section')}${detailsOpenAttr(sectionNodeId)}>
     <summary>
+      ${renderPlanSelectionCheckbox('section', aisle, side, sectionIndex + 1, '', '', `Sélectionner la section ${sectionIndex + 1}`)}
       <span>Section ${sectionIndex + 1}</span>
       <span class="tree-meta">${sectionProducts} prod. · ${section.shelves.length} T${sectionHome ? ` · <span style="color:#c8102e">★${sectionHome}</span>` : ''}</span>
+      ${renderPlanDropButton(aisle, side, sectionIndex + 1, '', 'section')}
     </summary>
     <div class="tree-body">
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 6px">
@@ -1484,6 +1831,7 @@ function renderSection(aisle, side, sectionIndex, section) {
         <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${esc(aisle)}','${side}',${sectionIndex},-1)">↑ Monter</button>
         <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${esc(aisle)}','${side}',${sectionIndex},1)">↓ Descendre</button>
         <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="openMoveSection('${esc(aisle)}','${side}',${sectionIndex})">⇄ Autre allée</button>
+        ${renderPlanScopeDeleteButton('section', aisle, side, sectionIndex + 1, '', sectionProducts)}
         <button type="button" class="btn btn-outline btn-inline plan-delete-action" style="font-size:12px;color:#c8102e;border-color:#f1b8c2;margin-left:auto" onclick="removeSection('${esc(aisle)}','${side}',${sectionIndex},this)">✕ Supprimer section</button>
       </div>
       ${section.shelves.length ? '' : `<div class="small" style="padding:4px 0;color:#94a3b8">Aucune tablette — cliquez ➕ Tablette ci-dessus.</div>`}
@@ -1512,6 +1860,7 @@ function renderSide(aisle, side, config) {
   if (!isPlanNodeOpen(sideNodeId)) {
     return `<details class="tree-node plan-side" ${attrs}${detailsOpenAttr(sideNodeId)}>
     <summary>
+      ${renderPlanSelectionCheckbox('side', aisle, side, '1', '', '', `Sélectionner ${sideLabel}`)}
       <span>${sideLabel}</span>
       <span class="tree-meta">${sections.length} section${sections.length !== 1 ? 's' : ''} · ${sideCount} produit${sideCount !== 1 ? 's' : ''}</span>
     </summary>
@@ -1520,6 +1869,7 @@ function renderSide(aisle, side, config) {
   }
   return `<details class="tree-node plan-side" ${attrs}${detailsOpenAttr(sideNodeId)}>
     <summary>
+      ${renderPlanSelectionCheckbox('side', aisle, side, '1', '', '', `Sélectionner ${sideLabel}`)}
       <span>${sideLabel}</span>
       <span class="tree-meta">${sections.length} section${sections.length !== 1 ? 's' : ''} · ${sideCount} produit${sideCount !== 1 ? 's' : ''}</span>
     </summary>
@@ -1580,7 +1930,7 @@ function renderMapEditor() {
   const msgDiv = document.getElementById('addMsg');
   const div = document.getElementById('mapContent');
   const counts = planSummaryCounts();   // memoized per cache version (no rescan on layout-only edits)
-  div.innerHTML = mapLayouts.length
+  div.innerHTML = renderPlanBulkToolbar() + (mapLayouts.length
     ? `<div class="tool-row" style="margin-bottom:12px">
         <button class="btn btn-outline btn-inline" onclick="setAllPlanTrees(true)">Ouvrir tout</button>
         <button class="btn btn-outline btn-inline" onclick="setAllPlanTrees(false)">Fermer tout</button>
@@ -1594,6 +1944,7 @@ function renderMapEditor() {
         if (!isPlanNodeOpen(aisleNodeId)) {
           return `<details class="tree-node plan-aisle-node" id="${aisleNodeId}" data-plan-kind="aisle" data-aisle="${esc(layout.aisle)}" data-node-id="${aisleNodeId}"${detailsOpenAttr(aisleNodeId)}>
         <summary>
+          ${renderPlanSelectionCheckbox('aisle', layout.aisle, '', '1', '', '', `Sélectionner l allée ${layout.aisle}`)}
           <span>Allée ${esc(layout.aisle)}</span>
           <span class="tree-meta">${layout.product_count || 0} produit${Number(layout.product_count || 0) !== 1 ? 's' : ''} · <span id="aisleSlots-${esc(layout.aisle)}">${slotCount}</span> slots${homeCount ? ` · <span style="color:#c8102e">★${homeCount} maison</span>` : ''}${dirty ? ' · <span style="color:#d97706">non sauvegardé</span>' : ''}</span>
         </summary>
@@ -1602,6 +1953,7 @@ function renderMapEditor() {
         }
         return `<details class="tree-node plan-aisle-node" id="${aisleNodeId}" data-node-id="${aisleNodeId}"${detailsOpenAttr(aisleNodeId)}>
         <summary>
+          ${renderPlanSelectionCheckbox('aisle', layout.aisle, '', '1', '', '', `Sélectionner l allée ${layout.aisle}`)}
           <span>Allée ${esc(layout.aisle)}</span>
           <span class="tree-meta">${layout.product_count || 0} produit${Number(layout.product_count || 0) !== 1 ? 's' : ''} · <span id="aisleSlots-${esc(layout.aisle)}">${slotCount}</span> slots${homeCount ? ` · <span style="color:#c8102e">★${homeCount} maison</span>` : ''}${dirty ? ' · <span style="color:#d97706">non sauvegardé</span>' : ''}</span>
         </summary>
@@ -1612,6 +1964,7 @@ function renderMapEditor() {
           <button class="btn btn-outline btn-inline" onclick="applyAisleLayoutToCursor('${esc(layout.aisle)}')">Utiliser pour scan</button>
           <button class="btn btn-outline btn-inline" onclick="setPlanAisleTrees('${esc(layout.aisle)}', true)">Tout ouvrir</button>
           <button class="btn btn-outline btn-inline" onclick="setPlanAisleTrees('${esc(layout.aisle)}', false)">Tout fermer</button>
+          ${renderPlanScopeDeleteButton('aisle', layout.aisle, '', '1', '', layout.product_count || 0)}
           <button class="btn btn-outline btn-inline" style="border-color:#f1b8c2;color:#c8102e" onclick="removeAisleLayout('${esc(layout.aisle)}')">Supprimer</button>
         </div>
         ${layout.modified_by ? `<div class="small" style="margin-top:6px">Modifie par: ${esc(layout.modified_by)}</div>` : ''}
@@ -1623,8 +1976,10 @@ function renderMapEditor() {
         </div>
       </details>`;
       }).join('')
-    : '<div class="empty">Aucune allée configurée.</div>';
+    : '<div class="empty">Aucune allée configurée.</div>');
   if (!msgDiv.textContent) msgDiv.innerHTML = '';
+  if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(syncPlanSelectionUi);
+  else syncPlanSelectionUi();
 }
 
 function planNodeIdsForAisle(layout) {
@@ -2026,6 +2381,8 @@ async function deleteProduct(id) {
     return;
   }
   removeCachedProduct(id);   // local cache update — no server refetch
+  planSelectedProductIds.delete(Number(id));
+  if (!planSelectedProductIds.size) planMoveMode = false;
   // Refresh only the view the user is on. (Was: doSearch + loadMapEditor, which
   // rebuilt the whole plan AND did a planogram-history network fetch on every
   // single delete — a real heat source when cleaning up many products.)
@@ -2589,9 +2946,11 @@ function _facadeShelfGrid(aisle, sideName, fk, shelves, labels) {
     const filled = allProductsCache.filter(p =>
       String(p.aisle) === String(aisle) && p.side === sideName && String(p.shelf) === String(shi + 1)
     ).length;
-    return `<div class="plan-shelf-card" style="${bg}">
+    return `<div class="plan-shelf-card" ${planDropTargetAttrs(aisle, sideName, 1, shi + 1, 'shelf')} style="${bg}">
       <div class="shelf-header" style="gap:4px">
+        ${renderPlanSelectionCheckbox('shelf', aisle, sideName, 1, shi + 1, '', `Sélectionner la tablette ${shi + 1}`)}
         <span class="shelf-title">${title}</span>
+        ${renderPlanDropButton(aisle, sideName, 1, shi + 1, 'shelf')}
         <input type="number" min="1" value="${positions}" title="Positions"
                style="width:46px;padding:2px 4px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px;text-align:center"
                onchange="setFacadeShelfPositions('${esc(aisle)}','${fk}',${shi},this.value)"/>
@@ -2600,6 +2959,7 @@ function _facadeShelfGrid(aisle, sideName, fk, shelves, labels) {
         <button type="button" class="plan-delete-action" onclick="removeFacadeShelf('${esc(aisle)}','${fk}',${shi},this)"
                 style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5"
                 title="Supprimer cette tablette">✕ Suppr.</button>
+        ${renderPlanScopeDeleteButton('shelf', aisle, sideName, 1, shi + 1, filled)}
       </div>
       <details class="struct-details">
         <summary class="struct-toggle" style="font-size:11px">⚙ Nom / étiquette</summary>
@@ -2625,6 +2985,7 @@ function renderFacadesSection(aisle, config) {
     const shelvesHtml = _facadeShelfGrid(aisle, sideName, key, shelves, labels);
     return `<details class="tree-node plan-section" data-node-id="${nodeId}"${detailsOpenAttr(nodeId)}>
       <summary>
+        ${renderPlanSelectionCheckbox('side', aisle, sideName, '1', '', '', `Sélectionner ${label}`)}
         <span>🔲 ${label}</span>
         <span class="tree-meta">${shelves.length} tablette${shelves.length!==1?'s':''} · ${prods.length} produit${prods.length!==1?'s':''}</span>
       </summary>
@@ -2632,6 +2993,7 @@ function renderFacadesSection(aisle, config) {
         <div style="display:flex;gap:6px;margin:6px 0 8px">
           <button class="btn btn-outline btn-inline" style="font-size:12px"
                   onclick="setFacadeShelfCount('${esc(aisle)}','${key}',${shelves.length + 1})">➕ Tablette</button>
+          ${renderPlanScopeDeleteButton('side', aisle, sideName, '1', '', prods.length)}
         </div>
         ${shelves.length ? '' : '<div class="small" style="color:#94a3b8;padding:4px 0">Aucune tablette.</div>'}
         <div class="plan-shelf-grid">${shelvesHtml}</div>
@@ -2673,13 +3035,17 @@ function renderPresentoirSection(aisle, config) {
           : `<input type="number" min="1" value="${positions}" style="width:44px;padding:2px 4px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px;text-align:center"
                onchange="setPresentoirShelfPositions('${esc(aisle)}',${pi},${fi},${shi},this.value)"/>
              <span style="font-size:10px;color:#94a3b8">pos · ${filled} prod.</span>`;
-        return `<div class="plan-shelf-card" style="${bg}${isLibre?';border-color:#a78bfa;background:#faf5ff':''}">
+        return `<div class="plan-shelf-card" ${planDropTargetAttrs(aisle, sideName, 1, shi + 1, 'shelf')}
+          style="${bg}${isLibre?';border-color:#a78bfa;background:#faf5ff':''}">
           <div class="shelf-header" style="gap:4px">
+            ${renderPlanSelectionCheckbox('shelf', aisle, sideName, 1, shi + 1, '', `Sélectionner la tablette ${shi + 1}`)}
             <span class="shelf-title">${title}</span>
+            ${renderPlanDropButton(aisle, sideName, 1, shi + 1, 'shelf')}
             ${posCtrl}
             <button type="button" class="plan-delete-action" onclick="removePresentoirShelf('${esc(aisle)}',${pi},${fi},${shi},this)"
                     style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5"
                     title="Supprimer cette tablette">✕ Suppr.</button>
+            ${renderPlanScopeDeleteButton('shelf', aisle, sideName, 1, shi + 1, filled)}
           </div>
           ${renderShelfProductList(aisle, sideName, 1, shi + 1, positions)}
         </div>`;
@@ -2687,6 +3053,7 @@ function renderPresentoirSection(aisle, config) {
 
       return `<details class="tree-node plan-section" data-node-id="${facadeNodeId}"${detailsOpenAttr(facadeNodeId)}>
         <summary>
+          ${renderPlanSelectionCheckbox('side', aisle, sideName, '1', '', '', `Sélectionner ${facade.name}`)}
           <span>${esc(facade.name)}</span>
           <span class="tree-meta">${shelves.length} T · ${facadeProds.length} prod.</span>
         </summary>
@@ -2695,6 +3062,7 @@ function renderPresentoirSection(aisle, config) {
             <input type="text" value="${esc(facade.name)}" style="flex:1;padding:5px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px"
                    oninput="renamePresentoirFacade('${esc(aisle)}',${pi},${fi},this.value)" placeholder="Nom de la façade"/>
             <button class="btn btn-outline btn-inline" style="font-size:11px" onclick="setPresentoirShelfCount('${esc(aisle)}',${pi},${fi},${shelves.length+1})">➕ T</button>
+            ${renderPlanScopeDeleteButton('side', aisle, sideName, '1', '', facadeProds.length)}
             <button class="btn btn-outline btn-inline" style="font-size:11px;color:#c8102e;border-color:#f1b8c2" onclick="removePresentoirFacade('${esc(aisle)}',${pi},${fi})">✕ Façade</button>
           </div>
           <div class="plan-shelf-grid">${shelvesHtml}</div>

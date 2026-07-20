@@ -171,6 +171,25 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:#c8102e;box-sh
 .plan-product-name{flex:1;color:#111827;font-size:13px;line-height:1.3}
 .plan-product-brand{color:#6b7280;font-size:11px;flex-shrink:0}
 .plan-slot-empty{color:#d1d5db;font-style:italic;font-size:12px}
+.plan-select-checkbox{width:20px;height:20px;min-width:20px;margin:0;accent-color:#2563eb;cursor:pointer;flex-shrink:0}
+.plan-select-checkbox:disabled{cursor:default;opacity:.3}
+.plan-scope-selected{border-color:#60a5fa !important;background-color:#eff6ff !important}
+.plan-scope-partial{border-color:#93c5fd !important}
+.plan-product-item.plan-scope-selected{margin:0 -5px;padding:5px;background:#eff6ff;border-radius:5px}
+.plan-bulk-toolbar{position:sticky;top:calc(112px + env(safe-area-inset-top));z-index:8;display:flex;align-items:center;gap:10px;justify-content:space-between;background:#fff;border:2px solid #2563eb;border-radius:8px;padding:10px 12px;margin:0 0 12px;box-shadow:0 5px 16px rgba(15,23,42,.16)}
+.plan-bulk-toolbar[hidden]{display:none}
+.plan-bulk-toolbar.is-busy{opacity:.72;cursor:wait}
+.plan-bulk-status{display:flex;flex-direction:column;gap:2px;min-width:150px}
+.plan-bulk-status strong{font-size:13px;color:#1e3a8a}
+.plan-bulk-status span{font-size:11px;color:#64748b;line-height:1.3}
+.plan-bulk-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.plan-bulk-delete,.plan-products-only-delete{color:#b91c1c !important;border-color:#f0a8b5 !important;background:#fff !important}
+.plan-drop-action{display:none;align-items:center;justify-content:center;min-height:34px !important;min-width:auto !important;border:1px solid #16a34a;border-radius:6px;background:#ecfdf5;color:#166534;font-size:11px;font-weight:800;padding:5px 9px;cursor:pointer;margin-left:auto}
+.plan-move-mode .plan-drop-action{display:inline-flex}
+.plan-move-mode .plan-shelf-card[data-drop-mode],.plan-dragging .plan-shelf-card[data-drop-mode]{outline:2px dashed #22c55e;outline-offset:2px}
+.plan-move-mode details.plan-section[data-drop-mode]>summary,.plan-dragging details.plan-section[data-drop-mode]>summary{background:#ecfdf5}
+.plan-drag-handle{cursor:grab;touch-action:manipulation}
+.plan-drag-handle:active{cursor:grabbing}
 
 /* ── Client / Advice ── */
 .advice-card{background:#fafbfc;border:1px solid #e4e6ea;border-radius:12px;padding:14px;margin-top:10px}
@@ -346,6 +365,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:#c8102e;box-sh
   #mapContent button{min-height:46px;min-width:46px;padding:8px 12px}
   #mapContent input[type="number"],#mapContent input[type="text"]{min-height:46px}
   #mapContent summary{min-height:48px;padding-top:13px;padding-bottom:13px}
+  .plan-select-checkbox{width:24px;height:24px;min-width:24px}
 }
 @media (max-width:520px){
   .row2,.row3,.confirm-grid,.device-grid,.scan-tools,.btn-row{grid-template-columns:1fr}
@@ -355,6 +375,10 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:#c8102e;box-sh
   .content{padding:12px}
   .cursor{align-items:flex-start;flex-direction:column}
   .btn-inline{width:100%}
+  .plan-bulk-toolbar{align-items:stretch;flex-direction:column;top:calc(112px + env(safe-area-inset-top));padding:9px}
+  .plan-bulk-actions{display:grid;grid-template-columns:1fr 1fr}
+  .plan-bulk-actions .btn-inline{width:auto;min-width:0}
+  .plan-bulk-actions .plan-bulk-delete{grid-column:1 / -1}
   .client-message{max-width:100%}
   .client-clear-history{margin-left:0}
   .client-message-user{max-width:92%}

@@ -5,6 +5,8 @@ const vm = require('vm');
 const scheduled = [];
 const saveCalls = [];
 const removalCalls = [];
+const bulkMoveCalls = [];
+const bulkDeleteCalls = [];
 const planMessage = {className: '', textContent: ''};
 const deleteButton = {
   dataset: {},
@@ -16,6 +18,7 @@ const deleteButton = {
 };
 const context = {
   console,
+  esc(value) { return String(value ?? ''); },
   mapLayouts: [{
     aisle: '1', max_section: '1', max_shelf: '1', max_position: '4',
     config: {
@@ -209,6 +212,80 @@ async function run() {
     [9, 1, 9, 2, 8, 1, 8, 2],
     'Cote A should descend S9 to S8 without reversing positions inside a shelf'
   );
+
+  context.allProductsCache = [
+    {id: 101, name: 'Produit A', aisle: '1', side: 'Gauche', section: '1', shelf: '1', position: '1', modified_at: 'v1'},
+    {id: 102, name: 'Produit B', aisle: '1', side: 'Gauche', section: '1', shelf: '2', position: '1', modified_at: 'v2'},
+    {id: 103, name: 'Produit C', aisle: '2', side: 'Droite', section: '3', shelf: '1', position: '1', modified_at: 'v3'},
+  ];
+  context.lastProductsRefreshAt = 100;
+  const sectionIds = JSON.parse(vm.runInContext(
+    "JSON.stringify(planScopeProductIds('section',{aisle:'1',side:'Gauche',section:'1'}))",
+    context,
+  ));
+  const aisleIds = JSON.parse(vm.runInContext(
+    "JSON.stringify(planScopeProductIds('aisle',{aisle:'1'}))",
+    context,
+  ));
+  assert.deepStrictEqual(sectionIds, [101, 102], 'a section selector should include only that section');
+  assert.deepStrictEqual(aisleIds, [101, 102], 'an aisle selector should include all products in that aisle');
+  assert(
+    vm.runInContext("renderPlanSelectionCheckbox('shelf','1','Gauche','1','1').includes('data-select-kind=\"shelf\"')", context),
+    'tablet selectors should carry an exact scope',
+  );
+
+  context.normalizeProduct = product => ({...product});
+  context.requireEditorSession = () => true;
+  context.invalidateProductSearchIndexes = () => {};
+  context.refreshPlanUi = () => {};
+  context.savePlanSnapshot = () => {};
+  context.apiBulkMoveLayoutProducts = async payload => {
+    bulkMoveCalls.push(payload);
+    return {
+      success: true,
+      moved_products: 2,
+      product_updates: context.allProductsCache.slice(0, 2).map((product, index) => ({
+        id: product.id, section: '1', shelf: '1', position: String(index + 1), modified_at: 'moved',
+      })),
+    };
+  };
+  context.dirtyLayoutAisles.clear();
+  vm.runInContext('planSelectedProductIds.add(101); planSelectedProductIds.add(102)', context);
+  await vm.runInContext(
+    "movePlanSelection({aisle:'1',side:'Gauche',section:'1',shelf:'1',mode:'shelf'})",
+    context,
+  );
+  assert.strictEqual(bulkMoveCalls.length, 1, 'one atomic request should move the whole selection');
+  assert.deepStrictEqual(Array.from(bulkMoveCalls[0].product_ids), [101, 102]);
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(context.allProductsCache.slice(0, 2).map(product => [product.shelf, product.position]))),
+    [['1', '1'], ['1', '2']],
+    'the local plan should immediately mirror the committed positions',
+  );
+  assert.strictEqual(vm.runInContext('planSelectedProductIds.size', context), 0);
+
+  context.apiBulkDeleteLayoutProducts = async payload => {
+    bulkDeleteCalls.push(payload);
+    return {success: true, removed_products: 1, deleted_product_ids: [101]};
+  };
+  await vm.runInContext("deletePlanProducts([101], 'cette tablette')", context);
+  assert.strictEqual(bulkDeleteCalls.length, 1, 'scoped deletion should be one atomic request');
+  assert.deepStrictEqual(
+    Array.from(context.allProductsCache, product => product.id),
+    [102, 103],
+    'scoped deletion must keep products outside the exact selection',
+  );
+  assert.deepStrictEqual(
+    context.mapLayouts[0].config.sides.Gauche.sections[0].shelves,
+    [2],
+    'product-only deletion must preserve the tablet structure',
+  );
+  const renderedTablet = vm.runInContext("renderShelfCard('1','Gauche',0,0,2,'')", context);
+  assert(renderedTablet.includes('data-select-kind="shelf"'), 'a tablet should have a scope selector');
+  assert(renderedTablet.includes('data-drop-mode="shelf"'), 'a tablet should be a drop destination');
+  assert(renderedTablet.includes('Vider produits (1)'), 'a tablet should expose product-only clearing');
+  assert(renderedTablet.includes('plan-drag-handle'), 'products should expose a desktop drag handle');
+  assert(vm.runInContext('renderPlanBulkToolbar()', context).includes('planSelectionMove'));
   console.log('layout autosave tests passed');
 }
 

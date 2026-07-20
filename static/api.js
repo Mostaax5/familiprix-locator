@@ -145,6 +145,40 @@ async function apiRemoveLayoutPart(aisle, endpoint, payload) {
   }
 }
 
+async function apiBulkMoveLayoutProducts(payload) {
+  try {
+    const {res, data} = await apiFetch('/api/layout/products/bulk-move', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: JSON.stringify(payload)
+    });
+    return res.ok ? data : {
+      success: false,
+      code: data?.code || '',
+      error: data?.error || 'Deplacement impossible.'
+    };
+  } catch (error) {
+    return {success: false, error: 'Deplacement impossible pour le moment (reseau).'};
+  }
+}
+
+async function apiBulkDeleteLayoutProducts(payload) {
+  try {
+    const {res, data} = await apiFetch('/api/layout/products/bulk-delete', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: JSON.stringify(payload)
+    });
+    return res.ok ? data : {
+      success: false,
+      code: data?.code || '',
+      error: data?.error || 'Suppression impossible.'
+    };
+  } catch (error) {
+    return {success: false, error: 'Suppression impossible pour le moment (reseau).'};
+  }
+}
+
 async function apiDeleteLayoutAisle(aisle) {
   try {
     const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}`, {

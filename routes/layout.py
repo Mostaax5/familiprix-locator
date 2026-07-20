@@ -205,6 +205,118 @@ def aisle_sort_key(value):
     return (1, text.lower())
 
 
+def _clean_product_ids(raw_ids):
+    if not isinstance(raw_ids, list):
+        return []
+    result = []
+    seen = set()
+    for raw_id in raw_ids:
+        try:
+            product_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if product_id <= 0 or product_id in seen:
+            continue
+        seen.add(product_id)
+        result.append(product_id)
+    return result
+
+
+class _StaleBulkProductError(Exception):
+    pass
+
+
+def _product_rows_by_ids(db, product_ids):
+    rows = []
+    for start in range(0, len(product_ids), 400):
+        chunk = product_ids[start:start + 400]
+        placeholders = ",".join("?" for _id in chunk)
+        rows.extend(db.execute(
+            f"SELECT * FROM products WHERE id IN ({placeholders})", tuple(chunk)
+        ).fetchall())
+    by_id = {int(row["id"]): row for row in rows}
+    return [by_id[product_id] for product_id in product_ids if product_id in by_id]
+
+
+def _target_shelves(config, side, section):
+    if side in ("Gauche", "Droite"):
+        section_index = clamp_non_negative_int(section) - 1
+        sections = config["sides"][side]["sections"]
+        if section_index < 0 or section_index >= len(sections):
+            return None
+        return sections[section_index].get("shelves", [])
+    fixture = _fixture_for_side(config, side)
+    return fixture.get("shelves", []) if fixture else None
+
+
+def _bulk_product_sort_key(row):
+    side_order = {"Facade A": 0, "Façade A": 0, "Gauche": 1, "Droite": 2,
+                  "Facade B": 3, "Façade B": 3}
+    return (
+        aisle_sort_key(row["aisle"]),
+        side_order.get(str(row["side"]), 4),
+        clamp_non_negative_int(row["section"]),
+        clamp_non_negative_int(row["shelf"]),
+        clamp_non_negative_int(row["position"]),
+        int(row["id"]),
+    )
+
+
+def _bulk_move_destinations(db, selected_ids, aisle, side, section, shelf, mode, config):
+    shelves = _target_shelves(config, side, section)
+    if shelves is None:
+        return None, "La section de destination n'existe pas."
+    if not shelves:
+        return None, "La section de destination ne contient aucune tablette."
+
+    if mode == "shelf":
+        shelf_number = clamp_non_negative_int(shelf)
+        if shelf_number < 1 or shelf_number > len(shelves):
+            return None, "La tablette de destination n'existe pas."
+        shelf_numbers = [shelf_number]
+    elif mode == "section" and side in ("Gauche", "Droite"):
+        shelf_numbers = list(range(1, len(shelves) + 1))
+    else:
+        return None, "Destination invalide."
+
+    target_rows = db.execute(
+        "SELECT id, shelf, position FROM products WHERE aisle=? AND side=? AND section=?",
+        (aisle, side, section),
+    ).fetchall()
+    occupied = {number: set() for number in shelf_numbers}
+    for row in target_rows:
+        if int(row["id"]) in selected_ids:
+            continue
+        shelf_number = clamp_non_negative_int(row["shelf"])
+        position_number = clamp_non_negative_int(row["position"])
+        if shelf_number in occupied and position_number > 0:
+            occupied[shelf_number].add(position_number)
+
+    destinations = []
+    for shelf_number in shelf_numbers:
+        capacity = clamp_non_negative_int(shelves[shelf_number - 1])
+        if capacity == 0:
+            position = 1
+            while len(destinations) < len(selected_ids):
+                if position not in occupied[shelf_number]:
+                    destinations.append((shelf_number, position))
+                position += 1
+            break
+        for position in range(1, capacity + 1):
+            if position not in occupied[shelf_number]:
+                destinations.append((shelf_number, position))
+                if len(destinations) >= len(selected_ids):
+                    break
+        if len(destinations) >= len(selected_ids):
+            break
+    if len(destinations) < len(selected_ids):
+        return None, (
+            f"Espace insuffisant: {len(selected_ids)} produit(s) selectionne(s), "
+            f"mais seulement {len(destinations)} position(s) libre(s) dans cette destination."
+        )
+    return destinations[:len(selected_ids)], ""
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @layout_bp.route("/api/layout/aisles", methods=["GET"])
@@ -241,6 +353,201 @@ def get_layout_aisles():
     response = jsonify(result)
     response.set_etag(etag, weak=True)
     return response
+
+
+@layout_bp.route("/api/layout/products/bulk-move", methods=["POST"])
+def bulk_move_layout_products():
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json() or {}
+    product_ids = _clean_product_ids(data.get("product_ids"))
+    target = data.get("target") if isinstance(data.get("target"), dict) else {}
+    aisle = str(target.get("aisle", "")).strip()
+    side = str(target.get("side", "")).strip()
+    section = str(target.get("section", "1")).strip() or "1"
+    shelf = str(target.get("shelf", "")).strip()
+    mode = str(target.get("mode", "shelf")).strip().lower()
+    if not product_ids:
+        return jsonify({"success": False, "error": "Aucun produit selectionne."}), 400
+    if not aisle or not side or mode not in ("section", "shelf"):
+        return jsonify({"success": False, "error": "Destination invalide."}), 400
+
+    db = get_db()
+    layout_row = get_layout_row(db, aisle)
+    if not layout_row:
+        return jsonify({"success": False, "error": "Allee de destination introuvable."}), 404
+    if "expected_layout_modified_at" in data:
+        stale = _stale_layout_response(layout_row, {
+            "expected_modified_at": data.get("expected_layout_modified_at")
+        })
+        if stale:
+            return stale
+    rows = _product_rows_by_ids(db, product_ids)
+    if len(rows) != len(product_ids):
+        return jsonify({
+            "success": False,
+            "code": "stale_products",
+            "error": "La selection a change. Rechargez le plan avant de la deplacer.",
+        }), 409
+    expected_products = data.get("expected_products")
+    if isinstance(expected_products, dict):
+        stale_ids = [
+            int(row["id"]) for row in rows
+            if str(row["id"]) in expected_products
+            and str(row["modified_at"] or "") != str(expected_products[str(row["id"])] or "")
+        ]
+        if stale_ids:
+            return jsonify({
+                "success": False,
+                "code": "stale_products",
+                "error": "Un produit selectionne a ete modifie. Rechargez le plan avant de continuer.",
+                "stale_product_ids": stale_ids,
+            }), 409
+
+    config = normalize_layout_config(
+        layout_row["config_json"], layout_row["max_section"],
+        layout_row["max_shelf"], layout_row["max_position"],
+    )
+    selected_ids = set(product_ids)
+    destinations, destination_error = _bulk_move_destinations(
+        db, selected_ids, aisle, side, section, shelf, mode, config
+    )
+    if destinations is None:
+        return jsonify({"success": False, "error": destination_error}), 409
+
+    ordered_rows = sorted(rows, key=_bulk_product_sort_key)
+    now = utc_now_iso()
+    temporary_aisle = "__bulk_move__"
+    try:
+        # Vacate every source slot first. This makes moves and swaps collision-free
+        # even when the destination contains another selected product.
+        for row in ordered_rows:
+            result = db.execute(
+                """UPDATE products
+                   SET aisle=?, side='__bulk__', section='0', shelf='0', position=?,
+                       modified_by=?, modified_at=?
+                   WHERE id=? AND COALESCE(modified_at, '')=?""",
+                (
+                    temporary_aisle, str(row["id"]), username, now,
+                    int(row["id"]), str(row["modified_at"] or ""),
+                ),
+            )
+            if result.rowcount != 1:
+                raise _StaleBulkProductError()
+        for row, (target_shelf, target_position) in zip(ordered_rows, destinations):
+            result = db.execute(
+                """UPDATE products
+                   SET aisle=?, side=?, section=?, shelf=?, position=?,
+                       modified_by=?, modified_at=?
+                   WHERE id=? AND aisle=? AND side='__bulk__'""",
+                (
+                    aisle, side, section, str(target_shelf), str(target_position),
+                    username, now, int(row["id"]), temporary_aisle,
+                ),
+            )
+            if result.rowcount != 1:
+                raise _StaleBulkProductError()
+        db.commit()
+    except _StaleBulkProductError:
+        db.rollback()
+        return jsonify({
+            "success": False,
+            "code": "stale_products",
+            "error": "La selection a change pendant le deplacement. Rechargez le plan; aucun produit n'a ete modifie.",
+        }), 409
+    except Exception as exc:
+        db.rollback()
+        print(f"[Plan] Bulk move rolled back: {exc}")
+        return jsonify({
+            "success": False,
+            "error": "Deplacement annule: aucun produit n'a ete modifie.",
+        }), 409 if isinstance(exc, DatabaseIntegrityError) else 500
+
+    product_updates = [
+        {
+            "id": int(row["id"]),
+            "aisle": aisle,
+            "side": side,
+            "section": section,
+            "shelf": str(target_shelf),
+            "position": str(target_position),
+            "modified_by": username,
+            "modified_at": now,
+        }
+        for row, (target_shelf, target_position) in zip(ordered_rows, destinations)
+    ]
+    return jsonify({
+        "success": True,
+        "moved_products": len(product_updates),
+        "product_updates": product_updates,
+    })
+
+
+@layout_bp.route("/api/layout/products/bulk-delete", methods=["POST"])
+def bulk_delete_layout_products():
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json() or {}
+    product_ids = _clean_product_ids(data.get("product_ids"))
+    if not product_ids:
+        return jsonify({"success": False, "error": "Aucun produit selectionne."}), 400
+    db = get_db()
+    rows = _product_rows_by_ids(db, product_ids)
+    if len(rows) != len(product_ids):
+        return jsonify({
+            "success": False,
+            "code": "stale_products",
+            "error": "La selection a change. Rechargez le plan; aucun produit n'a ete supprime.",
+        }), 409
+    expected_products = data.get("expected_products")
+    if isinstance(expected_products, dict):
+        stale_ids = [
+            int(row["id"]) for row in rows
+            if str(row["id"]) in expected_products
+            and str(row["modified_at"] or "") != str(expected_products[str(row["id"])] or "")
+        ]
+        if stale_ids:
+            return jsonify({
+                "success": False,
+                "code": "stale_products",
+                "error": "Un produit selectionne a ete modifie. Rechargez le plan avant de le supprimer.",
+                "stale_product_ids": stale_ids,
+            }), 409
+    from routes.products import archive_and_delete_products
+    try:
+        # Lock and re-check every selected row before archiving any of them.
+        for row in rows:
+            result = db.execute(
+                """UPDATE products SET id=id
+                   WHERE id=? AND COALESCE(modified_at, '')=?""",
+                (int(row["id"]), str(row["modified_at"] or "")),
+            )
+            if result.rowcount != 1:
+                raise _StaleBulkProductError()
+        removed_count = archive_and_delete_products(db, rows, username, utc_now_iso())
+        db.commit()
+    except _StaleBulkProductError:
+        db.rollback()
+        return jsonify({
+            "success": False,
+            "code": "stale_products",
+            "error": "La selection a change pendant la suppression. Rechargez le plan; aucun produit n'a ete retire.",
+        }), 409
+    except Exception as exc:
+        db.rollback()
+        print(f"[Plan] Bulk delete rolled back: {exc}")
+        return jsonify({
+            "success": False,
+            "error": "Suppression annulee: aucun produit n'a ete retire.",
+        }), 500
+    deleted_ids = [int(row["id"]) for row in rows]
+    return jsonify({
+        "success": True,
+        "removed_products": removed_count,
+        "deleted_product_ids": deleted_ids,
+    })
 
 
 @layout_bp.route("/api/layout/aisles", methods=["POST"])

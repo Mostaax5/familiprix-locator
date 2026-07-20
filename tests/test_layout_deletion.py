@@ -289,6 +289,114 @@ class LayoutDeletionTests(unittest.TestCase):
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM aisle_layouts").fetchone()[0], 0)
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM removed_products").fetchone()[0], 3)
 
+    def test_bulk_move_packs_selected_products_atomically_into_one_section(self):
+        response = self.post(
+            "/api/layout/products/bulk-move",
+            {
+                "product_ids": [2, 1],
+                "target": {
+                    "aisle": "A1", "side": "Gauche", "section": "2",
+                    "mode": "section",
+                },
+                "expected_layout_modified_at": "",
+                "expected_products": {"1": "", "2": ""},
+            },
+        )
+        result = response.get_json()
+        rows = self.db.execute(
+            "SELECT id, section, shelf, position FROM products ORDER BY id"
+        ).fetchall()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(result["moved_products"], 2)
+        self.assertEqual(
+            [(item["id"], item["shelf"], item["position"]) for item in result["product_updates"]],
+            [(1, "1", "2"), (2, "1", "3")],
+        )
+        self.assertEqual(
+            [(row["id"], row["section"], row["shelf"], row["position"]) for row in rows],
+            [(1, "2", "1", "2"), (2, "2", "1", "3"), (3, "2", "1", "1")],
+        )
+        self.assertEqual(self.stored_config(), self.config)
+
+    def test_bulk_move_with_insufficient_space_changes_nothing(self):
+        self.db.executemany(
+            """INSERT INTO products (id, aisle, side, section, shelf, position)
+               VALUES (?, 'A1', 'Gauche', '1', '1', ?)""",
+            [(4, "2"), (5, "3")],
+        )
+        self.db.commit()
+        before = [tuple(row) for row in self.db.execute(
+            "SELECT id, aisle, side, section, shelf, position FROM products ORDER BY id"
+        ).fetchall()]
+
+        response = self.post(
+            "/api/layout/products/bulk-move",
+            {
+                "product_ids": [1, 2],
+                "target": {
+                    "aisle": "A1", "side": "Gauche", "section": "1",
+                    "shelf": "1", "mode": "shelf",
+                },
+            },
+        )
+        after = [tuple(row) for row in self.db.execute(
+            "SELECT id, aisle, side, section, shelf, position FROM products ORDER BY id"
+        ).fetchall()]
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Espace insuffisant", response.get_json()["error"])
+        self.assertEqual(after, before)
+
+    def test_bulk_move_rejects_a_stale_selected_product(self):
+        self.db.execute("UPDATE products SET modified_at='server-v2' WHERE id=1")
+        self.db.commit()
+
+        response = self.post(
+            "/api/layout/products/bulk-move",
+            {
+                "product_ids": [1],
+                "target": {
+                    "aisle": "A1", "side": "Gauche", "section": "2",
+                    "mode": "section",
+                },
+                "expected_products": {"1": "phone-v1"},
+            },
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["code"], "stale_products")
+        row = self.db.execute(
+            "SELECT section, shelf, position FROM products WHERE id=1"
+        ).fetchone()
+        self.assertEqual(tuple(row), ("1", "1", "1"))
+
+    def test_bulk_delete_removes_only_selected_products_and_keeps_structure(self):
+        response = self.post(
+            "/api/layout/products/bulk-delete",
+            {"product_ids": [1, 3], "expected_products": {"1": "", "3": ""}},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["removed_products"], 2)
+        self.assertEqual(
+            [row[0] for row in self.db.execute("SELECT id FROM products ORDER BY id").fetchall()],
+            [2],
+        )
+        self.assertEqual(self.stored_config(), self.config)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM removed_products").fetchone()[0], 2)
+
+    def test_bulk_delete_with_a_stale_selection_deletes_nothing(self):
+        response = self.post(
+            "/api/layout/products/bulk-delete",
+            {"product_ids": [1, 999999]},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["code"], "stale_products")
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM products").fetchone()[0], 3)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM removed_products").fetchone()[0], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
