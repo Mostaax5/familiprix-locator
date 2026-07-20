@@ -121,7 +121,7 @@ def layout_metrics(config):
 def get_layout_row(db, aisle):
     return db.execute(
         """SELECT aisle, config_json, max_section, max_shelf, max_position,
-                  enabled, modified_by, modified_at
+                  sort_order, enabled, modified_by, modified_at
            FROM aisle_layouts WHERE aisle=?""",
         (str(aisle).strip(),),
     ).fetchone()
@@ -226,6 +226,10 @@ class _StaleBulkProductError(Exception):
     pass
 
 
+class _StaleStructureError(Exception):
+    pass
+
+
 def _product_rows_by_ids(db, product_ids):
     rows = []
     for start in range(0, len(product_ids), 400):
@@ -317,6 +321,122 @@ def _bulk_move_destinations(db, selected_ids, aisle, side, section, shelf, mode,
     return destinations[:len(selected_ids)], ""
 
 
+def _lock_layout_rows(db, rows, expected_versions=None):
+    expected_versions = expected_versions if isinstance(expected_versions, dict) else {}
+    ordered = sorted(rows, key=lambda row: aisle_sort_key(row["aisle"]))
+    for row in ordered:
+        aisle = str(row["aisle"])
+        if aisle in expected_versions:
+            expected = str(expected_versions.get(aisle) or "")
+            if expected != str(row["modified_at"] or ""):
+                raise _StaleStructureError()
+    for row in ordered:
+        result = db.execute(
+            """UPDATE aisle_layouts SET aisle=aisle
+               WHERE aisle=? AND COALESCE(modified_at, '')=?""",
+            (str(row["aisle"]), str(row["modified_at"] or "")),
+        )
+        if result.rowcount != 1:
+            raise _StaleStructureError()
+
+
+def _products_in_containers(db, containers):
+    unique = []
+    seen = set()
+    for aisle, side, section in containers:
+        key = (str(aisle), str(side), str(section))
+        if key not in seen:
+            seen.add(key)
+            unique.append(key)
+    if not unique:
+        return []
+    clauses = []
+    params = []
+    for aisle, side, section in unique:
+        clauses.append("(aisle=? AND side=? AND section=?)")
+        params.extend([aisle, side, section])
+    return db.execute(
+        "SELECT id, aisle, side, section, shelf, position, modified_at "
+        f"FROM products WHERE {' OR '.join(clauses)}",
+        tuple(params),
+    ).fetchall()
+
+
+def _apply_structure_product_locations(db, rows, location_mapper, username, now):
+    changes = []
+    location_fields = ("aisle", "side", "section", "shelf", "position")
+    for row in rows:
+        current = {field: str(row[field]) for field in location_fields}
+        target = location_mapper(row)
+        target = {field: str(target.get(field, current[field])) for field in location_fields}
+        if any(target[field] != current[field] for field in location_fields):
+            changes.append((row, target))
+
+    temporary_aisle = "__structure_move__"
+    if changes:
+        result = db.executemany(
+            """UPDATE products
+               SET aisle=?, side='__structure__', section='0', shelf='0', position=?,
+                   modified_by=?, modified_at=?
+               WHERE id=? AND COALESCE(modified_at, '')=?""",
+            [
+                (
+                    temporary_aisle, str(row["id"]), username, now,
+                    int(row["id"]), str(row["modified_at"] or ""),
+                )
+                for row, _target in changes
+            ],
+        )
+        if result.rowcount != len(changes):
+            raise _StaleStructureError()
+
+    updates = []
+    if changes:
+        result = db.executemany(
+            """UPDATE products
+               SET aisle=?, side=?, section=?, shelf=?, position=?,
+                   modified_by=?, modified_at=?
+               WHERE id=? AND aisle=? AND side='__structure__' AND position=?""",
+            [
+                (
+                    target["aisle"], target["side"], target["section"],
+                    target["shelf"], target["position"], username, now,
+                    int(row["id"]), temporary_aisle, str(row["id"]),
+                )
+                for row, target in changes
+            ],
+        )
+        if result.rowcount != len(changes):
+            raise _StaleStructureError()
+    for row, target in changes:
+        updates.append({
+            "id": int(row["id"]), **target,
+            "modified_by": username, "modified_at": now,
+        })
+    return updates
+
+
+def _final_index_from_boundary(source_index, boundary_index, item_count):
+    boundary = max(0, min(clamp_non_negative_int(boundary_index), item_count))
+    if boundary > source_index:
+        boundary -= 1
+    return max(0, min(boundary, max(0, item_count - 1)))
+
+
+def _reordered_number(old_index, source_index, final_index):
+    if old_index == source_index:
+        return final_index
+    if source_index < final_index and source_index < old_index <= final_index:
+        return old_index - 1
+    if final_index < source_index and final_index <= old_index < source_index:
+        return old_index + 1
+    return old_index
+
+
+def _configs_response(configs):
+    return {str(aisle): config for aisle, config in configs.items()}
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @layout_bp.route("/api/layout/aisles", methods=["GET"])
@@ -336,11 +456,11 @@ def get_layout_aisles():
         return "", 304
     aisles = db.execute(
         """
-        SELECT l.aisle, l.max_section, l.max_shelf, l.max_position, l.config_json, l.enabled, l.modified_by, l.modified_at,
+        SELECT l.aisle, l.sort_order, l.max_section, l.max_shelf, l.max_position, l.config_json, l.enabled, l.modified_by, l.modified_at,
                COUNT(p.id) AS product_count
         FROM aisle_layouts l
         LEFT JOIN products p ON p.aisle = l.aisle
-        GROUP BY l.aisle, l.max_section, l.max_shelf, l.max_position, l.config_json, l.enabled, l.modified_by, l.modified_at
+        GROUP BY l.aisle, l.sort_order, l.max_section, l.max_shelf, l.max_position, l.config_json, l.enabled, l.modified_by, l.modified_at
         """
     ).fetchall()
     result = []
@@ -349,10 +469,79 @@ def get_layout_aisles():
         item["config"] = normalize_layout_config(item.get("config_json", ""), item.get("max_section"), item.get("max_shelf"), item.get("max_position"))
         item.pop("config_json", None)
         result.append(item)
-    result.sort(key=lambda item: aisle_sort_key(item.get("aisle")))
+    result.sort(key=lambda item: (
+        clamp_non_negative_int(item.get("sort_order"), 10 ** 9) or 10 ** 9,
+        aisle_sort_key(item.get("aisle")),
+    ))
     response = jsonify(result)
     response.set_etag(etag, weak=True)
     return response
+
+
+@layout_bp.route("/api/layout/aisles/reorder", methods=["POST"])
+def reorder_layout_aisles():
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json() or {}
+    raw_order = data.get("ordered_aisles")
+    if not isinstance(raw_order, list):
+        return jsonify({"success": False, "error": "Ordre des allees invalide."}), 400
+    ordered_aisles = []
+    seen = set()
+    for value in raw_order:
+        aisle = str(value or "").strip()
+        if not aisle or aisle in seen:
+            return jsonify({"success": False, "error": "Ordre des allees invalide."}), 400
+        seen.add(aisle)
+        ordered_aisles.append(aisle)
+
+    db = get_db()
+    rows = db.execute(
+        """SELECT aisle, config_json, max_section, max_shelf, max_position,
+                  sort_order, enabled, modified_by, modified_at
+           FROM aisle_layouts"""
+    ).fetchall()
+    existing = {str(row["aisle"]) for row in rows}
+    if set(ordered_aisles) != existing or len(ordered_aisles) != len(rows):
+        return jsonify({
+            "success": False,
+            "code": "stale_layout",
+            "error": "Le plan a change. Rechargez-le avant de deplacer une allee.",
+        }), 409
+    now = utc_now_iso()
+    try:
+        _lock_layout_rows(db, rows, data.get("expected_layouts"))
+        result = db.executemany(
+            """UPDATE aisle_layouts
+               SET sort_order=?, modified_by=?, modified_at=? WHERE aisle=?""",
+            [
+                (sort_order, username, now, aisle)
+                for sort_order, aisle in enumerate(ordered_aisles, start=1)
+            ],
+        )
+        if result.rowcount != len(ordered_aisles):
+            raise _StaleStructureError()
+        db.commit()
+    except _StaleStructureError:
+        db.rollback()
+        return jsonify({
+            "success": False,
+            "code": "stale_layout",
+            "error": "Le plan a change pendant le deplacement. Aucune allee n'a ete deplacee.",
+        }), 409
+    except Exception as exc:
+        db.rollback()
+        print(f"[Plan] Aisle reorder rolled back: {exc}")
+        return jsonify({
+            "success": False,
+            "error": "Deplacement annule: l'ordre des allees est reste intact.",
+        }), 500
+    return jsonify({
+        "success": True,
+        "ordered_aisles": ordered_aisles,
+        "layout_versions": {aisle: now for aisle in ordered_aisles},
+    })
 
 
 @layout_bp.route("/api/layout/products/bulk-move", methods=["POST"])
@@ -422,32 +611,36 @@ def bulk_move_layout_products():
     try:
         # Vacate every source slot first. This makes moves and swaps collision-free
         # even when the destination contains another selected product.
-        for row in ordered_rows:
-            result = db.execute(
-                """UPDATE products
-                   SET aisle=?, side='__bulk__', section='0', shelf='0', position=?,
-                       modified_by=?, modified_at=?
-                   WHERE id=? AND COALESCE(modified_at, '')=?""",
+        result = db.executemany(
+            """UPDATE products
+               SET aisle=?, side='__bulk__', section='0', shelf='0', position=?,
+                   modified_by=?, modified_at=?
+               WHERE id=? AND COALESCE(modified_at, '')=?""",
+            [
                 (
                     temporary_aisle, str(row["id"]), username, now,
                     int(row["id"]), str(row["modified_at"] or ""),
-                ),
-            )
-            if result.rowcount != 1:
-                raise _StaleBulkProductError()
-        for row, (target_shelf, target_position) in zip(ordered_rows, destinations):
-            result = db.execute(
-                """UPDATE products
-                   SET aisle=?, side=?, section=?, shelf=?, position=?,
-                       modified_by=?, modified_at=?
-                   WHERE id=? AND aisle=? AND side='__bulk__'""",
+                )
+                for row in ordered_rows
+            ],
+        )
+        if result.rowcount != len(ordered_rows):
+            raise _StaleBulkProductError()
+        result = db.executemany(
+            """UPDATE products
+               SET aisle=?, side=?, section=?, shelf=?, position=?,
+                   modified_by=?, modified_at=?
+               WHERE id=? AND aisle=? AND side='__bulk__'""",
+            [
                 (
                     aisle, side, section, str(target_shelf), str(target_position),
                     username, now, int(row["id"]), temporary_aisle,
-                ),
-            )
-            if result.rowcount != 1:
-                raise _StaleBulkProductError()
+                )
+                for row, (target_shelf, target_position) in zip(ordered_rows, destinations)
+            ],
+        )
+        if result.rowcount != len(ordered_rows):
+            raise _StaleBulkProductError()
         db.commit()
     except _StaleBulkProductError:
         db.rollback()
@@ -518,14 +711,16 @@ def bulk_delete_layout_products():
     from routes.products import archive_and_delete_products
     try:
         # Lock and re-check every selected row before archiving any of them.
-        for row in rows:
-            result = db.execute(
-                """UPDATE products SET id=id
-                   WHERE id=? AND COALESCE(modified_at, '')=?""",
-                (int(row["id"]), str(row["modified_at"] or "")),
-            )
-            if result.rowcount != 1:
-                raise _StaleBulkProductError()
+        result = db.executemany(
+            """UPDATE products SET id=id
+               WHERE id=? AND COALESCE(modified_at, '')=?""",
+            [
+                (int(row["id"]), str(row["modified_at"] or ""))
+                for row in rows
+            ],
+        )
+        if result.rowcount != len(rows):
+            raise _StaleBulkProductError()
         removed_count = archive_and_delete_products(db, rows, username, utc_now_iso())
         db.commit()
     except _StaleBulkProductError:
@@ -572,15 +767,19 @@ def create_layout_aisle():
     if exists:
         return jsonify({"error": f"L’allée {aisle} existe déjà."}), 409
     now = utc_now_iso()
+    order_row = db.execute(
+        "SELECT COALESCE(MAX(sort_order), 0) AS max_order FROM aisle_layouts"
+    ).fetchone()
+    sort_order = int(order_row["max_order"] or 0) + 1
     db.execute(
         """
-        INSERT INTO aisle_layouts (aisle, max_section, max_shelf, max_position, config_json, enabled, modified_by, modified_at)
-        VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+        INSERT INTO aisle_layouts (aisle, sort_order, max_section, max_shelf, max_position, config_json, enabled, modified_by, modified_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
         """,
-        (aisle, max_section, max_shelf, max_position, json.dumps(config), username, now),
+        (aisle, sort_order, max_section, max_shelf, max_position, json.dumps(config), username, now),
     )
     db.commit()
-    return jsonify({"success": True, "modified_at": now})
+    return jsonify({"success": True, "modified_at": now, "sort_order": sort_order})
 
 
 @layout_bp.route("/api/layout/aisles/<aisle>", methods=["PUT"])
@@ -646,18 +845,314 @@ def delete_layout_aisle(aisle):
     if error:
         return error
     db = get_db()
-    if not get_layout_row(db, aisle):
+    row = get_layout_row(db, aisle)
+    if not row:
         return jsonify({"error": "Allée non trouvée."}), 404
+    data = request.get_json(silent=True) or {}
+    stale = _stale_layout_response(row, data)
+    if stale:
+        return stale
     from routes.products import archive_and_delete_products
-    products = db.execute("SELECT * FROM products WHERE aisle=?", (aisle,)).fetchall()
-    removed_products = archive_and_delete_products(
-        db, products, username, utc_now_iso()
-    )
-    result = db.execute("DELETE FROM aisle_layouts WHERE aisle=?", (aisle,))
-    db.commit()
-    if result.rowcount == 0:
-        return jsonify({"error": "Allée non trouvée."}), 404
+    try:
+        _lock_layout_rows(db, [row])
+        products = db.execute("SELECT * FROM products WHERE aisle=?", (aisle,)).fetchall()
+        removed_products = archive_and_delete_products(
+            db, products, username, utc_now_iso()
+        )
+        result = db.execute("DELETE FROM aisle_layouts WHERE aisle=?", (aisle,))
+        if result.rowcount != 1:
+            raise _StaleStructureError()
+        db.commit()
+    except _StaleStructureError:
+        db.rollback()
+        return jsonify({
+            "success": False, "code": "stale_layout",
+            "error": "Cette allée a changé. Rien n'a été supprimé; rechargez le plan.",
+        }), 409
+    except Exception as exc:
+        db.rollback()
+        print(f"[Plan] Aisle deletion rolled back: {exc}")
+        return jsonify({
+            "success": False,
+            "error": "Suppression annulée: l'allée et ses produits sont restés intacts.",
+        }), 500
     return jsonify({"success": True, "message": f"Allée {aisle} retirée par {username}. {removed_products} produit(s) supprime(s)."})
+
+
+@layout_bp.route("/api/layout/structure/move-section", methods=["POST"])
+def move_layout_section():
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json() or {}
+    source = data.get("source") if isinstance(data.get("source"), dict) else {}
+    target = data.get("target") if isinstance(data.get("target"), dict) else {}
+    source_aisle = str(source.get("aisle", "")).strip()
+    source_side = str(source.get("side", "")).strip()
+    target_aisle = str(target.get("aisle", "")).strip()
+    target_side = str(target.get("side", "")).strip()
+    if source.get("index") is None or target.get("index") is None:
+        return jsonify({"success": False, "error": "Destination de section invalide."}), 400
+    source_index = clamp_non_negative_int(source.get("index"))
+    target_boundary = clamp_non_negative_int(target.get("index"))
+    if (
+        not source_aisle or not target_aisle
+        or source_side not in ("Gauche", "Droite")
+        or target_side not in ("Gauche", "Droite")
+    ):
+        return jsonify({"success": False, "error": "Destination de section invalide."}), 400
+
+    db = get_db()
+    source_row = get_layout_row(db, source_aisle)
+    target_row = get_layout_row(db, target_aisle)
+    if not source_row or not target_row:
+        return jsonify({"success": False, "error": "Allee introuvable."}), 404
+    layout_rows = [source_row] if source_aisle == target_aisle else [source_row, target_row]
+    now = utc_now_iso()
+    try:
+        _lock_layout_rows(db, layout_rows, data.get("expected_layouts"))
+        source_config = normalize_layout_config(
+            source_row["config_json"], source_row["max_section"],
+            source_row["max_shelf"], source_row["max_position"],
+        )
+        target_config = source_config if source_aisle == target_aisle else normalize_layout_config(
+            target_row["config_json"], target_row["max_section"],
+            target_row["max_shelf"], target_row["max_position"],
+        )
+        source_sections = source_config["sides"][source_side]["sections"]
+        target_sections = target_config["sides"][target_side]["sections"]
+        if source_index >= len(source_sections):
+            db.rollback()
+            return jsonify({"success": False, "error": "Cette section n'existe plus."}), 409
+
+        same_container = source_aisle == target_aisle and source_side == target_side
+        clauses = ["(aisle=? AND side=?)"]
+        params = [source_aisle, source_side]
+        if not same_container:
+            clauses.append("(aisle=? AND side=?)")
+            params.extend([target_aisle, target_side])
+        rows = db.execute(
+            "SELECT id, aisle, side, section, shelf, position, modified_at "
+            f"FROM products WHERE {' OR '.join(clauses)}",
+            tuple(params),
+        ).fetchall()
+
+        if same_container:
+            final_index = _final_index_from_boundary(
+                source_index, target_boundary, len(source_sections)
+            )
+            moved_section = source_sections.pop(source_index)
+            source_sections.insert(final_index, moved_section)
+        else:
+            final_index = max(0, min(target_boundary, len(target_sections)))
+            moved_section = source_sections.pop(source_index)
+            target_sections.insert(final_index, moved_section)
+
+        def section_location(row):
+            location = {
+                field: str(row[field])
+                for field in ("aisle", "side", "section", "shelf", "position")
+            }
+            try:
+                old_index = int(str(row["section"])) - 1
+            except (TypeError, ValueError):
+                return location
+            row_aisle, row_side = str(row["aisle"]), str(row["side"])
+            if same_container:
+                if row_aisle == source_aisle and row_side == source_side:
+                    location["section"] = str(
+                        _reordered_number(old_index, source_index, final_index) + 1
+                    )
+                return location
+            if row_aisle == source_aisle and row_side == source_side:
+                if old_index == source_index:
+                    location.update({
+                        "aisle": target_aisle,
+                        "side": target_side,
+                        "section": str(final_index + 1),
+                    })
+                elif old_index > source_index:
+                    location["section"] = str(old_index)
+            elif row_aisle == target_aisle and row_side == target_side:
+                if old_index >= final_index:
+                    location["section"] = str(old_index + 2)
+            return location
+
+        product_updates = _apply_structure_product_locations(
+            db, rows, section_location, username, now
+        )
+        configs = {source_aisle: source_config, target_aisle: target_config}
+        for aisle_key, config in configs.items():
+            _persist_aisle_config(db, aisle_key, config, username, now)
+        db.commit()
+    except _StaleStructureError:
+        db.rollback()
+        return jsonify({
+            "success": False, "code": "stale_layout",
+            "error": "Le plan a change pendant le deplacement. Aucune section n'a ete deplacee.",
+        }), 409
+    except Exception as exc:
+        db.rollback()
+        print(f"[Plan] Section move rolled back: {exc}")
+        return jsonify({
+            "success": False,
+            "error": "Deplacement annule: la section et ses produits sont restes en place.",
+        }), 409 if isinstance(exc, DatabaseIntegrityError) else 500
+    return jsonify({
+        "success": True,
+        "source": source,
+        "target": {"aisle": target_aisle, "side": target_side, "index": final_index},
+        "configs": _configs_response(configs),
+        "layout_versions": {aisle_key: now for aisle_key in configs},
+        "product_updates": product_updates,
+    })
+
+
+@layout_bp.route("/api/layout/structure/move-shelf", methods=["POST"])
+def move_layout_shelf():
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json() or {}
+    source = data.get("source") if isinstance(data.get("source"), dict) else {}
+    target = data.get("target") if isinstance(data.get("target"), dict) else {}
+    required = (
+        source.get("aisle"), source.get("side"), source.get("section_index"), source.get("index"),
+        target.get("aisle"), target.get("side"), target.get("section_index"), target.get("index"),
+    )
+    if any(value is None or str(value).strip() == "" for value in required):
+        return jsonify({"success": False, "error": "Destination de tablette invalide."}), 400
+    source_aisle = str(source["aisle"]).strip()
+    source_side = str(source["side"]).strip()
+    source_section_index = clamp_non_negative_int(source["section_index"])
+    source_index = clamp_non_negative_int(source["index"])
+    target_aisle = str(target["aisle"]).strip()
+    target_side = str(target["side"]).strip()
+    target_section_index = clamp_non_negative_int(target["section_index"])
+    target_boundary = clamp_non_negative_int(target["index"])
+    if source_side not in ("Gauche", "Droite") or target_side not in ("Gauche", "Droite"):
+        return jsonify({"success": False, "error": "Les tablettes doivent rester dans une section du plan."}), 400
+
+    db = get_db()
+    source_row = get_layout_row(db, source_aisle)
+    target_row = get_layout_row(db, target_aisle)
+    if not source_row or not target_row:
+        return jsonify({"success": False, "error": "Allee introuvable."}), 404
+    layout_rows = [source_row] if source_aisle == target_aisle else [source_row, target_row]
+    now = utc_now_iso()
+    try:
+        _lock_layout_rows(db, layout_rows, data.get("expected_layouts"))
+        source_config = normalize_layout_config(
+            source_row["config_json"], source_row["max_section"],
+            source_row["max_shelf"], source_row["max_position"],
+        )
+        target_config = source_config if source_aisle == target_aisle else normalize_layout_config(
+            target_row["config_json"], target_row["max_section"],
+            target_row["max_shelf"], target_row["max_position"],
+        )
+        source_sections = source_config["sides"][source_side]["sections"]
+        target_sections = target_config["sides"][target_side]["sections"]
+        if source_section_index >= len(source_sections) or target_section_index >= len(target_sections):
+            db.rollback()
+            return jsonify({"success": False, "error": "La section de destination n'existe plus."}), 409
+        source_section = source_sections[source_section_index]
+        target_section = target_sections[target_section_index]
+        if source_index >= len(source_section["shelves"]):
+            db.rollback()
+            return jsonify({"success": False, "error": "Cette tablette n'existe plus."}), 409
+
+        same_container = (
+            source_aisle == target_aisle and source_side == target_side
+            and source_section_index == target_section_index
+        )
+        rows = _products_in_containers(db, [
+            (source_aisle, source_side, str(source_section_index + 1)),
+            (target_aisle, target_side, str(target_section_index + 1)),
+        ])
+        if same_container:
+            final_index = _final_index_from_boundary(
+                source_index, target_boundary, len(source_section["shelves"])
+            )
+        else:
+            final_index = max(0, min(target_boundary, len(target_section["shelves"])))
+
+        moved_capacity = source_section["shelves"].pop(source_index)
+        source_labels = source_section.setdefault("labels", [])
+        moved_label = source_labels.pop(source_index) if source_index < len(source_labels) else ""
+        target_section["shelves"].insert(final_index, moved_capacity)
+        target_labels = target_section.setdefault("labels", [])
+        target_labels.insert(final_index, moved_label)
+
+        def shelf_location(row):
+            location = {
+                field: str(row[field])
+                for field in ("aisle", "side", "section", "shelf", "position")
+            }
+            try:
+                old_index = int(str(row["shelf"])) - 1
+            except (TypeError, ValueError):
+                return location
+            row_container = (
+                str(row["aisle"]), str(row["side"]), str(row["section"])
+            )
+            source_container = (
+                source_aisle, source_side, str(source_section_index + 1)
+            )
+            target_container = (
+                target_aisle, target_side, str(target_section_index + 1)
+            )
+            if same_container:
+                if row_container == source_container:
+                    location["shelf"] = str(
+                        _reordered_number(old_index, source_index, final_index) + 1
+                    )
+                return location
+            if row_container == source_container:
+                if old_index == source_index:
+                    location.update({
+                        "aisle": target_aisle,
+                        "side": target_side,
+                        "section": str(target_section_index + 1),
+                        "shelf": str(final_index + 1),
+                    })
+                elif old_index > source_index:
+                    location["shelf"] = str(old_index)
+            elif row_container == target_container:
+                if old_index >= final_index:
+                    location["shelf"] = str(old_index + 2)
+            return location
+
+        product_updates = _apply_structure_product_locations(
+            db, rows, shelf_location, username, now
+        )
+        configs = {source_aisle: source_config, target_aisle: target_config}
+        for aisle_key, config in configs.items():
+            _persist_aisle_config(db, aisle_key, config, username, now)
+        db.commit()
+    except _StaleStructureError:
+        db.rollback()
+        return jsonify({
+            "success": False, "code": "stale_layout",
+            "error": "Le plan a change pendant le deplacement. Aucune tablette n'a ete deplacee.",
+        }), 409
+    except Exception as exc:
+        db.rollback()
+        print(f"[Plan] Shelf move rolled back: {exc}")
+        return jsonify({
+            "success": False,
+            "error": "Deplacement annule: la tablette et ses produits sont restes en place.",
+        }), 409 if isinstance(exc, DatabaseIntegrityError) else 500
+    return jsonify({
+        "success": True,
+        "source": source,
+        "target": {
+            "aisle": target_aisle, "side": target_side,
+            "section_index": target_section_index, "index": final_index,
+        },
+        "configs": _configs_response(configs),
+        "layout_versions": {aisle_key: now for aisle_key in configs},
+        "product_updates": product_updates,
+    })
 
 
 @layout_bp.route("/api/layout/aisles/<aisle>/swap-sections", methods=["POST"])

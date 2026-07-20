@@ -80,6 +80,17 @@ class DatabaseConnection:
 
         return CursorResult(cursor, self.backend, lastrowid=lastrowid)
 
+    def executemany(self, query, param_sequences):
+        cursor = self.connection.cursor()
+        sql = query.replace("?", "%s") if self.backend == "postgres" else query
+        params = [tuple(values or ()) for values in param_sequences]
+        try:
+            cursor.executemany(sql, params)
+        except INTEGRITY_ERRORS as exc:
+            self.connection.rollback()
+            raise DatabaseIntegrityError(str(exc)) from exc
+        return CursorResult(cursor, self.backend)
+
     def commit(self):
         self.connection.commit()
 
@@ -203,6 +214,28 @@ def init_db():
         db.close()
 
 
+def ensure_layout_sort_orders(db):
+    """Give pre-existing aisles a stable visual order after the column migration."""
+    rows = db.execute(
+        "SELECT aisle, sort_order FROM aisle_layouts"
+    ).fetchall()
+    pending = [row for row in rows if int(row["sort_order"] or 0) <= 0]
+    if not pending:
+        return
+    next_order = max([int(row["sort_order"] or 0) for row in rows] + [0])
+
+    def aisle_key(row):
+        value = str(row["aisle"] or "").strip()
+        return (0, int(value), value) if value.isdigit() else (1, value.lower(), value)
+
+    for row in sorted(pending, key=aisle_key):
+        next_order += 1
+        db.execute(
+            "UPDATE aisle_layouts SET sort_order=? WHERE aisle=?",
+            (next_order, str(row["aisle"])),
+        )
+
+
 def init_postgres_db(db):
     db.execute("""
         CREATE TABLE IF NOT EXISTS products (
@@ -239,6 +272,7 @@ def init_postgres_db(db):
     db.execute("""
         CREATE TABLE IF NOT EXISTS aisle_layouts (
             aisle        TEXT PRIMARY KEY,
+            sort_order   INTEGER NOT NULL DEFAULT 0,
             max_section  TEXT NOT NULL DEFAULT '1',
             max_shelf    TEXT NOT NULL DEFAULT '5',
             max_position TEXT NOT NULL DEFAULT '8',
@@ -351,6 +385,8 @@ def init_postgres_db(db):
 
     db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS max_section TEXT NOT NULL DEFAULT '1'")
     db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS config_json TEXT NOT NULL DEFAULT ''")
+    db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0")
+    ensure_layout_sort_orders(db)
 
 
 def init_sqlite_db(db):
@@ -389,6 +425,7 @@ def init_sqlite_db(db):
     db.execute("""
         CREATE TABLE IF NOT EXISTS aisle_layouts (
             aisle        TEXT PRIMARY KEY,
+            sort_order   INTEGER NOT NULL DEFAULT 0,
             max_section  TEXT NOT NULL DEFAULT '1',
             max_shelf    TEXT NOT NULL DEFAULT '5',
             max_position TEXT NOT NULL DEFAULT '8',
@@ -527,6 +564,9 @@ def init_sqlite_db(db):
         db.execute("ALTER TABLE aisle_layouts ADD COLUMN max_section TEXT NOT NULL DEFAULT '1'")
     if "config_json" not in layout_columns:
         db.execute("ALTER TABLE aisle_layouts ADD COLUMN config_json TEXT NOT NULL DEFAULT ''")
+    if "sort_order" not in layout_columns:
+        db.execute("ALTER TABLE aisle_layouts ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
+    ensure_layout_sort_orders(db)
 
 
 def ensure_best_effort_unique_indexes(db):

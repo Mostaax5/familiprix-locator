@@ -98,7 +98,8 @@ class PlanogramMetadataTests(unittest.TestCase):
         db.execute("CREATE TABLE users (username TEXT PRIMARY KEY, last_seen TEXT)")
         db.execute(
             """CREATE TABLE aisle_layouts (
-                aisle TEXT PRIMARY KEY, max_section TEXT, max_shelf TEXT,
+                aisle TEXT PRIMARY KEY, sort_order INTEGER DEFAULT 0,
+                max_section TEXT, max_shelf TEXT,
                 max_position TEXT, config_json TEXT, enabled INTEGER,
                 modified_by TEXT DEFAULT '', modified_at TEXT DEFAULT ''
             )"""

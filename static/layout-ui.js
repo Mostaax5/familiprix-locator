@@ -126,7 +126,13 @@ function countSlotsFromConfig(config) {
 }
 
 function sortMapLayouts() {
-  mapLayouts.sort((a, b) => (Number(a.aisle) || 0) - (Number(b.aisle) || 0) || String(a.aisle).localeCompare(String(b.aisle)));
+  mapLayouts.sort((a, b) => {
+    const orderA = Number(a.sort_order) > 0 ? Number(a.sort_order) : Number.MAX_SAFE_INTEGER;
+    const orderB = Number(b.sort_order) > 0 ? Number(b.sort_order) : Number.MAX_SAFE_INTEGER;
+    return orderA - orderB
+      || (Number(a.aisle) || 0) - (Number(b.aisle) || 0)
+      || String(a.aisle).localeCompare(String(b.aisle));
+  });
 }
 
 function syncLayoutRecord(layout) {
@@ -1185,6 +1191,14 @@ let planMoveMode = false;
 let planBulkActionBusy = false;
 let _planScopeIndexVersion = -1;
 let _planScopeIndex = null;
+let planStructureMoveSource = null;
+let planStructureMoveBusy = false;
+let planStructurePointer = null;
+let planStructurePointerFrame = 0;
+let planStructureActiveDrop = null;
+let planStructurePointerTarget = null;
+let planStructureHoverNode = null;
+let planStructureSuppressClickUntil = 0;
 
 function _planScopeKey(...parts) {
   return parts.map(part => String(part ?? '')).join('\x1f');
@@ -1317,7 +1331,10 @@ function syncPlanSelectionUi() {
   const clearButton = document.getElementById('planSelectionClear');
   if (clearButton) clearButton.disabled = planBulkActionBusy || count === 0;
   const map = document.getElementById('mapContent');
-  if (map?.classList) map.classList.toggle('plan-move-mode', planMoveMode && count > 0);
+  if (map?.classList) {
+    map.classList.toggle('plan-move-mode', planMoveMode && count > 0);
+    map.classList.toggle('plan-has-selection', count > 0);
+  }
 }
 
 function renderPlanBulkToolbar() {
@@ -1509,6 +1526,456 @@ async function deletePlanProducts(productIds, scopeLabel='cette zone') {
   showPlanActionMessage(`${Number(data.removed_products || deleted.size)} produit(s) supprime(s); structure conservee.`, 'success');
 }
 
+function planStructureKey(item) {
+  return [
+    item?.kind || '', item?.aisle || '', item?.side || '',
+    item?.sectionIndex ?? '', item?.index ?? ''
+  ].join('\x1f');
+}
+
+function planStructureLabel(item) {
+  if (!item) return '';
+  if (item.kind === 'aisle') return `Allée ${item.aisle}`;
+  if (item.kind === 'section') {
+    return `Allée ${item.aisle} · ${sideDisplayLabel(item.side)} · Section ${Number(item.index) + 1}`;
+  }
+  return `Allée ${item.aisle} · ${sideDisplayLabel(item.side)} · Section ${Number(item.sectionIndex) + 1} · Tablette ${Number(item.index) + 1}`;
+}
+
+function planStructureAttrs(kind, item) {
+  return `data-structure-kind="${esc(kind)}" data-structure-aisle="${esc(item.aisle || '')}" `
+    + `data-structure-side="${esc(item.side || '')}" data-structure-section-index="${esc(item.sectionIndex ?? '')}" `
+    + `data-structure-index="${esc(item.index ?? '')}"`;
+}
+
+function planStructureItemFromElement(element) {
+  return {
+    kind: String(element?.dataset?.structureKind || ''),
+    aisle: String(element?.dataset?.structureAisle || ''),
+    side: String(element?.dataset?.structureSide || ''),
+    sectionIndex: element?.dataset?.structureSectionIndex === ''
+      ? null : Number(element?.dataset?.structureSectionIndex),
+    index: Number(element?.dataset?.structureIndex),
+  };
+}
+
+function renderPlanStructureHandle(kind, item, label) {
+  return `<button type="button" class="plan-structure-handle" ${planStructureAttrs(kind, item)}
+    aria-label="${esc(label)}" title="${esc(label)}"
+    onclick="planStructureHandleClick(event,this)"
+    onpointerdown="beginPlanStructurePointer(event,this)"
+    onpointermove="movePlanStructurePointer(event)"
+    onpointerup="endPlanStructurePointer(event)"
+    onpointercancel="cancelPlanStructurePointer(event)">⠿</button>`;
+}
+
+function renderPlanStructureDropZone(kind, item, label) {
+  return `<button type="button" class="plan-structure-drop-zone plan-structure-drop-${esc(kind)}"
+    ${planStructureAttrs(kind, item)} onclick="commitPlanStructureDropFromElement(event,this)">
+    <span aria-hidden="true">↳</span><span>${esc(label)}</span>
+  </button>`;
+}
+
+function renderPlanStructureStatus() {
+  return `<div id="planStructureMoveStatus" class="plan-structure-status" hidden aria-live="polite">
+    <div><strong id="planStructureMoveTitle"></strong><span id="planStructureMoveTarget"></span></div>
+    <button type="button" aria-label="Annuler le déplacement" title="Annuler" onclick="cancelPlanStructureMove()">✕</button>
+  </div>`;
+}
+
+function syncPlanStructureMoveUi() {
+  const map = document.getElementById('mapContent');
+  if (!map?.classList) return;
+  for (const kind of ['aisle', 'section', 'shelf']) {
+    map.classList.toggle(`plan-structure-move-${kind}`, planStructureMoveSource?.kind === kind);
+  }
+  map.classList.toggle('plan-structure-active', Boolean(planStructureMoveSource));
+  map.classList.toggle('plan-structure-busy', planStructureMoveBusy);
+  const sourceKey = planStructureKey(planStructureMoveSource);
+  map.querySelectorAll?.('.plan-structure-handle').forEach(handle => {
+    handle.classList.toggle(
+      'is-source', Boolean(planStructureMoveSource)
+        && planStructureKey(planStructureItemFromElement(handle)) === sourceKey
+    );
+    handle.disabled = planStructureMoveBusy;
+  });
+  const status = document.getElementById('planStructureMoveStatus');
+  if (status) status.hidden = !planStructureMoveSource;
+  const title = document.getElementById('planStructureMoveTitle');
+  if (title) title.textContent = planStructureMoveBusy
+    ? 'Déplacement en cours…' : `Déplacer ${planStructureLabel(planStructureMoveSource)}`;
+  const target = document.getElementById('planStructureMoveTarget');
+  if (target && !planStructureMoveBusy && !target.textContent) {
+    target.textContent = 'Choisissez une ligne verte';
+  }
+}
+
+function setPlanStructureMoveSource(source) {
+  if (planStructureMoveBusy) return;
+  planStructureMoveSource = source;
+  planMoveMode = false;
+  const targetText = document.getElementById('planStructureMoveTarget');
+  if (targetText) targetText.textContent = '';
+  syncPlanSelectionUi();
+  syncPlanStructureMoveUi();
+}
+
+function cancelPlanStructureMove() {
+  if (planStructureMoveBusy) return;
+  planStructureMoveSource = null;
+  planStructureActiveDrop?.classList?.remove('is-active');
+  planStructureActiveDrop = null;
+  planStructureHoverNode?.classList?.remove(
+    'plan-structure-hover-before', 'plan-structure-hover-after'
+  );
+  planStructureHoverNode = null;
+  planStructurePointerTarget = null;
+  const ghost = document.getElementById('planStructureDragGhost');
+  if (ghost) ghost.remove();
+  syncPlanStructureMoveUi();
+}
+
+function planStructureHandleClick(event, handle) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (Date.now() < planStructureSuppressClickUntil || planStructureMoveBusy) return;
+  const source = planStructureItemFromElement(handle);
+  if (planStructureMoveSource && planStructureKey(planStructureMoveSource) === planStructureKey(source)) {
+    cancelPlanStructureMove();
+    return;
+  }
+  setPlanStructureMoveSource(source);
+}
+
+function commitPlanStructureDropFromElement(event, element) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (!planStructureMoveSource || planStructureMoveBusy) return;
+  commitPlanStructureDrop(planStructureMoveSource, planStructureItemFromElement(element));
+}
+
+function beginPlanStructurePointer(event, handle) {
+  if (planStructureMoveBusy || event.button > 0) return;
+  event.stopPropagation();
+  const source = planStructureItemFromElement(handle);
+  planStructurePointer = {
+    pointerId: event.pointerId,
+    pointerType: event.pointerType || 'mouse',
+    handle,
+    source,
+    startX: event.clientX,
+    startY: event.clientY,
+    x: event.clientX,
+    y: event.clientY,
+    active: false,
+    holdTimer: window.setTimeout(
+      activatePlanStructurePointer,
+      event.pointerType === 'mouse' ? 120 : 260
+    ),
+  };
+  handle.classList.add('is-pressed');
+  try { handle.setPointerCapture(event.pointerId); } catch (_error) {}
+}
+
+function activatePlanStructurePointer() {
+  const drag = planStructurePointer;
+  if (!drag || drag.active) return;
+  window.clearTimeout(drag.holdTimer);
+  drag.active = true;
+  planStructureSuppressClickUntil = Date.now() + 500;
+  setPlanStructureMoveSource(drag.source);
+  const ghost = document.createElement('div');
+  ghost.id = 'planStructureDragGhost';
+  ghost.className = 'plan-structure-drag-ghost';
+  ghost.textContent = planStructureLabel(drag.source);
+  document.body.appendChild(ghost);
+  document.getElementById('mapContent')?.classList.add('plan-structure-pointer-active');
+  schedulePlanStructurePointerFrame();
+}
+
+function movePlanStructurePointer(event) {
+  const drag = planStructurePointer;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  drag.x = event.clientX;
+  drag.y = event.clientY;
+  const distance = Math.hypot(drag.x - drag.startX, drag.y - drag.startY);
+  if (!drag.active && distance > 7) activatePlanStructurePointer();
+  if (drag.active) {
+    event.preventDefault();
+    schedulePlanStructurePointerFrame();
+  }
+}
+
+function schedulePlanStructurePointerFrame() {
+  if (planStructurePointerFrame) return;
+  planStructurePointerFrame = window.requestAnimationFrame(renderPlanStructurePointerFrame);
+}
+
+function planStructureDirectTarget(pointed, kind, pointerY) {
+  if (!pointed?.closest) return null;
+  let node = null;
+  let header = null;
+  if (kind === 'aisle') {
+    node = pointed.closest('.plan-aisle-node');
+    header = node?.querySelector?.(':scope > summary');
+  } else if (kind === 'section') {
+    node = pointed.closest('.plan-section[data-plan-kind="section"]');
+    header = node?.querySelector?.(':scope > summary');
+  } else if (kind === 'shelf') {
+    node = pointed.closest('.plan-shelf-card');
+    header = node?.querySelector?.(':scope > .shelf-header');
+  }
+  if ((!node || !header) && kind === 'section') {
+    const sideNode = pointed.closest('.plan-side[data-plan-kind="side"]');
+    const aisle = String(sideNode?.dataset?.aisle || '');
+    const side = String(sideNode?.dataset?.side || '');
+    const layout = getMutableLayout(aisle);
+    const sections = layout?.config?.sides?.[side]?.sections;
+    if (sideNode && aisle && Array.isArray(sections)) {
+      return {
+        item: {kind, aisle, side, sectionIndex: null, index: sections.length},
+        node: sideNode,
+        after: true,
+        label: `Fin de ${sideDisplayLabel(side)}`,
+      };
+    }
+  }
+  if ((!node || !header) && kind === 'shelf') {
+    const sectionNode = pointed.closest('.plan-section[data-plan-kind="section"]');
+    const aisle = String(sectionNode?.dataset?.aisle || '');
+    const side = String(sectionNode?.dataset?.side || '');
+    const sectionIndex = Number(sectionNode?.dataset?.sectionIndex);
+    const layout = getMutableLayout(aisle);
+    const shelves = layout?.config?.sides?.[side]?.sections?.[sectionIndex]?.shelves;
+    if (sectionNode && aisle && Number.isInteger(sectionIndex) && Array.isArray(shelves)) {
+      return {
+        item: {kind, aisle, side, sectionIndex, index: shelves.length},
+        node: sectionNode,
+        after: true,
+        label: `Fin de la section ${sectionIndex + 1}`,
+      };
+    }
+  }
+  if (!node || !header) return null;
+  const handle = header.querySelector?.(`.plan-structure-handle[data-structure-kind="${kind}"]`);
+  if (!handle) return null;
+  const item = planStructureItemFromElement(handle);
+  const rect = header.getBoundingClientRect();
+  const after = pointerY > rect.top + (rect.height / 2);
+  item.index += after ? 1 : 0;
+  const positionLabel = after ? 'Après' : 'Avant';
+  return {
+    item,
+    node,
+    after,
+    label: `${positionLabel} ${planStructureLabel(planStructureItemFromElement(handle))}`,
+  };
+}
+
+function renderPlanStructurePointerFrame() {
+  planStructurePointerFrame = 0;
+  const drag = planStructurePointer;
+  if (!drag?.active) return;
+  const ghost = document.getElementById('planStructureDragGhost');
+  if (ghost) {
+    ghost.style.transform = `translate3d(${Math.round(drag.x + 12)}px,${Math.round(drag.y + 12)}px,0)`;
+  }
+  const pointed = typeof document.elementFromPoint === 'function'
+    ? document.elementFromPoint(drag.x, drag.y) : null;
+  const directTarget = planStructureDirectTarget(
+    pointed, drag.source.kind, drag.y
+  );
+  if (directTarget?.node !== planStructureHoverNode || directTarget?.after !== planStructurePointerTarget?.after) {
+    planStructureHoverNode?.classList?.remove(
+      'plan-structure-hover-before', 'plan-structure-hover-after'
+    );
+    planStructureHoverNode = directTarget?.node || null;
+    planStructurePointerTarget = directTarget || null;
+    planStructureHoverNode?.classList?.add(
+      directTarget?.after ? 'plan-structure-hover-after' : 'plan-structure-hover-before'
+    );
+    const targetText = document.getElementById('planStructureMoveTarget');
+    if (targetText) {
+      targetText.textContent = directTarget
+        ? directTarget.label
+        : 'Aucune destination';
+    }
+  }
+
+  const topEdge = 138;
+  const bottomEdge = Math.max(topEdge + 80, window.innerHeight - 72);
+  let scrollSpeed = 0;
+  if (drag.y < topEdge) {
+    scrollSpeed = -Math.min(16, Math.max(3, (topEdge - drag.y) / 5));
+  } else if (drag.y > bottomEdge) {
+    scrollSpeed = Math.min(16, Math.max(3, (drag.y - bottomEdge) / 5));
+  }
+  if (scrollSpeed) {
+    window.scrollBy(0, scrollSpeed);
+    schedulePlanStructurePointerFrame();
+  }
+}
+
+function cleanupPlanStructurePointer() {
+  const drag = planStructurePointer;
+  if (drag) {
+    window.clearTimeout(drag.holdTimer);
+    drag.handle?.classList?.remove('is-pressed');
+    try { drag.handle?.releasePointerCapture?.(drag.pointerId); } catch (_error) {}
+  }
+  if (planStructurePointerFrame) window.cancelAnimationFrame(planStructurePointerFrame);
+  planStructurePointerFrame = 0;
+  planStructurePointer = null;
+  document.getElementById('mapContent')?.classList.remove('plan-structure-pointer-active');
+  document.getElementById('planStructureDragGhost')?.remove();
+  planStructureActiveDrop?.classList?.remove('is-active');
+  planStructureHoverNode?.classList?.remove(
+    'plan-structure-hover-before', 'plan-structure-hover-after'
+  );
+  planStructureHoverNode = null;
+}
+
+function endPlanStructurePointer(event) {
+  const drag = planStructurePointer;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  const wasActive = drag.active;
+  const source = drag.source;
+  const target = planStructurePointerTarget?.item || null;
+  cleanupPlanStructurePointer();
+  planStructureActiveDrop = null;
+  planStructurePointerTarget = null;
+  if (!wasActive) return;
+  event.preventDefault();
+  event.stopPropagation();
+  planStructureSuppressClickUntil = Date.now() + 500;
+  if (target) {
+    commitPlanStructureDrop(source, target);
+  } else {
+    setPlanStructureMoveSource(source);
+  }
+}
+
+function cancelPlanStructurePointer(event) {
+  const drag = planStructurePointer;
+  if (!drag || (event && drag.pointerId !== event.pointerId)) return;
+  const source = drag.source;
+  const wasActive = drag.active;
+  cleanupPlanStructurePointer();
+  planStructureActiveDrop = null;
+  planStructurePointerTarget = null;
+  if (wasActive) setPlanStructureMoveSource(source);
+}
+
+function planExpectedLayoutVersions(aisles) {
+  const keys = new Set((aisles || []).map(String));
+  return Object.fromEntries(mapLayouts
+    .filter(layout => keys.has(String(layout.aisle)))
+    .map(layout => [String(layout.aisle), String(layout.modified_at || '')]));
+}
+
+async function preparePlanStructureAisles(aisles) {
+  const keys = [...new Set((aisles || []).map(String))];
+  for (const key of keys) {
+    await waitForLayoutSave(key);
+    if (dirtyLayoutAisles.has(key)) await autoSaveAisleLayout(key);
+    await waitForLayoutSave(key);
+    if (dirtyLayoutAisles.has(key)) return false;
+  }
+  return true;
+}
+
+function applyPlanStructureResponse(data) {
+  for (const [aisle, config] of Object.entries(data.configs || {})) {
+    const layout = getMutableLayout(aisle);
+    if (!layout) continue;
+    layout.config = normalizeLayoutConfig(config);
+    layout.modified_at = data.layout_versions?.[aisle] || layout.modified_at || nowIsoWithoutMs();
+    layout.modified_by = loadEditorSession().username || layout.modified_by || '';
+    clearLayoutDirty(aisle);
+    syncLayoutRecord(layout);
+  }
+  if (Array.isArray(data.product_updates) && data.product_updates.length) {
+    _applyBulkProductUpdates(data.product_updates);
+  } else {
+    savePlanSnapshot();
+  }
+  lastLayoutsRefreshAt = Date.now();
+}
+
+function finishPlanStructureMove(success=true) {
+  planStructureMoveBusy = false;
+  if (success) planStructureMoveSource = null;
+  const targetText = document.getElementById('planStructureMoveTarget');
+  if (targetText && success) targetText.textContent = '';
+  syncPlanStructureMoveUi();
+}
+
+async function commitPlanStructureDrop(source, target) {
+  if (!source || !target || source.kind !== target.kind || planStructureMoveBusy) return;
+  if (!requireEditorSession('deplacer la structure du plan')) return;
+  const involvedAisles = source.kind === 'aisle'
+    ? mapLayouts.map(layout => String(layout.aisle))
+    : [String(source.aisle), String(target.aisle)];
+  if (!await preparePlanStructureAisles(involvedAisles)) {
+    showPlanActionMessage('Le plan doit etre sauvegarde avant ce deplacement.');
+    return;
+  }
+
+  planStructureMoveBusy = true;
+  syncPlanStructureMoveUi();
+  let data;
+  if (source.kind === 'aisle') {
+    const sourceIndex = mapLayouts.findIndex(
+      layout => String(layout.aisle) === String(source.aisle)
+    );
+    if (sourceIndex < 0) {
+      finishPlanStructureMove(false);
+      showPlanActionMessage('Cette allee n existe plus. Rechargez le plan.');
+      return;
+    }
+    const nextLayouts = mapLayouts.slice();
+    const [moving] = nextLayouts.splice(sourceIndex, 1);
+    let insertionIndex = Math.max(0, Math.min(Number(target.index) || 0, mapLayouts.length));
+    if (insertionIndex > sourceIndex) insertionIndex -= 1;
+    insertionIndex = Math.max(0, Math.min(insertionIndex, nextLayouts.length));
+    nextLayouts.splice(insertionIndex, 0, moving);
+    data = await apiReorderLayoutAisles({
+      ordered_aisles: nextLayouts.map(layout => String(layout.aisle)),
+      expected_layouts: planExpectedLayoutVersions(involvedAisles),
+    });
+    if (data.success) {
+      mapLayouts = nextLayouts;
+      mapLayouts.forEach((layout, index) => {
+        layout.sort_order = index + 1;
+        layout.modified_at = data.layout_versions?.[String(layout.aisle)]
+          || layout.modified_at || nowIsoWithoutMs();
+      });
+      lastLayoutsRefreshAt = Date.now();
+      savePlanSnapshot();
+    }
+  } else {
+    data = await apiMoveLayoutStructure(source.kind, {
+      source,
+      target,
+      expected_layouts: planExpectedLayoutVersions(involvedAisles),
+    });
+    if (data.success) applyPlanStructureResponse(data);
+  }
+
+  if (!data?.success) {
+    finishPlanStructureMove(false);
+    const message = data?.error || 'Deplacement impossible. Aucun element n a ete modifie.';
+    const targetText = document.getElementById('planStructureMoveTarget');
+    if (targetText) targetText.textContent = message;
+    showPlanActionMessage(message);
+    return;
+  }
+  finishPlanStructureMove(true);
+  _skipPlanCaptureOnce = true;
+  refreshPlanUi();
+  showPlanActionMessage(`${planStructureLabel(source)} deplace.`, 'success');
+}
+
 // Products grouped by exact shelf, built once per cache version. Rendering a
 // plan asks for dozens of shelves; without this each shelf scanned the whole
 // product list (O(shelves × products)). The index auto-rebuilds whenever the
@@ -1615,14 +2082,11 @@ async function confirmMoveSection(aisle, side, sectionIndex) {
   const msg = document.getElementById('msMsg');
   const target_aisle = document.getElementById('msAisle').value;
   const target_side  = document.getElementById('msSide').value;
-  const target_position = document.getElementById('msPosition')?.value || '';
+  const targetPosition = Math.max(1, Number(document.getElementById('msPosition')?.value) || 1);
   const aisleKeys = [...new Set([String(aisle), String(target_aisle)])];
-  for (const key of aisleKeys) {
-    if (dirtyLayoutAisles.has(key)) await autoSaveAisleLayout(key);
-    if (dirtyLayoutAisles.has(key)) {
-      if (msg) msg.textContent = 'Sauvegardez ou rechargez les allées avant de déplacer cette section.';
-      return;
-    }
+  if (!await preparePlanStructureAisles(aisleKeys)) {
+    if (msg) msg.textContent = 'Sauvegardez ou rechargez les allées avant de déplacer cette section.';
+    return;
   }
   const sourceLayout = getMutableLayout(aisle);
   const targetLayout = getMutableLayout(target_aisle);
@@ -1630,22 +2094,24 @@ async function confirmMoveSection(aisle, side, sectionIndex) {
     if (msg) msg.textContent = 'Rechargez le plan avant de déplacer cette section.';
     return;
   }
-  try {
-    const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}/move-section-to-aisle`, {
-      method: 'POST', headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-      body: JSON.stringify({
-        side, section_index: sectionIndex, target_aisle, target_side, target_position,
-        expected_modified_at: sourceLayout.modified_at || '',
-        expected_target_modified_at: targetLayout.modified_at || ''
-      })
-    });
-    if (res.ok && data.success) {
-      if (overlay) overlay.remove();
-      await refreshProductsCache(true);   // products + 2 layouts changed
-      await refreshLayoutsCache(true);
-      renderMapEditor();
-    } else if (msg) { msg.textContent = (data && data.error) || 'Déplacement impossible.'; }
-  } catch (e) { if (msg) msg.textContent = 'Erreur réseau.'; }
+  const sameContainer = String(aisle) === String(target_aisle) && side === target_side;
+  const desiredIndex = targetPosition - 1;
+  const targetBoundary = sameContainer && desiredIndex > sectionIndex
+    ? desiredIndex + 1 : desiredIndex;
+  const data = await apiMoveLayoutStructure('section', {
+    source: {kind: 'section', aisle: String(aisle), side, index: sectionIndex},
+    target: {kind: 'section', aisle: String(target_aisle), side: target_side, index: targetBoundary},
+    expected_layouts: planExpectedLayoutVersions(aisleKeys),
+  });
+  if (data.success) {
+    applyPlanStructureResponse(data);
+    if (overlay) overlay.remove();
+    _skipPlanCaptureOnce = true;
+    refreshPlanUi();
+    showPlanActionMessage('Section déplacée.', 'success');
+  } else if (msg) {
+    msg.textContent = data.error || 'Déplacement impossible.';
+  }
 }
 
 function renderShelfProductList(aisle, side, section, shelf, positions) {
@@ -1739,6 +2205,7 @@ function renderShelfCard(aisle, side, sectionIndex, shelfIndex, positions, shelf
   return `<div class="plan-shelf-card" id="shelfcard-${esc(aisle)}|${esc(side)}|${sectionIndex}|${shelfIndex}"
     ${planDropTargetAttrs(aisle, side, sectionIndex + 1, shelfIndex + 1, 'shelf')} style="${cardBg}">
     <div class="shelf-header" style="gap:4px">
+      ${renderPlanStructureHandle('shelf', {aisle, side, sectionIndex, index: shelfIndex}, `Déplacer la tablette ${shelfIndex + 1}`)}
       ${renderPlanSelectionCheckbox('shelf', aisle, side, sectionIndex + 1, shelfIndex + 1, '', `Sélectionner la tablette ${shelfIndex + 1}`)}
       <span class="shelf-title">${shelfTitle}</span>
       ${renderPlanDropButton(aisle, side, sectionIndex + 1, shelfIndex + 1, 'shelf')}
@@ -1755,7 +2222,7 @@ function renderShelfCard(aisle, side, sectionIndex, shelfIndex, positions, shelf
            <button title="Passer en mode libre (cosmétiques, presentoirs...)" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
                    onclick="setShelfPositionCount('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},0)">📦 Libre</button>`
       }
-      <button type="button" class="plan-delete-action" onclick="removeShelf('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},this)" style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5" title="Supprimer cette tablette">✕ Suppr.</button>
+      <button type="button" class="plan-delete-action" onclick="removeShelf('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},this)" style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5" title="Supprimer cette tablette">✕ Tablette</button>
     </div>
     <div style="display:flex;gap:6px;padding:5px 0 4px;border-top:1px solid rgba(0,0,0,.06);margin-top:4px;flex-wrap:wrap">
       <button class="btn btn-outline btn-inline" style="font-size:12px;flex:1" onclick="moveShelf('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},-1)">↑ Monter</button>
@@ -1806,20 +2273,24 @@ function renderSection(aisle, side, sectionIndex, section) {
   if (!isPlanNodeOpen(sectionNodeId)) {
     return `<details class="tree-node plan-section" ${attrs} ${planDropTargetAttrs(aisle, side, sectionIndex + 1, '', 'section')}${detailsOpenAttr(sectionNodeId)}>
     <summary>
+      ${renderPlanStructureHandle('section', {aisle, side, index: sectionIndex}, `Déplacer la section ${sectionIndex + 1}`)}
       ${renderPlanSelectionCheckbox('section', aisle, side, sectionIndex + 1, '', '', `Sélectionner la section ${sectionIndex + 1}`)}
       <span>Section ${sectionIndex + 1}</span>
       <span class="tree-meta">${sectionProducts} prod. · ${section.shelves.length} T${sectionHome ? ` · <span style="color:#c8102e">★${sectionHome}</span>` : ''}</span>
       ${renderPlanDropButton(aisle, side, sectionIndex + 1, '', 'section')}
+      ${renderPlanStructureDropZone('shelf', {aisle, side, sectionIndex, index: section.shelves.length}, `Fin de la section ${sectionIndex + 1}`)}
     </summary>
     <div class="tree-body plan-lazy-body" data-lazy-empty="1"></div>
   </details>`;
   }
   return `<details class="tree-node plan-section" ${attrs} ${planDropTargetAttrs(aisle, side, sectionIndex + 1, '', 'section')}${detailsOpenAttr(sectionNodeId)}>
     <summary>
+      ${renderPlanStructureHandle('section', {aisle, side, index: sectionIndex}, `Déplacer la section ${sectionIndex + 1}`)}
       ${renderPlanSelectionCheckbox('section', aisle, side, sectionIndex + 1, '', '', `Sélectionner la section ${sectionIndex + 1}`)}
       <span>Section ${sectionIndex + 1}</span>
       <span class="tree-meta">${sectionProducts} prod. · ${section.shelves.length} T${sectionHome ? ` · <span style="color:#c8102e">★${sectionHome}</span>` : ''}</span>
       ${renderPlanDropButton(aisle, side, sectionIndex + 1, '', 'section')}
+      ${renderPlanStructureDropZone('shelf', {aisle, side, sectionIndex, index: section.shelves.length}, `Fin de la section ${sectionIndex + 1}`)}
     </summary>
     <div class="tree-body">
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 6px">
@@ -1842,8 +2313,18 @@ function renderSection(aisle, side, sectionIndex, section) {
       </label>
       <div class="plan-shelf-grid">
         ${section.shelves.map((positions, shelfIndex) =>
-          renderShelfCard(aisle, side, sectionIndex, shelfIndex, positions, (section.labels || [])[shelfIndex] || '')
+          renderPlanStructureDropZone(
+            'shelf', {aisle, side, sectionIndex, index: shelfIndex},
+            `Avant la tablette ${shelfIndex + 1}`
+          ) + renderShelfCard(
+            aisle, side, sectionIndex, shelfIndex, positions,
+            (section.labels || [])[shelfIndex] || ''
+          )
         ).join('')}
+        ${renderPlanStructureDropZone(
+          'shelf', {aisle, side, sectionIndex, index: section.shelves.length},
+          `Fin de la section ${sectionIndex + 1}`
+        )}
       </div>
     </div>
   </details>`;
@@ -1863,6 +2344,7 @@ function renderSide(aisle, side, config) {
       ${renderPlanSelectionCheckbox('side', aisle, side, '1', '', '', `Sélectionner ${sideLabel}`)}
       <span>${sideLabel}</span>
       <span class="tree-meta">${sections.length} section${sections.length !== 1 ? 's' : ''} · ${sideCount} produit${sideCount !== 1 ? 's' : ''}</span>
+      ${renderPlanStructureDropZone('section', {aisle, side, index: sections.length}, `Fin de ${sideLabel}`)}
     </summary>
     <div class="tree-body plan-lazy-body" data-lazy-empty="1"></div>
   </details>`;
@@ -1872,6 +2354,7 @@ function renderSide(aisle, side, config) {
       ${renderPlanSelectionCheckbox('side', aisle, side, '1', '', '', `Sélectionner ${sideLabel}`)}
       <span>${sideLabel}</span>
       <span class="tree-meta">${sections.length} section${sections.length !== 1 ? 's' : ''} · ${sideCount} produit${sideCount !== 1 ? 's' : ''}</span>
+      ${renderPlanStructureDropZone('section', {aisle, side, index: sections.length}, `Fin de ${sideLabel}`)}
     </summary>
     <div class="tree-body">
       <details class="struct-details">
@@ -1899,7 +2382,15 @@ function renderSide(aisle, side, config) {
         </div>
       </details>
       ${sections.length ? '' : `<div class="small" style="padding:8px 0">Aucune section sur ${sideLabel}.</div>`}
-      ${sections.map((section, sectionIndex) => renderSection(aisle, side, sectionIndex, section)).join('')}
+      ${sections.map((section, sectionIndex) =>
+        renderPlanStructureDropZone(
+          'section', {aisle, side, index: sectionIndex},
+          `Avant la section ${sectionIndex + 1}`
+        ) + renderSection(aisle, side, sectionIndex, section)
+      ).join('')}
+      ${renderPlanStructureDropZone(
+        'section', {aisle, side, index: sections.length}, `Fin de ${sideLabel}`
+      )}
       <button class="btn btn-outline btn-inline" style="margin-top:8px;font-size:12px;width:100%" onclick="addSection('${esc(aisle)}','${side}')">➕ Ajouter une section</button>
     </div>
   </details>`;
@@ -1930,20 +2421,25 @@ function renderMapEditor() {
   const msgDiv = document.getElementById('addMsg');
   const div = document.getElementById('mapContent');
   const counts = planSummaryCounts();   // memoized per cache version (no rescan on layout-only edits)
-  div.innerHTML = renderPlanBulkToolbar() + (mapLayouts.length
+  div.innerHTML = renderPlanStructureStatus() + renderPlanBulkToolbar() + (mapLayouts.length
     ? `<div class="tool-row" style="margin-bottom:12px">
         <button class="btn btn-outline btn-inline" onclick="setAllPlanTrees(true)">Ouvrir tout</button>
         <button class="btn btn-outline btn-inline" onclick="setAllPlanTrees(false)">Fermer tout</button>
-      </div>` + mapLayouts.map(layout => {
+      </div>` + mapLayouts.map((layout, aisleIndex) => {
         syncLayoutRecord(layout);          // normalizes layout.config + refreshes metrics/count (count is memoized)
         const config = layout.config;       // already normalized above — skip a 2nd deep rebuild
         const slotCount = countSlotsFromConfig(config);   // no per-slot object allocation
         const aisleNodeId = `planAisle-${layout.aisle}`;
         const homeCount = counts.home.get(String(layout.aisle)) || 0;
         const dirty = dirtyLayoutAisles.has(String(layout.aisle));
+        const aisleDrop = renderPlanStructureDropZone(
+          'aisle', {aisle: layout.aisle, index: aisleIndex},
+          `Avant l allée ${layout.aisle}`
+        );
         if (!isPlanNodeOpen(aisleNodeId)) {
-          return `<details class="tree-node plan-aisle-node" id="${aisleNodeId}" data-plan-kind="aisle" data-aisle="${esc(layout.aisle)}" data-node-id="${aisleNodeId}"${detailsOpenAttr(aisleNodeId)}>
+          return `${aisleDrop}<details class="tree-node plan-aisle-node" id="${aisleNodeId}" data-plan-kind="aisle" data-aisle="${esc(layout.aisle)}" data-node-id="${aisleNodeId}"${detailsOpenAttr(aisleNodeId)}>
         <summary>
+          ${renderPlanStructureHandle('aisle', {aisle: layout.aisle, index: aisleIndex}, `Déplacer l allée ${layout.aisle}`)}
           ${renderPlanSelectionCheckbox('aisle', layout.aisle, '', '1', '', '', `Sélectionner l allée ${layout.aisle}`)}
           <span>Allée ${esc(layout.aisle)}</span>
           <span class="tree-meta">${layout.product_count || 0} produit${Number(layout.product_count || 0) !== 1 ? 's' : ''} · <span id="aisleSlots-${esc(layout.aisle)}">${slotCount}</span> slots${homeCount ? ` · <span style="color:#c8102e">★${homeCount} maison</span>` : ''}${dirty ? ' · <span style="color:#d97706">non sauvegardé</span>' : ''}</span>
@@ -1951,8 +2447,9 @@ function renderMapEditor() {
         <div class="tree-body plan-lazy-body" data-lazy-empty="1"></div>
       </details>`;
         }
-        return `<details class="tree-node plan-aisle-node" id="${aisleNodeId}" data-node-id="${aisleNodeId}"${detailsOpenAttr(aisleNodeId)}>
+        return `${aisleDrop}<details class="tree-node plan-aisle-node" id="${aisleNodeId}" data-plan-kind="aisle" data-aisle="${esc(layout.aisle)}" data-node-id="${aisleNodeId}"${detailsOpenAttr(aisleNodeId)}>
         <summary>
+          ${renderPlanStructureHandle('aisle', {aisle: layout.aisle, index: aisleIndex}, `Déplacer l allée ${layout.aisle}`)}
           ${renderPlanSelectionCheckbox('aisle', layout.aisle, '', '1', '', '', `Sélectionner l allée ${layout.aisle}`)}
           <span>Allée ${esc(layout.aisle)}</span>
           <span class="tree-meta">${layout.product_count || 0} produit${Number(layout.product_count || 0) !== 1 ? 's' : ''} · <span id="aisleSlots-${esc(layout.aisle)}">${slotCount}</span> slots${homeCount ? ` · <span style="color:#c8102e">★${homeCount} maison</span>` : ''}${dirty ? ' · <span style="color:#d97706">non sauvegardé</span>' : ''}</span>
@@ -1965,7 +2462,7 @@ function renderMapEditor() {
           <button class="btn btn-outline btn-inline" onclick="setPlanAisleTrees('${esc(layout.aisle)}', true)">Tout ouvrir</button>
           <button class="btn btn-outline btn-inline" onclick="setPlanAisleTrees('${esc(layout.aisle)}', false)">Tout fermer</button>
           ${renderPlanScopeDeleteButton('aisle', layout.aisle, '', '1', '', layout.product_count || 0)}
-          <button class="btn btn-outline btn-inline" style="border-color:#f1b8c2;color:#c8102e" onclick="removeAisleLayout('${esc(layout.aisle)}')">Supprimer</button>
+          <button class="btn btn-outline btn-inline plan-delete-action" style="border-color:#f1b8c2;color:#c8102e" onclick="removeAisleLayout('${esc(layout.aisle)}')">✕ Supprimer allée</button>
         </div>
         ${layout.modified_by ? `<div class="small" style="margin-top:6px">Modifie par: ${esc(layout.modified_by)}</div>` : ''}
         <div class="plan-sides">
@@ -1975,11 +2472,20 @@ function renderMapEditor() {
         ${renderPresentoirSection(layout.aisle, config)}
         </div>
       </details>`;
-      }).join('')
+      }).join('') + renderPlanStructureDropZone(
+        'aisle', {aisle: '', index: mapLayouts.length}, 'Fin du magasin'
+      )
     : '<div class="empty">Aucune allée configurée.</div>');
   if (!msgDiv.textContent) msgDiv.innerHTML = '';
-  if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(syncPlanSelectionUi);
-  else syncPlanSelectionUi();
+  if (typeof window.requestAnimationFrame === 'function') {
+    window.requestAnimationFrame(() => {
+      syncPlanSelectionUi();
+      syncPlanStructureMoveUi();
+    });
+  } else {
+    syncPlanSelectionUi();
+    syncPlanStructureMoveUi();
+  }
 }
 
 function planNodeIdsForAisle(layout) {
@@ -2259,6 +2765,7 @@ async function createAisleLayout() {
     const config = normalizeLayoutConfig(buildLayoutWithSideCounts(leftSections, rightSections, max_shelf, max_position), max_section, max_shelf, max_position);
     mapLayouts.push(syncLayoutRecord({
       aisle: String(aisle), config, enabled: true,
+      sort_order: Number(data.sort_order) || (mapLayouts.length + 1),
       modified_by: loadEditorSession().username || '',
       modified_at: data.modified_at || nowIsoWithoutMs(), product_count: 0,
       ...getLayoutMetrics(config)
@@ -2348,7 +2855,11 @@ async function removeAisleLayout(aisle) {
     : `Supprimer l’allée ${aisle} ?`;
   if (!confirm(question)) return;
   let data = null;
-  try { data = await apiDeleteLayoutAisle(aisle); }
+  try {
+    data = await apiDeleteLayoutAisle(aisle, {
+      expected_modified_at: layout?.modified_at || ''
+    });
+  }
   catch (e) { data = {success: false, error: 'Suppression impossible pour le moment.'}; }
   const msgDiv = document.getElementById('addMsg');
   const success = Boolean(data && data.success);
@@ -2357,9 +2868,17 @@ async function removeAisleLayout(aisle) {
     ? (data.message || `Allée ${aisle} retirée.`)
     : ((data && data.error) || `Impossible de supprimer l’allée ${aisle}.`);
   if (success) {
+    const removedIds = new Set(allProductsCache
+      .filter(product => String(product.aisle) === String(aisle))
+      .map(product => Number(product.id)));
     mapLayouts = mapLayouts.filter(item => String(item.aisle) !== String(aisle));
+    allProductsCache = allProductsCache.filter(
+      product => String(product.aisle) !== String(aisle)
+    );
+    for (const id of removedIds) planSelectedProductIds.delete(id);
+    if (typeof invalidateProductSearchIndexes === 'function') invalidateProductSearchIndexes();
+    lastProductsRefreshAt = Date.now();
     clearLayoutDirty(aisle);
-    await refreshProductsCache(true);
     lastLayoutsRefreshAt = Date.now();
     planStartDraft = getCursorSelection();
     savePlanSnapshot();
@@ -2780,13 +3299,11 @@ async function moveSection(aisle, side, sectionIndex, direction) {
   const sections = layout.config.sides[side].sections;
   const target = sectionIndex + direction;
   if (target < 0 || target >= sections.length) return;
-  // Server swaps the products of the two sections (3 SQL statements).
-  if (!await _swapCall(aisle, 'swap-sections', {side, section_a: String(sectionIndex+1), section_b: String(target+1)})) {
-    document.getElementById('addMsg').innerHTML = '<div class="msg error">Déplacement impossible.</div>';
-    return;
-  }
-  [sections[sectionIndex], sections[target]] = [sections[target], sections[sectionIndex]];
-  await saveAisleLayout(aisle);   // persist config in the same step → no desync on refresh
+  const boundary = target > sectionIndex ? target + 1 : target;
+  await commitPlanStructureDrop(
+    {kind: 'section', aisle: String(aisle), side, index: sectionIndex},
+    {kind: 'section', aisle: String(aisle), side, index: boundary},
+  );
 }
 
 async function moveShelf(aisle, side, sectionIndex, shelfIndex, direction) {
@@ -2796,13 +3313,17 @@ async function moveShelf(aisle, side, sectionIndex, shelfIndex, direction) {
   if (!section) return;
   const target = shelfIndex + direction;
   if (target < 0 || target >= section.shelves.length) return;
-  if (!await _swapCall(aisle, 'swap-shelves', {side, section: String(sectionIndex+1), shelf_a: String(shelfIndex+1), shelf_b: String(target+1)})) {
-    document.getElementById('addMsg').innerHTML = '<div class="msg error">Déplacement impossible.</div>';
-    return;
-  }
-  [section.shelves[shelfIndex], section.shelves[target]] = [section.shelves[target], section.shelves[shelfIndex]];
-  if (section.labels) [section.labels[shelfIndex], section.labels[target]] = [section.labels[target], section.labels[shelfIndex]];
-  await saveAisleLayout(aisle);
+  const boundary = target > shelfIndex ? target + 1 : target;
+  await commitPlanStructureDrop(
+    {
+      kind: 'shelf', aisle: String(aisle), side,
+      sectionIndex, index: shelfIndex,
+    },
+    {
+      kind: 'shelf', aisle: String(aisle), side,
+      sectionIndex, index: boundary,
+    },
+  );
 }
 
 async function swapPositions(aisle, side, section, shelf, posA, posB) {

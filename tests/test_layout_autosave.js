@@ -7,6 +7,8 @@ const saveCalls = [];
 const removalCalls = [];
 const bulkMoveCalls = [];
 const bulkDeleteCalls = [];
+const structureMoveCalls = [];
+const aisleReorderCalls = [];
 const planMessage = {className: '', textContent: ''};
 const deleteButton = {
   dataset: {},
@@ -19,6 +21,8 @@ const deleteButton = {
 const context = {
   console,
   esc(value) { return String(value ?? ''); },
+  isHomeBrand() { return false; },
+  sideDisplayLabel(side) { return side === 'Gauche' ? 'Côté A' : 'Côté B'; },
   mapLayouts: [{
     aisle: '1', max_section: '1', max_shelf: '1', max_position: '4',
     config: {
@@ -32,6 +36,7 @@ const context = {
     },
   }],
   dirtyLayoutAisles: new Set(),
+  openPlanNodes: new Set(),
   allProductsCache: [],
   lastProductsRefreshAt: 0,
   STORAGE_KEYS: {planSnapshot: ''},
@@ -285,7 +290,157 @@ async function run() {
   assert(renderedTablet.includes('data-drop-mode="shelf"'), 'a tablet should be a drop destination');
   assert(renderedTablet.includes('Vider produits (1)'), 'a tablet should expose product-only clearing');
   assert(renderedTablet.includes('plan-drag-handle'), 'products should expose a desktop drag handle');
+  assert(renderedTablet.includes('plan-structure-handle'), 'a tablet should expose an obvious structure grip');
+  const renderedSection = vm.runInContext(
+    "renderSection('1','Gauche',0,{shelves:[2],labels:['']})",
+    context,
+  );
+  assert(renderedSection.includes('plan-structure-handle'), 'a section should expose a structure grip');
+  assert(renderedSection.includes('plan-structure-drop-shelf'), 'a section should expose tablet insertion points');
+  const renderedSide = vm.runInContext(
+    "renderSide('1','Gauche',mapLayouts[0].config)",
+    context,
+  );
+  assert(renderedSide.includes('plan-structure-drop-section'), 'an aisle side should expose section insertion points');
   assert(vm.runInContext('renderPlanBulkToolbar()', context).includes('planSelectionMove'));
+
+  context.fakeGrip = {
+    dataset: {
+      structureKind: 'section', structureAisle: '1', structureSide: 'Gauche',
+      structureSectionIndex: '', structureIndex: '0',
+    },
+    classList: {add() {}, remove() {}},
+    setPointerCapture() {},
+    releasePointerCapture() {},
+  };
+  context.fakePointerEvent = {
+    button: 0, pointerId: 8, pointerType: 'touch', clientX: 20, clientY: 30,
+    stopPropagation() {}, preventDefault() {},
+  };
+  vm.runInContext('beginPlanStructurePointer(fakePointerEvent,fakeGrip)', context);
+  assert.strictEqual(
+    scheduled.at(-1).delay,
+    260,
+    'touch dragging should use a short deliberate hold instead of native HTML dragging',
+  );
+  vm.runInContext('cancelPlanStructurePointer(fakePointerEvent)', context);
+  context.pointerFrameRequests = 0;
+  context.window.requestAnimationFrame = () => {
+    context.pointerFrameRequests += 1;
+    return 77;
+  };
+  vm.runInContext(`
+    planStructurePointer = {active:true};
+    planStructurePointerFrame = 0;
+    schedulePlanStructurePointerFrame();
+    schedulePlanStructurePointerFrame();
+  `, context);
+  assert.strictEqual(
+    context.pointerFrameRequests,
+    1,
+    'many pointer events should collapse into one animation frame',
+  );
+  vm.runInContext('planStructurePointer = null; planStructurePointerFrame = 0', context);
+
+  context.mapLayouts = [{
+    aisle: '1', sort_order: 1, modified_at: '', max_section: '1', max_shelf: '2', max_position: '4',
+    config: {
+      sides: {Gauche: {sections: [{shelves: [4, 2], labels: ['A', 'B']}]}, Droite: {sections: []}},
+      facade_a: {shelves: [], labels: []}, facade_b: {shelves: [], labels: []}, presentoirs: [],
+    },
+  }];
+  context.allProductsCache = [
+    {id: 201, name: 'Move me', aisle: '1', side: 'Gauche', section: '1', shelf: '1', position: '1', modified_at: ''},
+  ];
+  context.lastProductsRefreshAt = 500;
+  context.apiMoveLayoutStructure = async (kind, payload) => {
+    structureMoveCalls.push({kind, payload});
+    return {
+      success: true,
+      configs: {
+        '1': {
+          sides: {Gauche: {sections: [{shelves: [2, 4], labels: ['B', 'A']}]}, Droite: {sections: []}},
+          facade_a: {shelves: [], labels: []}, facade_b: {shelves: [], labels: []}, presentoirs: [],
+        },
+      },
+      layout_versions: {'1': 'layout-v2'},
+      product_updates: [{
+        id: 201, aisle: '1', side: 'Gauche', section: '1', shelf: '2', position: '1', modified_at: 'product-v2',
+      }],
+    };
+  };
+  await vm.runInContext(`commitPlanStructureDrop(
+    {kind:'shelf',aisle:'1',side:'Gauche',sectionIndex:0,index:0},
+    {kind:'shelf',aisle:'1',side:'Gauche',sectionIndex:0,index:2}
+  )`, context);
+  assert.strictEqual(structureMoveCalls.length, 1, 'one structure request should move a whole tablet');
+  assert.strictEqual(structureMoveCalls[0].kind, 'shelf');
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(context.mapLayouts[0].config.sides.Gauche.sections[0])),
+    {shelves: [2, 4], labels: ['B', 'A']},
+    'the committed tablet structure should paint locally without a full refetch',
+  );
+  assert.strictEqual(context.allProductsCache[0].shelf, '2');
+
+  context.mapLayouts.push({
+    aisle: '2', sort_order: 2, modified_at: '', max_section: '0', max_shelf: '0', max_position: '0',
+    config: {
+      sides: {Gauche: {sections: []}, Droite: {sections: []}},
+      facade_a: {shelves: [], labels: []}, facade_b: {shelves: [], labels: []}, presentoirs: [],
+    },
+  });
+  context.apiReorderLayoutAisles = async payload => {
+    aisleReorderCalls.push(payload);
+    return {success: true, layout_versions: {'1': 'order-v2', '2': 'order-v2'}};
+  };
+  await vm.runInContext(`commitPlanStructureDrop(
+    {kind:'aisle',aisle:'1',index:0},
+    {kind:'aisle',aisle:'',index:2}
+  )`, context);
+  assert.strictEqual(aisleReorderCalls.length, 1, 'aisle drag should persist one complete order');
+  assert.deepStrictEqual(
+    Array.from(context.mapLayouts, layout => layout.aisle),
+    ['2', '1'],
+    'the store should repaint in the persisted aisle order',
+  );
+  context.fakeSideNode = {dataset: {aisle: '2', side: 'Gauche'}};
+  context.fakeSidePoint = {
+    closest(selector) { return selector.includes('.plan-side') ? context.fakeSideNode : null; },
+  };
+  const emptySideTarget = vm.runInContext(
+    "planStructureDirectTarget(fakeSidePoint,'section',100)", context,
+  );
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(emptySideTarget.item)),
+    {kind: 'section', aisle: '2', side: 'Gauche', sectionIndex: null, index: 0},
+    'a collapsed or empty side should accept a dragged section at its end',
+  );
+  context.fakeSectionNode = {
+    dataset: {aisle: '1', side: 'Gauche', sectionIndex: '0'},
+  };
+  context.fakeSectionPoint = {
+    closest(selector) { return selector.includes('.plan-section') ? context.fakeSectionNode : null; },
+  };
+  const collapsedSectionTarget = vm.runInContext(
+    "planStructureDirectTarget(fakeSectionPoint,'shelf',100)", context,
+  );
+  assert.strictEqual(
+    collapsedSectionTarget.item.index,
+    2,
+    'a collapsed section should accept a dragged tablet after its last tablet',
+  );
+  context.fakeMapContent = {
+    innerHTML: '',
+    classList: {toggle() {}, add() {}, remove() {}},
+    querySelectorAll() { return []; },
+  };
+  context.document.getElementById = id => id === 'mapContent'
+    ? context.fakeMapContent
+    : (id === 'addMsg' ? planMessage : null);
+  vm.runInContext('_skipPlanCaptureOnce = true; renderMapEditor()', context);
+  assert(context.fakeMapContent.innerHTML.includes('planStructureMoveStatus'));
+  assert(context.fakeMapContent.innerHTML.includes('data-structure-kind="aisle"'));
+  assert(context.fakeMapContent.innerHTML.includes('Fin du magasin'));
   console.log('layout autosave tests passed');
 }
 

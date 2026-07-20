@@ -1,3 +1,4 @@
+import sqlite3
 import types
 import unittest
 from unittest.mock import Mock, patch
@@ -6,6 +7,21 @@ import database
 
 
 class DatabaseConnectionTests(unittest.TestCase):
+    def test_executemany_batches_sqlite_writes(self):
+        connection = sqlite3.connect(":memory:")
+        wrapped = database.DatabaseConnection(connection, "sqlite")
+        wrapped.execute("CREATE TABLE samples (id INTEGER PRIMARY KEY, value TEXT)")
+
+        result = wrapped.executemany(
+            "INSERT INTO samples (id, value) VALUES (?, ?)",
+            [(1, "first"), (2, "second"), (3, "third")],
+        )
+
+        self.assertEqual(result.rowcount, 3)
+        rows = wrapped.execute("SELECT id, value FROM samples ORDER BY id").fetchall()
+        self.assertEqual(rows, [(1, "first"), (2, "second"), (3, "third")])
+        wrapped.close()
+
     def test_postgres_uses_bounded_direct_connection_by_default(self):
         connection = object()
         psycopg = types.SimpleNamespace(connect=Mock(return_value=connection))

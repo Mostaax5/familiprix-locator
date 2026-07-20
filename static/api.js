@@ -179,11 +179,49 @@ async function apiBulkDeleteLayoutProducts(payload) {
   }
 }
 
-async function apiDeleteLayoutAisle(aisle) {
+async function apiReorderLayoutAisles(payload) {
+  try {
+    const {res, data} = await apiFetch('/api/layout/aisles/reorder', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: JSON.stringify(payload)
+    });
+    return res.ok ? data : {
+      success: false,
+      code: data?.code || '',
+      error: data?.error || 'Deplacement des allees impossible.'
+    };
+  } catch (error) {
+    return {success: false, error: 'Deplacement des allees impossible pour le moment (reseau).'};
+  }
+}
+
+async function apiMoveLayoutStructure(kind, payload) {
+  if (kind !== 'section' && kind !== 'shelf') {
+    return {success: false, error: 'Type de structure invalide.'};
+  }
+  try {
+    const {res, data} = await apiFetch(`/api/layout/structure/move-${kind}`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: JSON.stringify(payload)
+    });
+    return res.ok ? data : {
+      success: false,
+      code: data?.code || '',
+      error: data?.error || 'Deplacement impossible.'
+    };
+  } catch (error) {
+    return {success: false, error: 'Deplacement impossible pour le moment (reseau).'};
+  }
+}
+
+async function apiDeleteLayoutAisle(aisle, payload={}) {
   try {
     const {res, data} = await apiFetch(`/api/layout/aisles/${encodeURIComponent(aisle)}`, {
       method: 'DELETE',
-      headers: getEditorHeaders()
+      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: JSON.stringify(payload)
     });
     return res.ok ? data : {success: false, error: data.error || 'Erreur de suppression d allée.'};
   } catch (error) {
