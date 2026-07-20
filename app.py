@@ -94,6 +94,7 @@ def _asset_version():
         "static/api.js", "static/config.js", "static/store.js", "static/lock.js",
         "static/search.js", "static/gist-ui.js", "static/ai-ui.js",
         "static/scan-ui.js", "static/layout-ui.js", "static/main.js",
+        "static/vendor/zxing-library-0.21.3.min.js",
         "static/service-worker.js", "static/manifest.json", "static/icon.svg",
     )
     root = os.path.dirname(__file__)

@@ -25,6 +25,7 @@ let quaggaLibraryPromise = null;
 let ocrLibraryPromise = null;
 let nativeScanActive = false;
 let nativeScanFrame = null;
+let nativeZxingAssistActive = false;
 let torchEnabled = false;
 let zxingActive = false;
 let zxingFrame = null;
@@ -133,8 +134,9 @@ async function startCamera() {
 
   resetCameraCandidate();
 
-  // Android Chrome exposes a fast OS-level barcode reader. Try it before loading
-  // any CDN decoder or OCR library so the camera opens and reads UPCs immediately.
+  // Android uses its OS reader plus a same-stream local ZXing reader. Some phones
+  // expose BarcodeDetector but silently return no results; the second reader
+  // prevents that state without opening another camera stream.
   if ('BarcodeDetector' in window) {
     try {
       await startNativeScan(video, status, button, reader);
@@ -147,6 +149,20 @@ async function startCamera() {
         cameraTrack = null;
         video.srcObject = null;
       }
+    }
+  }
+
+  // Older Android WebViews and some vendor browsers do not expose
+  // BarcodeDetector. ZXing is bundled with the app, so use it immediately
+  // instead of waiting for a third-party script before opening the camera.
+  if (isAndroidBrowser() && window.ZXing) {
+    try {
+      video.style.display = 'block';
+      if (reader) { reader.style.display = 'none'; reader.innerHTML = ''; }
+      await startZXingLiveScan(video, status, button);
+      return;
+    } catch (error) {
+      console.warn('[Scanner] Local Android decoder failed, using web fallback:', error);
     }
   }
 
@@ -179,6 +195,10 @@ async function startCamera() {
 
   status.textContent = 'Camera bloquee';
   showCameraHint('Impossible d ouvrir la camera. Sur telephone, utilisez une adresse HTTPS, ou entrez le code manuellement.');
+}
+
+function isAndroidBrowser() {
+  return /Android/i.test(String(navigator.userAgent || ''));
 }
 
 async function openEnvironmentCamera(idealWidth=1920, idealHeight=1080) {
@@ -253,6 +273,62 @@ async function startNativeScan(video, status, button, reader) {
     nativeScanFrame = requestAnimationFrame(loop);
   };
   nativeScanFrame = requestAnimationFrame(loop);
+  void startNativeZxingAssist(video);
+}
+
+async function startNativeZxingAssist(video) {
+  const loaded = await ensureZXingLoaded().catch(() => false);
+  if (!loaded || !window.ZXing || !nativeScanActive) return;
+
+  let zxingReader;
+  try {
+    zxingReader = createZxingCanvasReader();
+  } catch (_) {
+    return;
+  }
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d', {willReadFrequently: true});
+  if (!context) return;
+
+  nativeZxingAssistActive = true;
+  _dbg.z = '✓';
+  _renderDbg();
+  updateDeviceSupport();
+  window.clearInterval(scanFrameTimer);
+  scanFrameTimer = window.setInterval(() => {
+    if (!nativeScanActive || scanPaused || video.readyState < 2 || !video.videoWidth) return;
+    const videoWidth = video.videoWidth;
+    const videoHeight = video.videoHeight;
+    const sourceX = Math.floor(videoWidth * 0.02);
+    const sourceY = Math.floor(videoHeight * 0.12);
+    const sourceWidth = Math.floor(videoWidth * 0.96);
+    const sourceHeight = Math.floor(videoHeight * 0.76);
+    if (canvas.width !== sourceWidth || canvas.height !== sourceHeight) {
+      canvas.width = sourceWidth;
+      canvas.height = sourceHeight;
+    }
+    context.filter = 'grayscale(1) contrast(1.6)';
+    context.drawImage(
+      video,
+      sourceX, sourceY, sourceWidth, sourceHeight,
+      0, 0, sourceWidth, sourceHeight,
+    );
+    try {
+      const result = decodeZxingCanvas(zxingReader, canvas);
+      const code = String(result?.getText?.() || '').trim();
+      if (validateRetailBarcode(code)) {
+        _dbg.zRead = code + ' ✓';
+        _renderDbg();
+        onDecodedCode(code, true);
+      }
+    } catch (error) {
+      const name = String(error?.name || '');
+      if (name && !name.includes('NotFound')) {
+        _dbg.zRead = '(' + name + ')';
+        _renderDbg();
+      }
+    }
+  }, 120);
 }
 
 function showCameraExtras() {
@@ -607,7 +683,7 @@ async function startZXingLiveScan(video, status, button) {
     try {
       const result = decodeZxingCanvas(zxingReader, scanCanvas);
       if (result && validateRetailBarcode(result.getText())) {
-        onDecodedCode(result.getText());
+        onDecodedCode(result.getText(), true);
       }
     } catch (_) {}
   };
@@ -1360,6 +1436,7 @@ async function stopCamera() {
     nativeScanActive = false;
     if (nativeScanFrame !== null) { cancelAnimationFrame(nativeScanFrame); nativeScanFrame = null; }
   }
+  nativeZxingAssistActive = false;
   if (zxingActive) {
     zxingActive = false;
     if (zxingFrame !== null) { cancelAnimationFrame(zxingFrame); zxingFrame = null; }
@@ -1710,10 +1787,12 @@ function updateDeviceSupport() {
   cameraSupport.style.color = hasCamera && isSecure ? '#065f46' : '#991b1b';
 
   if (nativeScanActive && !zxingActive) {
-    scannerSupport.textContent = 'Natif (rapide)';
+    scannerSupport.textContent = nativeZxingAssistActive ? 'Android renforcé' : 'Natif (rapide)';
     scannerSupport.style.background = '#ecfdf5';
     scannerSupport.style.color = '#065f46';
-    if (supportHint) supportHint.textContent = 'Lecteur natif du telephone : detection UPC locale et immediate.';
+    if (supportHint) supportHint.textContent = nativeZxingAssistActive
+      ? 'Deux lecteurs UPC locaux utilisent la même caméra pour une détection immédiate.'
+      : 'Lecteur natif du telephone : detection UPC locale et immediate.';
   } else {
     scannerSupport.textContent = hasZXing ? 'ZXing' : (hasNative ? 'Natif disponible' : 'Chargement');
     scannerSupport.style.background = '#fefce8';
