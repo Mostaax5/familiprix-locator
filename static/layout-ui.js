@@ -1040,6 +1040,9 @@ function startScanFromSection(aisle, side, sectionIndex) {
 function productCard(p, showDelete=true, showAiButton=true) {
   // Catalog-only products come from the imported planograms and have no shelf yet.
   const catalogOnly = p.catalog_only || !String(p.aisle || '').trim();
+  const referenceImageBarcode = catalogOnly
+    ? String(p.barcode || '').replace(/\D/g, '')
+    : '';
   const locationHtml = catalogOnly
     ? `<div class="location" style="color:#64748b">📦 En magasin — position à confirmer</div>`
     : `<div class="location">${[
@@ -1070,7 +1073,11 @@ function productCard(p, showDelete=true, showAiButton=true) {
     <div class="product-layout">
       ${p.image_url
         ? `<img class="product-thumb" src="${esc(p.image_url)}" alt="Image produit">`
-        : (p.id ? `<span class="product-thumb product-thumb-placeholder" data-product-image-id="${Number(p.id)}" aria-label="Photo en attente"></span>` : '')}
+        : (p.id
+          ? `<span class="product-thumb product-thumb-placeholder" data-product-image-id="${Number(p.id)}" aria-label="Photo en attente"></span>`
+          : (referenceImageBarcode
+            ? `<span class="product-thumb product-thumb-placeholder" data-reference-image-barcode="${referenceImageBarcode}" aria-label="Photo en attente"></span>`
+            : ''))}
       <div class="product-info">
         <div style="margin-bottom:3px">${planoBadge}</div>
         <div class="name">${esc(p.name)}</div>

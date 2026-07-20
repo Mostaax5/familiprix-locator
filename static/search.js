@@ -352,11 +352,19 @@ function onSearchFieldChange() {
 // ── Search tab ────────────────────────────────────────────────────────────────
 let _searchImagePollTimer = null;
 let _searchImagePollGeneration = 0;
+let _referenceImagePollTimer = null;
+let _referenceImagePollGeneration = 0;
 
 function cancelSearchImagePolling() {
   _searchImagePollGeneration += 1;
   window.clearTimeout(_searchImagePollTimer);
   _searchImagePollTimer = null;
+}
+
+function cancelReferenceImagePolling() {
+  _referenceImagePollGeneration += 1;
+  window.clearTimeout(_referenceImagePollTimer);
+  _referenceImagePollTimer = null;
 }
 
 function startSearchImagePolling(products) {
@@ -398,6 +406,48 @@ function startSearchImagePolling(products) {
   poll(0);
 }
 
+function startReferenceImagePolling(products) {
+  cancelReferenceImagePolling();
+  const visibleProducts = Array.isArray(products) ? products : [];
+  const barcodes = [...new Set(visibleProducts
+    .filter(product => product?.catalog_only && !product.image_url)
+    .map(product => normalizedDigits(product.barcode))
+    .filter(Boolean))].slice(0, 80);
+  if (!barcodes.length || typeof apiGetReferenceProductImages !== 'function') return;
+
+  const generation = _referenceImagePollGeneration;
+  const pending = new Set(barcodes);
+  const poll = async attempt => {
+    if (generation !== _referenceImagePollGeneration) return;
+    const data = await apiGetReferenceProductImages(barcodes);
+    if (generation !== _referenceImagePollGeneration) return;
+    const images = data?.images || {};
+    for (const [rawBarcode, imageUrl] of Object.entries(images)) {
+      const barcode = normalizedDigits(rawBarcode);
+      if (!barcode || !imageUrl) continue;
+      pending.delete(barcode);
+      for (const product of visibleProducts) {
+        if (normalizedDigits(product.barcode) === barcode && !product.image_url) {
+          product.image_url = imageUrl;
+        }
+      }
+      document.querySelectorAll(`[data-reference-image-barcode="${barcode}"]`).forEach(placeholder => {
+        const img = document.createElement('img');
+        img.className = 'product-thumb';
+        img.src = imageUrl;
+        img.alt = 'Image produit';
+        img.loading = 'lazy';
+        img.onerror = () => img.remove();
+        placeholder.replaceWith(img);
+      });
+    }
+    if (pending.size && attempt < 9) {
+      _referenceImagePollTimer = window.setTimeout(() => poll(attempt + 1), 3000);
+    }
+  };
+  poll(0);
+}
+
 function filterByHomeBrand(brand) {
   const products = allProductsCache.filter(p => brand ? p.brand?.toLowerCase().startsWith(brand.toLowerCase()) : isHomeBrand(p.brand));
   const div = document.getElementById('searchResults');
@@ -426,7 +476,13 @@ function scheduleSearch() {
 
 async function doSearchValue(q) {
   const div = document.getElementById('searchResults');
-  if (!q) { cancelSearchImagePolling(); div.innerHTML = ''; return; }
+  if (!q) {
+    cancelSearchImagePolling();
+    cancelReferenceImagePolling();
+    div.innerHTML = '';
+    return;
+  }
+  cancelReferenceImagePolling();
 
   // Explicit "Code" mode: match only the pharmacy code, never barcode/name.
   if (getSearchField() === 'code') {
@@ -507,6 +563,7 @@ async function appendReferenceMatches(q, div, placed) {
   </div>`;
   if (!placed.length) div.innerHTML = html;       // replace the "searching…" placeholder
   else div.insertAdjacentHTML('beforeend', html);
+  startReferenceImagePolling(ref);
 }
 
 function groupAndRenderSearchResults(products) {
@@ -557,4 +614,5 @@ window.AppSearch = {
   doSearch, doSearchValue, filterByHomeBrand, scheduleSearch, onSearchFieldChange,
   searchProductsFromCache, productsByBarcodeFromCache, invalidateProductSearchIndexes,
   startSearchImagePolling, cancelSearchImagePolling,
+  startReferenceImagePolling, cancelReferenceImagePolling,
 };

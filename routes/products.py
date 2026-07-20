@@ -1152,9 +1152,23 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None):
         if score > 0:
             ranked.append((score, row))
     ranked.sort(key=lambda x: (-x[0], x[1]["_name"]))
-    return [{"barcode": r["barcode"], "name": r["name"], "brand": r["brand"],
-             "description": r["description"], "product_code": r["product_code"],
-             "catalog_only": True, "in_stock": 1} for _, r in ranked[:limit]]
+    rows = [row for _, row in ranked[:limit]]
+    metadata_by_barcode = build_reference_metadata_index(
+        db, [row.get("barcode", "") for row in rows]
+    )
+    return [{
+        "barcode": row["barcode"],
+        "name": row["name"],
+        "brand": row["brand"],
+        "description": row["description"],
+        "image_url": str(
+            metadata_by_barcode.get(normalized_digits(row.get("barcode", "")), {}).get("image_url", "")
+            or ""
+        ).strip(),
+        "product_code": row["product_code"],
+        "catalog_only": True,
+        "in_stock": 1,
+    } for row in rows]
 
 
 def _fuzzy_product_score(row, query_tokens):
@@ -1411,6 +1425,37 @@ def get_product_images():
     # A product the employee is actively viewing jumps ahead of the background
     # backlog. The response stays instant; enrichment remains off-request.
     schedule_image_fill(missing_barcodes)
+    return jsonify({"images": images})
+
+
+@products_bp.route("/api/products/reference-images", methods=["GET"])
+def get_reference_product_images():
+    """Return UPC-verified images for visible imported-planogram products."""
+    barcodes = []
+    seen = set()
+    for raw in str(request.args.get("barcodes", "")).split(","):
+        barcode = normalized_digits(raw)
+        if barcode and barcode not in seen:
+            seen.add(barcode)
+            barcodes.append(barcode)
+        if len(barcodes) >= 80:
+            break
+    if not barcodes:
+        return jsonify({"images": {}})
+
+    metadata_by_barcode = build_reference_metadata_index(get_db(), barcodes)
+    images = {}
+    missing_barcodes = []
+    for barcode in barcodes:
+        image_url = str(
+            metadata_by_barcode.get(barcode, {}).get("image_url", "") or ""
+        ).strip()
+        if image_url:
+            images[barcode] = image_url
+        else:
+            missing_barcodes.append(barcode)
+    # The existing worker verifies UPC/name before persisting a newly found image.
+    schedule_image_fill(missing_barcodes, priority=True)
     return jsonify({"images": images})
 
 

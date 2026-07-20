@@ -13,6 +13,7 @@ from routes.products import (
     planogram_metadata,
     persist_image_for_barcode,
     products_bp,
+    rank_reference_for_query,
     reference_metadata_for_barcode,
     sync_reference_metadata_to_products,
 )
@@ -219,6 +220,48 @@ class PlanogramMetadataTests(unittest.TestCase):
         self.assertEqual(reference["brand"], "Rich")
         self.assertEqual(reference["description"], "Useful description")
         self.assertEqual(reference["product_code"], "F999")
+
+    def test_reference_search_includes_a_saved_product_image(self):
+        db = self.make_db()
+        row = {
+            "barcode": "041388316000", "name": "BLISTEX LIP MEDEX POT 7G",
+            "brand": "Blistex", "description": "", "product_code": "699496",
+            "_bc": "041388316000", "_name": "blistex lip medex pot 7g",
+            "_brand": "blistex", "_hay": "blistex lip medex pot 7g blistex",
+            "_tokens": ["blistex", "lip", "medex", "pot", "7g"],
+        }
+        with patch("routes.products.get_db", return_value=db), \
+             patch("routes.products._reference_corpus", return_value=[row]), \
+             patch("routes.products.build_reference_metadata_index", return_value={
+                 "041388316000": {"image_url": "https://img.test/blistex.jpg"},
+             }):
+            results = rank_reference_for_query("blistex")
+
+        self.assertEqual(results[0]["image_url"], "https://img.test/blistex.jpg")
+        self.assertTrue(results[0]["catalog_only"])
+        db.close()
+
+    def test_reference_image_endpoint_returns_known_images_and_queues_missing(self):
+        db = self.make_db()
+        app = Flask(__name__)
+        app.register_blueprint(products_bp)
+        with patch("routes.products.get_db", return_value=db), \
+             patch("routes.products.build_reference_metadata_index", return_value={
+                 "041388316000": {"image_url": "https://img.test/blistex.jpg"},
+                 "012345678901": {"image_url": ""},
+             }), \
+             patch("routes.products.schedule_image_fill") as schedule:
+            with app.test_client() as client:
+                response = client.get(
+                    "/api/products/reference-images?barcodes=041388316000,012345678901"
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["images"], {
+            "041388316000": "https://img.test/blistex.jpg",
+        })
+        schedule.assert_called_once_with(["012345678901"], priority=True)
+        db.close()
 
     def test_bulk_planogram_import_attaches_reference_metadata_and_clears_old_upc_data(self):
         db = self.make_plan_db()

@@ -210,6 +210,21 @@ async function apiGetProductImages(ids) {
   }
 }
 
+async function apiGetReferenceProductImages(barcodes) {
+  const cleanBarcodes = [...new Set((barcodes || [])
+    .map(value => String(value || '').replace(/\D/g, ''))
+    .filter(Boolean))].slice(0, 80);
+  if (!cleanBarcodes.length) return {images: {}};
+  try {
+    const {res, data} = await apiFetch(
+      `/api/products/reference-images?barcodes=${encodeURIComponent(cleanBarcodes.join(','))}`
+    );
+    return res.ok && data && typeof data === 'object' ? data : {images: {}};
+  } catch (_) {
+    return {images: {}};
+  }
+}
+
 async function apiSetProductStock(id, inStock) {
   try {
     const {res, data} = await apiFetch(`/api/products/${id}/stock`, {
