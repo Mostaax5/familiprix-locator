@@ -387,7 +387,8 @@ def ensure_product_data_schema(db):
     db.execute(
         """UPDATE product_reference SET store_presence_status='planogram_imported'
            WHERE TRIM(COALESCE(store_presence_status,''))=''
-             AND LOWER(COALESCE(source,'')) LIKE '%planogram%'"""
+             AND LOWER(COALESCE(source,'')) LIKE ?""",
+        ("%planogram%",),
     )
 
     id_type = "BIGSERIAL PRIMARY KEY" if db.backend == "postgres" else "INTEGER PRIMARY KEY AUTOINCREMENT"
