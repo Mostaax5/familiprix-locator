@@ -367,15 +367,27 @@ def _reference_corpus(db):
                 d.get("name", "") if store_identity else ""
             )
             verified_brand = verified.get("brand", "")
-            verified_description = verified.get("description", "")
+            # Descriptions remain useful employee-facing catalogue context even
+            # before a manager has reviewed their evidence.  Keep the status
+            # explicit instead of making an existing description disappear.
+            available_description = (
+                verified.get("description", "")
+                or str(d.get("description", "") or "").strip()
+            )
             gtin_key = gtin_identity_key(d.get("barcode", ""))
             identifiers = identifiers_by_key.get(gtin_key, [])
             name = normalize_search_text(official_name)
             brand = normalize_search_text(verified_brand)
-            desc = normalize_search_text(verified_description)
+            desc = normalize_search_text(available_description)
             rows.append({
                 "barcode": d.get("barcode", ""), "name": official_name,
-                "brand": verified_brand, "description": verified_description,
+                "brand": verified_brand, "description": available_description,
+                "description_status": (
+                    "verified" if verified.get("description", "") else "unverified"
+                ),
+                "description_available_unverified": bool(
+                    available_description and not verified.get("description", "")
+                ),
                 "product_code": verified.get("product_code", "") or (
                     d.get("product_code", "") if store_identity else ""
                 ),
@@ -545,7 +557,10 @@ def _product_search_row(item, aliases=(), identifiers=()):
     brand = normalize_search_text(verified("brand"))
     hay = " ".join([
         name, brand,
-        normalize_search_text(verified("description")),
+        # A description is a retrieval clue, not an identity key.  Use the
+        # available text for search while retaining its verification status on
+        # the product returned to the employee and to the AI.
+        normalize_search_text(item.get("description", "")),
         normalize_search_text(verified("official_name_fr")),
         normalize_search_text(verified("official_name_en")),
         normalize_search_text(verified("category")),
@@ -959,19 +974,16 @@ def row_to_product(product):
         not has_evidence_context or "description" in verified_fields
     )
     item["image_available_unverified"] = bool(
-        raw_image and image_status and not image_is_verified
+        raw_image and not image_is_verified
     )
     item["description_available_unverified"] = bool(
-        raw_description and description_status and not description_is_verified
+        raw_description and not description_is_verified
     )
-    item["image_url"] = (
-        raw_image if not image_status or image_is_verified else ""
-    )
-    item["description"] = (
-        raw_description
-        if not description_status or description_is_verified
-        else ""
-    )
+    # Availability and verification are separate concerns.  Employees need the
+    # best data already present in the catalogue now; the flags above preserve
+    # the review state without blanking pictures or descriptions.
+    item["image_url"] = raw_image
+    item["description"] = raw_description
     for field in FIELD_NAMES - {"name", "description", "image_url"}:
         if field not in verified_fields:
             item[field] = ""
@@ -1083,26 +1095,28 @@ def find_product_at_position(db, aisle, side, section, shelf, position, exclude_
 
 
 def find_existing_image_for_barcode(db, barcode, exclude_id=None):
-    """Return an image already stored for this barcode (any location), so we
-    never lose a product picture when re-adding / moving / re-importing it."""
+    """Return the best available image already stored for this exact barcode."""
     if not str(barcode or "").strip():
         return ""
-    found = set()
+    verified_found = set()
+    available_found = set()
     for candidate in exact_gtin_variants(barcode):
         q = "SELECT image_url, image_status FROM products WHERE barcode=? AND TRIM(COALESCE(image_url,'')) <> ''"
         params = [candidate]
         if exclude_id is not None:
             q += " AND id<>?"
             params.append(int(exclude_id))
-        q += " ORDER BY id LIMIT 1"
+        q += " ORDER BY CASE WHEN image_status='verified' THEN 0 ELSE 1 END, id LIMIT 1"
         row = db.execute(q, tuple(params)).fetchone()
         if row:
             item = dict(row)
-            image = item.get("image_url", "")
-            if image and item.get("image_status") == "verified":
-                found.add(str(image))
-    # The broad catalogue is never used as Client inventory, but an image already
-    # verified for the same UPC is safe to reuse on the real mapped product.
+            image = safe_http_url(item.get("image_url", ""))
+            if image:
+                available_found.add(image)
+                if item.get("image_status") == "verified":
+                    verified_found.add(image)
+    # The broad catalogue is never used as Client inventory.  Its exact-UPC
+    # picture can still illustrate the mapped product while awaiting review.
     key = gtin_identity_key(barcode)
     if key:
         rows = db.execute(
@@ -1111,13 +1125,29 @@ def find_existing_image_for_barcode(db, barcode, exclude_id=None):
                  AND verification_status='verified'""",
             (key,),
         ).fetchall()
-        found.update(
-            str(dict(row).get("field_value", "") or "")
-            for row in rows if str(dict(row).get("field_value", "") or "").strip()
+        verified_found.update(
+            safe_http_url(dict(row).get("field_value", ""))
+            for row in rows if safe_http_url(dict(row).get("field_value", ""))
         )
-    # Conflicting images for the same canonical GTIN are not resolved by row
-    # order. Leave the image missing so the quality audit can request review.
-    return next(iter(found)) if len(found) == 1 else ""
+    preferred = verified_found or available_found
+    if preferred:
+        # A conflict remains visible to the audit, but the employee still gets
+        # one stable picture, with verified evidence taking precedence.
+        return sorted(preferred)[0]
+    reference_rows = _rows_for_barcodes(
+        db, "product_reference", "barcode, image_url, source_priority", [barcode]
+    )
+    reference_rows.sort(
+        key=lambda row: (
+            -int(dict(row).get("source_priority") or 0),
+            str(dict(row).get("barcode", "")),
+        )
+    )
+    return next((
+        safe_http_url(dict(row).get("image_url", ""))
+        for row in reference_rows
+        if safe_http_url(dict(row).get("image_url", ""))
+    ), "")
 
 
 _REFERENCE_METADATA_FIELDS = (
@@ -1172,13 +1202,32 @@ def build_reference_metadata_index(db, barcodes=None):
             db, "product_reference", "*", barcodes,
         )
     keys = []
-    representative = {}
+    key_seen = set()
+    rows_by_key = {}
     for row in rows:
         item = dict(row)
         key = gtin_identity_key(item.get("barcode", ""))
-        if key and key not in representative:
-            representative[key] = item
+        if key:
+            rows_by_key.setdefault(key, []).append(item)
+        if key and key not in key_seen:
+            key_seen.add(key)
             keys.append(key)
+
+    def reference_row_rank(item):
+        _source_type, classified_priority = classify_source(
+            item.get("source", ""), item.get("source_url", "")
+        )
+        return (
+            int(item.get("source_priority") or classified_priority or 0),
+            bool(safe_http_url(item.get("image_url", ""))),
+            bool(str(item.get("description", "") or "").strip()),
+            str(item.get("updated_at", "") or ""),
+        )
+
+    representative = {
+        key: max(key_rows, key=reference_row_rank)
+        for key, key_rows in rows_by_key.items()
+    }
     evidence_rows = []
     for start in range(0, len(keys), 400):
         chunk = keys[start:start + 400]
@@ -1230,6 +1279,39 @@ def build_reference_metadata_index(db, barcodes=None):
             combined["source_url"] = highest.get("source_url", "")
             combined["source_priority"] = highest.get("source_priority", 0)
             combined["confidence"] = highest.get("confidence", 1.0)
+        else:
+            combined["source"] = str(item.get("source", "") or "")
+            combined["source_url"] = safe_http_url(item.get("source_url", ""))
+            combined["source_priority"] = int(item.get("source_priority") or 0)
+            combined["confidence"] = float(item.get("confidence") or 0)
+
+        # Keep exact-UPC legacy media available while explicitly marking it as
+        # unverified.  This restores the useful catalogue coverage without
+        # pretending that a general-web match has passed manager review.
+        unverified_fields = []
+        fallback_rows = sorted(
+            rows_by_key.get(key, [item]), key=reference_row_rank, reverse=True
+        )
+        for field in ("description", "image_url"):
+            if str(combined.get(field, "") or "").strip():
+                continue
+            value = next((
+                safe_http_url(candidate.get(field, ""))
+                if field == "image_url"
+                else str(candidate.get(field, "") or "").strip()
+                for candidate in fallback_rows
+                if (
+                    safe_http_url(candidate.get(field, ""))
+                    if field == "image_url"
+                    else str(candidate.get(field, "") or "").strip()
+                )
+            ), "")
+            if value:
+                combined[field] = value
+                unverified_fields.append(field)
+        combined["_unverified_fields"] = unverified_fields
+        if unverified_fields:
+            combined["verification_status"] = "requires_review"
         index[key] = combined
         for variant in exact_gtin_variants(item.get("barcode", "")):
             index[normalized_digits(variant)] = combined
@@ -1276,6 +1358,19 @@ def planogram_metadata(existing, reference, barcode, product_code=""):
     }
     assessment = assess_metadata_candidate(anchor, reference, match_method="exact_gtin")
     metadata = merge_reference_metadata(prior, reference) if assessment.auto_apply else dict(prior)
+    # For the exact same UPC, available description/image data may be shown as
+    # unverified even when its source is not eligible for automatic verification.
+    # Structured identity fields keep the stricter policy.
+    if assessment.accepted:
+        conflicts = reference.get("_conflicts") or {}
+        for field in ("description", "image_url", "source_url"):
+            if field in conflicts or str(metadata.get(field, "") or "").strip():
+                continue
+            value = str(reference.get(field, "") or "").strip()
+            if field in {"image_url", "source_url"}:
+                value = safe_http_url(value)
+            if value:
+                metadata[field] = value
     return {
         "brand": str(metadata.get("brand", "") or "").strip(),
         "description": str(metadata.get("description", "") or "").strip(),
@@ -1366,6 +1461,10 @@ def update_product_metadata_from_reference(
                 confidence=field_confidence, created_at=timestamp,
             )
             continue
+        available_unverified = (
+            field in {"description", "image_url", "source_url"}
+            and assessment.accepted
+        )
         if not current and assessment.accepted and not field_auto_apply:
             create_review_issue(
                 db, original["id"], "unverified_suggestion", field_name=field,
@@ -1375,16 +1474,17 @@ def update_product_metadata_from_reference(
                 details={"reason": "source_requires_manual_verification"},
                 created_at=timestamp,
             )
-        if not current and field_auto_apply:
+        if not current and (field_auto_apply or available_unverified):
             merged[field] = incoming
             changed_fields[field] = incoming
-            record_field_evidence(
-                db, original["id"], field, incoming, source=field_source,
-                source_url=field_source_url, source_record_id=reference.get("barcode", ""),
-                match_method=match_method, confidence=field_confidence,
-                verification_status="verified", imported_at=timestamp,
-                last_verified_at=timestamp, active=True,
-            )
+            if field_auto_apply:
+                record_field_evidence(
+                    db, original["id"], field, incoming, source=field_source,
+                    source_url=field_source_url, source_record_id=reference.get("barcode", ""),
+                    match_method=match_method, confidence=field_confidence,
+                    verification_status="verified", imported_at=timestamp,
+                    last_verified_at=timestamp, active=True,
+                )
     if changed_fields:
         changed_fields["primary_source"] = source
         changed_fields["primary_source_url"] = source_url
@@ -2077,8 +2177,8 @@ def hydrate_candidate_images(products):
         db, "products", "barcode, image_url, image_status", barcodes
     ):
         item = dict(row)
-        image_url = str(item.get("image_url", "") or "").strip()
-        if not image_url or item.get("image_status") != "verified":
+        image_url = safe_http_url(item.get("image_url", ""))
+        if not image_url:
             continue
         key = gtin_identity_key(item.get("barcode", ""))
         if key:
@@ -2086,7 +2186,7 @@ def hydrate_candidate_images(products):
     references = build_reference_metadata_index(db, barcodes)
     for barcode in barcodes:
         reference = reference_metadata_for_barcode(references, barcode)
-        image_url = str(reference.get("image_url", "") or "").strip()
+        image_url = safe_http_url(reference.get("image_url", ""))
         key = gtin_identity_key(barcode)
         if key and image_url:
             image_by_barcode.setdefault(key, image_url)
@@ -2621,17 +2721,26 @@ def get_product_images():
     rows = db.execute(
         f"SELECT id, image_url, image_status, barcode FROM products WHERE id IN ({placeholders})", tuple(ids)
     ).fetchall()
-    missing_barcodes = []
+    missing_by_id = {}
     for row in rows:
         item = dict(row)
-        value = (
-            str(item.get("image_url", "") or "").strip()
-            if item.get("image_status") == "verified" else ""
-        )
+        value = safe_http_url(item.get("image_url", ""))
         if value:
             images[str(item["id"])] = value
         elif str(item.get("barcode", "") or "").strip():
-            missing_barcodes.append(item["barcode"])
+            missing_by_id[str(item["id"])] = item["barcode"]
+
+    # A legacy picture can live only in the exact-UPC reference catalogue after
+    # a reimport. Return it immediately instead of waiting for another web lookup.
+    references = build_reference_metadata_index(db, list(missing_by_id.values()))
+    missing_barcodes = []
+    for product_id, barcode in missing_by_id.items():
+        reference = reference_metadata_for_barcode(references, barcode)
+        value = safe_http_url(reference.get("image_url", ""))
+        if value:
+            images[product_id] = value
+        else:
+            missing_barcodes.append(barcode)
     # A product the employee is actively viewing jumps ahead of the background
     # backlog. The response stays instant; enrichment remains off-request.
     schedule_image_fill(missing_barcodes)
@@ -2640,7 +2749,7 @@ def get_product_images():
 
 @products_bp.route("/api/products/reference-images", methods=["GET"])
 def get_reference_product_images():
-    """Return UPC-verified images for visible imported-planogram products."""
+    """Return the best available exact-UPC imported-planogram images."""
     barcodes = []
     seen = set()
     for raw in str(request.args.get("barcodes", "")).split(","):
@@ -2657,9 +2766,11 @@ def get_reference_product_images():
     images = {}
     missing_barcodes = []
     for barcode in barcodes:
-        image_url = str(
-            metadata_by_barcode.get(barcode, {}).get("image_url", "") or ""
-        ).strip()
+        image_url = safe_http_url(
+            reference_metadata_for_barcode(metadata_by_barcode, barcode).get(
+                "image_url", ""
+            )
+        )
         if image_url:
             images[barcode] = image_url
         else:
@@ -3300,9 +3411,9 @@ def bulk_import_products():
         if key:
             existing_by_barcode_rows.setdefault(key, []).append(d)
 
-    # Cross-location reuse is field-by-field and verified only. Selecting the
-    # row with the most filled columns silently carried corrupted descriptions
-    # and pictures into a fresh planogram import.
+    # Cross-location reuse is field-by-field and exact-UPC only. Prefer verified
+    # values, but keep one consistent legacy value available with an unverified
+    # status instead of erasing it during a reimport.
     existing_by_barcode = {}
     status_by_field = {
         "description": "description_status", "image_url": "image_status",
@@ -3312,15 +3423,22 @@ def bulk_import_products():
         snapshot = {"barcode": rows_for_key[0].get("barcode", "")}
         snapshot["_verified_fields"] = []
         for field, status_field in status_by_field.items():
-            values = {
+            verified_values = {
                 str(item.get(field, "") or "").strip()
                 for item in rows_for_key
                 if str(item.get(field, "") or "").strip()
                 and str(item.get(status_field, "") or "") == "verified"
             }
+            available_values = {
+                str(item.get(field, "") or "").strip()
+                for item in rows_for_key
+                if str(item.get(field, "") or "").strip()
+            }
+            values = verified_values or available_values
             if len(values) == 1:
                 snapshot[field] = next(iter(values))
-                snapshot["_verified_fields"].append(field)
+                if verified_values:
+                    snapshot["_verified_fields"].append(field)
         existing_by_barcode[key] = snapshot
 
     # Replacement is tablet-level, not position-level. Otherwise an old product
@@ -3334,19 +3452,27 @@ def bulk_import_products():
     touched_fixture_shelves = {shelf for _section, shelf in touched_shelves}
     incoming_barcodes = [ln["p"].get("barcode", "") for ln in lines]
     reference_index = build_reference_metadata_index(db, incoming_barcodes)
-    image_by_barcode = {}
+    image_candidates = {}
     for r in _rows_for_barcodes(
         db, "products", "barcode, image_url, image_status", incoming_barcodes
     ):
         d = dict(r)
-        if (
-            not str(d.get("image_url", "") or "").strip()
-            or d.get("image_status") != "verified"
-        ):
+        image_url = safe_http_url(d.get("image_url", ""))
+        if not image_url:
             continue
         key = gtin_identity_key(d.get("barcode", ""))
         if key:
-            image_by_barcode.setdefault(key, d["image_url"])
+            candidate = image_candidates.setdefault(
+                key, {"verified": set(), "available": set()}
+            )
+            candidate["available"].add(image_url)
+            if d.get("image_status") == "verified":
+                candidate["verified"].add(image_url)
+    image_by_barcode = {}
+    for key, candidates in image_candidates.items():
+        values = candidates["verified"] or candidates["available"]
+        if len(values) == 1:
+            image_by_barcode[key] = next(iter(values))
 
     replaced_removed = 0
     if replace and touched_shelves:

@@ -960,6 +960,13 @@ def lookup_brocade(barcode):
 
 def product_context_for_client_help(product):
     verified_fields = set(product.get("_verified_fields") or [])
+    description = str(product.get("description", "") or "").strip()
+    description_verified = bool(
+        description and (
+            "description" in verified_fields
+            or product.get("description_status") == "verified"
+        )
+    )
 
     def verified_value(field, status_field=""):
         value = str(product.get(field, "") or "").strip()
@@ -977,7 +984,14 @@ def product_context_for_client_help(product):
     ctx = {
         "name":     str(product.get("name", "")).strip(),
         "brand":    verified_value("brand"),
-        "notes":    verified_value("description", "description_status"),
+        "notes":    description,
+        "description_verified": description_verified,
+        "description_status": str(
+            product.get("description_status", "unverified") or "unverified"
+        ),
+        "unverified_description_included": bool(
+            description and not description_verified
+        ),
         "location": location,
         # The UPC is essential context: without it a question that names a UPC
         # ("quelle saveur a le 0605388...") could never be matched to its product.
@@ -1668,8 +1682,10 @@ _CLIENT_VERIFICATION_INSTRUCTIONS = (
     "sur ce qu'il faut manger ne justifie pas automatiquement un analgésique. Ne prétends pas "
     "connaître une saveur, un ingrédient ou un dosage absent des données. Rédige answer dans "
     "answer_language, directement selon la demande et en tenant compte de l'historique. "
-    "Les champs non vérifiés sont volontairement omis des candidats: ne les reconstitue jamais "
-    "à partir du nom ou de tes connaissances. Si data_status n'est pas complete_verified, "
+    "Les descriptions disponibles peuvent être marquées non vérifiées: utilise-les comme contexte "
+    "pratique, mais ne présente pas un attribut incertain comme un fait confirmé. Les autres champs "
+    "non vérifiés sont volontairement omis: ne les reconstitue jamais à partir du nom ou de tes "
+    "connaissances. Si data_status n'est pas complete_verified, "
     "indique brièvement ce que l'employé doit confirmer sur l'emballage lorsque cette "
     "information est nécessaire. "
     "Ne déclare jamais deux produits thérapeutiquement équivalents, interchangeables ou sûrs "
@@ -1703,6 +1719,7 @@ _CLIENT_VERIFICATION_INSTRUCTIONS = (
 def product_context_for_client_rag(product):
     context = product_context_for_client_help(product)
     verified_fields = set(product.get("_verified_fields") or [])
+    description = str(product.get("description", "") or "").strip()
     verified_identifiers = [
         {
             "type": identifier.get("type", ""),
@@ -1725,7 +1742,7 @@ def product_context_for_client_rag(product):
         "candidate_id": str(product.get("client_id", "")),
         "plan_status": "PLANO" if product.get("is_plano") else "HORS-PLANO",
         "locations": product.get("locations") or [],
-        "description": verified_value("description", "description_status"),
+        "description": description,
         "category": verified_value("category"),
         "package_size": verified_value("package_size"),
         "package_unit": verified_value("package_unit"),

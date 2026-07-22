@@ -129,6 +129,32 @@ class PlanogramMetadataTests(unittest.TestCase):
         self.assertEqual(second["brand"], "Example")
         self.assertEqual(third["description"], "")
 
+    def test_available_exact_upc_media_backfills_before_manual_review(self):
+        db = self.make_db()
+        upsert_reference_candidate(
+            db, {
+                "barcode": "063848966068", "name": "Razor",
+                "description": "Available catalogue description",
+                "image_url": "https://img.test/unverified-razor.jpg",
+                "source": "Open Products Facts",
+            }, imported_at="2026-07-22T00:00:00+00:00",
+        )
+        db.execute(
+            """INSERT INTO products
+               (id, name, barcode, aisle, side, section, shelf, position)
+               VALUES (1, 'Razor', '063848966068', '1', 'Gauche', '1', '1', '1')"""
+        )
+
+        linked = sync_reference_metadata_to_products(
+            db, now="2026-07-22T00:00:00+00:00"
+        )
+        product = dict(db.execute("SELECT * FROM products WHERE id=1").fetchone())
+
+        self.assertEqual(linked, 1)
+        self.assertEqual(product["description"], "Available catalogue description")
+        self.assertEqual(product["image_url"], "https://img.test/unverified-razor.jpg")
+        db.close()
+
     def test_planogram_import_preserves_same_upc_metadata_and_drops_stale_other_upc_data(self):
         reference = {
             "brand": "New Brand",
@@ -226,6 +252,32 @@ class PlanogramMetadataTests(unittest.TestCase):
             "041388316000": "https://img.test/blistex.jpg",
         })
         schedule.assert_called_once_with(["012345678901"], priority=True)
+        db.close()
+
+    def test_product_image_endpoint_returns_unreviewed_exact_upc_image(self):
+        db = self.make_db()
+        db.execute(
+            """INSERT INTO products
+               (id, name, barcode, aisle, side, section, shelf, position)
+               VALUES (1, 'Razor', '063848966068', '1', 'Gauche', '1', '1', '1')"""
+        )
+        db.execute(
+            """INSERT INTO product_reference
+               (barcode, name, image_url, source, verification_status)
+               VALUES ('063848966068', 'Razor', 'https://img.test/catalogue-razor.jpg',
+                       'Open Products Facts', 'requires_review')"""
+        )
+        app = self.make_test_app()
+        with patch("routes.products.get_db", return_value=db), \
+             patch("routes.products.schedule_image_fill") as schedule:
+            with app.test_client() as client:
+                response = client.get("/api/products/images?ids=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["images"], {
+            "1": "https://img.test/catalogue-razor.jpg",
+        })
+        schedule.assert_called_once_with([])
         db.close()
 
     def test_bulk_planogram_import_attaches_reference_metadata_and_clears_old_upc_data(self):

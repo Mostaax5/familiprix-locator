@@ -83,7 +83,7 @@ class ProductDataAccuracyTests(unittest.TestCase):
             "package_size_conflict", {issue["type"] for issue in result.issues}
         )
 
-    def test_untrusted_online_values_are_evidence_not_active_metadata(self):
+    def test_untrusted_online_media_remains_available_and_flagged(self):
         db = self.make_db()
         result = upsert_reference_candidate(
             db,
@@ -100,14 +100,40 @@ class ProductDataAccuracyTests(unittest.TestCase):
             "063848966068",
         )
         self.assertEqual(result["verification_status"], "requires_review")
-        self.assertEqual(reference.get("description", ""), "")
-        self.assertEqual(reference.get("image_url", ""), "")
+        self.assertEqual(reference.get("description", ""), "Unverified web description")
+        self.assertEqual(reference.get("image_url", ""), "https://web.test/image.jpg")
+        self.assertEqual(
+            set(reference.get("_unverified_fields", [])),
+            {"description", "image_url"},
+        )
         evidence = db.execute(
             """SELECT verification_status, active FROM product_reference_evidence
                WHERE field_name='image_url'"""
         ).fetchone()
         self.assertEqual(evidence["verification_status"], "requires_review")
         self.assertEqual(evidence["active"], 0)
+        db.close()
+
+    def test_media_is_found_across_equivalent_upc_and_gtin_forms(self):
+        db = self.make_db()
+        db.execute(
+            """INSERT INTO product_reference (barcode, name, source)
+               VALUES ('063848966068', 'Test product', 'Planogramme magasin')"""
+        )
+        db.execute(
+            """INSERT INTO product_reference
+               (barcode, name, description, image_url, source)
+               VALUES ('0063848966068', 'Test product', 'Exact package text',
+                       'https://img.test/exact.jpg', 'Open Products Facts')"""
+        )
+
+        reference = reference_metadata_for_barcode(
+            build_reference_metadata_index(db, ["063848966068"]),
+            "063848966068",
+        )
+
+        self.assertEqual(reference["description"], "Exact package text")
+        self.assertEqual(reference["image_url"], "https://img.test/exact.jpg")
         db.close()
 
     def test_rejected_reference_evidence_cannot_be_reactivated_automatically(self):
@@ -161,7 +187,7 @@ class ProductDataAccuracyTests(unittest.TestCase):
         self.assertEqual(product["image_url"], "https://manufacturer.test/image.jpg")
         db.close()
 
-    def test_legacy_unproven_values_are_hidden_and_sent_to_review(self):
+    def test_legacy_unproven_values_are_shown_and_sent_to_review(self):
         db = self.make_db()
         product_id = self.insert_product(db)
         db.execute(
@@ -178,8 +204,8 @@ class ProductDataAccuracyTests(unittest.TestCase):
                 (product_id,),
             ).fetchall()
         }
-        self.assertEqual(public["description"], "")
-        self.assertEqual(public["image_url"], "")
+        self.assertEqual(public["description"], "Maybe wrong")
+        self.assertEqual(public["image_url"], "https://unknown.test/image.jpg")
         self.assertTrue(public["description_available_unverified"])
         self.assertTrue(public["image_available_unverified"])
         self.assertIn("possible_wrong_description", issue_types)
@@ -208,7 +234,7 @@ class ProductDataAccuracyTests(unittest.TestCase):
         self.assertEqual({row["product_id"] for row in din_rows}, {first, second})
         db.close()
 
-    def test_ai_context_omits_unverified_attributes(self):
+    def test_ai_context_includes_unverified_description_with_status(self):
         context = product_context_for_client_rag({
             "client_id": "product:1", "name": "Test product",
             "brand": "Wrong brand", "description": "Wrong description",
@@ -218,7 +244,10 @@ class ProductDataAccuracyTests(unittest.TestCase):
             "_verified_fields": [],
         })
         self.assertEqual(context["brand"], "")
-        self.assertEqual(context["description"], "")
+        self.assertEqual(context["description"], "Wrong description")
+        self.assertEqual(context["notes"], "Wrong description")
+        self.assertFalse(context["description_verified"])
+        self.assertTrue(context["unverified_description_included"])
         self.assertTrue(context["unverified_information_omitted"])
 
     def test_verified_name_status_does_not_verify_brand(self):
@@ -243,6 +272,20 @@ class ProductDataAccuracyTests(unittest.TestCase):
         self.assertNotIn("secretwidget", search_row["_hay"])
         self.assertNotIn("madeupingredient", search_row["_hay"])
         self.assertEqual(search_row["_brand"], "")
+        db.close()
+
+    def test_available_description_influences_search_before_review(self):
+        db = self.make_db()
+        product_id = self.insert_product(db, name="Neutral item")
+        db.execute(
+            "UPDATE products SET description='transparent wound membrane' WHERE id=?",
+            (product_id,),
+        )
+        products_module._PROD_CACHE.update(key=None, rows=[])
+        item, search_row = products_module._products_corpus(db)[0]
+        self.assertEqual(item["description"], "transparent wound membrane")
+        self.assertIn("transparent wound membrane", search_row["_hay"])
+        self.assertTrue(item["description_available_unverified"])
         db.close()
 
     def test_verified_aliases_and_identifiers_expand_search_without_changing_name(self):
