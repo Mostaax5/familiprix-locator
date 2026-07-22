@@ -1,4 +1,5 @@
 import json
+import gc
 import os
 import re
 import threading
@@ -8,9 +9,10 @@ from flask import Blueprint, jsonify, request
 
 from auth import require_editor, utc_now_iso
 from database import connect_db, ensure_product_data_ready, get_db
-from memory_guard import memory_intensive_task, release_unused_memory
+from memory_guard import release_unused_memory
 from product_data import (
     create_review_issue,
+    exact_gtin_variants,
     gtin_identity_key,
     sync_reference_identifiers_to_product,
     upsert_reference_candidate,
@@ -118,10 +120,14 @@ def _save_state(db):
 def _catalogue_items(db):
     items = {}
     queries = (
-        """SELECT barcode, name, brand, description, source
+        """SELECT barcode, name, brand,
+                  SUBSTR(COALESCE(description,''), 1, 800) AS description,
+                  source
            FROM product_reference
            WHERE TRIM(COALESCE(barcode,''))<>''""",
-        """SELECT barcode, name, brand, description, '' AS source
+        """SELECT barcode, name, brand,
+                  SUBSTR(COALESCE(description,''), 1, 800) AS description,
+                  '' AS source
            FROM products
            WHERE TRIM(COALESCE(barcode,''))<>''""",
     )
@@ -143,25 +149,38 @@ def _catalogue_items(db):
     return items
 
 
-def _product_rows_by_key(db):
-    rows = {}
-    for row in db.execute(
-        "SELECT * FROM products WHERE TRIM(COALESCE(barcode,''))<>''"
-    ).fetchall():
-        product = dict(row)
-        key = gtin_identity_key(product.get("barcode", ""))
-        if key:
-            rows.setdefault(key, []).append(product)
-    return rows
+def _product_rows_for_key(db, key, barcode=""):
+    """Load only products touched by one identifier association."""
+    rows = [dict(row) for row in db.execute(
+        "SELECT * FROM products WHERE gtin_key=?", (str(key or ""),)
+    ).fetchall()]
+    if rows or not barcode:
+        return rows
+    variants = exact_gtin_variants(barcode)
+    if not variants:
+        return []
+    placeholders = ",".join("?" for _ in variants)
+    return [
+        dict(row) for row in db.execute(
+            f"SELECT * FROM products WHERE barcode IN ({placeholders})",
+            tuple(variants),
+        ).fetchall()
+        if gtin_identity_key(dict(row).get("barcode", "")) == key
+    ]
 
 
 def _seed_catalogue_label_candidates(db, now):
     """Preserve regulatory labels already attached to an exact catalogue UPC."""
     queries = (
-        """SELECT barcode, name, description, ingredients, source, source_url
+        """SELECT barcode, name,
+                  SUBSTR(COALESCE(description,''), 1, 2000) AS description,
+                  SUBSTR(COALESCE(ingredients,''), 1, 1000) AS ingredients,
+                  source, source_url
            FROM product_reference
            WHERE TRIM(COALESCE(barcode,''))<>''""",
-        """SELECT barcode, name, description, ingredients,
+        """SELECT barcode, name,
+                  SUBSTR(COALESCE(description,''), 1, 2000) AS description,
+                  SUBSTR(COALESCE(ingredients,''), 1, 1000) AS ingredients,
                   COALESCE(primary_source, '') AS source,
                   COALESCE(NULLIF(primary_source_url,''), source_url, '')
                     AS source_url
@@ -256,7 +275,7 @@ def _official_reference_metadata(barcode, record):
     }
 
 
-def _store_dpd_results(db, items, matches, version, now, products_by_key):
+def _store_dpd_results(db, items, matches, version, now):
     verified_groups, conflicts = group_unambiguous_dpd_matches(matches)
     verified_count = 0
     affected_ids = set()
@@ -292,7 +311,7 @@ def _store_dpd_results(db, items, matches, version, now, products_by_key):
                 imported_at=now,
             )
             verified_count += int(bool(saved_din)) + int(bool(saved_hc))
-            for product in products_by_key.get(key, []):
+            for product in _product_rows_for_key(db, key, barcode):
                 sync_reference_identifiers_to_product(
                     db, product, imported_at=now
                 )
@@ -315,7 +334,9 @@ def _store_dpd_results(db, items, matches, version, now, products_by_key):
                     confidence=1.0, verification_status="requires_review",
                     imported_at=now,
                 )
-            for product in products_by_key.get(key, []):
+            for product in _product_rows_for_key(
+                db, key, item.get("barcode", "")
+            ):
                 create_review_issue(
                     db, product["id"], "identifier_conflict",
                     candidate_value="DIN: " + " | ".join(dins),
@@ -386,7 +407,7 @@ def _metadata_from_verification(barcode, result):
     }
 
 
-def _store_verified_candidate(db, item, candidate, result, now, products_by_key):
+def _store_verified_candidate(db, item, candidate, result, now):
     identifier_type = result.get("identifier_type", candidate.get("type", ""))
     saved = upsert_reference_identifier(
         db, item["barcode"], identifier_type, result.get("value", ""),
@@ -415,13 +436,15 @@ def _store_verified_candidate(db, item, candidate, result, now, products_by_key)
         imported_at=now,
     )
     affected_ids = set()
-    for product in products_by_key.get(item["gtin_key"], []):
+    for product in _product_rows_for_key(
+        db, item["gtin_key"], item.get("barcode", "")
+    ):
         sync_reference_identifiers_to_product(db, product, imported_at=now)
         affected_ids.add(int(product["id"]))
     return int(bool(saved)), affected_ids
 
 
-def _reject_candidate(db, row, products_by_key):
+def _reject_candidate(db, row):
     """Remove a definite official mismatch from employee-facing search."""
     db.execute(
         """UPDATE product_reference_identifiers
@@ -429,7 +452,9 @@ def _reject_candidate(db, row, products_by_key):
            WHERE id=? AND verification_status='requires_review'""",
         (row["id"],),
     )
-    for product in products_by_key.get(row.get("gtin_key"), []):
+    for product in _product_rows_for_key(
+        db, row.get("gtin_key"), row.get("barcode", "")
+    ):
         db.execute(
             """UPDATE product_identifiers SET verification_status='rejected'
                WHERE product_id=? AND identifier_type=? AND identifier_value=?
@@ -441,7 +466,7 @@ def _reject_candidate(db, row, products_by_key):
         )
 
 
-def _verify_candidates(db, items, products_by_key, now):
+def _verify_candidates(db, items, now):
     rows = [dict(row) for row in db.execute(
         """SELECT * FROM product_reference_identifiers
            WHERE verification_status='requires_review'
@@ -476,7 +501,7 @@ def _verify_candidates(db, items, products_by_key, now):
             row, item, candidate, result = future.result()
             if result.get("verified"):
                 saved, affected = _store_verified_candidate(
-                    db, item, candidate, result, now, products_by_key
+                    db, item, candidate, result, now
                 )
                 verified += saved
                 affected_ids.update(affected)
@@ -492,15 +517,19 @@ def _verify_candidates(db, items, products_by_key, now):
             ):
                 # The exact-UPC page explicitly labels this identifier. Keep it
                 # useful as "À confirmer" until the official API is reachable.
-                for product in products_by_key.get(row.get("gtin_key"), []):
+                for product in _product_rows_for_key(
+                    db, row.get("gtin_key"), row.get("barcode", "")
+                ):
                     sync_reference_identifiers_to_product(
                         db, product, imported_at=now
                     )
                     affected_ids.add(int(product["id"]))
             else:
                 review += 1
-                _reject_candidate(db, row, products_by_key)
-                for product in products_by_key.get(row.get("gtin_key"), []):
+                _reject_candidate(db, row)
+                for product in _product_rows_for_key(
+                    db, row.get("gtin_key"), row.get("barcode", "")
+                ):
                     create_review_issue(
                         db, product["id"], "identifier_conflict",
                         candidate_value=(
@@ -520,17 +549,15 @@ def _verify_candidates(db, items, products_by_key, now):
     return {"verified": verified, "review": review, "affected_ids": affected_ids}
 
 
-def _discover_online(db, items, products_by_key, now, force=False):
+def _discover_online(db, batch, now, remaining_after_batch=0):
     from routes.ai import _reference_upsert, lookup_regulatory_product_online
 
-    already_checked = set() if force else _checked_keys(db, _ONLINE_CHECK_SOURCE)
-    candidates = [
-        item for key, item in items.items()
-        if key not in already_checked and _likely_regulated(item)
-    ]
-    batch = candidates[:_ONLINE_BATCH_LIMIT]
     if not batch:
-        return {"checked": 0, "verified": 0, "review": 0, "remaining": 0, "affected_ids": set()}
+        return {
+            "checked": 0, "verified": 0, "review": 0,
+            "remaining": max(0, int(remaining_after_batch)),
+            "affected_ids": set(),
+        }
 
     def lookup(item):
         try:
@@ -566,7 +593,7 @@ def _discover_online(db, items, products_by_key, now, force=False):
                     )
                     if result.get("verified"):
                         saved, affected = _store_verified_candidate(
-                            db, item, candidate, result, now, products_by_key
+                            db, item, candidate, result, now
                         )
                         verified += saved
                         affected_ids.update(affected)
@@ -577,7 +604,9 @@ def _discover_online(db, items, products_by_key, now, force=False):
                     ):
                         # Keep the explicitly labelled exact-UPC candidate
                         # searchable while the official service is unavailable.
-                        for product in products_by_key.get(item["gtin_key"], []):
+                        for product in _product_rows_for_key(
+                            db, item["gtin_key"], item.get("barcode", "")
+                        ):
                             sync_reference_identifiers_to_product(
                                 db, product, imported_at=now
                             )
@@ -597,7 +626,7 @@ def _discover_online(db, items, products_by_key, now, force=False):
                         ).fetchall()
                         for rejected_row in rejected_rows:
                             _reject_candidate(
-                                db, dict(rejected_row), products_by_key
+                                db, dict(rejected_row)
                             )
                 details = {
                     "candidate_count": len(source_candidates),
@@ -615,7 +644,9 @@ def _discover_online(db, items, products_by_key, now, force=False):
                 _state_update(online_checked=checked)
                 release_unused_memory()
     _write_checks(db, _ONLINE_CHECK_SOURCE, checks)
-    remaining = max(0, len(candidates) - checked)
+    remaining = max(
+        0, int(remaining_after_batch) + len(batch) - checked
+    )
     return {
         "checked": checked, "verified": verified, "review": review,
         "remaining": remaining, "affected_ids": affected_ids,
@@ -629,7 +660,6 @@ def _regulatory_worker(force=False):
         db = connect_db()
         ensure_product_data_ready(db)
         items = _catalogue_items(db)
-        products_by_key = _product_rows_by_key(db)
         now = utc_now_iso()
         _state_update(
             running=True, status="running", phase="prepare", started_at=now,
@@ -660,11 +690,12 @@ def _regulatory_worker(force=False):
             exact_matches=dpd_result["exact_matches"],
             verified_identifiers=dpd_result["verified_identifiers"],
             conflicts=dpd_result["conflicts"],
+            source_version=version,
         )
 
         if not _STOP_EVENT.is_set():
             _state_update(phase="verify_labeled_identifiers")
-            verified = _verify_candidates(db, items, products_by_key, now)
+            verified = _verify_candidates(db, items, now)
             affected_ids.update(verified["affected_ids"])
             _state_update(
                 verified_identifiers=(
@@ -676,8 +707,21 @@ def _regulatory_worker(force=False):
 
         if not _STOP_EVENT.is_set():
             _state_update(phase="inspect_exact_upc_sources")
+            already_checked = (
+                set() if force else _checked_keys(db, _ONLINE_CHECK_SOURCE)
+            )
+            candidates = [
+                item for key, item in items.items()
+                if key not in already_checked and _likely_regulated(item)
+            ]
+            batch = candidates[:_ONLINE_BATCH_LIMIT]
+            remaining_after_batch = max(0, len(candidates) - len(batch))
+            del candidates
+            del items
+            gc.collect()
             online = _discover_online(
-                db, items, products_by_key, now, force=force
+                db, batch, now,
+                remaining_after_batch=remaining_after_batch,
             )
             affected_ids.update(online["affected_ids"])
             snapshot = _state_snapshot()
