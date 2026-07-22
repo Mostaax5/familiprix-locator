@@ -30,6 +30,7 @@ from product_data import (
     gtin_identity_key,
     record_field_evidence,
     record_reference_evidence,
+    sync_reference_identifiers_to_product,
     sync_basic_aliases,
     upsert_product_identifier,
     upsert_reference_candidate,
@@ -289,7 +290,14 @@ def _reference_state_key(db):
     ).fetchone()
     row_key = tuple(row.values()) if isinstance(row, dict) else tuple(row)
     evidence_key = tuple(evidence.values()) if isinstance(evidence, dict) else tuple(evidence)
-    return (row_key, evidence_key)
+    identifiers = db.execute(
+        """SELECT COUNT(*) AS n, MAX(id) AS max_id,
+                  SUM(CASE WHEN verification_status='verified' THEN 1 ELSE 0 END) AS verified_count,
+                  SUM(CASE WHEN verification_status='requires_review' THEN 1 ELSE 0 END) AS probable_count
+           FROM product_reference_identifiers"""
+    ).fetchone()
+    identifier_key = tuple(identifiers.values()) if isinstance(identifiers, dict) else tuple(identifiers)
+    return (row_key, evidence_key, identifier_key)
 
 
 def _reference_corpus(db):
@@ -314,6 +322,7 @@ def _reference_corpus(db):
             return _REF_CACHE["rows"]
         rows = []
         verified_by_key = {}
+        identifiers_by_key = {}
         for evidence_row in db.execute(
             """SELECT gtin_key, field_name, field_value
                FROM product_reference_evidence
@@ -323,6 +332,26 @@ def _reference_corpus(db):
             verified_by_key.setdefault(evidence["gtin_key"], {})[
                 evidence["field_name"]
             ] = evidence["field_value"]
+        for identifier_row in db.execute(
+            """SELECT gtin_key, identifier_type, identifier_value, authority,
+                      source, verification_status, match_method, confidence
+               FROM product_reference_identifiers
+               WHERE verification_status='verified'
+                  OR (verification_status='requires_review'
+                      AND identifier_type IN ('DIN','NPN','DIN_HM')
+                      AND match_method IN ('exact_gtin_labeled_source','imported_typed_identifier')
+                      AND confidence>=0.7)
+               ORDER BY CASE WHEN verification_status='verified' THEN 0 ELSE 1 END,
+                        confidence DESC, id"""
+        ).fetchall():
+            identifier = dict(identifier_row)
+            identifiers_by_key.setdefault(identifier["gtin_key"], []).append({
+                "type": identifier.get("identifier_type", ""),
+                "value": identifier.get("identifier_value", ""),
+                "authority": identifier.get("authority", ""),
+                "source": identifier.get("source", ""),
+                "verification_status": identifier.get("verification_status", ""),
+            })
         for r in db.execute(
             """SELECT barcode, name, brand, description, product_code,
                       store_presence_status, source, source_url
@@ -339,6 +368,8 @@ def _reference_corpus(db):
             )
             verified_brand = verified.get("brand", "")
             verified_description = verified.get("description", "")
+            gtin_key = gtin_identity_key(d.get("barcode", ""))
+            identifiers = identifiers_by_key.get(gtin_key, [])
             name = normalize_search_text(official_name)
             brand = normalize_search_text(verified_brand)
             desc = normalize_search_text(verified_description)
@@ -349,9 +380,15 @@ def _reference_corpus(db):
                     d.get("product_code", "") if store_identity else ""
                 ),
                 "store_presence_status": d.get("store_presence_status", ""),
+                "regulatory_identifiers": _public_regulatory_identifiers(identifiers),
+                "_identifiers": identifiers,
                 "_bc": normalized_digits(d.get("barcode", "")),
                 "_name": name, "_brand": brand,
-                "_hay": " ".join([name, brand, desc]), "_tokens": name.split(),
+                "_hay": " ".join([
+                    name, brand, desc,
+                    " ".join(normalize_search_text(item.get("value", "")) for item in identifiers),
+                ]),
+                "_tokens": name.split(),
             })
         _REF_CACHE.update(key=key, rows=rows, built_at=time.time())
     return rows
@@ -440,6 +477,31 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
 _PROD_CACHE = {"key": None, "rows": []}
 
 
+def _public_regulatory_identifiers(identifiers):
+    """Expose useful regulatory IDs without disguising probable data as fact."""
+    result = []
+    seen = set()
+    for raw in identifiers or []:
+        identifier_type = str(raw.get("type", "") or "").upper()
+        value = str(raw.get("value", "") or "").strip()
+        if identifier_type not in {"DIN", "NPN", "DIN_HM"} or not value:
+            continue
+        key = (identifier_type, value)
+        if key in seen:
+            continue
+        seen.add(key)
+        confirmed = raw.get("verification_status") == "verified"
+        result.append({
+            "type": identifier_type,
+            "value": value,
+            "authority": str(raw.get("authority", "") or ""),
+            "source": str(raw.get("source", "") or ""),
+            "status": "confirmed" if confirmed else "probable",
+            "label": "Confirmé" if confirmed else "À confirmer",
+        })
+    return result
+
+
 def _product_search_row(item, aliases=(), identifiers=()):
     """Pre-normalized search fields for a placed product, in the shape
     _fast_reference_score expects — computed once per product, not once per term."""
@@ -464,6 +526,8 @@ def _product_search_row(item, aliases=(), identifiers=()):
         normalize_search_text(verified("manufacturer")),
         normalize_search_text(verified("ingredients")),
         normalize_search_text(verified("compatibility")),
+        normalize_search_text(verified("purpose")),
+        normalize_search_text(verified("route_of_administration")),
         " ".join(normalize_search_text(alias) for alias in aliases),
         " ".join(
             normalize_search_text(identifier.get("value", ""))
@@ -495,6 +559,19 @@ def products_state_key(db):
            FROM products"""
     ).fetchone()
     return (tuple(key_row.values()) if isinstance(key_row, dict) else tuple(key_row))
+
+
+def product_identifier_state_key(db):
+    """Fingerprint identifier changes so phones do not keep a stale 304 cache."""
+    row = db.execute(
+        """SELECT COUNT(*) AS n, MAX(id) AS max_id,
+                  MAX(last_verified_at) AS max_verified,
+                  SUM(CASE WHEN verification_status='verified' THEN 1 ELSE 0 END) AS verified_count,
+                  SUM(CASE WHEN verification_status='requires_review' THEN 1 ELSE 0 END) AS probable_count,
+                  SUM(CASE WHEN verification_status='rejected' THEN 1 ELSE 0 END) AS rejected_count
+           FROM product_identifiers"""
+    ).fetchone()
+    return tuple(row.values()) if isinstance(row, dict) else tuple(row)
 
 
 def _products_corpus(db):
@@ -565,9 +642,15 @@ def _products_corpus(db):
             }
         for identifier_row in db.execute(
             """SELECT product_id, identifier_type, identifier_value, authority,
-                      verification_status
+                      source, verification_status, match_method, confidence
                FROM product_identifiers
-               WHERE verification_status='verified'"""
+               WHERE verification_status='verified'
+                  OR (verification_status='requires_review'
+                      AND identifier_type IN ('DIN','NPN','DIN_HM')
+                      AND match_method IN ('exact_gtin_labeled_source','imported_typed_identifier')
+                      AND confidence>=0.7)
+               ORDER BY CASE WHEN verification_status='verified' THEN 0 ELSE 1 END,
+                        confidence DESC, id"""
         ).fetchall():
             identifier = dict(identifier_row)
             identifiers_by_product.setdefault(
@@ -576,6 +659,7 @@ def _products_corpus(db):
                 "type": identifier.get("identifier_type", ""),
                 "value": identifier.get("identifier_value", ""),
                 "authority": identifier.get("authority", ""),
+                "source": identifier.get("source", ""),
                 "verification_status": identifier.get("verification_status", ""),
             })
     except Exception:
@@ -607,6 +691,7 @@ def _products_corpus(db):
         identifiers = identifiers_by_product.get(product_id, [])
         item["_search_aliases"] = aliases
         item["_identifiers"] = identifiers
+        item["regulatory_identifiers"] = _public_regulatory_identifiers(identifiers)
         rows.append((item, _product_search_row(item, aliases, identifiers)))
     _PROD_CACHE.update(key=key, rows=rows)
     return rows
@@ -994,7 +1079,8 @@ _REFERENCE_METADATA_FIELDS = (
     "brand", "description", "image_url", "product_code", "source_url",
     "package_size", "package_unit", "variant", "flavour", "colour",
     "strength", "dosage_form", "manufacturer", "category", "ingredients",
-    "compatibility", "official_name_fr", "official_name_en",
+    "compatibility", "purpose", "route_of_administration",
+    "official_name_fr", "official_name_en",
 )
 
 
@@ -1268,15 +1354,36 @@ def update_product_metadata_from_reference(
     return bool(changed_fields)
 
 
-def sync_reference_metadata_to_products(db, now=None):
-    """Backfill only exact, trusted packages; uncertain rows become review issues."""
-    reference_index = build_reference_metadata_index(db)
+def sync_reference_metadata_to_products(db, now=None, product_ids=None):
+    """Backfill exact trusted metadata, optionally for a bounded product set."""
+    clean_ids = []
+    for value in product_ids or []:
+        try:
+            product_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if product_id > 0 and product_id not in clean_ids:
+            clean_ids.append(product_id)
+    rows = []
+    if clean_ids:
+        for start in range(0, len(clean_ids), 400):
+            chunk = clean_ids[start:start + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(db.execute(
+                f"""SELECT * FROM products WHERE id IN ({placeholders})
+                    AND TRIM(COALESCE(barcode,'')) <> ''""",
+                tuple(chunk),
+            ).fetchall())
+    else:
+        rows = db.execute(
+            "SELECT * FROM products WHERE TRIM(COALESCE(barcode,'')) <> ''"
+        ).fetchall()
+    reference_index = build_reference_metadata_index(
+        db, [dict(row).get("barcode", "") for row in rows]
+    )
     if not reference_index:
         return 0
     linked = 0
-    rows = db.execute(
-        "SELECT * FROM products WHERE TRIM(COALESCE(barcode,'')) <> ''"
-    ).fetchall()
     for row in rows:
         product = dict(row)
         reference = reference_metadata_for_barcode(reference_index, product.get("barcode", ""))
@@ -1414,6 +1521,9 @@ def _record_import_identifiers(db, product, now, source="Planogramme", payload=N
     )
     sync_basic_aliases(
         db, product_id, alias_payload, source=source, verified=True
+    )
+    sync_reference_identifiers_to_product(
+        db, product, imported_at=now
     )
     return valid_gtin
 
@@ -2047,6 +2157,7 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None):
             or ""
         ).strip(),
         "product_code": row["product_code"],
+        "regulatory_identifiers": row.get("regulatory_identifiers", []),
         "catalog_only": True,
         "in_stock": 1,
     } for row in rows]
@@ -2264,7 +2375,9 @@ def get_products():
     reuses its stored copy — this endpoint is fetched at every app open and tab
     switch, and used to re-serialize ~1 MB of JSON every time."""
     db = get_db()
-    etag = hashlib.sha256(repr(products_state_key(db)).encode()).hexdigest()
+    etag = hashlib.sha256(repr((
+        products_state_key(db), product_identifier_state_key(db)
+    )).encode()).hexdigest()
     if client_etag_matches(etag):
         return "", 304
     products = sorted(
@@ -3283,6 +3396,11 @@ def bulk_import_products():
     from routes.gist import _schedule_gist_backup
     _schedule_gist_backup(db)
     schedule_image_fill(image_barcodes)   # fetch missing plano pictures automatically
+    try:
+        from routes.regulatory import schedule_regulatory_enrichment
+        schedule_regulatory_enrichment()
+    except Exception:
+        pass
     return jsonify({"success": True, "imported": imported, "skipped": skipped,
                     "errors": errors, "overflow": overflow,
                     "overflow_shelves": overflow, "overflow_products": overflow_products,

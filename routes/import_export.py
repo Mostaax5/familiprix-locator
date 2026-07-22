@@ -659,7 +659,8 @@ def import_planogram_catalog():
             for field in (
                 "package_size", "package_unit", "variant", "flavour", "colour",
                 "strength", "dosage_form", "manufacturer", "category",
-                "ingredients", "compatibility", "official_name_fr",
+                "ingredients", "compatibility", "purpose",
+                "route_of_administration", "official_name_fr",
                 "official_name_en",
             ):
                 metadata_candidate[field] = str(p.get(field, "") or "").strip()[:6000]
@@ -673,7 +674,8 @@ def import_planogram_catalog():
                     "brand", "description", "image_url", "package_size",
                     "package_unit", "variant", "flavour", "colour", "strength",
                     "dosage_form", "manufacturer", "category", "ingredients",
-                    "compatibility", "official_name_fr", "official_name_en",
+                    "compatibility", "purpose", "route_of_administration",
+                    "official_name_fr", "official_name_en",
                 )
             )
             metadata_result = {"issues": [], "confidence": 0.0}
@@ -772,6 +774,11 @@ def import_planogram_catalog():
     try:
         from routes.products import bump_reference_cache
         bump_reference_cache()   # refresh the in-memory search corpus
+    except Exception:
+        pass
+    try:
+        from routes.regulatory import schedule_regulatory_enrichment
+        schedule_regulatory_enrichment()
     except Exception:
         pass
     return jsonify({

@@ -17,7 +17,13 @@ from product_data import (
     classify_source,
     gtin_identity_key,
     gtin_check_digit_valid,
+    upsert_reference_identifier,
     upsert_reference_candidate,
+)
+from regulatory_data import (
+    HEALTH_CANADA_AUTHORITY,
+    attach_regulatory_candidates,
+    merge_regulatory_candidates,
 )
 
 ai_bp = Blueprint("ai", __name__)
@@ -131,7 +137,8 @@ PRODUCT_LOOKUP_SOURCES = [
 LOOKUP_FIELDS = [
     "code", "product_name", "product_name_fr", "product_name_en",
     "generic_name", "generic_name_fr", "brands", "quantity", "categories",
-    "ingredients_text_fr", "ingredients_text", "labels", "url", "image_front_url",
+    "ingredients_text_fr", "ingredients_text", "labels", "labels_tags",
+    "packaging_text", "npn", "din", "din_hm", "url", "image_front_url",
 ]
 
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY",  "").strip()
@@ -323,13 +330,31 @@ def _prefer_lookup_result(current, current_score, candidate, candidate_score, re
     """Prefer a real image during image enrichment, then use normal quality."""
     if not candidate:
         return current, current_score
+    current_candidates = list((current or {}).get("regulatory_identifiers") or [])
+    candidate_candidates = list(candidate.get("regulatory_identifiers") or [])
+    merged_candidates = merge_regulatory_candidates(
+        current_candidates, candidate_candidates
+    )
     if require_image:
         candidate_has_image = _lookup_has_image(candidate)
         current_has_image = _lookup_has_image(current)
         if candidate_has_image != current_has_image:
-            return (candidate, candidate_score) if candidate_has_image else (current, current_score)
+            selected, score = (
+                (candidate, candidate_score)
+                if candidate_has_image else (current, current_score)
+            )
+            if selected is not None and merged_candidates:
+                selected = dict(selected)
+                selected["regulatory_identifiers"] = merged_candidates
+            return selected, score
     if candidate_score > current_score:
+        if merged_candidates:
+            candidate = dict(candidate)
+            candidate["regulatory_identifiers"] = merged_candidates
         return candidate, candidate_score
+    if current is not None and merged_candidates:
+        current = dict(current)
+        current["regulatory_identifiers"] = merged_candidates
     return current, current_score
 
 
@@ -629,8 +654,11 @@ def parse_familiprix_product_page(html, url, barcode, barcode_candidates=None):
     brand = structured.get("brand") or infer_brand_from_title(title)
     if not title:
         return None
-    return {"name": title, "brand": brand, "description": description, "barcode": barcode,
-            "source": "Familiprix", "source_url": url, "image_url": image_url}
+    return attach_regulatory_candidates({
+        "name": title, "brand": brand, "description": description,
+        "barcode": barcode, "source": "Familiprix", "source_url": url,
+        "image_url": image_url,
+    }, html)
 
 
 def lookup_familiprix_product(barcode, barcode_candidates=None):
@@ -684,8 +712,11 @@ def parse_generic_pharmacy_product_page(source_name, html, url, barcode, barcode
     brand = structured.get("brand") or infer_brand_from_title(title)
     if not title:
         return None
-    return {"name": title, "brand": brand, "description": description, "barcode": barcode,
-            "source": source_name, "source_url": url, "image_url": image_url}
+    return attach_regulatory_candidates({
+        "name": title, "brand": brand, "description": description,
+        "barcode": barcode, "source": source_name, "source_url": url,
+        "image_url": image_url,
+    }, html)
 
 
 def lookup_generic_pharmacy_product(source_name, base_url, barcode, barcode_candidates=None):
@@ -741,9 +772,12 @@ def lookup_open_facts_product(source_name, base_url, barcode):
                                            (f"Ingrédients: {ingredients}" if ingredients else "")] if part]
     if not name and not brand:
         return None
-    return {"name": name or brand, "brand": brand, "description": " | ".join(description_parts),
-            "barcode": barcode, "source": source_name, "source_url": product.get("url", ""),
-            "image_url": product.get("image_front_url", "")}
+    return attach_regulatory_candidates({
+        "name": name or brand, "brand": brand,
+        "description": " | ".join(description_parts), "barcode": barcode,
+        "source": source_name, "source_url": product.get("url", ""),
+        "image_url": product.get("image_front_url", ""),
+    }, json.dumps(product, ensure_ascii=False))
 
 
 def lookup_upcitemdb(barcode):
@@ -768,8 +802,12 @@ def lookup_upcitemdb(barcode):
     image_url = str(images[0]).strip() if images else ""
     if not name:
         return None
-    return {"name": name, "brand": brand, "description": description, "barcode": digits,
-            "source": "UPC Item DB", "source_url": f"https://www.upcitemdb.com/upc/{digits}", "image_url": image_url}
+    return attach_regulatory_candidates({
+        "name": name, "brand": brand, "description": description,
+        "barcode": digits, "source": "UPC Item DB",
+        "source_url": f"https://www.upcitemdb.com/upc/{digits}",
+        "image_url": image_url,
+    }, json.dumps(item, ensure_ascii=False))
 
 
 def lookup_ean_search(barcode):
@@ -830,8 +868,12 @@ def lookup_barcodelookup(barcode):
         r'<meta name="description" content="([^"]+)"', r'<meta property="og:description" content="([^"]+)"',
     ])) if verified else "")
     image_url = structured.get("image_url") or (first_regex(html, [r'<meta property="og:image" content="([^"]+)"']) if verified else "")
-    return {"name": name.strip(), "brand": brand or infer_brand_from_title(name), "description": description,
-            "barcode": digits, "source": "Barcode Lookup", "source_url": url, "image_url": image_url or ""}
+    return attach_regulatory_candidates({
+        "name": name.strip(), "brand": brand or infer_brand_from_title(name),
+        "description": description, "barcode": digits,
+        "source": "Barcode Lookup", "source_url": url,
+        "image_url": image_url or "",
+    }, html)
 
 
 def lookup_go_upc(barcode):
@@ -862,8 +904,12 @@ def lookup_go_upc(barcode):
         r'<meta name="description" content="([^"]+)"', r'<meta property="og:description" content="([^"]+)"',
     ])) if verified else "")
     image_url = structured.get("image_url") or (first_regex(html, [r'<meta property="og:image" content="([^"]+)"']) if verified else "")
-    return {"name": name.strip(), "brand": brand or infer_brand_from_title(name), "description": description,
-            "barcode": digits, "source": "Go UPC", "source_url": url, "image_url": image_url or ""}
+    return attach_regulatory_candidates({
+        "name": name.strip(), "brand": brand or infer_brand_from_title(name),
+        "description": description, "barcode": digits,
+        "source": "Go UPC", "source_url": url,
+        "image_url": image_url or "",
+    }, html)
 
 
 def _fetch_json(url, timeout=5):
@@ -980,6 +1026,8 @@ def _build_client_candidates(question, limit=35):
     def ref_to_item(row):
         return {"barcode": row["barcode"], "name": row["name"], "brand": row["brand"],
                 "description": row["description"], "product_code": row["product_code"],
+                "regulatory_identifiers": row.get("regulatory_identifiers", []),
+                "_identifiers": row.get("_identifiers", []),
                 "catalog_only": True, "in_stock": 1}
 
     # 1) Exact UPC(s) named in the question — pinned first.
@@ -1689,6 +1737,8 @@ def product_context_for_client_rag(product):
         "manufacturer": verified_value("manufacturer"),
         "ingredients": verified_value("ingredients"),
         "compatibility": verified_value("compatibility"),
+        "purpose": verified_value("purpose"),
+        "route_of_administration": verified_value("route_of_administration"),
         "product_code": next((
             str(identifier.get("value", "") or "")
             for identifier in verified_identifiers
@@ -1906,6 +1956,8 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
 
 _HEALTH_CANADA_DPD_API = "https://health-products.canada.ca/api/drug"
 _HEALTH_CANADA_DPD_INFO = "https://health-products.canada.ca/dpd-bdpp/info"
+_HEALTH_CANADA_LNHPD_API = "https://health-products.canada.ca/api/natural-licences"
+_HEALTH_CANADA_LNHPD_INFO = "https://health-products.canada.ca/lnhpd-bdpsnh/"
 _HEALTH_CANADA_CACHE = {}
 _HEALTH_CANADA_CACHE_MAX = 64
 _DOCUMENTATION_SEARCH_STOPWORDS = {
@@ -1929,10 +1981,28 @@ def _health_canada_json(endpoint, **params):
     return data
 
 
+def _health_canada_nhp_json(endpoint, **params):
+    key = ("nhp", endpoint, tuple(sorted((str(k), str(v)) for k, v in params.items())))
+    if key in _HEALTH_CANADA_CACHE:
+        return _HEALTH_CANADA_CACHE[key]
+    url = f"{_HEALTH_CANADA_LNHPD_API}/{endpoint}/?{urlencode(params)}"
+    data = _fetch_json(url, timeout=3.5)
+    if data is not None:
+        if len(_HEALTH_CANADA_CACHE) >= _HEALTH_CANADA_CACHE_MAX:
+            _HEALTH_CANADA_CACHE.pop(next(iter(_HEALTH_CANADA_CACHE)), None)
+        _HEALTH_CANADA_CACHE[key] = data
+    return data
+
+
 def _json_records(value):
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
     if isinstance(value, dict):
+        nested = value.get("data")
+        if isinstance(nested, list):
+            return [item for item in nested if isinstance(item, dict)]
+        if isinstance(nested, dict):
+            return [nested]
         return [value]
     return []
 
@@ -2139,6 +2209,101 @@ def health_canada_documents(products, limit=4):
     return documents
 
 
+def _health_canada_nhp_document(product, identifier_type, licence, record):
+    lnhpd_id = str(record.get("lnhpd_id", "") or "").strip()
+    if not lnhpd_id:
+        return None
+    ingredients = _json_records(_health_canada_nhp_json(
+        "medicinalingredient", id=lnhpd_id, lang="fr", type="json"
+    ))
+    purposes = _json_records(_health_canada_nhp_json(
+        "productpurpose", id=lnhpd_id, lang="fr", type="json"
+    ))
+    routes = _json_records(_health_canada_nhp_json(
+        "productroute", id=lnhpd_id, lang="fr", type="json"
+    ))
+    ingredient_text = []
+    for item in ingredients[:8]:
+        name = str(item.get("ingredient_name", "") or "").strip()
+        amount = str(
+            item.get("quantity", "") or item.get("potency_amount", "") or ""
+        ).strip()
+        unit = str(
+            item.get("quantity_unit_of_measure", "")
+            or item.get("potency_unit_of_measure", "") or ""
+        ).strip()
+        if name:
+            ingredient_text.append(" ".join(
+                part for part in (name, amount, unit) if part
+            ))
+    purpose_text = [
+        str(item.get("purpose", "") or "").strip()
+        for item in purposes[:3]
+        if str(item.get("purpose", "") or "").strip()
+    ]
+    route_text = [
+        str(item.get("route_type_desc", "") or "").strip()
+        for item in routes[:4]
+        if str(item.get("route_type_desc", "") or "").strip()
+    ]
+    facts = [
+        f"Nom autorisé: {str(record.get('product_name', '') or '').strip()}",
+        f"{identifier_type.replace('_', '-')}: {licence}",
+    ]
+    dosage_form = str(record.get("dosage_form", "") or "").strip()
+    company = str(record.get("company_name", "") or "").strip()
+    if company:
+        facts.append(f"Titulaire: {company}")
+    if dosage_form:
+        facts.append(f"Forme: {dosage_form}")
+    if ingredient_text:
+        facts.append(f"Ingrédient(s) médicinal(aux): {', '.join(ingredient_text)}")
+    if purpose_text:
+        facts.append(f"Usage(s) homologué(s): {' '.join(purpose_text)}")
+    if route_text:
+        facts.append(f"Voie(s): {', '.join(route_text)}")
+    return {
+        "source_id": f"health-canada-nhp:{lnhpd_id}",
+        "title": f"Santé Canada - {str(record.get('product_name', '') or '').strip()}",
+        "publisher": "Santé Canada",
+        "url": _HEALTH_CANADA_LNHPD_INFO,
+        "evidence": ". ".join(fact for fact in facts if not fact.endswith(": "))[:2200],
+        "candidate_ids": [str(product.get("client_id", "") or "")],
+    }
+
+
+def health_canada_nhp_documents(products, limit=4):
+    verified = []
+    for product in products:
+        for identifier in product.get("_identifiers") or []:
+            identifier_type = str(identifier.get("type", "") or "")
+            if (
+                identifier_type not in {"NPN", "DIN_HM"}
+                or identifier.get("verification_status") != "verified"
+            ):
+                continue
+            licence = re.sub(r"\D", "", str(identifier.get("value", "") or ""))
+            if len(licence) == 8:
+                verified.append((product, identifier_type, licence))
+    documents = []
+    for product, identifier_type, licence in verified[:limit]:
+        records = _json_records(_health_canada_nhp_json(
+            "productlicence", id=licence, lang="fr", type="json"
+        ))
+        record = next((
+            item for item in records
+            if re.sub(r"\D", "", str(item.get("licence_number", "") or "")) == licence
+        ), None)
+        if not record:
+            continue
+        document = _health_canada_nhp_document(
+            product, identifier_type, licence, record
+        )
+        if document:
+            documents.append(document)
+    return documents
+
+
 def retrieve_client_documentation(products):
     product_names = [str(product.get("name", "") or "").strip() for product in products]
     documents = [{
@@ -2159,6 +2324,10 @@ def retrieve_client_documentation(products):
         documents.extend(health_canada_documents(products))
     except Exception:
         pass
+    try:
+        documents.extend(health_canada_nhp_documents(products))
+    except Exception:
+        pass
 
     field_labels = {
         "brand": "Marque", "description": "Description",
@@ -2167,6 +2336,8 @@ def retrieve_client_documentation(products):
         "strength": "Concentration", "dosage_form": "Forme",
         "manufacturer": "Fabricant", "ingredients": "Ingrédients",
         "compatibility": "Compatibilité", "category": "Catégorie",
+        "purpose": "Usage autorisé",
+        "route_of_administration": "Voie d'administration",
     }
     source_index = 0
     for product in products[:10]:
@@ -2814,6 +2985,25 @@ def _reference_upsert(db, product):
     result = upsert_reference_candidate(
         db, candidate, imported_at=utc_now_iso()
     )
+    imported_at = utc_now_iso()
+    for identifier in candidate.get("regulatory_identifiers") or []:
+        source = str(identifier.get("source", "") or candidate.get("source", ""))
+        source_url = str(
+            identifier.get("source_url", "") or candidate.get("source_url", "")
+        )
+        upsert_reference_identifier(
+            db, barcode, identifier.get("type", ""),
+            identifier.get("value", ""), authority=HEALTH_CANADA_AUTHORITY,
+            source=source, source_url=source_url,
+            source_record_id=(
+                identifier.get("product_name", "")
+                or candidate.get("name", "")
+                or identifier.get("value", "")
+            ),
+            match_method="exact_gtin_labeled_source",
+            confidence=0.75, verification_status="requires_review",
+            imported_at=imported_at,
+        )
     return bool(result.get("stored"))
 
 
@@ -3072,6 +3262,31 @@ def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False,
         ai_found = ai_grounded_product_lookup(barcode)
         if ai_found:
             best = ai_found
+    return best
+
+
+def lookup_regulatory_product_online(barcode):
+    """Inspect exact-UPC sources for explicitly labelled DIN/NPN/DIN-HM values.
+
+    This deliberately waits for all three narrow sources so an early image/name
+    result cannot hide a regulatory label returned by a slower source.
+    """
+    barcode = str(barcode or "").strip()
+    if not barcode:
+        return None
+    candidates = build_barcode_candidates(barcode)
+    tasks = [
+        lambda: lookup_familiprix_product(barcode, candidates),
+        lambda: lookup_open_facts_product(
+            "Open Drug Facts", "https://world.opendrugfacts.org", barcode
+        ),
+        lambda: lookup_open_facts_product(
+            "Open Products Facts", "https://world.openproductsfacts.org", barcode
+        ),
+    ]
+    best, _score = best_lookup_result(
+        tasks, max_workers=3, good_enough=None, wait_for_cleanup=True
+    )
     return best
 
 

@@ -33,6 +33,17 @@ function normalizeProduct(product) {
     manufacturer: String(product.manufacturer || '').trim(),
     ingredients: String(product.ingredients || '').trim(),
     compatibility: String(product.compatibility || '').trim(),
+    purpose: String(product.purpose || '').trim(),
+    route_of_administration: String(product.route_of_administration || '').trim(),
+    regulatory_identifiers: (Array.isArray(product.regulatory_identifiers)
+      ? product.regulatory_identifiers : []).slice(0, 12).map(identifier => ({
+        type: String(identifier?.type || '').trim(),
+        value: String(identifier?.value || '').trim(),
+        authority: String(identifier?.authority || '').trim(),
+        source: String(identifier?.source || '').trim(),
+        status: String(identifier?.status || 'probable').trim(),
+        label: String(identifier?.label || 'À confirmer').trim(),
+      })).filter(identifier => identifier.type && identifier.value),
     primary_source: String(product.primary_source || '').trim(),
     primary_source_url: safeHttpUrl(product.primary_source_url),
     facings: Number(product.facings) > 0 ? Number(product.facings) : 1,

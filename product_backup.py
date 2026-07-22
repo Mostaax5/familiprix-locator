@@ -10,14 +10,21 @@ PRODUCT_DATA_TABLE_COLUMNS = {
         "match_method", "verification_status", "last_verified_at",
         "store_presence_status", "package_size", "package_unit", "variant",
         "flavour", "colour", "strength", "dosage_form", "manufacturer",
-        "category", "ingredients", "compatibility", "official_name_fr",
-        "official_name_en", "source_priority", "confidence",
+        "category", "ingredients", "compatibility", "purpose",
+        "route_of_administration", "official_name_fr", "official_name_en",
+        "source_priority", "confidence",
     ),
     "product_reference_evidence": (
         "gtin_key", "barcode", "field_name", "field_value", "source",
         "source_type", "source_priority", "source_url", "source_record_id",
         "match_method", "confidence", "verification_status", "imported_at",
         "last_verified_at", "active",
+    ),
+    "product_reference_identifiers": (
+        "gtin_key", "barcode", "identifier_type", "identifier_value",
+        "normalized_value", "authority", "source", "source_url",
+        "source_record_id", "match_method", "confidence",
+        "verification_status", "imported_at", "last_verified_at",
     ),
     "product_identifiers": (
         "product_id", "identifier_type", "identifier_value", "normalized_value",
@@ -62,8 +69,9 @@ PRODUCT_RESTORE_COLUMNS = (
     "image_status", "quality_checked_at", "primary_source",
     "primary_source_url", "category", "package_size", "package_unit",
     "variant", "flavour", "colour", "strength", "dosage_form",
-    "manufacturer", "ingredients", "compatibility", "official_name_fr",
-    "official_name_en", "quality_issue_count",
+    "manufacturer", "ingredients", "compatibility", "purpose",
+    "route_of_administration", "official_name_fr", "official_name_en",
+    "quality_issue_count",
 )
 
 _PRODUCT_FLAG_COLUMNS = {"is_plano", "in_stock", "flipped_label"}

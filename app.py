@@ -22,6 +22,10 @@ from routes.layout import layout_bp
 from routes.ai import ai_bp, configured_ai_provider, reference_count, maybe_resume_enrichment
 from routes.gist import gist_bp, _restore_from_gist_if_empty
 from routes.import_export import import_export_bp
+from routes.regulatory import (
+    maybe_resume_regulatory_enrichment, regulatory_bp,
+    schedule_regulatory_enrichment,
+)
 
 
 def _preload_idna_codec():
@@ -120,10 +124,13 @@ app.register_blueprint(layout_bp)
 app.register_blueprint(ai_bp)
 app.register_blueprint(gist_bp)
 app.register_blueprint(import_export_bp)
+app.register_blueprint(regulatory_bp)
 app.register_blueprint(auth_bp)
 
 
-_PRODUCT_DATA_BLUEPRINTS = {"products", "ai", "gist", "import_export"}
+_PRODUCT_DATA_BLUEPRINTS = {
+    "products", "ai", "gist", "import_export", "regulatory",
+}
 
 
 @app.before_request
@@ -273,6 +280,7 @@ def add_security_headers(response):
 @app.route("/api/system/info", methods=["GET"])
 def get_system_info():
     maybe_resume_enrichment()   # keep-alive pings land here — a dead enrichment
+    maybe_resume_regulatory_enrichment()
     ai_provider = configured_ai_provider()   # run recovers with no page open
     try:
         db = get_db()
@@ -413,6 +421,8 @@ def _finish_persistence_boot():
         schedule_reference_metadata_sync()  # connect catalogue metadata to placed UPCs
         schedule_initial_product_quality_audit()
         schedule_backfill_missing()  # fetch missing product images in background
+        if _ASYNC_RENDER_BOOT:
+            schedule_regulatory_enrichment()  # official identifiers, never blocks boot
 
 
 if _ASYNC_RENDER_BOOT:

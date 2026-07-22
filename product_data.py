@@ -35,14 +35,16 @@ FIELD_NAMES = {
     "name", "brand", "description", "image_url", "package_size",
     "package_unit", "variant", "flavour", "colour", "strength",
     "dosage_form", "manufacturer", "category", "ingredients",
-    "compatibility", "official_name_fr", "official_name_en",
+    "compatibility", "purpose", "route_of_administration",
+    "official_name_fr", "official_name_en",
 }
 
 REFERENCE_FIELDS = (
     "name", "brand", "description", "image_url", "product_code",
     "package_size", "package_unit", "variant", "flavour", "colour",
     "strength", "dosage_form", "manufacturer", "category", "ingredients",
-    "compatibility", "official_name_fr", "official_name_en",
+    "compatibility", "purpose", "route_of_administration",
+    "official_name_fr", "official_name_en",
 )
 
 SOURCE_PRIORITIES = {
@@ -440,7 +442,11 @@ def upsert_product_identifier(
                  source_record_id=CASE WHEN excluded.confidence >= product_identifiers.confidence THEN excluded.source_record_id ELSE product_identifiers.source_record_id END,
                  match_method=CASE WHEN excluded.confidence >= product_identifiers.confidence THEN excluded.match_method ELSE product_identifiers.match_method END,
                  confidence=CASE WHEN excluded.confidence > product_identifiers.confidence THEN excluded.confidence ELSE product_identifiers.confidence END,
-                 verification_status=CASE WHEN product_identifiers.verification_status IN ('verified','rejected') THEN product_identifiers.verification_status ELSE excluded.verification_status END,
+                 verification_status=CASE
+                   WHEN excluded.verification_status='verified' THEN 'verified'
+                   WHEN product_identifiers.verification_status='verified' THEN 'verified'
+                   WHEN product_identifiers.verification_status='rejected' THEN 'rejected'
+                   ELSE excluded.verification_status END,
                  last_verified_at=CASE WHEN excluded.last_verified_at<>'' THEN excluded.last_verified_at ELSE product_identifiers.last_verified_at END""",
             (
                 int(product_id), identifier_type, str(value or "").strip(), normalized,
@@ -454,6 +460,132 @@ def upsert_product_identifier(
         return True
     except Exception:
         return False
+
+
+def upsert_reference_identifier(
+    db, barcode, identifier_type, value, *, authority="", source="",
+    source_url="", source_record_id="", match_method="exact_gtin",
+    confidence=0.0, verification_status="unverified", imported_at="",
+    last_verified_at="",
+):
+    """Store an identifier against an exact package before it is placed.
+
+    Verified package identifiers can then follow the UPC into every planogram
+    location without relying on names or repeating a network lookup.
+    """
+    identifier_type = str(identifier_type or "").strip().upper().replace("-", "_")
+    if identifier_type not in IDENTIFIER_TYPES:
+        return False
+    authority = str(authority or "").strip()
+    normalized = normalize_identifier(identifier_type, value, authority)
+    key = gtin_identity_key(barcode)
+    if not key or not normalized:
+        return False
+    status = verification_status if verification_status in VERIFICATION_STATUSES else "unverified"
+    try:
+        db.execute(
+            """INSERT INTO product_reference_identifiers
+               (gtin_key, barcode, identifier_type, identifier_value,
+                normalized_value, authority, source, source_url,
+                source_record_id, match_method, confidence,
+                verification_status, imported_at, last_verified_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(gtin_key, identifier_type, normalized_value, authority, source_record_id)
+               DO UPDATE SET
+                 barcode=excluded.barcode,
+                 source=CASE WHEN excluded.confidence >= product_reference_identifiers.confidence THEN excluded.source ELSE product_reference_identifiers.source END,
+                 source_url=CASE WHEN excluded.confidence >= product_reference_identifiers.confidence THEN excluded.source_url ELSE product_reference_identifiers.source_url END,
+                 match_method=CASE WHEN excluded.confidence >= product_reference_identifiers.confidence THEN excluded.match_method ELSE product_reference_identifiers.match_method END,
+                 confidence=CASE WHEN excluded.confidence > product_reference_identifiers.confidence THEN excluded.confidence ELSE product_reference_identifiers.confidence END,
+                 verification_status=CASE
+                   WHEN excluded.verification_status='verified' THEN 'verified'
+                   WHEN product_reference_identifiers.verification_status='verified' THEN 'verified'
+                   WHEN product_reference_identifiers.verification_status='rejected' THEN 'rejected'
+                   ELSE excluded.verification_status END,
+                 last_verified_at=CASE WHEN excluded.last_verified_at<>'' THEN excluded.last_verified_at ELSE product_reference_identifiers.last_verified_at END""",
+            (
+                key, str(barcode or "").strip(), identifier_type,
+                str(value or "").strip(), normalized, authority,
+                str(source or "")[:160], str(source_url or "")[:2048],
+                str(source_record_id or "")[:240], str(match_method or "")[:80],
+                float(max(0.0, min(float(confidence), 1.0))), status,
+                str(imported_at or "")[:64], str(last_verified_at or "")[:64],
+            ),
+        )
+        return True
+    except Exception:
+        return False
+
+
+def reference_identifiers_for_barcode(db, barcode, statuses=("verified",)):
+    key = gtin_identity_key(barcode)
+    allowed = tuple(
+        status for status in statuses if status in VERIFICATION_STATUSES
+    )
+    if not key or not allowed:
+        return []
+    placeholders = ",".join("?" for _ in allowed)
+    try:
+        return [dict(row) for row in db.execute(
+            f"""SELECT * FROM product_reference_identifiers
+                WHERE gtin_key=? AND verification_status IN ({placeholders})
+                ORDER BY confidence DESC, id""",
+            (key,) + allowed,
+        ).fetchall()]
+    except Exception:
+        return []
+
+
+def sync_reference_identifiers_to_product(db, product, *, imported_at=""):
+    """Copy safe exact-package identifiers to a placed product.
+
+    Official matches remain ``verified``.  An explicitly labelled DIN/NPN/
+    DIN-HM found on a page for the exact UPC is also copied as
+    ``requires_review`` so employees can search it immediately, while the UI
+    and AI continue to distinguish it from a confirmed regulatory fact.
+    Conflicts and name-only suggestions never cross this boundary.
+    """
+    item = dict(product or {})
+    product_id = item.get("id")
+    barcode = str(item.get("barcode", "") or "").strip()
+    if not product_id or not barcode:
+        return 0
+    copied = 0
+    for reference in reference_identifiers_for_barcode(
+        db, barcode, statuses=("verified", "requires_review")
+    ):
+        status = str(reference.get("verification_status", "") or "")
+        identifier_type = str(reference.get("identifier_type", "") or "")
+        match_method = str(reference.get("match_method", "") or "")
+        if status == "requires_review" and not (
+            identifier_type in {"DIN", "NPN", "DIN_HM"}
+            and match_method == "exact_gtin_labeled_source"
+            and float(reference.get("confidence", 0) or 0) >= 0.7
+        ):
+            continue
+        if upsert_product_identifier(
+            db, product_id, identifier_type,
+            reference.get("identifier_value", ""),
+            authority=reference.get("authority", ""),
+            source=reference.get("source", ""),
+            source_url=reference.get("source_url", ""),
+            source_record_id=reference.get("source_record_id", ""),
+            match_method=reference.get("match_method", "exact_gtin"),
+            confidence=reference.get("confidence", 0),
+            verification_status=status,
+            imported_at=imported_at,
+            last_verified_at=(
+                reference.get("last_verified_at", "") or imported_at
+                if status == "verified" else ""
+            ),
+            package_level=(
+                "regulated_product" if reference.get("identifier_type")
+                in {"DIN", "NPN", "DIN_HM", "HEALTH_CANADA_ID"}
+                else "sellable_unit"
+            ),
+        ):
+            copied += 1
+    return copied
 
 
 def record_field_evidence(

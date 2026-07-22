@@ -162,11 +162,17 @@ function productSearchFields(product) {
     const usageNotes = normalizeSearchText(product.usage_notes);
     const alternatives = normalizeSearchText(product.alternative_suggestions);
     const barcode = normalizedDigits(product.barcode);
-    const haystack = [name, brand, description, searchTerms, usageNotes, alternatives].join(' ');
+    const regulatoryValues = (Array.isArray(product.regulatory_identifiers)
+      ? product.regulatory_identifiers : [])
+      .map(identifier => normalizeSearchText(identifier?.value || ''))
+      .filter(Boolean);
+    const haystack = [name, brand, description, searchTerms, usageNotes, alternatives,
+      regulatoryValues.join(' ')].join(' ');
     const nameTokens = name ? name.split(' ') : [];
     // non-enumerable so it never gets copied into API payloads (e.g. {...product})
     Object.defineProperty(product, '_sf', {
-      value: {name, brand, description, searchTerms, usageNotes, alternatives, barcode, haystack, nameTokens},
+      value: {name, brand, description, searchTerms, usageNotes, alternatives,
+        barcode, regulatoryValues, haystack, nameTokens},
       enumerable: false, writable: true, configurable: true,
     });
   }
@@ -182,13 +188,14 @@ function scoreProductForQuery(product, query) {
   const digitsQuery = normalizedDigits(query);
   if (!loweredQuery && !digitsQuery) return 0;
   const f = productSearchFields(product);
-  const {barcode, name, brand, description, searchTerms, usageNotes, alternatives, haystack} = f;
+  const {barcode, regulatoryValues, name, brand, description, searchTerms, usageNotes, alternatives, haystack} = f;
   let score = 0;
   if (digitsQuery && barcode) {
     if (barcode === digitsQuery) score += 1200;
     else if (digitsQuery.length >= 4 && barcode.endsWith(digitsQuery)) score += 900;
     else if (barcode.includes(digitsQuery)) score += 500;
   }
+  if (digitsQuery && regulatoryValues.includes(digitsQuery)) score += 1100;
   if (loweredQuery === name) score += 800;
   else if (name.startsWith(loweredQuery)) score += 650;
   else if (loweredQuery && name.includes(loweredQuery)) score += 450;
@@ -604,6 +611,7 @@ function productCardMultiLocation(entries) {
     </div>
     <div class="product-footer">
       ${primary.barcode ? `<div class="meta-row"><span class="meta-label">Code-barres</span><span class="barcode-text">${esc(primary.barcode)}</span></div>` : ''}
+      ${typeof regulatoryIdentifiersMarkup === 'function' ? regulatoryIdentifiersMarkup(primary) : ''}
       ${primary.description ? `<div class="desc-text">${esc(primary.description)}</div>` : ''}
       ${primary.usage_notes ? `<div class="desc-text">${esc(primary.usage_notes)}</div>` : ''}
     </div>

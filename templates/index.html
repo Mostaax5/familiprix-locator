@@ -376,6 +376,11 @@
       <button id="catalogEnrichStop" class="btn btn-outline btn-inline" style="display:none;color:#c8102e;border-color:#f1b8c2" onclick="stopCatalogEnrich()">⏹ Arrêter</button>
     </div>
     <div id="catalogEnrichMsg" style="min-height:18px;font-size:13px;margin-top:6px"></div>
+    <div class="tool-row" style="margin-top:8px">
+      <button id="regulatorySyncStart" class="btn btn-outline btn-inline" type="button" onclick="startRegulatorySync()">Synchroniser DIN / NPN / DIN-HM</button>
+      <button id="regulatorySyncStop" class="btn btn-outline btn-inline" type="button" style="display:none;color:#c8102e;border-color:#f1b8c2" onclick="stopRegulatorySync()">Arrêter</button>
+    </div>
+    <div id="regulatorySyncMsg" style="min-height:18px;font-size:13px;margin-top:6px" aria-live="polite"></div>
     <div class="tool-row" style="margin-top:6px">
       <a class="btn btn-outline btn-inline" href="/api/import/catalog-needs-description" download style="text-decoration:none">⬇ Liste des produits sans description (CSV)</a>
     </div>
@@ -403,6 +408,7 @@
           <option value="missing_description">Description manquante</option>
           <option value="missing_image">Image manquante</option>
           <option value="upc_conflict">UPC à vérifier</option>
+          <option value="identifier_conflict">Identifiant réglementaire à vérifier</option>
         </select>
         <button class="btn btn-outline btn-inline" type="button" onclick="startProductQualityAudit()">Vérifier le catalogue</button>
         <button class="btn btn-outline btn-inline" type="button" onclick="loadProductQuality(true)">Actualiser</button>

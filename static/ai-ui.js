@@ -63,6 +63,13 @@ function clientProductForStorage(product, compact=false) {
     usage_notes: String(product.usage_notes || '').slice(0, compact ? 700 : 1800),
     barcode: String(product.barcode || ''),
     product_code: String(product.product_code || ''),
+    regulatory_identifiers: (Array.isArray(product.regulatory_identifiers)
+      ? product.regulatory_identifiers : []).slice(0, 12).map(identifier => ({
+        type: String(identifier?.type || ''),
+        value: String(identifier?.value || ''),
+        status: String(identifier?.status || 'probable'),
+        label: String(identifier?.label || 'À confirmer'),
+      })),
     facings: Number(product.facings) || 1,
     aisle: String(product.aisle || ''),
     side: String(product.side || ''),
@@ -652,6 +659,16 @@ function clientProductLocations(product) {
     </span>`).join('');
 }
 
+function clientRegulatoryIdentifiers(product) {
+  const identifiers = Array.isArray(product?.regulatory_identifiers)
+    ? product.regulatory_identifiers : [];
+  return identifiers.map(identifier => {
+    const type = identifier.type === 'DIN_HM' ? 'DIN-HM' : identifier.type;
+    const confirmed = identifier.status === 'confirmed';
+    return `<span title="${confirmed ? 'Confirmé par une source officielle' : 'À confirmer sur l’emballage'}">${esc(type)} ${esc(identifier.value)} · ${confirmed ? 'Confirmé' : 'À confirmer'}</span>`;
+  }).join('');
+}
+
 function openClientProductDetails(candidateId) {
   const product = currentClientMatches.find(item => String(item.client_id || '') === String(candidateId || ''));
   const modal = document.getElementById('clientProductModal');
@@ -692,6 +709,7 @@ function openClientProductDetails(candidateId) {
     <div class="client-product-detail-codes">
       ${product.barcode ? `<span>UPC ${esc(product.barcode)}</span>` : ''}
       ${product.product_code ? `<span>Code pharmacie ${esc(product.product_code)}</span>` : ''}
+      ${clientRegulatoryIdentifiers(product)}
     </div>`;
   const input = document.getElementById('clientProductQuestion');
   if (input) input.value = '';
@@ -745,6 +763,7 @@ function clientProductCard(product) {
       <div class="client-result-codes">
         ${product.barcode ? `<span>UPC ${esc(product.barcode)}</span>` : ''}
         ${product.product_code ? `<span>Code ${esc(product.product_code)}</span>` : ''}
+        ${clientRegulatoryIdentifiers(product)}
         <button type="button" class="client-detail-affordance" onclick="event.stopPropagation();openClientProductDetails(this.closest('.client-result-card').dataset.clientId)">Voir détails</button>
       </div>
     </div>

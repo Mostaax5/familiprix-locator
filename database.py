@@ -328,7 +328,8 @@ _PRODUCT_DATA_TEXT_COLUMNS = (
     "primary_source", "primary_source_url", "category", "package_size",
     "package_unit", "variant", "flavour", "colour", "strength",
     "dosage_form", "manufacturer", "ingredients", "compatibility",
-    "official_name_fr", "official_name_en",
+    "purpose", "route_of_administration", "official_name_fr",
+    "official_name_en",
 )
 
 
@@ -344,7 +345,8 @@ def ensure_product_data_schema(db):
             "store_presence_status",
             "package_size", "package_unit", "variant", "flavour", "colour",
             "strength", "dosage_form", "manufacturer", "category", "ingredients",
-            "compatibility", "official_name_fr", "official_name_en",
+            "compatibility", "purpose", "route_of_administration",
+            "official_name_fr", "official_name_en",
         )
         for column in reference_columns:
             db.execute(
@@ -372,7 +374,8 @@ def ensure_product_data_schema(db):
             "store_presence_status",
             "package_size", "package_unit", "variant", "flavour", "colour",
             "strength", "dosage_form", "manufacturer", "category", "ingredients",
-            "compatibility", "official_name_fr", "official_name_en",
+            "compatibility", "purpose", "route_of_administration",
+            "official_name_fr", "official_name_en",
         )
         for column in reference_columns:
             if column not in reference_existing:
@@ -456,6 +459,26 @@ def ensure_product_data_schema(db):
         )
     """)
     db.execute(f"""
+        CREATE TABLE IF NOT EXISTS product_reference_identifiers (
+            id                  {id_type},
+            gtin_key            TEXT NOT NULL,
+            barcode             TEXT NOT NULL,
+            identifier_type     TEXT NOT NULL,
+            identifier_value    TEXT NOT NULL,
+            normalized_value    TEXT NOT NULL,
+            authority           TEXT NOT NULL DEFAULT '',
+            source              TEXT DEFAULT '',
+            source_url          TEXT DEFAULT '',
+            source_record_id    TEXT DEFAULT '',
+            match_method        TEXT DEFAULT '',
+            confidence          {real_type} NOT NULL DEFAULT 0,
+            verification_status TEXT NOT NULL DEFAULT 'unverified',
+            imported_at         TEXT DEFAULT '',
+            last_verified_at    TEXT DEFAULT '',
+            UNIQUE(gtin_key, identifier_type, normalized_value, authority, source_record_id)
+        )
+    """)
+    db.execute(f"""
         CREATE TABLE IF NOT EXISTS product_data_issues (
             id              {id_type},
             product_id      BIGINT NOT NULL,
@@ -518,11 +541,46 @@ def ensure_product_data_schema(db):
             issues       INTEGER DEFAULT 0
         )
     """)
+    db.execute(f"""
+        CREATE TABLE IF NOT EXISTS regulatory_sync_state (
+            source               TEXT PRIMARY KEY,
+            status               TEXT DEFAULT '',
+            phase                TEXT DEFAULT '',
+            started_at           TEXT DEFAULT '',
+            updated_at           TEXT DEFAULT '',
+            completed_at         TEXT DEFAULT '',
+            source_version       TEXT DEFAULT '',
+            catalogue_gtins      INTEGER DEFAULT 0,
+            checked_gtins        INTEGER DEFAULT 0,
+            exact_matches        INTEGER DEFAULT 0,
+            verified_identifiers INTEGER DEFAULT 0,
+            review_candidates    INTEGER DEFAULT 0,
+            conflicts            INTEGER DEFAULT 0,
+            online_checked       INTEGER DEFAULT 0,
+            remaining_online     INTEGER DEFAULT 0,
+            error                TEXT DEFAULT ''
+        )
+    """)
+    db.execute(f"""
+        CREATE TABLE IF NOT EXISTS regulatory_gtin_checks (
+            id             {id_type},
+            gtin_key       TEXT NOT NULL,
+            barcode        TEXT DEFAULT '',
+            source         TEXT NOT NULL,
+            status         TEXT DEFAULT '',
+            checked_at     TEXT DEFAULT '',
+            source_version TEXT DEFAULT '',
+            details_json   TEXT DEFAULT '',
+            UNIQUE(gtin_key, source)
+        )
+    """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_products_gtin_key ON products(gtin_key)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_reference_gtin_key ON product_reference(gtin_key)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_product_identifiers_value ON product_identifiers(identifier_type, normalized_value, authority)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_product_evidence_active ON product_field_evidence(product_id, field_name, active)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_reference_evidence_active ON product_reference_evidence(gtin_key, field_name, active)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_reference_identifiers_value ON product_reference_identifiers(identifier_type, normalized_value, authority)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_reference_identifiers_gtin ON product_reference_identifiers(gtin_key, verification_status)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_product_issues_open ON product_data_issues(status, issue_type, product_id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_product_aliases_value ON product_aliases(normalized_value)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_product_relationships_source ON product_relationships(source_product_id, relationship_type)")
@@ -530,16 +588,18 @@ def ensure_product_data_schema(db):
 
 _PRODUCT_DATA_TABLES = (
     "product_identifiers", "product_field_evidence",
-    "product_reference_evidence", "product_data_issues", "product_aliases",
-    "product_relationships", "product_quality_runs",
+    "product_reference_evidence", "product_reference_identifiers",
+    "product_data_issues", "product_aliases", "product_relationships",
+    "product_quality_runs", "regulatory_sync_state", "regulatory_gtin_checks",
 )
 
 _PRODUCT_REFERENCE_DATA_COLUMNS = (
     "gtin_key", "match_method", "verification_status", "last_verified_at",
     "store_presence_status", "package_size", "package_unit", "variant",
     "flavour", "colour", "strength", "dosage_form", "manufacturer",
-    "category", "ingredients", "compatibility", "official_name_fr",
-    "official_name_en", "source_priority", "confidence",
+    "category", "ingredients", "compatibility", "purpose",
+    "route_of_administration", "official_name_fr", "official_name_en",
+    "source_priority", "confidence",
 )
 
 

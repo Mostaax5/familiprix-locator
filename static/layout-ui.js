@@ -1048,6 +1048,19 @@ function startScanFromSection(aisle, side, sectionIndex) {
 }
 
 // ── Product card ──────────────────────────────────────────────────────────────
+function regulatoryIdentifiersMarkup(product) {
+  const identifiers = Array.isArray(product?.regulatory_identifiers)
+    ? product.regulatory_identifiers : [];
+  return identifiers.map(identifier => {
+    const confirmed = identifier.status === 'confirmed';
+    const type = identifier.type === 'DIN_HM' ? 'DIN-HM' : identifier.type;
+    const title = confirmed
+      ? 'Correspondance confirmée par une source officielle'
+      : 'Correspondance probable liée à cet UPC, à confirmer sur l’emballage';
+    return `<div class="meta-row"><span class="meta-label">${esc(type)}</span><span class="barcode-text">${esc(identifier.value)}</span><span title="${esc(title)}" style="font-size:10px;font-weight:700;color:${confirmed ? '#047857' : '#b45309'}">${confirmed ? 'CONFIRMÉ' : 'À CONFIRMER'}</span></div>`;
+  }).join('');
+}
+
 function productCard(p, showDelete=true, showAiButton=true) {
   // Catalog-only products come from the imported planograms and have no shelf yet.
   const catalogOnly = p.catalog_only || !String(p.aisle || '').trim();
@@ -1100,6 +1113,7 @@ function productCard(p, showDelete=true, showAiButton=true) {
       ${stockRow}
       ${p.barcode ? `<div class="meta-row"><span class="meta-label">Code-barres</span><span class="barcode-text">${esc(p.barcode)}</span></div>` : ''}
       ${p.product_code ? `<div class="meta-row"><span class="meta-label">Code pharmacie</span><span class="barcode-text">${esc(p.product_code)}</span></div>` : ''}
+      ${regulatoryIdentifiersMarkup(p)}
       ${p.facings > 1 ? `<div class="meta-row"><span class="meta-label">Façades</span><span>${esc(p.facings)} positions</span></div>` : ''}
       ${p.last_change_by ? `<div class="meta-row"><span class="meta-label">Modifié par</span><span>${esc(p.last_change_by)}</span></div>` : ''}
       ${p.description ? `<div class="desc-text">${esc(p.description)}</div>` : ''}
@@ -2876,6 +2890,7 @@ async function loadMapEditor(forceServer=false) {
   refreshPlanUi();
   loadPlanogramHistory();
   loadReferenceCount();
+  pollRegulatorySync();
 }
 
 async function loadReferenceCount() {
@@ -4050,6 +4065,79 @@ async function stopCatalogEnrich() {
   if (msg) msg.textContent = 'Arrêt demandé…';
 }
 
+let regulatorySyncTimer = null;
+let regulatorySyncWasRunning = false;
+
+const REGULATORY_PHASE_LABELS = {
+  prepare: 'Préparation du catalogue',
+  download_packages: 'Téléchargement des emballages Santé Canada',
+  download_drugs: 'Téléchargement des médicaments Santé Canada',
+  match_exact_upc: 'Correspondance exacte des UPC',
+  save_exact_matches: 'Enregistrement des DIN',
+  verify_labeled_identifiers: 'Vérification des NPN et DIN-HM',
+  inspect_exact_upc_sources: 'Inspection des sources UPC exactes',
+  refresh_product_quality: 'Mise à jour des fiches produits',
+};
+
+async function startRegulatorySync() {
+  if (!requireEditorSession('synchroniser les identifiants')) return;
+  regulatorySyncWasRunning = true;
+  const msg = document.getElementById('regulatorySyncMsg');
+  if (msg) { msg.style.color = '#64748b'; msg.textContent = 'Démarrage de la synchronisation…'; }
+  try {
+    await secureFetch('/api/product-quality/regulatory/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({force: false}),
+    });
+  } catch (_) {}
+  pollRegulatorySync();
+}
+
+async function pollRegulatorySync() {
+  window.clearTimeout(regulatorySyncTimer);
+  let state = {};
+  try {
+    state = await (await secureFetch('/api/product-quality/regulatory/status')).json();
+  } catch (_) {}
+  const msg = document.getElementById('regulatorySyncMsg');
+  const stop = document.getElementById('regulatorySyncStop');
+  const running = Boolean(state.running || ['running', 'starting'].includes(state.status));
+  if (stop) stop.style.display = running ? '' : 'none';
+  if (msg) {
+    const phase = REGULATORY_PHASE_LABELS[state.phase] || 'Synchronisation des identifiants';
+    if (running) {
+      msg.style.color = '#0369a1';
+      msg.textContent = `${phase} · ${Number(state.confirmed_catalog_identifiers || 0)} confirmés · ${Number(state.probable_catalog_identifiers || 0)} utilisables à confirmer`;
+    } else if (state.status === 'error') {
+      msg.style.color = '#b91c1c';
+      msg.textContent = `Synchronisation interrompue : ${String(state.error || 'source temporairement indisponible')}`;
+    } else if (state.status === 'partial') {
+      msg.style.color = '#b45309';
+      msg.textContent = `${Number(state.confirmed_catalog_identifiers || 0)} confirmés · ${Number(state.probable_catalog_identifiers || 0)} utilisables à confirmer · ${Number(state.remaining_online || 0)} produits seront repris automatiquement.`;
+    } else if (state.completed_at) {
+      msg.style.color = '#16a34a';
+      msg.textContent = `${Number(state.confirmed_catalog_identifiers || 0)} identifiants confirmés · ${Number(state.probable_catalog_identifiers || 0)} utilisables à confirmer · ${Number(state.conflicts || 0)} conflit(s).`;
+    }
+  }
+  if (running) {
+    regulatorySyncWasRunning = true;
+    regulatorySyncTimer = window.setTimeout(pollRegulatorySync, 3000);
+  } else if (regulatorySyncWasRunning) {
+    regulatorySyncWasRunning = false;
+    try { await refreshProductsCache(true); } catch (_) {}
+    if (document.getElementById('productQualityPanel')?.open) {
+      try { await loadProductQuality(true); } catch (_) {}
+    }
+  }
+}
+
+async function stopRegulatorySync() {
+  try { await secureFetch('/api/product-quality/regulatory/stop', {method: 'POST'}); } catch (_) {}
+  const msg = document.getElementById('regulatorySyncMsg');
+  if (msg) msg.textContent = 'Arrêt demandé…';
+}
+
 // Token so an old poll loop stops cleanly if the user picks another PDF.
 let _planoParseToken = 0;
 
@@ -4638,13 +4726,18 @@ async function loadProductQuality(force=false) {
     const issues = Array.isArray(issuesResult.data?.issues) ? issuesResult.data.issues : [];
     const openTotal = Object.values(summary.open_issues || {}).reduce((sum, value) => sum + Number(value || 0), 0);
     const audit = summary.audit || {};
+    const identifierCoverage = summary.identifier_coverage || {};
+    const verifiedIdentifierCount = type => Number(identifierCoverage[type]?.verified || 0);
     if (count) count.textContent = `${openTotal} à vérifier`;
     const progress = audit.running
       ? `<div class="product-quality-progress"><span style="width:${Math.min(100, audit.total ? (Number(audit.scanned || 0) / Number(audit.total)) * 100 : 4)}%"></span></div><small>Vérification ${Number(audit.scanned || 0)} / ${Number(audit.total || 0)}</small>`
       : audit.error ? `<small class="product-quality-error">${esc(audit.error)}</small>` : '';
     summaryBox.innerHTML = `<div><strong>${Number(summary.verified_products || 0)}</strong><span>fiches entièrement vérifiées</span></div>
       <div><strong>${openTotal}</strong><span>points à examiner</span></div>
-      <div><strong>${Number(summary.total_products || 0)}</strong><span>produits dans le plan</span></div>${progress}`;
+      <div><strong>${Number(summary.total_products || 0)}</strong><span>produits dans le plan</span></div>
+      <div><strong>${verifiedIdentifierCount('DIN')}</strong><span>DIN vérifiés</span></div>
+      <div><strong>${verifiedIdentifierCount('NPN')}</strong><span>NPN vérifiés</span></div>
+      <div><strong>${verifiedIdentifierCount('DIN_HM')}</strong><span>DIN-HM vérifiés</span></div>${progress}`;
     renderProductQualityIssues(issues);
     clearTimeout(productQualityPollTimer);
     if (audit.running) productQualityPollTimer = setTimeout(() => loadProductQuality(true), 1800);
