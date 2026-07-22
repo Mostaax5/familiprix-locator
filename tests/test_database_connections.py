@@ -35,7 +35,8 @@ class DatabaseConnectionTests(unittest.TestCase):
 
         get_pool.assert_not_called()
         psycopg.connect.assert_called_once_with(
-            database.DATABASE_URL, row_factory=database.dict_row, connect_timeout=5
+            database.DATABASE_URL, row_factory=database.dict_row,
+            connect_timeout=5, sslmode="require",
         )
         self.assertIs(wrapped.connection, connection)
         self.assertIsNone(wrapped.pool)

@@ -4,11 +4,15 @@ import os
 import gc
 import time
 import uuid
+import secrets
 import tempfile
 import threading
-from flask import Blueprint, request, jsonify, Response
+from flask import Blueprint, request, jsonify, Response, g
 from database import get_db, DatabaseIntegrityError
 from auth import require_editor, utc_now_iso
+from security import record_security_event
+from routes.layout import layout_metrics, normalize_layout_config, valid_aisle_name
+from routes.products import product_payload_error, safe_http_url
 from memory_guard import memory_intensive_task, release_unused_memory
 
 import_export_bp = Blueprint("import_export", __name__)
@@ -29,6 +33,20 @@ _JOBS_DIR = os.path.join(tempfile.gettempdir(), "plano-parse-jobs")
 _JOB_MAX_AGE_S = 6 * 3600
 
 
+def _bounded_env_int(name, default, minimum, maximum):
+    try:
+        return min(max(int(os.environ.get(name, default)), minimum), maximum)
+    except (TypeError, ValueError):
+        return default
+
+
+_MAX_PDF_BYTES = _bounded_env_int("PLANOGRAM_PDF_MAX_MB", 20, 1, 40) * 1024 * 1024
+_MAX_PDF_PAGES = _bounded_env_int("PLANOGRAM_PDF_MAX_PAGES", 120, 1, 250)
+_MAX_CATALOG_BYTES = _bounded_env_int("PLANOGRAM_CATALOG_MAX_MB", 24, 1, 40) * 1024 * 1024
+_MAX_CATALOG_PLANOGRAMS = 500
+_MAX_CATALOG_PRODUCTS = 100_000
+
+
 def _job_paths(job_id):
     return (os.path.join(_JOBS_DIR, f"{job_id}.json"),
             os.path.join(_JOBS_DIR, f"{job_id}.pdf"))
@@ -36,10 +54,18 @@ def _job_paths(job_id):
 
 def _write_job(job_id, payload):
     os.makedirs(_JOBS_DIR, exist_ok=True)
+    try:
+        os.chmod(_JOBS_DIR, 0o700)
+    except OSError:
+        pass
     path = _job_paths(job_id)[0]
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False)
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
     os.replace(tmp, path)   # atomic: a poll never sees a half-written file
 
 
@@ -69,6 +95,8 @@ def _launch_parse_thread(job_id):
     """Parse the job's stored PDF in a background thread and write the result."""
     def worker():
         json_path, pdf_path = _job_paths(job_id)
+        job_meta = _read_job(job_id) or {}
+        owner = str(job_meta.get("owner") or "")
         try:
             import pdfplumber
             plano_meta = {"name": "", "number": "", "version": ""}
@@ -78,6 +106,8 @@ def _launch_parse_thread(job_id):
             # a bytes object before pdfminer reads it.
             with memory_intensive_task("planogram_pdf", priority=True):
                 with _PDF_PARSE_LOCK, pdfplumber.open(pdf_path) as pdf:
+                    if len(pdf.pages) > _MAX_PDF_PAGES:
+                        raise ValueError("PDF page limit exceeded")
                     try:
                         head = pdf.pages[0].extract_text() or ""
                         m = re.search(r"PLANOGRAMME\s*:\s*([^\n]+)", head, re.IGNORECASE)
@@ -94,6 +124,8 @@ def _launch_parse_thread(job_id):
                         tables = page.extract_tables() or []
                         for table in tables:
                             parser.feed_table(table)
+                            if len(parser.products) > _MAX_CATALOG_PRODUCTS:
+                                raise ValueError("PDF product limit exceeded")
                         del tables
                         try:
                             page.close()
@@ -105,7 +137,7 @@ def _launch_parse_thread(job_id):
             for p in products:
                 t = str(p["tablette"])
                 tablettes[t] = tablettes.get(t, 0) + 1
-            _write_job(job_id, {"status": "done", "success": True,
+            _write_job(job_id, {"status": "done", "success": True, "owner": owner,
                                 "products": products, "count": len(products),
                                 "tablettes": tablettes, "plano": plano_meta})
             try:
@@ -113,8 +145,9 @@ def _launch_parse_thread(job_id):
             except OSError:
                 pass
         except Exception as exc:
-            _write_job(job_id, {"status": "error", "success": False,
-                                "error": f"Erreur d’analyse PDF: {exc}"})
+            print(f"[SECURITY] Planogram parse failed for job {job_id}: {type(exc).__name__}: {exc}")
+            _write_job(job_id, {"status": "error", "success": False, "owner": owner,
+                                "error": "Le PDF est invalide, trop volumineux ou impossible a analyser."})
             try:
                 os.remove(pdf_path)
             except OSError:
@@ -152,19 +185,34 @@ def import_database():
     username, error = require_editor()
     if error:
         return error
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"success": False, "error": "Structure de sauvegarde invalide."}), 400
     if payload.get("export_version") != 1:
         return jsonify({"success": False, "error": "Format de fichier non reconnu."}), 400
+    layouts_payload = payload.get("aisle_layouts") or []
+    products_payload = payload.get("products") or []
+    if not isinstance(layouts_payload, list) or not isinstance(products_payload, list):
+        return jsonify({"success": False, "error": "Structure de sauvegarde invalide."}), 400
+    if len(layouts_payload) > 1000 or len(products_payload) > 50_000:
+        return jsonify({"success": False, "error": "Sauvegarde trop volumineuse."}), 413
 
     db = get_db()
     imported_layouts = 0
     imported_products = 0
     skipped_products = 0
 
-    for layout in (payload.get("aisle_layouts") or []):
-        aisle = str(layout.get("aisle", "")).strip()
-        if not aisle:
+    for layout in layouts_payload:
+        if not isinstance(layout, dict):
             continue
+        aisle = str(layout.get("aisle", "")).strip()
+        if not valid_aisle_name(aisle):
+            continue
+        config = normalize_layout_config(
+            layout.get("config_json"), layout.get("max_section", "1"),
+            layout.get("max_shelf", "5"), layout.get("max_position", "8"),
+        )
+        max_section, max_shelf, max_position = layout_metrics(config)
         db.execute(
             """
             INSERT INTO aisle_layouts (aisle, max_section, max_shelf, max_position, config_json, enabled, modified_by, modified_at)
@@ -176,25 +224,33 @@ def import_database():
             """,
             (
                 aisle,
-                str(layout.get("max_section", "1")),
-                str(layout.get("max_shelf", "5")),
-                str(layout.get("max_position", "8")),
-                str(layout.get("config_json", "")),
-                int(layout.get("enabled", 1)),
+                max_section,
+                max_shelf,
+                max_position,
+                json.dumps(config, ensure_ascii=False, separators=(",", ":")),
+                1 if layout.get("enabled", 1) else 0,
                 username,
                 utc_now_iso(),
             ),
         )
         imported_layouts += 1
 
-    for product in (payload.get("products") or []):
+    for product in products_payload:
+        if not isinstance(product, dict):
+            continue
+        product = dict(product)
+        product["image_url"] = safe_http_url(product.get("image_url"))
+        product["source_url"] = safe_http_url(product.get("source_url"))
+        if product_payload_error(product):
+            skipped_products += 1
+            continue
         name = str(product.get("name", "")).strip()
         aisle = str(product.get("aisle", "")).strip()
         side = str(product.get("side", "")).strip()
         section = str(product.get("section", "1")).strip() or "1"
         shelf = str(product.get("shelf", "")).strip()
         position = str(product.get("position", "")).strip()
-        if not all([name, aisle, side, shelf, position]):
+        if not all([name, aisle, side, shelf, position]) or not valid_aisle_name(aisle):
             skipped_products += 1
             continue
         try:
@@ -216,14 +272,14 @@ def import_database():
                     name,
                     str(product.get("brand", "")),
                     str(product.get("description", "")),
-                    str(product.get("image_url", "")),
-                    str(product.get("source_url", "")),
+                    product["image_url"],
+                    product["source_url"],
                     str(product.get("search_terms", "")),
                     str(product.get("usage_notes", "")),
                     str(product.get("alternative_suggestions", "")),
                     str(product.get("barcode", "")),
                     aisle, side, section, shelf, position,
-                    username, str(product.get("created_at", "") or utc_now_iso()),
+                    username, str(product.get("created_at", "") or utc_now_iso())[:64],
                     username, utc_now_iso(),
                 ),
             )
@@ -245,8 +301,17 @@ def reset_database():
     username, error = require_editor()
     if error:
         return error
-    data = request.get_json() or {}
-    wipe_layouts = bool(data.get("wipe_layouts", False))
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("wipe_layouts"), bool):
+        return jsonify({"success": False, "error": "Demande de suppression invalide."}), 400
+    wipe_layouts = data["wipe_layouts"]
+    expected_confirmation = "SUPPRIMER LE PLAN" if wipe_layouts else "SUPPRIMER LES PRODUITS"
+    if not secrets.compare_digest(str(data.get("confirmation", "")), expected_confirmation):
+        return jsonify({
+            "success": False,
+            "error": "La phrase de confirmation est incorrecte.",
+            "code": "confirmation_required",
+        }), 400
     db = get_db()
     from routes.products import first_column
     product_count = first_column(db.execute("SELECT COUNT(*) FROM products").fetchone()) or 0
@@ -255,6 +320,11 @@ def reset_database():
     if wipe_layouts:
         layout_count = first_column(db.execute("SELECT COUNT(*) FROM aisle_layouts").fetchone()) or 0
         db.execute("DELETE FROM aisle_layouts")
+    record_security_event(db, "database_reset", username, {
+        "deleted_products": int(product_count),
+        "deleted_layouts": int(layout_count),
+        "wipe_layouts": wipe_layouts,
+    })
     db.commit()
     return jsonify({
         "success": True,
@@ -387,6 +457,9 @@ def parse_planogram_pdf():
     """Accept the PDF, store it, launch the background parse, return a job id
     IMMEDIATELY. A big plano takes minutes on this CPU — parsing inside the
     request timed out at every layer while looking like a dead button."""
+    username, error = require_editor()
+    if error:
+        return error
     try:
         import pdfplumber  # noqa: F401 — fail fast if the parser isn't available
     except ImportError:
@@ -395,27 +468,62 @@ def parse_planogram_pdf():
     if "file" not in request.files:
         return jsonify({"success": False, "error": "Aucun fichier fourni."}), 400
     f = request.files["file"]
-    if not f.filename.lower().endswith(".pdf"):
+    filename = str(f.filename or "")
+    if len(filename) > 255 or not filename.lower().endswith(".pdf"):
         return jsonify({"success": False, "error": "Le fichier doit etre un PDF."}), 400
 
     _cleanup_old_jobs()
-    job_id = uuid.uuid4().hex[:12]
+    job_id = uuid.uuid4().hex
     json_path, pdf_path = _job_paths(job_id)
     os.makedirs(_JOBS_DIR, exist_ok=True)
-    f.save(pdf_path)
-    _write_job(job_id, {"status": "running", "pid": os.getpid(), "created": time.time()})
+    try:
+        first = f.stream.read(5)
+        if first != b"%PDF-":
+            return jsonify({"success": False, "error": "Le contenu du fichier n'est pas un PDF valide."}), 400
+        total = len(first)
+        fd = os.open(pdf_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as output:
+            output.write(first)
+            while True:
+                chunk = f.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _MAX_PDF_BYTES:
+                    raise ValueError("pdf-too-large")
+                output.write(chunk)
+    except ValueError:
+        try:
+            os.remove(pdf_path)
+        except OSError:
+            pass
+        return jsonify({"success": False, "error": "PDF trop volumineux."}), 413
+    except OSError:
+        try:
+            os.remove(pdf_path)
+        except OSError:
+            pass
+        return jsonify({"success": False, "error": "Impossible de stocker le PDF en securite."}), 500
+    _write_job(job_id, {
+        "status": "running", "pid": os.getpid(), "created": time.time(),
+        "owner": str(getattr(g, "auth_session_hash", "")), "employee": username,
+    })
     _launch_parse_thread(job_id)
     return jsonify({"success": True, "job": job_id})
 
 
 @import_export_bp.route("/api/import/planogram-parse/status/<job_id>", methods=["GET"])
 def parse_planogram_status(job_id):
-    if not re.fullmatch(r"[0-9a-f]{12}", str(job_id or "")):
+    if not re.fullmatch(r"[0-9a-f]{32}", str(job_id or "")):
         return jsonify({"success": False, "error": "Job invalide."}), 400
     job = _read_job(job_id)
     if job is None:
         return jsonify({"success": False, "status": "unknown",
                         "error": "Analyse introuvable ou expirée. Re-choisissez le PDF."}), 404
+    if not secrets.compare_digest(
+        str(job.get("owner") or ""), str(getattr(g, "auth_session_hash", ""))
+    ):
+        return jsonify({"success": False, "error": "Analyse introuvable."}), 404
     if job.get("status") == "running":
         # Self-heal: if the worker that started the parse was recycled mid-job
         # (pid changed), the thread died with it — relaunch from the stored PDF.
@@ -423,7 +531,8 @@ def parse_planogram_status(job_id):
             _write_job(job_id, {**job, "pid": os.getpid()})
             _launch_parse_thread(job_id)
         return jsonify({"success": True, "status": "running"})
-    return jsonify(job)
+    return jsonify({key: value for key, value in job.items()
+                    if key not in {"owner", "employee", "pid", "created"}})
 
 
 @import_export_bp.route("/api/import/planogram-catalog", methods=["POST"])
@@ -441,19 +550,36 @@ def import_planogram_catalog():
     username, error = require_editor()
     if error:
         return error
+    if request.content_length and request.content_length > _MAX_CATALOG_BYTES + 1024 * 1024:
+        return jsonify({"success": False, "error": "Catalogue trop volumineux."}), 413
 
     try:
         if "file" in request.files:
-            payload = json.loads(request.files["file"].read().decode("utf-8"))
+            raw = request.files["file"].stream.read(_MAX_CATALOG_BYTES + 1)
+            if len(raw) > _MAX_CATALOG_BYTES:
+                return jsonify({"success": False, "error": "Catalogue trop volumineux."}), 413
+            payload = json.loads(raw.decode("utf-8"))
         else:
             payload = request.get_json(silent=True)
-    except (ValueError, UnicodeDecodeError) as exc:
-        return jsonify({"success": False, "error": f"JSON illisible: {exc}"}), 400
+    except (ValueError, UnicodeDecodeError):
+        return jsonify({"success": False, "error": "Catalogue JSON illisible."}), 400
 
     if isinstance(payload, dict):
         payload = payload.get("catalog") or payload.get("planograms")
     if not isinstance(payload, list):
         return jsonify({"success": False, "error": "Catalogue JSON invalide (liste de planogrammes attendue)."}), 400
+    if len(payload) > _MAX_CATALOG_PLANOGRAMS:
+        return jsonify({"success": False, "error": "Le catalogue contient trop de planogrammes."}), 413
+    total_products = 0
+    for plano in payload:
+        if not isinstance(plano, dict):
+            continue
+        products = plano.get("products") or []
+        if not isinstance(products, list):
+            return jsonify({"success": False, "error": "Produits de planogramme invalides."}), 400
+        total_products += len(products)
+        if total_products > _MAX_CATALOG_PRODUCTS:
+            return jsonify({"success": False, "error": "Le catalogue contient trop de produits."}), 413
 
     from routes.products import (
         build_barcode_candidates, normalized_digits,
@@ -475,20 +601,22 @@ def import_planogram_catalog():
             continue
         planos += 1
         meta = plano.get("meta") or {}
-        plano_name = str(meta.get("name") or "").strip()
+        if not isinstance(meta, dict):
+            meta = {}
+        plano_name = str(meta.get("name") or "").strip()[:120]
         source = f"Planogramme: {plano_name}" if plano_name else "Planogramme"
-        source_url = str(plano.get("file") or "")
+        source_url = safe_http_url(plano.get("file"))
 
         for p in (plano.get("products") or []):
             barcode = normalized_digits(p.get("barcode", ""))
-            name = str(p.get("name", "")).strip()
-            if not barcode or len(name) < 2:
+            name = str(p.get("name", "")).strip()[:300]
+            if not barcode or len(barcode) > 14 or len(name) < 2:
                 continue
             products_seen += 1
-            code = str(p.get("code_familiprix", "")).strip()
-            brand = str(p.get("brand", "") or "").strip()
-            description = str(p.get("description", "") or "").strip()
-            image_url = str(p.get("image_url", "") or "").strip()
+            code = str(p.get("code_familiprix", "")).strip()[:64]
+            brand = str(p.get("brand", "") or "").strip()[:160]
+            description = str(p.get("description", "") or "").strip()[:6000]
+            image_url = safe_http_url(p.get("image_url"))
 
             # 1) Reference catalogue. Most generated plano JSON files contain only
             # name/code/facings, but preserve richer metadata when a file has it.

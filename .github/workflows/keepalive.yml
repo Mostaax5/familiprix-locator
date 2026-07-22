@@ -6,6 +6,9 @@
 # minute.
 name: Keep Render app warm
 
+permissions:
+  contents: read
+
 on:
   schedule:
     - cron: "*/10 * * * *"
@@ -17,4 +20,4 @@ jobs:
     timeout-minutes: 3
     steps:
       - name: Ping the app
-        run: curl -sS --max-time 90 https://familiprix-locator.onrender.com/api/system/info > /dev/null || true
+        run: curl -fsS --max-time 90 https://familiprix-locator.onrender.com/healthz > /dev/null || true

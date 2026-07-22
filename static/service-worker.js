@@ -1,4 +1,4 @@
-const CACHE_NAME = 'familiprix-locator-v29';
+const CACHE_NAME = 'familiprix-locator-v31';
 const OFFLINE_CACHE = [
   '/',
   '/manifest.json',
@@ -33,8 +33,26 @@ self.addEventListener('fetch', event => {
     return;
   }
 
+  if (event.request.mode === 'navigate') {
+    // Authentication UI must never remain one deployment behind. Prefer the
+    // current HTML and use the shell cache only when the network is unavailable.
+    event.respondWith(networkFirstNavigation(event.request));
+    return;
+  }
+
   event.respondWith(staleWhileRevalidate(event.request));
 });
+
+async function networkFirstNavigation(request) {
+  const cache = await caches.open(CACHE_NAME);
+  try {
+    const response = await fetch(request);
+    if (response?.ok) await cache.put('/', response.clone());
+    return response;
+  } catch (_) {
+    return (await cache.match('/')) || new Response('Hors ligne', {status: 503});
+  }
+}
 
 // App shell strategy: serve INSTANTLY from the device's copy and refresh it in
 // the background (stale-while-revalidate). The old network-first re-downloaded

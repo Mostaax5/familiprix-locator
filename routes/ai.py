@@ -1,13 +1,14 @@
 import json
 import os
 import re
+import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
-from urllib.request import Request, urlopen
-from flask import Blueprint, request, jsonify, Response
+from urllib.parse import urlencode, urljoin, urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+from flask import Blueprint, request, jsonify, Response, g
 from database import get_db
 from auth import require_editor, utc_now_iso, side_display_label
 from memory_guard import memory_intensive_task, release_unused_memory
@@ -23,12 +24,58 @@ _LOOKUP_SOURCE_EXECUTOR = ThreadPoolExecutor(
     max_workers=_LOOKUP_SOURCE_WORKERS, thread_name_prefix="product-source"
 )
 _MAX_ONLINE_BODY_BYTES = 1_500_000
+_AI_LOG_MAX_JSON_CHARS = 120_000
+_AI_LOGGING_ENABLED = os.environ.get("AI_LOGGING_ENABLED", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+_ai_log_cleanup_lock = threading.Lock()
+_ai_log_last_cleanup = 0.0
+
+
+def _bounded_log_json(value):
+    if value is None:
+        return ""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))[:_AI_LOG_MAX_JSON_CHARS]
+
+
+def _outbound_url_allowed(url, expected_host=None):
+    try:
+        parsed = urlparse(str(url or ""))
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    if parsed.scheme != "https" or not host or parsed.username or parsed.password:
+        return False
+    if expected_host and host != str(expected_host).lower().rstrip("."):
+        return False
+    return True
+
+
+class _SameHostRedirectHandler(HTTPRedirectHandler):
+    def __init__(self, expected_host):
+        super().__init__()
+        self.expected_host = expected_host
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _outbound_url_allowed(newurl, self.expected_host):
+            raise HTTPError(newurl, 403, "Cross-host redirect blocked", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _safe_urlopen(request_obj, timeout):
+    target_url = request_obj.full_url if isinstance(request_obj, Request) else str(request_obj)
+    if not _outbound_url_allowed(target_url):
+        raise URLError("Unsafe outbound URL")
+    host = urlparse(target_url).hostname
+    return build_opener(_SameHostRedirectHandler(host)).open(request_obj, timeout=timeout)
 
 
 def log_ai_interaction(kind, question, context, response):
     """Persist every AI Q&A as a training example, tagged with store, employee
     (auto from device name — never prompted) and time. Never raises — logging
     must not break the user-facing response."""
+    if not _AI_LOGGING_ENABLED:
+        return
     try:
         prov = configured_ai_provider()
         logged_model = (
@@ -38,16 +85,24 @@ def log_ai_interaction(kind, question, context, response):
         )
         body = request.get_json(silent=True) or {}
         store = str(body.get("store", "")).strip()
-        employee = (request.headers.get("X-User-Name") or body.get("_username") or "").strip()
+        employee = str(getattr(g, "auth_username", "") or "").strip()
         db = get_db()
         db.execute(
             """INSERT INTO ai_logs (created_at, kind, provider, model, question, context_json, response_json, store, employee)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (utc_now_iso(), kind, prov["name"], logged_model, str(question or ""),
-             json.dumps(context, ensure_ascii=False) if context is not None else "",
-             json.dumps(response, ensure_ascii=False) if response is not None else "",
-             store, employee),
+            (utc_now_iso(), str(kind or "")[:80], prov["name"], logged_model,
+             str(question or "")[:4000], _bounded_log_json(context),
+             _bounded_log_json(response), store[:120], employee[:60]),
         )
+        global _ai_log_last_cleanup
+        now = time.time()
+        with _ai_log_cleanup_lock:
+            if now - _ai_log_last_cleanup > 86400:
+                db.execute(
+                    "DELETE FROM ai_logs WHERE id NOT IN "
+                    "(SELECT id FROM ai_logs ORDER BY id DESC LIMIT 5000)"
+                )
+                _ai_log_last_cleanup = now
         db.commit()
     except Exception:
         pass
@@ -93,6 +148,7 @@ _OPENAI_OUTPUT_COST_PER_M = 0.60
 
 _AI_RATE_LIMIT  = int(os.environ.get("AI_RATE_LIMIT",  "30"))
 _AI_RATE_WINDOW = int(os.environ.get("AI_RATE_WINDOW", "3600"))
+_MAX_AI_RATE_KEYS = 4096
 try:
     _AI_REQUEST_TIMEOUT_SECONDS = min(30, max(5, int(os.environ.get("AI_REQUEST_TIMEOUT", "12"))))
 except (TypeError, ValueError):
@@ -108,6 +164,7 @@ _DEEPSEEK_DOCUMENTED_THINKING = (
     in {"1", "true", "yes", "on"}
 )
 _ai_rate_buckets: dict = defaultdict(list)
+_ai_rate_lock = threading.Lock()
 
 # Auto AI-enrich of online UPC lookups is OFF by default so it can NEVER cost
 # anything unexpectedly. Turn it on with AI_AUTO_ENRICH=1 on Render only if you
@@ -137,14 +194,19 @@ _SIMPLE_ANSWERS = {
 # ── AI cost helpers ────────────────────────────────────────────────────────────
 
 def _check_ai_rate_limit() -> bool:
-    ip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "unknown").split(",")[0].strip()
+    # ProxyFix has already reduced Render's trusted proxy hop.  Never trust a
+    # caller-supplied X-Forwarded-For value directly.
+    identity = str(getattr(g, "auth_session_hash", "") or request.remote_addr or "unknown")
     now = time.time()
     cutoff = now - _AI_RATE_WINDOW
-    _ai_rate_buckets[ip] = [t for t in _ai_rate_buckets[ip] if t > cutoff]
-    if len(_ai_rate_buckets[ip]) >= _AI_RATE_LIMIT:
-        return False
-    _ai_rate_buckets[ip].append(now)
-    return True
+    with _ai_rate_lock:
+        if identity not in _ai_rate_buckets and len(_ai_rate_buckets) >= _MAX_AI_RATE_KEYS:
+            identity = "__overflow__"
+        _ai_rate_buckets[identity] = [t for t in _ai_rate_buckets[identity] if t > cutoff]
+        if len(_ai_rate_buckets[identity]) >= _AI_RATE_LIMIT:
+            return False
+        _ai_rate_buckets[identity].append(now)
+        return True
 
 
 def _try_simple_answer(question: str):
@@ -333,7 +395,7 @@ def fetch_text(url):
         },
     )
     try:
-        with urlopen(request_obj, timeout=3) as response:
+        with _safe_urlopen(request_obj, timeout=3) as response:
             body = _read_limited_response(response).decode("utf-8", errors="ignore")
             return body, response.geturl()
     except (HTTPError, URLError, TimeoutError, UnicodeDecodeError):
@@ -397,19 +459,16 @@ def looks_like_product_page(url):
 
 
 def normalize_url(base_url, url):
-    if url.startswith("http"):
-        return url
-    if url.startswith("/"):
-        return f"{base_url}{url}"
-    return f"{base_url}/{url}"
+    try:
+        absolute = urljoin(f"{str(base_url).rstrip('/')}/", str(url or ""))
+        base_host = urlparse(base_url).hostname
+    except ValueError:
+        return ""
+    return absolute if _outbound_url_allowed(absolute, base_host) else ""
 
 
 def normalize_familiprix_url(url):
-    if url.startswith("http"):
-        return url
-    if url.startswith("/"):
-        return f"https://magasiner.familiprix.com{url}"
-    return f"https://magasiner.familiprix.com/{url}"
+    return normalize_url("https://magasiner.familiprix.com", url)
 
 
 def collect_structured_products(value, bucket):
@@ -655,7 +714,7 @@ def lookup_open_facts_product(source_name, base_url, barcode):
     url = f"{base_url}/api/v2/product/{barcode}.json?{params}"
     request_obj = Request(url, headers={"User-Agent": "FamiliprixLocator/0.1 (local testing)", "Accept": "application/json"})
     try:
-        with urlopen(request_obj, timeout=3) as response:
+        with _safe_urlopen(request_obj, timeout=3) as response:
             payload = json.loads(_read_limited_response(response).decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
         return None
@@ -687,7 +746,7 @@ def lookup_upcitemdb(barcode):
     request_obj = Request(f"https://api.upcitemdb.com/prod/trial/lookup?upc={digits}",
                           headers={"User-Agent": "FamiliprixLocator/0.1", "Accept": "application/json"})
     try:
-        with urlopen(request_obj, timeout=5) as response:
+        with _safe_urlopen(request_obj, timeout=5) as response:
             payload = json.loads(_read_limited_response(response).decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
         return None
@@ -715,7 +774,7 @@ def lookup_ean_search(barcode):
         headers={"User-Agent": "FamiliprixLocator/0.1", "Accept": "application/json"},
     )
     try:
-        with urlopen(request_obj, timeout=5) as response:
+        with _safe_urlopen(request_obj, timeout=5) as response:
             payload = json.loads(_read_limited_response(response).decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
         return None
@@ -741,7 +800,7 @@ def lookup_barcodelookup(barcode):
         "Accept-Language": "fr-CA,fr;q=0.9,en;q=0.6",
     })
     try:
-        with urlopen(request_obj, timeout=8) as response:
+        with _safe_urlopen(request_obj, timeout=8) as response:
             html = _read_limited_response(response).decode("utf-8", errors="ignore")
     except (HTTPError, URLError, TimeoutError):
         return None
@@ -778,7 +837,7 @@ def lookup_go_upc(barcode):
         "Accept": "text/html,*/*", "Accept-Language": "fr-CA,fr;q=0.9,en;q=0.6",
     })
     try:
-        with urlopen(request_obj, timeout=8) as response:
+        with _safe_urlopen(request_obj, timeout=8) as response:
             html = _read_limited_response(response).decode("utf-8", errors="ignore")
     except (HTTPError, URLError, TimeoutError):
         return None
@@ -803,7 +862,7 @@ def lookup_go_upc(barcode):
 def _fetch_json(url, timeout=5):
     req = Request(url, headers={"User-Agent": "FamiliprixLocator/0.1", "Accept": "application/json"})
     try:
-        with urlopen(req, timeout=timeout) as response:
+        with _safe_urlopen(req, timeout=timeout) as response:
             return json.loads(_read_limited_response(response).decode("utf-8", errors="ignore"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError):
         return None
@@ -1081,8 +1140,8 @@ def generate_client_help_payload_gemini(question, products):
     )
     try:
         # Keep employee-facing AI calls inside the configured response budget.
-        with urlopen(request_obj, timeout=_AI_REQUEST_TIMEOUT_SECONDS) as response:
-            raw_response = json.loads(response.read().decode("utf-8"))
+        with _safe_urlopen(request_obj, timeout=_AI_REQUEST_TIMEOUT_SECONDS) as response:
+            raw_response = json.loads(_read_limited_response(response).decode("utf-8"))
     except HTTPError as exc:
         body = ""
         try: body = exc.read().decode("utf-8", "replace")[:250]
@@ -1144,8 +1203,8 @@ def generate_client_help_payload_openai(question, products):
         method="POST",
     )
     try:
-        with urlopen(request_obj, timeout=_AI_REQUEST_TIMEOUT_SECONDS) as response:
-            raw_response = json.loads(response.read().decode("utf-8"))
+        with _safe_urlopen(request_obj, timeout=_AI_REQUEST_TIMEOUT_SECONDS) as response:
+            raw_response = json.loads(_read_limited_response(response).decode("utf-8"))
     except HTTPError as exc:
         body = ""
         try: body = exc.read().decode("utf-8", "replace")[:250]
@@ -1199,8 +1258,8 @@ def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mo
             _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS
             if quality_mode else _AI_REQUEST_TIMEOUT_SECONDS
         )
-        with urlopen(request_obj, timeout=timeout) as response:
-            raw_response = json.loads(response.read().decode("utf-8"))
+        with _safe_urlopen(request_obj, timeout=timeout) as response:
+            raw_response = json.loads(_read_limited_response(response).decode("utf-8"))
     except HTTPError as exc:
         body = ""
         try:
@@ -1277,8 +1336,8 @@ def _gemini_structured_request(system_prompt, user_payload, max_tokens, question
         method="POST",
     )
     try:
-        with urlopen(request_obj, timeout=_AI_REQUEST_TIMEOUT_SECONDS) as response:
-            raw_response = json.loads(response.read().decode("utf-8"))
+        with _safe_urlopen(request_obj, timeout=_AI_REQUEST_TIMEOUT_SECONDS) as response:
+            raw_response = json.loads(_read_limited_response(response).decode("utf-8"))
     except HTTPError as exc:
         _set_ai_error(f"Gemini a refusé la requête structurée (HTTP {exc.code}).")
         return None
@@ -1317,8 +1376,8 @@ def _openai_structured_request(system_prompt, user_payload, max_tokens,
         method="POST",
     )
     try:
-        with urlopen(request_obj, timeout=_AI_REQUEST_TIMEOUT_SECONDS) as response:
-            raw_response = json.loads(response.read().decode("utf-8"))
+        with _safe_urlopen(request_obj, timeout=_AI_REQUEST_TIMEOUT_SECONDS) as response:
+            raw_response = json.loads(_read_limited_response(response).decode("utf-8"))
     except HTTPError as exc:
         _set_ai_error(f"OpenAI a refusé la requête structurée (HTTP {exc.code}).")
         return None
@@ -2542,8 +2601,8 @@ def generate_product_assist_payload_gemini(name, brand, description, barcode):
         method="POST",
     )
     try:
-        with urlopen(request_obj, timeout=12) as response:
-            raw_response = json.loads(response.read().decode("utf-8"))
+        with _safe_urlopen(request_obj, timeout=12) as response:
+            raw_response = json.loads(_read_limited_response(response).decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
         return None
     usage = raw_response.get("usageMetadata", {})
@@ -2591,8 +2650,8 @@ def generate_product_assist_payload_openai(name, brand, description, barcode):
         method="POST",
     )
     try:
-        with urlopen(request_obj, timeout=12) as response:
-            raw_response = json.loads(response.read().decode("utf-8"))
+        with _safe_urlopen(request_obj, timeout=12) as response:
+            raw_response = json.loads(_read_limited_response(response).decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
         return None
     usage = raw_response.get("usage", {})
@@ -2818,8 +2877,8 @@ def ai_grounded_product_lookup(barcode):
         headers={"Content-Type": "application/json"}, method="POST",
     )
     try:
-        with urlopen(req, timeout=18) as response:
-            raw = json.loads(response.read().decode("utf-8"))
+        with _safe_urlopen(req, timeout=18) as response:
+            raw = json.loads(_read_limited_response(response).decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
         return None
     usage = raw.get("usageMetadata", {})
@@ -3217,11 +3276,18 @@ def catalog_needs_description():
     buf = _io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["UPC", "Code Familiprix", "Nom (planogramme)", "Planogramme", "Statut"])
+
+    def safe_csv_cell(value):
+        text = str(value or "")
+        # Spreadsheet tools may execute cells beginning with these characters.
+        return "'" + text if text.startswith(("=", "+", "-", "@", "\t", "\r")) else text
+
     for r in rows:
         d = dict(r)
         status = "aucune correspondance en ligne" if d.get("enrich_status") == "no_match" else "pas encore tenté"
-        writer.writerow([d.get("barcode", ""), d.get("product_code", ""), d.get("name", ""),
-                         str(d.get("source", "")).replace("Planogramme: ", ""), status])
+        writer.writerow([safe_csv_cell(d.get("barcode", "")), safe_csv_cell(d.get("product_code", "")),
+                         safe_csv_cell(d.get("name", "")),
+                         safe_csv_cell(str(d.get("source", "")).replace("Planogramme: ", "")), status])
     return Response("﻿" + buf.getvalue(), mimetype="text/csv",
                     headers={"Content-Disposition": 'attachment; filename="produits-sans-description.csv"'})
 
@@ -3302,6 +3368,10 @@ def assist_product():
     brand = str(data.get("brand", "")).strip()
     description = str(data.get("description", "")).strip()
     barcode = str(data.get("barcode", "")).strip()
+    if any(len(value) > limit for value, limit in (
+        (name, 300), (brand, 160), (description, 6000), (barcode, 64)
+    )):
+        return jsonify({"success": False, "error": "Informations produit trop longues."}), 400
     if not name and not description:
         return jsonify({"success": False, "error": "Nom ou description requis."}), 400
     if not configured_ai_provider()["name"]:
@@ -3334,6 +3404,8 @@ def client_help():
             break
     if not question:
         return jsonify({"success": False, "error": "Question client requise."}), 400
+    if len(question) > 2000:
+        return jsonify({"success": False, "error": "La question est trop longue."}), 400
 
     global _AI_LAST_ERROR
     _AI_LAST_ERROR = ""
@@ -3536,6 +3608,7 @@ def ai_feedback():
     rating = str(data.get("rating", "")).strip()  # 'up' | 'down'
     if rating not in ("up", "down"):
         return jsonify({"success": False}), 400
+    question = question[:2000]
     log_ai_interaction("feedback", question, None, {"rating": rating})
     return jsonify({"success": True})
 

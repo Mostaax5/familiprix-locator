@@ -454,8 +454,10 @@ async function hydrateOnlineLookup(barcode) {
     if (!document.getElementById('scanProductDescription').value.trim()) document.getElementById('scanProductDescription').value = lookupProduct.description || '';
     status.className = 'msg success';
     status.textContent = `Trouve dans ${lookupProduct.source}. Verifiez avant de confirmer.`;
-    document.getElementById('lookupSource').innerHTML = lookupProduct.source_url ? `Source: <a href="${esc(lookupProduct.source_url)}" target="_blank" rel="noopener noreferrer">${esc(lookupProduct.source_url)}</a>` : '';
-    if (lookupProduct.image_url) document.getElementById('lookupImageWrap').innerHTML = `<img class="lookup-image" src="${esc(lookupProduct.image_url)}" alt="Image produit">`;
+    const sourceUrl = safeHttpUrl(lookupProduct.source_url);
+    const imageUrl = safeHttpUrl(lookupProduct.image_url);
+    document.getElementById('lookupSource').innerHTML = sourceUrl ? `Source: <a href="${esc(sourceUrl)}" target="_blank" rel="noopener noreferrer">${esc(sourceUrl)}</a>` : '';
+    if (imageUrl) document.getElementById('lookupImageWrap').innerHTML = `<img class="lookup-image" src="${esc(imageUrl)}" alt="Image produit">`;
   } else {
     pendingLookupProduct = null;
     status.className = 'msg error';

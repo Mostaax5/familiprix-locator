@@ -2,17 +2,42 @@ import json
 import os
 import threading
 from datetime import datetime, timezone
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
-from flask import Blueprint, request, jsonify
+from urllib.parse import urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+from flask import Blueprint, current_app, request, jsonify
 from database import get_db, DatabaseIntegrityError
 from auth import require_editor, utc_now_iso
+from routes.layout import layout_metrics, normalize_layout_config, valid_aisle_name
+from routes.products import product_payload_error, safe_http_url
 
 gist_bp = Blueprint("gist", __name__)
 
 GITHUB_TOKEN  = os.environ.get("GITHUB_TOKEN",  "").strip()
 GITHUB_GIST_ID = os.environ.get("GITHUB_GIST_ID", "").strip()
 _GIST_FILENAME = "familiprix-backup.json"
+_MAX_GIST_BYTES = 32 * 1024 * 1024
+_MAX_GIST_PRODUCTS = 100_000
+_MAX_GIST_LAYOUTS = 1_000
+_GITHUB_HTTPS_HOSTS = {
+    "api.github.com", "gist.githubusercontent.com", "raw.githubusercontent.com",
+}
+
+
+class _RejectRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _github_urlopen(request_obj, timeout):
+    parsed = urlparse(request_obj.full_url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in _GITHUB_HTTPS_HOSTS
+        or parsed.username
+        or parsed.password
+    ):
+        raise ValueError("Unsafe GitHub URL")
+    return build_opener(_RejectRedirects()).open(request_obj, timeout=timeout)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -25,6 +50,60 @@ def _as_flag(value, default):
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _bounded_int(value, default, minimum, maximum):
+    try:
+        return min(max(int(value), minimum), maximum)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _normalized_backup_layout(layout):
+    if not isinstance(layout, dict):
+        return None
+    aisle = str(layout.get("aisle", "")).strip()
+    if not valid_aisle_name(aisle):
+        return None
+    config = normalize_layout_config(
+        layout.get("config_json"), layout.get("max_section", "1"),
+        layout.get("max_shelf", "5"), layout.get("max_position", "8"),
+    )
+    max_section, max_shelf, max_position = layout_metrics(config)
+    return {
+        "aisle": aisle,
+        "max_section": max_section,
+        "max_shelf": max_shelf,
+        "max_position": max_position,
+        "config_json": json.dumps(config, ensure_ascii=False, separators=(",", ":")),
+        "enabled": 1 if layout.get("enabled", 1) else 0,
+    }
+
+
+def _normalized_backup_product(product, now):
+    if not isinstance(product, dict):
+        return None
+    cleaned = dict(product)
+    cleaned["image_url"] = safe_http_url(cleaned.get("image_url"))
+    cleaned["source_url"] = safe_http_url(cleaned.get("source_url"))
+    if product_payload_error(cleaned):
+        return None
+    for key in (
+        "name", "brand", "description", "search_terms", "usage_notes",
+        "alternative_suggestions", "barcode", "product_code", "aisle", "side",
+        "section", "shelf", "position", "underneath_label",
+    ):
+        cleaned[key] = str(cleaned.get(key, "") or "").strip()
+    cleaned["section"] = cleaned["section"] or "1"
+    if not all(cleaned.get(key) for key in ("name", "aisle", "side", "shelf", "position")):
+        return None
+    if not valid_aisle_name(cleaned["aisle"]):
+        return None
+    cleaned["facings"] = _bounded_int(cleaned.get("facings"), 1, 1, 1000)
+    for key, default in (("is_plano", 0), ("in_stock", 1), ("flipped_label", 0)):
+        cleaned[key] = 1 if _as_flag(cleaned.get(key), default) else 0
+    cleaned["created_at"] = str(cleaned.get("created_at") or now)[:64]
+    return cleaned
 
 
 def _build_backup_payload(db):
@@ -46,14 +125,37 @@ def _gist_file_content(file_info):
     if not file_info:
         return None
     if file_info.get("truncated") and file_info.get("raw_url"):
+        raw_url = str(file_info["raw_url"])
+        parsed = urlparse(raw_url)
+        if parsed.scheme != "https" or parsed.hostname not in {
+            "gist.githubusercontent.com", "raw.githubusercontent.com",
+        } or parsed.username or parsed.password:
+            raise ValueError("Unsafe Gist raw URL")
         req = Request(
-            file_info["raw_url"],
+            raw_url,
             headers={"Authorization": f"token {GITHUB_TOKEN}",
                      "X-GitHub-Api-Version": "2022-11-28"},
         )
-        with urlopen(req, timeout=30) as resp:
-            return resp.read().decode("utf-8")
-    return file_info.get("content")
+        with _github_urlopen(req, timeout=30) as resp:
+            raw = resp.read(_MAX_GIST_BYTES + 1)
+            if len(raw) > _MAX_GIST_BYTES:
+                raise ValueError("Gist backup is too large")
+            return raw.decode("utf-8")
+    content = file_info.get("content")
+    if content is not None and len(str(content).encode("utf-8")) > _MAX_GIST_BYTES:
+        raise ValueError("Gist backup is too large")
+    return content
+
+
+def _valid_backup_payload(payload):
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("export_version") == 1
+        and isinstance(payload.get("products"), list)
+        and isinstance(payload.get("aisle_layouts"), list)
+        and len(payload["products"]) <= _MAX_GIST_PRODUCTS
+        and len(payload["aisle_layouts"]) <= _MAX_GIST_LAYOUTS
+    )
 
 
 def _push_to_gist(payload):
@@ -62,6 +164,8 @@ def _push_to_gist(payload):
     # Compact JSON (no indentation): pretty-printing doubled the size and pushed
     # the backup toward GitHub's 1 MB API-read threshold (see _gist_file_content).
     content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if len(content.encode("utf-8")) > _MAX_GIST_BYTES:
+        return False, "La sauvegarde est trop volumineuse."
     body = json.dumps({
         "description": "Familiprix Locator - sauvegarde automatique",
         "public": False,
@@ -78,15 +182,15 @@ def _push_to_gist(payload):
     else:
         req = Request("https://api.github.com/gists", data=body, headers=headers, method="POST")
     try:
-        with urlopen(req, timeout=15) as resp:
+        with _github_urlopen(req, timeout=15) as resp:
             result = json.loads(resp.read())
             gist_id = result.get("id", "")
             if not GITHUB_GIST_ID:
                 print(f"[Gist] Nouveau gist cree: {gist_id} — ajoutez GITHUB_GIST_ID={gist_id} dans vos variables Render")
             return True, gist_id
     except Exception as exc:
-        print(f"[Gist] Sauvegarde echouee: {exc}")
-        return False, str(exc)
+        current_app.logger.error("Gist backup failed: %s: %s", type(exc).__name__, exc)
+        return False, "La sauvegarde distante a echoue. Reessayez plus tard."
 
 
 # Debounced backup: during a scanning session every add/delete used to build the
@@ -156,7 +260,7 @@ def _restore_from_gist_if_empty():
                 "X-GitHub-Api-Version": "2022-11-28",
             },
         )
-        with urlopen(req, timeout=15) as resp:
+        with _github_urlopen(req, timeout=15) as resp:
             gist = json.loads(resp.read())
         file_info = gist.get("files", {}).get(_GIST_FILENAME)
         content = _gist_file_content(file_info)
@@ -164,14 +268,15 @@ def _restore_from_gist_if_empty():
             db.close()
             return
         payload = json.loads(content)
-        if payload.get("export_version") != 1:
+        if not _valid_backup_payload(payload):
             db.close()
             return
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        for layout in (payload.get("aisle_layouts") or []):
-            aisle = str(layout.get("aisle", "")).strip()
-            if not aisle:
+        for raw_layout in (payload.get("aisle_layouts") or []):
+            layout = _normalized_backup_layout(raw_layout)
+            if not layout:
                 continue
+            aisle = layout["aisle"]
             db.execute(
                 """
                 INSERT INTO aisle_layouts (aisle, max_section, max_shelf, max_position, config_json, enabled, modified_by, modified_at)
@@ -181,15 +286,16 @@ def _restore_from_gist_if_empty():
                     max_position=excluded.max_position, config_json=excluded.config_json,
                     enabled=excluded.enabled, modified_by=excluded.modified_by, modified_at=excluded.modified_at
                 """,
-                (aisle, str(layout.get("max_section", "1")), str(layout.get("max_shelf", "5")),
-                 str(layout.get("max_position", "8")), str(layout.get("config_json", "")),
-                 int(layout.get("enabled", 1)), "gist-restore", now),
+                (aisle, layout["max_section"], layout["max_shelf"],
+                 layout["max_position"], layout["config_json"],
+                 layout["enabled"], "gist-restore", now),
             )
         imported = 0
-        for p in (payload.get("products") or []):
-            name = str(p.get("name", "")).strip()
-            if not name:
+        for raw_product in (payload.get("products") or []):
+            p = _normalized_backup_product(raw_product, now)
+            if not p:
                 continue
+            name = p["name"]
             try:
                 db.execute(
                     """
@@ -198,13 +304,12 @@ def _restore_from_gist_if_empty():
                         is_plano, in_stock, flipped_label, underneath_label, created_by, created_at, modified_by, modified_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (name, p.get("brand", ""), p.get("description", ""), p.get("image_url", ""),
-                     p.get("source_url", ""), p.get("search_terms", ""), p.get("usage_notes", ""),
-                     p.get("alternative_suggestions", ""), p.get("barcode", ""), p.get("product_code", ""), _as_flag(p.get("facings"), 1),
-                     p.get("aisle", ""), p.get("side", ""), p.get("section", "1"),
-                     p.get("shelf", ""), p.get("position", ""),
-                     _as_flag(p.get("is_plano"), 0), _as_flag(p.get("in_stock"), 1), _as_flag(p.get("flipped_label"), 0), p.get("underneath_label", ""),
-                     "gist-restore", p.get("created_at", now), "gist-restore", now),
+                    (name, p["brand"], p["description"], p["image_url"],
+                     p["source_url"], p["search_terms"], p["usage_notes"],
+                     p["alternative_suggestions"], p["barcode"], p["product_code"], p["facings"],
+                     p["aisle"], p["side"], p["section"], p["shelf"], p["position"],
+                     p["is_plano"], p["in_stock"], p["flipped_label"], p["underneath_label"],
+                     "gist-restore", p["created_at"], "gist-restore", now),
                 )
                 imported += 1
             except Exception:
@@ -259,7 +364,7 @@ def gist_restore_now():
                 "X-GitHub-Api-Version": "2022-11-28",
             },
         )
-        with urlopen(req, timeout=15) as resp:
+        with _github_urlopen(req, timeout=15) as resp:
             gist = json.loads(resp.read())
         file_info = gist.get("files", {}).get(_GIST_FILENAME)
         content = _gist_file_content(file_info)
@@ -267,18 +372,23 @@ def gist_restore_now():
             return jsonify({"success": False, "error": "Fichier de sauvegarde introuvable dans le gist."}), 404
         payload = json.loads(content)
     except Exception as exc:
-        return jsonify({"success": False, "error": f"Impossible de lire le gist: {exc}"}), 500
-    if payload.get("export_version") != 1:
+        current_app.logger.error("Gist restore read failed: %s: %s", type(exc).__name__, exc)
+        return jsonify({
+            "success": False,
+            "error": "Impossible de lire la sauvegarde distante. Reessayez plus tard.",
+        }), 500
+    if not _valid_backup_payload(payload):
         return jsonify({"success": False, "error": "Format de sauvegarde non reconnu."}), 400
     db = get_db()
     imported_layouts = 0
     imported_products = 0
     skipped_products = 0
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    for layout in (payload.get("aisle_layouts") or []):
-        aisle = str(layout.get("aisle", "")).strip()
-        if not aisle:
+    for raw_layout in (payload.get("aisle_layouts") or []):
+        layout = _normalized_backup_layout(raw_layout)
+        if not layout:
             continue
+        aisle = layout["aisle"]
         db.execute(
             """
             INSERT INTO aisle_layouts (aisle, max_section, max_shelf, max_position, config_json, enabled, modified_by, modified_at)
@@ -288,15 +398,17 @@ def gist_restore_now():
                 max_position=excluded.max_position, config_json=excluded.config_json,
                 enabled=excluded.enabled, modified_by=excluded.modified_by, modified_at=excluded.modified_at
             """,
-            (aisle, str(layout.get("max_section", "1")), str(layout.get("max_shelf", "5")),
-             str(layout.get("max_position", "8")), str(layout.get("config_json", "")),
-             int(layout.get("enabled", 1)), username, now),
+            (aisle, layout["max_section"], layout["max_shelf"],
+             layout["max_position"], layout["config_json"],
+             layout["enabled"], username, now),
         )
         imported_layouts += 1
-    for p in (payload.get("products") or []):
-        name = str(p.get("name", "")).strip()
-        if not name:
+    for raw_product in (payload.get("products") or []):
+        p = _normalized_backup_product(raw_product, now)
+        if not p:
+            skipped_products += 1
             continue
+        name = p["name"]
         try:
             db.execute(
                 """
@@ -305,13 +417,12 @@ def gist_restore_now():
                     is_plano, in_stock, flipped_label, underneath_label, created_by, created_at, modified_by, modified_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (name, p.get("brand", ""), p.get("description", ""), p.get("image_url", ""),
-                 p.get("source_url", ""), p.get("search_terms", ""), p.get("usage_notes", ""),
-                 p.get("alternative_suggestions", ""), p.get("barcode", ""), p.get("product_code", ""), _as_flag(p.get("facings"), 1),
-                 p.get("aisle", ""), p.get("side", ""), p.get("section", "1"),
-                 p.get("shelf", ""), p.get("position", ""),
-                 _as_flag(p.get("is_plano"), 0), _as_flag(p.get("in_stock"), 1), _as_flag(p.get("flipped_label"), 0), p.get("underneath_label", ""),
-                 username, p.get("created_at", now), username, now),
+                (name, p["brand"], p["description"], p["image_url"],
+                 p["source_url"], p["search_terms"], p["usage_notes"],
+                 p["alternative_suggestions"], p["barcode"], p["product_code"], p["facings"],
+                 p["aisle"], p["side"], p["section"], p["shelf"], p["position"],
+                 p["is_plano"], p["in_stock"], p["flipped_label"], p["underneath_label"],
+                 username, p["created_at"], username, now),
             )
             imported_products += 1
         except DatabaseIntegrityError:

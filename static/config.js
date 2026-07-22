@@ -37,13 +37,9 @@ const STORES = [
   }
 ];
 
-// SHA-256 of the access password (one-way hash — the password is NOT recoverable
-// from this source, unlike the old base64 which was trivially reversible).
-const LOCK_HASH = '1158a3823fa4014569a2b5f7f475a5539429ca8d6abcbab1d1cc7972470982e8';
-const LOCK_TTL_MS = 8 * 60 * 60 * 1000; // 8 heures — un mot de passe par quart de
-                                        // travail, FIXE depuis le déverrouillage
-                                        // (jamais prolongé par l'activité)
-const LOCKED_TABS = new Set(['scan', 'add']);
+// Every employee view contains store data, so every tab now requires the same
+// server-verified session. No password material is shipped to the browser.
+const LOCKED_TABS = new Set(['search', 'client', 'scan', 'add']);
 
 let backendInfo = {
   backend: 'sqlite',
@@ -90,4 +86,4 @@ const SEARCH_STOPWORDS = new Set([
   'toutes','tu','type','types','usage','usages','use','uses','utiliser','vous','you'
 ]);
 
-window.AppConfig = { STORAGE_KEYS, LOCK_HASH, LOCK_TTL_MS, LOCKED_TABS, SEARCH_STOPWORDS, STORES };
+window.AppConfig = { STORAGE_KEYS, LOCKED_TABS, SEARCH_STOPWORDS, STORES };

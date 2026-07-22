@@ -22,6 +22,15 @@ const deleteButton = {
 const context = {
   console,
   esc(value) { return String(value ?? ''); },
+  jsq(value) {
+    return String(value ?? '')
+      .replace(/\\/g, '\\\\')
+      .replace(/'/g, '\\x27')
+      .replace(/\r/g, '\\r')
+      .replace(/\n/g, '\\n')
+      .replace(/\u2028/g, '\\u2028')
+      .replace(/\u2029/g, '\\u2029');
+  },
   isHomeBrand() { return false; },
   sideDisplayLabel(side) { return side === 'Gauche' ? 'Côté A' : 'Côté B'; },
   mapLayouts: [{
@@ -308,6 +317,16 @@ async function run() {
   );
   assert(renderedSide.includes('plan-structure-drop-section'), 'an aisle side should expose section insertion points');
   assert(vm.runInContext('renderPlanBulkToolbar()', context).includes('planSelectionMove'));
+
+  const hostileAisleMarkup = vm.runInContext(
+    'renderShelfCard("7\\\');globalThis.planXss=true;//","Gauche",0,0,2,"")',
+    context
+  );
+  assert(hostileAisleMarkup.includes('\\x27'), 'inline plan arguments must JavaScript-escape quotes');
+  assert(
+    !hostileAisleMarkup.includes("setShelfPositionCount('7');globalThis.planXss"),
+    'aisle data must not escape its handler string'
+  );
 
   context.fakeGrip = {
     dataset: {

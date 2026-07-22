@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from app import app
 from routes.ai import (
+    _outbound_url_allowed,
     _deepseek_json_request,
     build_client_query_plan,
     classify_client_request,
@@ -13,6 +14,7 @@ from routes.ai import (
     health_canada_documents,
     normalize_documented_client_answer,
     normalize_verified_client_answer,
+    normalize_url,
     select_client_answer_candidates,
 )
 from routes.products import (
@@ -24,6 +26,8 @@ from routes.products import (
     row_matches_client_concepts,
     tokenize_search_query,
 )
+
+app.config.update(TESTING=True, AUTH_TEST_BYPASS=True)
 
 
 def search_row(name, brand="", description="", barcode=""):
@@ -44,6 +48,16 @@ def search_row(name, brand="", description="", barcode=""):
 
 
 class ClientRagTests(unittest.TestCase):
+    def test_outbound_lookup_urls_cannot_reach_other_or_insecure_hosts(self):
+        base = "https://example.com/catalog"
+        self.assertEqual(
+            normalize_url(base, "/product/123"),
+            "https://example.com/product/123",
+        )
+        self.assertEqual(normalize_url(base, "https://169.254.169.254/latest"), "")
+        self.assertEqual(normalize_url(base, "http://example.com/product/123"), "")
+        self.assertFalse(_outbound_url_allowed("https://user:pass@example.com/private"))
+
     def test_hybrid_retrieval_corrects_spoken_french_brand_typo(self):
         advil = {"id": 1, "name": "Advil Extra Fort", "brand": "Advil", "barcode": "111"}
         unrelated = {"id": 2, "name": "Tylenol Regular", "brand": "Tylenol", "barcode": "222"}
@@ -476,13 +490,13 @@ class ClientRagTests(unittest.TestCase):
             def __exit__(self, _type, _value, _traceback):
                 return False
 
-            def read(self):
+            def read(self, _size=-1):
                 return json.dumps(response_payload).encode("utf-8")
 
         with patch("routes.ai.DEEPSEEK_DOCUMENTED_MODEL", "deepseek-v4-pro"), \
              patch("routes.ai.DEEPSEEK_MODEL", "deepseek-v4-flash"), \
              patch("routes.ai._DEEPSEEK_DOCUMENTED_THINKING", False), \
-             patch("routes.ai.urlopen", side_effect=[TimeoutError("slow"), StubResponse()]) as opener, \
+             patch("routes.ai._safe_urlopen", side_effect=[TimeoutError("slow"), StubResponse()]) as opener, \
              patch("routes.ai._log_ai_usage"):
             result = _deepseek_json_request(
                 [{"role": "user", "content": "test"}],

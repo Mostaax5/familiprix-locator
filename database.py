@@ -124,7 +124,7 @@ def _get_pg_pool():
                 # database is back.
                 pool = ConnectionPool(
                     DATABASE_URL, min_size=0, max_size=6, max_idle=300, timeout=15,
-                    kwargs={"row_factory": dict_row}, open=False,
+                    kwargs={"row_factory": dict_row, "sslmode": "require"}, open=False,
                 )
                 pool.open(wait=False)   # non-blocking: getconn() waits (≤15s), boot never does
                 _PG_POOL = pool
@@ -157,9 +157,13 @@ def connect_db():
                 return DatabaseConnection(pool.getconn(), "postgres", pool=pool)
             except Exception as exc:  # PoolTimeout/pool trouble — NEVER block the app on it
                 print(f"[DB] pool indisponible ({exc}) — connexion directe de secours. stats={pool_stats()}")
-                conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=5)
+                conn = psycopg.connect(
+                    DATABASE_URL, row_factory=dict_row, connect_timeout=5, sslmode="require"
+                )
                 return DatabaseConnection(conn, "postgres")
-        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=5)
+        conn = psycopg.connect(
+            DATABASE_URL, row_factory=dict_row, connect_timeout=5, sslmode="require"
+        )
         return DatabaseConnection(conn, "postgres")
 
     conn = sqlite3.connect(DB_PATH)
@@ -268,6 +272,44 @@ def init_postgres_db(db):
             last_seen  TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            setting_key   TEXT PRIMARY KEY,
+            setting_value TEXT NOT NULL DEFAULT '',
+            updated_at    BIGINT NOT NULL DEFAULT 0
+        )
+    """)
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+            token_hash      TEXT PRIMARY KEY,
+            csrf_token      TEXT NOT NULL,
+            username        TEXT NOT NULL,
+            created_at      BIGINT NOT NULL,
+            expires_at      BIGINT NOT NULL,
+            last_seen       BIGINT NOT NULL,
+            revoked_at      BIGINT NOT NULL DEFAULT 0,
+            client_hash     TEXT DEFAULT '',
+            user_agent_hash TEXT DEFAULT '',
+            password_fingerprint TEXT DEFAULT ''
+        )
+    """)
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS security_events (
+            id              BIGSERIAL PRIMARY KEY,
+            created_at      BIGINT NOT NULL,
+            action          TEXT NOT NULL,
+            username        TEXT DEFAULT '',
+            client_hash     TEXT DEFAULT '',
+            user_agent_hash TEXT DEFAULT '',
+            detail_json     TEXT DEFAULT ''
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_security_events_created ON security_events(created_at)")
+    db.execute("ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS password_fingerprint TEXT DEFAULT ''")
 
     db.execute("""
         CREATE TABLE IF NOT EXISTS aisle_layouts (
@@ -421,6 +463,48 @@ def init_sqlite_db(db):
             last_seen  TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            setting_key   TEXT PRIMARY KEY,
+            setting_value TEXT NOT NULL DEFAULT '',
+            updated_at    INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+            token_hash      TEXT PRIMARY KEY,
+            csrf_token      TEXT NOT NULL,
+            username        TEXT NOT NULL,
+            created_at      INTEGER NOT NULL,
+            expires_at      INTEGER NOT NULL,
+            last_seen       INTEGER NOT NULL,
+            revoked_at      INTEGER NOT NULL DEFAULT 0,
+            client_hash     TEXT DEFAULT '',
+            user_agent_hash TEXT DEFAULT '',
+            password_fingerprint TEXT DEFAULT ''
+        )
+    """)
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS security_events (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at      INTEGER NOT NULL,
+            action          TEXT NOT NULL,
+            username        TEXT DEFAULT '',
+            client_hash     TEXT DEFAULT '',
+            user_agent_hash TEXT DEFAULT '',
+            detail_json     TEXT DEFAULT ''
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_security_events_created ON security_events(created_at)")
+    auth_session_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(auth_sessions)").fetchall()
+    }
+    if "password_fingerprint" not in auth_session_columns:
+        db.execute("ALTER TABLE auth_sessions ADD COLUMN password_fingerprint TEXT DEFAULT ''")
 
     db.execute("""
         CREATE TABLE IF NOT EXISTS aisle_layouts (

@@ -265,6 +265,7 @@ function compactPlanProduct(product) {
 }
 
 function savePlanSnapshot() {
+  if (typeof isUnlocked === 'function' && !isUnlocked()) return;
   if (!STORAGE_KEYS.planSnapshot) return;
   if (!mapLayouts.length) {
     localStorage.removeItem(STORAGE_KEYS.planSnapshot);
@@ -308,6 +309,7 @@ function savePlanSnapshot() {
 }
 
 function restorePlanSnapshot() {
+  if (typeof isUnlocked === 'function' && !isUnlocked()) return false;
   if (!STORAGE_KEYS.planSnapshot || mapLayouts.length) return false;
   const raw = localStorage.getItem(STORAGE_KEYS.planSnapshot);
   if (!raw) return false;
@@ -589,6 +591,7 @@ function loadCursor() {
 
 // ── Draft persistence ─────────────────────────────────────────────────────────
 function persistScanDraft() {
+  if (typeof isUnlocked === 'function' && !isUnlocked()) return;
   localStorage.setItem(STORAGE_KEYS.scanDraft, JSON.stringify({
     barcode: document.getElementById('scanInput').value.trim()
   }));
@@ -604,6 +607,7 @@ function loadScanDraft() {
 }
 
 function persistAddDraft() {
+  if (typeof isUnlocked === 'function' && !isUnlocked()) return;
   localStorage.setItem(STORAGE_KEYS.addDraft, JSON.stringify({
     aisle: document.getElementById('mapAisle').value.trim(),
     leftSections: document.getElementById('mapLeftSections').value.trim(),
@@ -627,6 +631,7 @@ function loadAddDraft() {
 }
 
 function persistClientDraft() {
+  if (typeof isUnlocked === 'function' && !isUnlocked()) return;
   try {
     localStorage.setItem(STORAGE_KEYS.clientDraft, JSON.stringify({
       store_id: (typeof getCurrentStore === 'function' ? getCurrentStore()?.id : '') || '',
@@ -2416,7 +2421,7 @@ function openMoveSection(aisle, side, sectionIndex) {
     </div>
     <div id="msMsg" class="small" style="color:#c8102e;min-height:16px"></div>
     <div class="tool-row" style="margin-top:8px">
-      <button class="btn btn-inline" onclick="confirmMoveSection('${esc(aisle)}','${side}',${sectionIndex})">Déplacer</button>
+      <button class="btn btn-inline" onclick="confirmMoveSection('${jsq(aisle)}','${jsq(side)}',${sectionIndex})">Déplacer</button>
       <button class="btn btn-outline btn-inline" onclick="this.closest('.move-overlay').remove()">Annuler</button>
     </div>
   </div>`;
@@ -2452,7 +2457,7 @@ function renderShelfProductList(aisle, side, section, shelf, positions) {
   const total = Number(positions) || 0;
   // "Scanner ici" makes EVERY tablette directly scannable — côté sections,
   // accroches, façades and présentoirs all render their products through here.
-  const scanBtn = `<button class="btn btn-outline btn-inline" style="font-size:11px;padding:3px 9px;margin:0 0 5px;width:100%;color:#16a34a;border-color:#16a34a" onclick="startScanAt('${esc(String(aisle))}','${esc(String(side))}','${esc(String(section))}','${esc(String(shelf))}')">▶ Scanner ici</button>`;
+  const scanBtn = `<button class="btn btn-outline btn-inline" style="font-size:11px;padding:3px 9px;margin:0 0 5px;width:100%;color:#16a34a;border-color:#16a34a" onclick="startScanAt('${jsq(aisle)}','${jsq(side)}','${jsq(section)}','${jsq(shelf)}')">▶ Scanner ici</button>`;
   if (!total && !filled) return `<div class="plan-product-list">${scanBtn}</div>`;
 
   // Mode libre (positions = 0): show all scanned products without fixed slots
@@ -2475,7 +2480,7 @@ function renderShelfProductList(aisle, side, section, shelf, positions) {
   }
   const byPos = {};
   products.forEach(p => { byPos[Number(p.position)] = p; });
-  const ae = s => esc(String(s));
+  const ae = s => jsq(s);
   let html = `<div class="plan-product-list">${scanBtn}`;
   for (let pos = 1; pos <= total; pos++) {
     const p = byPos[pos];
@@ -2543,28 +2548,28 @@ function renderShelfCard(aisle, side, sectionIndex, shelfIndex, positions, shelf
       ${isLibre
         ? `<span style="font-size:10px;color:#8b5cf6;font-weight:700">LIBRE · ${shelfFilled} prod.</span>
            <button title="Définir un nombre fixe de positions" style="background:none;border:1px solid #a78bfa;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
-                   onclick="setShelfPositionCount('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},prompt('Nombre de positions fixes ?','8')||0)">→ Positions fixes</button>`
-        : `<button title="Retirer une position" style="background:none;border:1px solid #e2e8f0;border-radius:5px;cursor:pointer;font-size:14px;padding:1px 8px;line-height:1.3;${positions<=1?'opacity:.3;cursor:default':''}" onclick="setShelfPositionCount('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},${positions-1})" ${positions<=1?'disabled':''}>➖</button>
+                   onclick="setShelfPositionCount('${jsq(aisle)}','${jsq(side)}',${sectionIndex},${shelfIndex},prompt('Nombre de positions fixes ?','8')||0)">→ Positions fixes</button>`
+        : `<button title="Retirer une position" style="background:none;border:1px solid #e2e8f0;border-radius:5px;cursor:pointer;font-size:14px;padding:1px 8px;line-height:1.3;${positions<=1?'opacity:.3;cursor:default':''}" onclick="setShelfPositionCount('${jsq(aisle)}','${jsq(side)}',${sectionIndex},${shelfIndex},${positions-1})" ${positions<=1?'disabled':''}>➖</button>
            <input type="number" min="1" value="${positions}" title="Positions"
                  style="width:46px;padding:2px 4px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px;text-align:center"
-                 onchange="setShelfPositionCount('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},this.value)"/>
-           <button title="Ajouter une position" style="background:none;border:1px solid #e2e8f0;border-radius:5px;cursor:pointer;font-size:14px;padding:1px 8px;line-height:1.3" onclick="setShelfPositionCount('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},${positions+1})">➕</button>
+                 onchange="setShelfPositionCount('${jsq(aisle)}','${jsq(side)}',${sectionIndex},${shelfIndex},this.value)"/>
+           <button title="Ajouter une position" style="background:none;border:1px solid #e2e8f0;border-radius:5px;cursor:pointer;font-size:14px;padding:1px 8px;line-height:1.3" onclick="setShelfPositionCount('${jsq(aisle)}','${jsq(side)}',${sectionIndex},${shelfIndex},${positions+1})">➕</button>
            <span style="font-size:11px;color:#64748b">${shelfFilled} prod.</span>
            <button title="Passer en mode libre (cosmétiques, presentoirs...)" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
-                   onclick="setShelfPositionCount('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},0)">📦 Libre</button>`
+                   onclick="setShelfPositionCount('${jsq(aisle)}','${jsq(side)}',${sectionIndex},${shelfIndex},0)">📦 Libre</button>`
       }
-      <button type="button" class="plan-delete-action" onclick="removeShelf('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},this)" style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5" title="Supprimer cette tablette">✕ Tablette</button>
+      <button type="button" class="plan-delete-action" onclick="removeShelf('${jsq(aisle)}','${jsq(side)}',${sectionIndex},${shelfIndex},this)" style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5" title="Supprimer cette tablette">✕ Tablette</button>
     </div>
     <div style="display:flex;gap:6px;padding:5px 0 4px;border-top:1px solid rgba(0,0,0,.06);margin-top:4px;flex-wrap:wrap">
-      <button class="btn btn-outline btn-inline" style="font-size:12px;flex:1" onclick="moveShelf('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},-1)">↑ Monter</button>
-      <button class="btn btn-outline btn-inline" style="font-size:12px;flex:1" onclick="moveShelf('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},1)">↓ Descendre</button>
+      <button class="btn btn-outline btn-inline" style="font-size:12px;flex:1" onclick="moveShelf('${jsq(aisle)}','${jsq(side)}',${sectionIndex},${shelfIndex},-1)">↑ Monter</button>
+      <button class="btn btn-outline btn-inline" style="font-size:12px;flex:1" onclick="moveShelf('${jsq(aisle)}','${jsq(side)}',${sectionIndex},${shelfIndex},1)">↓ Descendre</button>
       ${renderPlanScopeDeleteButton('shelf', aisle, side, sectionIndex + 1, shelfIndex + 1, shelfFilled)}
     </div>
     <details class="struct-details">
       <summary class="struct-toggle" style="font-size:11px">⚙ Nom / étiquette</summary>
       <div class="field" style="margin-top:6px">
         <input type="text" value="${esc(shelfLabel)}" placeholder="Laisser vide = Tablette ${shelfIndex + 1}"
-               oninput="setShelfLabel('${esc(aisle)}','${side}',${sectionIndex},${shelfIndex},this.value)"/>
+               oninput="setShelfLabel('${jsq(aisle)}','${jsq(side)}',${sectionIndex},${shelfIndex},this.value)"/>
       </div>
     </details>
     ${renderShelfProductList(aisle, side, sectionIndex + 1, shelfIndex + 1, positions)}
@@ -2625,22 +2630,22 @@ function renderSection(aisle, side, sectionIndex, section) {
     </summary>
     <div class="tree-body">
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 6px">
-        <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addShelf('${esc(aisle)}','${side}',${sectionIndex})">➕ Tablette</button>
-        <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addAccrocheToSection('${esc(aisle)}','${side}',${sectionIndex})">📎 Accroche</button>
-        <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="startScanFromSection('${esc(aisle)}','${side}',${sectionIndex})">▶ Scanner ici</button>
+        <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addShelf('${jsq(aisle)}','${jsq(side)}',${sectionIndex})">➕ Tablette</button>
+        <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addAccrocheToSection('${jsq(aisle)}','${jsq(side)}',${sectionIndex})">📎 Accroche</button>
+        <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="startScanFromSection('${jsq(aisle)}','${jsq(side)}',${sectionIndex})">▶ Scanner ici</button>
       </div>
       <div style="display:flex;gap:6px;margin-bottom:10px;align-items:center;flex-wrap:wrap">
-        <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${esc(aisle)}','${side}',${sectionIndex},-1)">↑ Monter</button>
-        <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${esc(aisle)}','${side}',${sectionIndex},1)">↓ Descendre</button>
-        <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="openMoveSection('${esc(aisle)}','${side}',${sectionIndex})">⇄ Autre allée</button>
+        <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${jsq(aisle)}','${jsq(side)}',${sectionIndex},-1)">↑ Monter</button>
+        <button class="btn btn-outline btn-inline" style="font-size:13px;padding:6px 14px" onclick="moveSection('${jsq(aisle)}','${jsq(side)}',${sectionIndex},1)">↓ Descendre</button>
+        <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="openMoveSection('${jsq(aisle)}','${jsq(side)}',${sectionIndex})">⇄ Autre allée</button>
         ${renderPlanScopeDeleteButton('section', aisle, side, sectionIndex + 1, '', sectionProducts)}
-        <button type="button" class="btn btn-outline btn-inline plan-delete-action" style="font-size:12px;color:#c8102e;border-color:#f1b8c2;margin-left:auto" onclick="removeSection('${esc(aisle)}','${side}',${sectionIndex},this)">✕ Supprimer section</button>
+        <button type="button" class="btn btn-outline btn-inline plan-delete-action" style="font-size:12px;color:#c8102e;border-color:#f1b8c2;margin-left:auto" onclick="removeSection('${jsq(aisle)}','${jsq(side)}',${sectionIndex},this)">✕ Supprimer section</button>
       </div>
       ${section.shelves.length ? '' : `<div class="small" style="padding:4px 0;color:#94a3b8">Aucune tablette — cliquez ➕ Tablette ci-dessus.</div>`}
       <label class="small" style="display:flex;align-items:center;gap:6px;margin:4px 0 8px;font-weight:700;color:#475569">
         Nombre de tablettes
         <input type="number" min="0" max="60" value="${section.shelves.length}" style="width:58px;padding:5px;text-align:center"
-               onchange="setSectionShelfCount('${esc(aisle)}','${side}',${sectionIndex},this.value)"/>
+               onchange="setSectionShelfCount('${jsq(aisle)}','${jsq(side)}',${sectionIndex},this.value)"/>
       </label>
       <div class="plan-shelf-grid">
         ${section.shelves.map((positions, shelfIndex) =>
@@ -2705,10 +2710,10 @@ function renderSide(aisle, side, config) {
               <input id="sideTemplatePositions-${aisle}-${side}" type="number" min="0" value="${sections[0]?.shelves?.[0] ?? 0}"/>
             </div>
           </div>
-          <button class="btn btn-outline btn-inline" style="margin-top:8px" onclick="applySideTemplate('${esc(aisle)}','${side}')">Appliquer modèle uniforme a ${sideLabel}</button>
+          <button class="btn btn-outline btn-inline" style="margin-top:8px" onclick="applySideTemplate('${jsq(aisle)}','${jsq(side)}')">Appliquer modèle uniforme a ${sideLabel}</button>
           <div class="field" style="margin-top:8px">
             <label class="label" for="sectionCount-${aisle}-${side}">Nombre de sections</label>
-            <input id="sectionCount-${aisle}-${side}" type="number" min="0" value="${sections.length}" onchange="setSideSectionCount('${esc(aisle)}','${side}', this.value)"/>
+            <input id="sectionCount-${esc(aisle)}-${esc(side)}" type="number" min="0" value="${sections.length}" onchange="setSideSectionCount('${jsq(aisle)}','${jsq(side)}', this.value)"/>
           </div>
         </div>
       </details>
@@ -2722,7 +2727,7 @@ function renderSide(aisle, side, config) {
       ${renderPlanStructureDropZone(
         'section', {aisle, side, index: sections.length}, `Fin de ${sideLabel}`
       )}
-      <button class="btn btn-outline btn-inline" style="margin-top:8px;font-size:12px;width:100%" onclick="addSection('${esc(aisle)}','${side}')">➕ Ajouter une section</button>
+      <button class="btn btn-outline btn-inline" style="margin-top:8px;font-size:12px;width:100%" onclick="addSection('${jsq(aisle)}','${jsq(side)}')">➕ Ajouter une section</button>
     </div>
   </details>`;
 }
@@ -2788,12 +2793,12 @@ function renderMapEditor() {
         <div class="tree-body">
         <div class="plan-actions" style="margin-top:8px">
           <span id="aisleSaveState-${esc(layout.aisle)}" class="small" data-state="${dirty ? 'waiting' : 'saved'}" style="color:${dirty ? '#d97706' : '#15803d'}">${dirty ? 'En attente...' : 'Sauvegarde automatique'}</span>
-          <button class="btn btn-inline" onclick="saveAisleLayout('${esc(layout.aisle)}')">Sauver</button>
-          <button class="btn btn-outline btn-inline" onclick="applyAisleLayoutToCursor('${esc(layout.aisle)}')">Utiliser pour scan</button>
-          <button class="btn btn-outline btn-inline" onclick="setPlanAisleTrees('${esc(layout.aisle)}', true)">Tout ouvrir</button>
-          <button class="btn btn-outline btn-inline" onclick="setPlanAisleTrees('${esc(layout.aisle)}', false)">Tout fermer</button>
+          <button class="btn btn-inline" onclick="saveAisleLayout('${jsq(layout.aisle)}')">Sauver</button>
+          <button class="btn btn-outline btn-inline" onclick="applyAisleLayoutToCursor('${jsq(layout.aisle)}')">Utiliser pour scan</button>
+          <button class="btn btn-outline btn-inline" onclick="setPlanAisleTrees('${jsq(layout.aisle)}', true)">Tout ouvrir</button>
+          <button class="btn btn-outline btn-inline" onclick="setPlanAisleTrees('${jsq(layout.aisle)}', false)">Tout fermer</button>
           ${renderPlanScopeDeleteButton('aisle', layout.aisle, '', '1', '', layout.product_count || 0)}
-          <button class="btn btn-outline btn-inline plan-delete-action" style="border-color:#f1b8c2;color:#c8102e" onclick="removeAisleLayout('${esc(layout.aisle)}')">✕ Supprimer allée</button>
+          <button class="btn btn-outline btn-inline plan-delete-action" style="border-color:#f1b8c2;color:#c8102e" onclick="removeAisleLayout('${jsq(layout.aisle)}')">✕ Supprimer allée</button>
         </div>
         ${layout.modified_by ? `<div class="small" style="margin-top:6px">Modifie par: ${esc(layout.modified_by)}</div>` : ''}
         <div class="plan-sides">
@@ -3250,7 +3255,7 @@ async function exportDatabase() {
   const msg = document.getElementById('exportImportMsg');
   if (msg) { msg.className = 'msg info'; msg.textContent = 'Preparation du fichier...'; }
   try {
-    const res = await fetch('/api/export');
+    const res = await secureFetch('/api/export');
     if (!res.ok) throw new Error('Erreur serveur');
     const blob = await res.blob();
     const filename = `familiprix-backup-${new Date().toISOString().slice(0,10)}.json`;
@@ -3311,14 +3316,22 @@ async function importDatabase(input) {
 async function resetDatabase(wipeLayouts) {
   const msg = document.getElementById('exportImportMsg');
   const what = wipeLayouts ? 'TOUS les produits ET le plan du magasin' : 'tous les produits';
-  if (!confirm(`Effacer ${what}? Cette action’est irreversible. Faites une sauvegarde d’abord si nécessaire.`)) return;
-  if (!confirm('Confirmation finale: effacer definitivement?')) return;
+  const confirmation = wipeLayouts ? 'SUPPRIMER LE PLAN' : 'SUPPRIMER LES PRODUITS';
+  if (!confirm(`Effacer ${what}? Cette action est irreversible. Faites une sauvegarde d'abord si necessaire.`)) return;
+  const typed = prompt(`Confirmation finale : ecrivez exactement ${confirmation}`);
+  if (typed !== confirmation) {
+    if (typed !== null && msg) {
+      msg.className = 'msg error';
+      msg.textContent = 'Suppression annulee : la phrase de confirmation ne correspond pas.';
+    }
+    return;
+  }
   if (msg) { msg.className = 'msg info'; msg.textContent = 'Suppression en cours...'; }
   try {
     const {res, data} = await apiFetch('/api/reset', {
       method: 'POST',
       headers: {'Content-Type': 'application/json', ...getEditorHeaders()},
-      body: JSON.stringify({wipe_layouts: wipeLayouts})
+      body: JSON.stringify({wipe_layouts: wipeLayouts, confirmation})
     });
     if (!res.ok || !data.success) throw new Error(data.error || 'Erreur');
     if (msg) {
@@ -3806,10 +3819,10 @@ function _facadeShelfGrid(aisle, sideName, fk, shelves, labels) {
         ${renderPlanDropButton(aisle, sideName, 1, shi + 1, 'shelf')}
         <input type="number" min="1" value="${positions}" title="Positions"
                style="width:46px;padding:2px 4px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px;text-align:center"
-               onchange="setFacadeShelfPositions('${esc(aisle)}','${fk}',${shi},this.value)"/>
+               onchange="setFacadeShelfPositions('${jsq(aisle)}','${jsq(fk)}',${shi},this.value)"/>
         <span style="font-size:10px;color:#94a3b8">pos</span>
         <span style="font-size:11px;color:#64748b">${filled} prod.</span>
-        <button type="button" class="plan-delete-action" onclick="removeFacadeShelf('${esc(aisle)}','${fk}',${shi},this)"
+        <button type="button" class="plan-delete-action" onclick="removeFacadeShelf('${jsq(aisle)}','${jsq(fk)}',${shi},this)"
                 style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5"
                 title="Supprimer cette tablette">✕ Suppr.</button>
         ${renderPlanScopeDeleteButton('shelf', aisle, sideName, 1, shi + 1, filled)}
@@ -3818,7 +3831,7 @@ function _facadeShelfGrid(aisle, sideName, fk, shelves, labels) {
         <summary class="struct-toggle" style="font-size:11px">⚙ Nom / étiquette</summary>
         <div class="field" style="margin-top:6px">
           <input type="text" value="${esc(sl)}" placeholder="Laisser vide = Tablette ${shi + 1}"
-                 oninput="setFacadeShelfLabel('${esc(aisle)}','${fk}',${shi},this.value)"/>
+                 oninput="setFacadeShelfLabel('${jsq(aisle)}','${jsq(fk)}',${shi},this.value)"/>
         </div>
       </details>
       ${renderShelfProductList(aisle, sideName, 1, shi + 1, positions)}
@@ -3845,7 +3858,7 @@ function renderFacadesSection(aisle, config) {
       <div class="tree-body">
         <div style="display:flex;gap:6px;margin:6px 0 8px">
           <button class="btn btn-outline btn-inline" style="font-size:12px"
-                  onclick="setFacadeShelfCount('${esc(aisle)}','${key}',${shelves.length + 1})">➕ Tablette</button>
+                  onclick="setFacadeShelfCount('${jsq(aisle)}','${jsq(key)}',${shelves.length + 1})">➕ Tablette</button>
           ${renderPlanScopeDeleteButton('side', aisle, sideName, '1', '', prods.length)}
         </div>
         ${shelves.length ? '' : '<div class="small" style="color:#94a3b8;padding:4px 0">Aucune tablette.</div>'}
@@ -3886,7 +3899,7 @@ function renderPresentoirSection(aisle, config) {
         const posCtrl = isLibre
           ? `<span style="font-size:10px;color:#8b5cf6;font-weight:700">LIBRE · ${filled}</span>`
           : `<input type="number" min="1" value="${positions}" style="width:44px;padding:2px 4px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px;text-align:center"
-               onchange="setPresentoirShelfPositions('${esc(aisle)}',${pi},${fi},${shi},this.value)"/>
+               onchange="setPresentoirShelfPositions('${jsq(aisle)}',${pi},${fi},${shi},this.value)"/>
              <span style="font-size:10px;color:#94a3b8">pos · ${filled} prod.</span>`;
         return `<div class="plan-shelf-card" ${planDropTargetAttrs(aisle, sideName, 1, shi + 1, 'shelf')}
           style="${bg}${isLibre?';border-color:#a78bfa;background:#faf5ff':''}">
@@ -3895,7 +3908,7 @@ function renderPresentoirSection(aisle, config) {
             <span class="shelf-title">${title}</span>
             ${renderPlanDropButton(aisle, sideName, 1, shi + 1, 'shelf')}
             ${posCtrl}
-            <button type="button" class="plan-delete-action" onclick="removePresentoirShelf('${esc(aisle)}',${pi},${fi},${shi},this)"
+            <button type="button" class="plan-delete-action" onclick="removePresentoirShelf('${jsq(aisle)}',${pi},${fi},${shi},this)"
                     style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5"
                     title="Supprimer cette tablette">✕ Suppr.</button>
             ${renderPlanScopeDeleteButton('shelf', aisle, sideName, 1, shi + 1, filled)}
@@ -3913,10 +3926,10 @@ function renderPresentoirSection(aisle, config) {
         <div class="tree-body">
           <div style="display:flex;gap:6px;align-items:center;margin:6px 0 8px">
             <input type="text" value="${esc(facade.name)}" style="flex:1;padding:5px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px"
-                   oninput="renamePresentoirFacade('${esc(aisle)}',${pi},${fi},this.value)" placeholder="Nom de la façade"/>
-            <button class="btn btn-outline btn-inline" style="font-size:11px" onclick="setPresentoirShelfCount('${esc(aisle)}',${pi},${fi},${shelves.length+1})">➕ T</button>
+                   oninput="renamePresentoirFacade('${jsq(aisle)}',${pi},${fi},this.value)" placeholder="Nom de la façade"/>
+            <button class="btn btn-outline btn-inline" style="font-size:11px" onclick="setPresentoirShelfCount('${jsq(aisle)}',${pi},${fi},${shelves.length+1})">➕ T</button>
             ${renderPlanScopeDeleteButton('side', aisle, sideName, '1', '', facadeProds.length)}
-            <button class="btn btn-outline btn-inline" style="font-size:11px;color:#c8102e;border-color:#f1b8c2" onclick="removePresentoirFacade('${esc(aisle)}',${pi},${fi})">✕ Façade</button>
+            <button class="btn btn-outline btn-inline" style="font-size:11px;color:#c8102e;border-color:#f1b8c2" onclick="removePresentoirFacade('${jsq(aisle)}',${pi},${fi})">✕ Façade</button>
           </div>
           <div class="plan-shelf-grid">${shelvesHtml}</div>
         </div>
@@ -3931,9 +3944,9 @@ function renderPresentoirSection(aisle, config) {
       <div class="tree-body">
         <div style="display:flex;gap:8px;align-items:center;margin:8px 0 10px">
           <input type="text" value="${esc(pres.name)}" style="flex:1;padding:5px 8px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px"
-                 oninput="renamePresentoir('${esc(aisle)}',${pi},this.value)" placeholder="Nom du présentoir"/>
-          <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addPresentoirFacade('${esc(aisle)}',${pi})">➕ Façade</button>
-          <button class="btn btn-outline btn-inline" style="font-size:12px;color:#c8102e;border-color:#f1b8c2" onclick="removePresentoir('${esc(aisle)}',${pi})">✕ Supprimer</button>
+                 oninput="renamePresentoir('${jsq(aisle)}',${pi},this.value)" placeholder="Nom du présentoir"/>
+          <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addPresentoirFacade('${jsq(aisle)}',${pi})">➕ Façade</button>
+          <button class="btn btn-outline btn-inline" style="font-size:12px;color:#c8102e;border-color:#f1b8c2" onclick="removePresentoir('${jsq(aisle)}',${pi})">✕ Supprimer</button>
         </div>
         ${facadesHtml}
       </div>
@@ -3943,7 +3956,7 @@ function renderPresentoirSection(aisle, config) {
   return `<div style="margin-top:12px">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
       <div style="font-weight:700;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">Présentoirs (couloir)</div>
-      <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addPresentoir('${esc(aisle)}')">📦 Ajouter présentoir</button>
+      <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="addPresentoir('${jsq(aisle)}')">📦 Ajouter présentoir</button>
     </div>
     ${presHtml || '<div class="small" style="color:#94a3b8;padding:4px 0">Aucun présentoir.</div>'}
   </div>`;
@@ -3963,7 +3976,7 @@ async function importPlanogramCatalog(input) {
   const form = new FormData();
   form.append('file', file);
   try {
-    const res = await fetch('/api/import/planogram-catalog', {method:'POST', body: form, headers: getEditorHeaders()});
+    const res = await secureFetch('/api/import/planogram-catalog', {method:'POST', body: form});
     const data = await res.json();
     if (!res.ok || !data.success) {
       msg.style.color = '#c8102e';
@@ -3988,14 +4001,14 @@ async function startCatalogEnrich() {
   catalogEnrichWasRunning = true;
   const msg = document.getElementById('catalogEnrichMsg');
   if (msg) { msg.style.color = '#64748b'; msg.textContent = 'Démarrage de l enrichissement…'; }
-  try { await fetch('/api/import/catalog-enrich/start', {method:'POST', headers: getEditorHeaders()}); } catch (_) {}
+  try { await secureFetch('/api/import/catalog-enrich/start', {method:'POST'}); } catch (_) {}
   const stop = document.getElementById('catalogEnrichStop'); if (stop) stop.style.display = '';
   pollCatalogEnrich();
 }
 async function pollCatalogEnrich() {
   window.clearTimeout(catalogEnrichTimer);
   let s = {};
-  try { s = await (await fetch('/api/import/catalog-enrich/status')).json(); } catch (_) {}
+  try { s = await (await secureFetch('/api/import/catalog-enrich/status')).json(); } catch (_) {}
   const msg = document.getElementById('catalogEnrichMsg');
   if (msg) {
     const pct = s.total ? Math.round(100 * (s.done || 0) / s.total) : 0;
@@ -4032,7 +4045,7 @@ async function pollCatalogEnrich() {
   }
 }
 async function stopCatalogEnrich() {
-  try { await fetch('/api/import/catalog-enrich/stop', {method:'POST', headers: getEditorHeaders()}); } catch (_) {}
+  try { await secureFetch('/api/import/catalog-enrich/stop', {method:'POST'}); } catch (_) {}
   const msg = document.getElementById('catalogEnrichMsg');
   if (msg) msg.textContent = 'Arrêt demandé…';
 }
@@ -4057,7 +4070,7 @@ async function parsePlanogramPDF(input) {
     // The server parses in the BACKGROUND and we poll for the result: a big
     // plano takes minutes on the server's small CPU — parsing inside the
     // upload request hit the HTTP timeout and looked like a dead button.
-    const res  = await fetch('/api/import/planogram-parse', {method:'POST', body: form});
+    const res  = await secureFetch('/api/import/planogram-parse', {method:'POST', body: form});
     const up = await res.json();
     if (!res.ok || !up.success || !up.job) {
       msg.textContent = up.error || 'Erreur lors de l analyse.';
@@ -4071,7 +4084,7 @@ async function parsePlanogramPDF(input) {
       if (token !== _planoParseToken) return;           // user picked another PDF
       let sj = null;
       try {
-        const sr = await fetch(`/api/import/planogram-parse/status/${up.job}`, {cache: 'no-store'});
+        const sr = await secureFetch(`/api/import/planogram-parse/status/${up.job}`, {cache: 'no-store'});
         sj = await sr.json();
       } catch (e) { continue; }                          // transient network — keep polling
       if (!sj) continue;
@@ -4102,9 +4115,9 @@ async function parsePlanogramPDF(input) {
     document.getElementById('planoTabStart').value = tabs[0] || 1;
     document.getElementById('planoTabEnd').value   = tabs[tabs.length-1] || 8;
     const aisleSelect = document.getElementById('planoAisle');
-    aisleSelect.innerHTML = mapLayouts.map(l=>`<option value="${l.aisle}">${l.aisle}</option>`).join('');
-    const sum = Object.entries(data.tablettes).map(([t,n])=>`T${t}:${n}`).join(' | ');
-    msg.innerHTML = `<strong style="color:#16a34a">${data.count} produits</strong> trouvés — ${sum}`;
+    aisleSelect.innerHTML = mapLayouts.map(l=>`<option value="${esc(l.aisle)}">${esc(l.aisle)}</option>`).join('');
+    const sum = Object.entries(data.tablettes).map(([t,n])=>`T${esc(t)}:${esc(n)}`).join(' | ');
+    msg.innerHTML = `<strong style="color:#16a34a">${esc(data.count)} produits</strong> trouvés — ${sum}`;
     msg.style.color = '#16a34a';
     document.getElementById('planoConfig').style.display = '';
     onPlanoSideChange();   // sets the start section to the côté's starting end, then previews

@@ -27,10 +27,14 @@ class PerformanceContractTests(unittest.TestCase):
 
     def test_startup_restores_local_plan_before_network_wait(self):
         source = (ROOT / "static" / "main.js").read_text(encoding="utf-8")
-        boot = source.index("async function bootApp()")
-        restore = source.index("restorePlanSnapshot()", boot)
-        network_wait = source.index("await Promise.allSettled", boot)
+        authenticated_load = source.index("async function _loadAuthenticatedApp")
+        restore = source.index("restorePlanSnapshot()", authenticated_load)
+        network_wait = source.index("await Promise.allSettled", authenticated_load)
         self.assertLess(restore, network_wait)
+        boot = source.index("async function bootApp()")
+        auth_check = source.index("await initializeAuth()", boot)
+        resume = source.index("await resumeAuthenticatedApp()", auth_check)
+        self.assertLess(auth_check, resume)
 
     def test_planogram_import_paints_committed_delta_before_revalidation(self):
         source = (ROOT / "static" / "layout-ui.js").read_text(encoding="utf-8")

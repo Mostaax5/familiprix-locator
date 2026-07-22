@@ -9,6 +9,7 @@ import threading
 import unicodedata
 from collections import Counter, deque
 from difflib import SequenceMatcher
+from urllib.parse import urlsplit
 from flask import Blueprint, request, jsonify
 from database import get_db, DatabaseIntegrityError
 from auth import require_editor, utc_now_iso, side_display_label
@@ -16,6 +17,44 @@ from routes.layout import validate_layout_slot, aisle_sort_key
 from memory_guard import memory_intensive_task, release_unused_memory
 
 products_bp = Blueprint("products", __name__)
+
+_PRODUCT_TEXT_LIMITS = {
+    "name": 300, "brand": 160, "description": 6000, "image_url": 2048,
+    "source_url": 2048, "search_terms": 3000, "usage_notes": 6000,
+    "alternative_suggestions": 6000, "barcode": 64, "product_code": 64,
+    "aisle": 80, "side": 80, "section": 20, "shelf": 20, "position": 20,
+    "underneath_label": 500,
+}
+
+
+def safe_http_url(value):
+    raw = str(value or "").strip()[:2048]
+    if not raw:
+        return ""
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() != "https" or not parsed.netloc or parsed.username or parsed.password:
+        return ""
+    return raw
+
+
+def product_payload_error(data):
+    if not isinstance(data, dict):
+        return "Corps JSON invalide."
+    for key, limit in _PRODUCT_TEXT_LIMITS.items():
+        if key in data:
+            value = data.get(key)
+            if isinstance(value, (dict, list, tuple, set)):
+                return f"Le champ {key} est invalide."
+            if len(str(value or "")) > limit:
+                return f"Le champ {key} est trop long."
+    for key in ("image_url", "source_url"):
+        value = str(data.get(key) or "").strip()
+        if value and not safe_http_url(value):
+            return f"Le champ {key} doit utiliser une adresse HTTPS valide."
+    return None
 
 SEARCH_STOPWORDS = {
     "a", "an", "and", "au", "aux", "avec", "ce", "ces", "cette", "client", "comme",
@@ -610,6 +649,8 @@ def row_to_product(product):
     if not product:
         return None
     item = dict(product)
+    item["image_url"] = safe_http_url(item.get("image_url"))
+    item["source_url"] = safe_http_url(item.get("source_url"))
     item["last_change_by"] = item.get("modified_by") or item.get("created_by") or ""
     item["last_change_at"] = item.get("modified_at") or item.get("created_at") or ""
     return item
@@ -1383,7 +1424,7 @@ def get_products():
     reuses its stored copy — this endpoint is fetched at every app open and tab
     switch, and used to re-serialize ~1 MB of JSON every time."""
     db = get_db()
-    etag = hashlib.md5(repr(products_state_key(db)).encode()).hexdigest()
+    etag = hashlib.sha256(repr(products_state_key(db)).encode()).hexdigest()
     if client_etag_matches(etag):
         return "", 304
     products = sorted((item for item, _ in _products_corpus(db)), key=location_sort_key)
@@ -1461,7 +1502,7 @@ def get_reference_product_images():
 
 @products_bp.route("/api/products/search", methods=["GET"])
 def search_products():
-    query = request.args.get("q", "").strip()
+    query = request.args.get("q", "").strip()[:500]
     if not query:
         return jsonify([])
     field = (request.args.get("field") or "").strip().lower()
@@ -1491,7 +1532,7 @@ def search_products():
 @products_bp.route("/api/client/find", methods=["GET"])
 def client_find():
     """Fast inventory-safe lookup from the current mapped store plan only."""
-    query = request.args.get("q", "").strip()
+    query = request.args.get("q", "").strip()[:500]
     if not query:
         return jsonify([])
     limit = min(max(clamp_non_negative_int(request.args.get("limit", "30"), 30), 1), 100)
@@ -1533,7 +1574,7 @@ def client_find():
 def reference_search():
     """Search the reference catalogue (imported planograms) for products we carry but
     that aren't placed on a shelf yet. Excludes barcodes already placed to avoid dups."""
-    query = request.args.get("q", "").strip()
+    query = request.args.get("q", "").strip()[:500]
     if not query:
         return jsonify([])
     limit = min(max(clamp_non_negative_int(request.args.get("limit", "40"), 40), 1), 80)
@@ -1545,6 +1586,8 @@ def reference_search():
 
 @products_bp.route("/api/products/barcode/<barcode>", methods=["GET"])
 def get_by_barcode(barcode):
+    if len(str(barcode or "")) > 64:
+        return jsonify({"error": "Code-barres invalide"}), 400
     db = get_db()
     for candidate in build_barcode_candidates(barcode):
         product = db.execute(
@@ -1561,21 +1604,24 @@ def add_product():
     if error:
         return error
     data = request.get_json(silent=True) or {}
-    name     = data.get("name", "").strip()
-    brand    = data.get("brand", "").strip()
-    description = data.get("description", "").strip()
-    image_url = data.get("image_url", "").strip()
-    source_url = data.get("source_url", "").strip()
-    search_terms = data.get("search_terms", "").strip()
-    usage_notes = data.get("usage_notes", "").strip()
-    alternative_suggestions = data.get("alternative_suggestions", "").strip()
-    barcode  = data.get("barcode", "").strip()
-    product_code = data.get("product_code", "").strip()
-    aisle    = data.get("aisle", "").strip()
-    side     = data.get("side", "").strip()
-    section  = data.get("section", "").strip() or "1"
-    shelf    = data.get("shelf", "").strip()
-    position = data.get("position", "").strip()
+    payload_error = product_payload_error(data)
+    if payload_error:
+        return jsonify({"error": payload_error}), 400
+    name     = str(data.get("name", "") or "").strip()
+    brand    = str(data.get("brand", "") or "").strip()
+    description = str(data.get("description", "") or "").strip()
+    image_url = safe_http_url(data.get("image_url", ""))
+    source_url = safe_http_url(data.get("source_url", ""))
+    search_terms = str(data.get("search_terms", "") or "").strip()
+    usage_notes = str(data.get("usage_notes", "") or "").strip()
+    alternative_suggestions = str(data.get("alternative_suggestions", "") or "").strip()
+    barcode  = str(data.get("barcode", "") or "").strip()
+    product_code = str(data.get("product_code", "") or "").strip()
+    aisle    = str(data.get("aisle", "") or "").strip()
+    side     = str(data.get("side", "") or "").strip()
+    section  = str(data.get("section", "") or "").strip() or "1"
+    shelf    = str(data.get("shelf", "") or "").strip()
+    position = str(data.get("position", "") or "").strip()
     is_plano = 1 if data.get("is_plano", 0) else 0
     flipped  = 1 if data.get("flipped_label", 0) else 0
     underneath = str(data.get("underneath_label", "")).strip()
@@ -1630,6 +1676,9 @@ def update_product(product_id):
     if error:
         return error
     data = request.get_json(silent=True) or {}
+    payload_error = product_payload_error(data)
+    if payload_error:
+        return jsonify({"error": payload_error}), 400
     missing = [k for k in ("name", "aisle", "side", "shelf", "position") if not str(data.get(k, "")).strip()]
     if missing:
         return jsonify({"error": f"Champs obligatoires manquants: {', '.join(missing)}"}), 400
@@ -1664,8 +1713,8 @@ def update_product(product_id):
     # Never blank an image: keep the new one, else the existing one, else any
     # image already known for this barcode.
     new_barcode = str(data.get("barcode", existing["barcode"]) or "").strip()
-    resolved_image = (str(data.get("image_url", "")).strip()
-                      or str(existing["image_url"] or "").strip()
+    resolved_image = (safe_http_url(data.get("image_url", ""))
+                      or safe_http_url(existing["image_url"])
                       or find_existing_image_for_barcode(db, new_barcode, exclude_id=product_id))
 
     try:
@@ -1676,7 +1725,7 @@ def update_product(product_id):
                 data.get("brand", existing["brand"]),
                 data.get("description", existing["description"]),
                 resolved_image,
-                data.get("source_url", existing["source_url"]),
+                safe_http_url(data.get("source_url", existing["source_url"])),
                 data.get("search_terms", existing["search_terms"]),
                 data.get("usage_notes", existing["usage_notes"]),
                 data.get("alternative_suggestions", existing["alternative_suggestions"]),
@@ -1720,7 +1769,7 @@ def removed_products_list():
     """Archive of removed products — searchable so a question about an old
     product can still be answered (what it was, where it used to be)."""
     db = get_db()
-    q = (request.args.get("q") or "").strip().lower()
+    q = (request.args.get("q") or "").strip().lower()[:300]
     rows = db.execute("SELECT * FROM removed_products ORDER BY id DESC LIMIT 500").fetchall()
     out = []
     for r in rows:
@@ -1768,7 +1817,7 @@ def set_flipped_label(product_id):
         return error
     data = request.get_json() or {}
     has_under = "underneath" in data
-    underneath = str(data.get("underneath", "")).strip()
+    underneath = str(data.get("underneath", "")).strip()[:500]
     flipped = 1 if (data.get("flipped", False) or underneath) else 0
     db = get_db()
     if has_under:
@@ -1921,8 +1970,15 @@ def bulk_import_products():
         return jsonify({"success": False, "error": "Début ou fin de tablette invalide."}), 400
     if not isinstance(products, list):
         return jsonify({"success": False, "error": "Liste de produits invalide."}), 400
+    if len(products) > 5000:
+        return jsonify({"success": False, "error": "Le planogramme contient trop de produits."}), 413
+    if any(not isinstance(product, dict) for product in products):
+        return jsonify({"success": False, "error": "Une ligne de produit est invalide."}), 400
 
-    from routes.layout import get_layout_row, normalize_layout_config, layout_metrics
+    from routes.layout import (
+        MAX_LAYOUT_POSITIONS, MAX_LAYOUT_SECTIONS, MAX_LAYOUT_SHELVES,
+        get_layout_row, normalize_layout_config, layout_metrics,
+    )
     db = get_db()
     row = get_layout_row(db, aisle)
     if not row:
@@ -1972,9 +2028,18 @@ def bulk_import_products():
         except (ValueError, TypeError):
             errors += 1
             continue
+        name = str(p.get("name", "") or "").strip()
+        barcode = str(p.get("barcode", "") or "").strip()
+        product_code = str(p.get("code_familiprix", "") or "").strip()
         if not (tablette_start <= tab <= tablette_end):
             continue
-        if pos < 1 or not str(p.get("name", "")).strip():
+        if (
+            tab < 1 or tab > MAX_LAYOUT_SECTIONS * MAX_LAYOUT_SHELVES
+            or pos < 1 or pos > MAX_LAYOUT_POSITIONS
+            or not name or len(name) > _PRODUCT_TEXT_LIMITS["name"]
+            or len(barcode) > _PRODUCT_TEXT_LIMITS["barcode"]
+            or len(product_code) > _PRODUCT_TEXT_LIMITS["product_code"]
+        ):
             errors += 1
             continue
         selected_products += 1
@@ -2085,7 +2150,7 @@ def bulk_import_products():
         is_plano = 1 if p.get("is_plano", True) else 0
         flipped  = 1 if p.get("flipped_label", False) else 0
         try:
-            facings = max(1, int(p.get("facings", 1) or 1))
+            facings = min(1000, max(1, int(p.get("facings", 1) or 1)))
         except (ValueError, TypeError):
             facings = 1
         # The pharmacy code lives in its own column (product_code), NOT in
@@ -2231,15 +2296,16 @@ def bulk_import_products():
 
     # Record this import in the planogram history.
     try:
-        plano = data.get("plano") or {}
-        store = str(data.get("store", "")).strip()
+        plano = data.get("plano") if isinstance(data.get("plano"), dict) else {}
+        store = str(data.get("store", "")).strip()[:120]
         db.execute(
             """INSERT INTO planogram_imports
                (created_at, store, employee, plano_name, plano_number, plano_version,
                 aisle, side, section, tablette_start, tablette_end, imported, skipped)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (now, store, username,
-             str(plano.get("name", "")), str(plano.get("number", "")), str(plano.get("version", "")),
+             str(plano.get("name", ""))[:120], str(plano.get("number", ""))[:40],
+             str(plano.get("version", ""))[:40],
              aisle, side, str(start_section), str(tablette_start), str(tablette_end), imported, skipped),
         )
     except Exception as exc:

@@ -9,3 +9,6 @@ services:
     healthCheckPath: /healthz
     autoDeployTrigger: commit
     plan: free
+    envVars:
+      - key: APP_PASSWORD_HASH
+        sync: false

@@ -63,6 +63,7 @@ class LayoutDeletionTests(unittest.TestCase):
         )
         self.db.commit()
         self.app = Flask(__name__)
+        self.app.config.update(TESTING=True, AUTH_TEST_BYPASS=True)
         self.app.register_blueprint(layout_bp)
 
     def tearDown(self):

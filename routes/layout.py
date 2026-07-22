@@ -6,20 +6,38 @@ from auth import require_editor, utc_now_iso
 
 layout_bp = Blueprint("layout", __name__)
 
+MAX_LAYOUT_SECTIONS = 200
+MAX_LAYOUT_SHELVES = 100
+MAX_LAYOUT_POSITIONS = 500
+MAX_LAYOUT_PRESENTOIRS = 100
+MAX_LAYOUT_FACADES = 50
+MAX_LAYOUT_LABEL_LENGTH = 160
+_AISLE_NAME_RE = re.compile(r"[A-Za-z0-9À-ÿ .\-]+")
+
 
 # ── Config helpers ─────────────────────────────────────────────────────────────
 
-def clamp_non_negative_int(value, fallback=0):
+def clamp_non_negative_int(value, fallback=0, maximum=None):
     try:
-        return max(0, int(str(value)))
+        cleaned = max(0, int(str(value)))
+        return min(cleaned, maximum) if maximum is not None else cleaned
     except (TypeError, ValueError):
         return fallback
 
 
+def valid_aisle_name(value):
+    aisle = str(value or "").strip()
+    return bool(aisle and len(aisle) <= 40 and _AISLE_NAME_RE.fullmatch(aisle))
+
+
+def _layout_label(value):
+    return str(value or "")[:MAX_LAYOUT_LABEL_LENGTH]
+
+
 def build_default_layout_config(max_section, max_shelf, max_position):
-    section_count = clamp_non_negative_int(max_section)
-    shelf_count = clamp_non_negative_int(max_shelf)
-    position_count = clamp_non_negative_int(max_position)
+    section_count = clamp_non_negative_int(max_section, maximum=MAX_LAYOUT_SECTIONS)
+    shelf_count = clamp_non_negative_int(max_shelf, maximum=MAX_LAYOUT_SHELVES)
+    position_count = clamp_non_negative_int(max_position, maximum=MAX_LAYOUT_POSITIONS)
     section_template = [
         {"shelves": [position_count for _ in range(shelf_count)], "labels": ["" for _ in range(shelf_count)]}
         for _ in range(section_count)
@@ -52,15 +70,21 @@ def normalize_layout_config(config_value, max_section="1", max_shelf="5", max_po
         has_explicit_sections = isinstance(side_value.get("sections"), list)
         sections = side_value.get("sections") if has_explicit_sections else []
         normalized_sections = []
-        for section in sections:
+        for section in sections[:MAX_LAYOUT_SECTIONS]:
             shelves = section.get("shelves") if isinstance(section, dict) else None
             if not isinstance(shelves, list):
                 continue
-            cleaned_shelves = [clamp_non_negative_int(shelf) for shelf in shelves]
+            cleaned_shelves = [
+                clamp_non_negative_int(shelf, maximum=MAX_LAYOUT_POSITIONS)
+                for shelf in shelves[:MAX_LAYOUT_SHELVES]
+            ]
             raw_labels = section.get("labels", []) if isinstance(section, dict) else []
             if not isinstance(raw_labels, list):
                 raw_labels = []
-            cleaned_labels = [str(raw_labels[i]) if i < len(raw_labels) else "" for i in range(len(cleaned_shelves))]
+            cleaned_labels = [
+                _layout_label(raw_labels[i]) if i < len(raw_labels) else ""
+                for i in range(len(cleaned_shelves))
+            ]
             normalized_sections.append({"shelves": cleaned_shelves, "labels": cleaned_labels})
         if not has_explicit_sections:
             normalized_sections = default["sides"][side]["sections"]
@@ -71,10 +95,13 @@ def normalize_layout_config(config_value, max_section="1", max_shelf="5", max_po
             return {"shelves": [], "labels": []}
         raw_sh = fx.get("shelves", [])
         if not isinstance(raw_sh, list): raw_sh = []
-        shelves = [clamp_non_negative_int(v) for v in raw_sh]
+        shelves = [
+            clamp_non_negative_int(v, maximum=MAX_LAYOUT_POSITIONS)
+            for v in raw_sh[:MAX_LAYOUT_SHELVES]
+        ]
         raw_lab = fx.get("labels", [])
         if not isinstance(raw_lab, list): raw_lab = []
-        labels = [str(raw_lab[i]) if i < len(raw_lab) else "" for i in range(len(shelves))]
+        labels = [_layout_label(raw_lab[i]) if i < len(raw_lab) else "" for i in range(len(shelves))]
         return {"shelves": shelves, "labels": labels}
 
     normalized_facade_a = norm_fixture(config.get("facade_a") if isinstance(config, dict) else None)
@@ -83,17 +110,17 @@ def normalize_layout_config(config_value, max_section="1", max_shelf="5", max_po
     raw_pres = config.get("presentoirs", []) if isinstance(config, dict) else []
     if not isinstance(raw_pres, list): raw_pres = []
     normalized_pres = []
-    for p in raw_pres:
+    for p in raw_pres[:MAX_LAYOUT_PRESENTOIRS]:
         if not isinstance(p, dict):
             continue
-        name = str(p.get("name", "Présentoir")).strip() or "Présentoir"
+        name = _layout_label(p.get("name", "Présentoir")).strip() or "Présentoir"
         raw_facades = p.get("facades") if isinstance(p.get("facades"), list) else None
         if raw_facades:
             facades = []
-            for i, f in enumerate(raw_facades):
+            for i, f in enumerate(raw_facades[:MAX_LAYOUT_FACADES]):
                 if not isinstance(f, dict):
                     continue
-                fname = str(f.get("name", f"Façade {i+1}")).strip() or f"Façade {i+1}"
+                fname = _layout_label(f.get("name", f"Façade {i+1}")).strip() or f"Façade {i+1}"
                 fx = norm_fixture(f)
                 facades.append({"name": fname, "shelves": fx["shelves"], "labels": fx["labels"]})
         else:
@@ -451,7 +478,7 @@ def get_layout_aisles():
     ).fetchone()
     layouts_key = (tuple(layouts_key_row.values()) if isinstance(layouts_key_row, dict)
                    else tuple(layouts_key_row))
-    etag = hashlib.md5(repr((layouts_key, products_state_key(db))).encode()).hexdigest()
+    etag = hashlib.sha256(repr((layouts_key, products_state_key(db))).encode()).hexdigest()
     if client_etag_matches(etag):
         return "", 304
     aisles = db.execute(
@@ -760,7 +787,7 @@ def create_layout_aisle():
         return jsonify({"error": "Nom d'allée trop long (40 caractères max)."}), 400
     # Allow names (Caisse, Labo, Près du labo…) as well as numbers. No quotes or
     # angle brackets so the name is always safe inside inline onclick handlers.
-    if not re.fullmatch(r"[A-Za-z0-9À-ÿ .\-]+", aisle):
+    if not valid_aisle_name(aisle):
         return jsonify({"error": "Nom d'allée invalide : lettres, chiffres, espaces, points et tirets seulement."}), 400
     db = get_db()
     exists = db.execute("SELECT aisle FROM aisle_layouts WHERE aisle=?", (aisle,)).fetchone()

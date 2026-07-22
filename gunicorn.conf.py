@@ -21,6 +21,13 @@ workers = 1          # Render free tier: one small CPU — more workers just swa
 threads = 4
 timeout = 180
 keepalive = 5
+# Bound parser work before a request reaches Flask. These are comfortably above
+# every legitimate app request while limiting oversized request-line/header abuse.
+limit_request_line = 4094
+limit_request_fields = 50
+limit_request_field_size = 8190
+# Any runtime files created by the worker are private to its operating-system user.
+umask = 0o077
 # Recycle the worker every ~2000 requests (± jitter): Python/pdfplumber don't
 # always return freed memory to the OS, so over a long uptime RSS creeps up.
 # 2000 (was 500): every recycle gives the NEXT visitor a slow "cold worker"

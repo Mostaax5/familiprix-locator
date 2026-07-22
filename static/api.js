@@ -1,7 +1,32 @@
-async function apiFetch(url, options = {}) {
-  const opts = {...options, cache: options.cache || 'no-store'};
+async function secureFetch(url, options = {}) {
+  const target = new URL(String(url), window.location.origin);
+  if (target.origin !== window.location.origin) {
+    throw new Error('cross-origin-request-blocked');
+  }
+  const opts = {...options};
+  const skipAuthHandling = Boolean(opts.skipAuthHandling);
+  delete opts.skipAuthHandling;
+  opts.cache = options.cache || 'no-store';
+  opts.credentials = 'same-origin';
   opts.headers = {...(options.headers || {})};
-  const res = await fetch(url, opts);
+  const method = String(opts.method || 'GET').toUpperCase();
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    const csrfToken = window.AppLock?.csrfToken?.() || '';
+    if (csrfToken && !opts.headers['X-CSRF-Token']) {
+      opts.headers['X-CSRF-Token'] = csrfToken;
+    }
+  }
+  const res = await fetch(`${target.pathname}${target.search}${target.hash}`, opts);
+  if (!skipAuthHandling && (res.status === 401 || res.status === 428)) {
+    let payload = {};
+    try { payload = await res.clone().json(); } catch (_) {}
+    window.AppLock?.handleAuthFailure?.(res.status, payload);
+  }
+  return res;
+}
+
+async function apiFetch(url, options = {}) {
+  const res = await secureFetch(url, options);
   const contentType = res.headers.get('content-type') || '';
   const data = contentType.includes('application/json') ? await res.json() : await res.text();
   return {res, data};

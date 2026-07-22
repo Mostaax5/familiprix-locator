@@ -7,8 +7,8 @@ function normalizeProduct(product) {
     name: String(product.name || '').trim(),
     brand: String(product.brand || '').trim(),
     description: String(product.description || '').trim(),
-    image_url: String(product.image_url || '').trim(),
-    source_url: String(product.source_url || '').trim(),
+    image_url: safeHttpUrl(product.image_url),
+    source_url: safeHttpUrl(product.source_url),
     search_terms: String(product.search_terms || '').trim(),
     usage_notes: String(product.usage_notes || '').trim(),
     alternative_suggestions: String(product.alternative_suggestions || '').trim(),
@@ -63,6 +63,31 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// Escape a value for a single-quoted JavaScript argument inside an HTML
+// attribute. HTML escaping alone is insufficient because entities are decoded
+// before an inline handler is compiled.
+function jsq(value) {
+  const javascriptSafe = String(value ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, '\\x27')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+  return esc(javascriptSafe);
+}
+
+function safeHttpUrl(value) {
+  const raw = String(value || '').trim().slice(0, 2048);
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    const sameOrigin = parsed.origin === window.location.origin;
+    if (parsed.protocol === 'https:' || (sameOrigin && parsed.protocol === 'http:')) return parsed.href;
+  } catch (_) {}
+  return '';
+}
+
 // The internal side value stays 'Gauche'/'Droite' (DB + layout config keys),
 // but it is NEVER shown to users — everything displays "Côté A"/"Côté B".
 function sideDisplayLabel(side) {
@@ -95,17 +120,29 @@ function loadEditorSession() {
   catch (e) { return {username: 'appareil'}; }
 }
 
-function saveEditorName() {
+async function saveEditorName() {
   const username = document.getElementById('editorName').value.trim() || 'appareil';
   localStorage.setItem(STORAGE_KEYS.editorSession, JSON.stringify({username}));
+  if (isUnlocked()) {
+    try {
+      const {res, data} = await apiFetch('/api/auth/profile', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username}),
+      });
+      if (res.ok && data?.username) window.AppLock?.setAuthenticatedUsername?.(data.username);
+    } catch (_) {}
+  }
   updateAppShellState();
 }
 
-function requireEditorSession() { return true; }
-
-function getEditorHeaders() {
-  return {'X-User-Name': loadEditorSession().username || 'appareil'};
+function requireEditorSession() {
+  if (isUnlocked()) return true;
+  showLockModal(localStorage.getItem(STORAGE_KEYS.activeTab) || 'search');
+  return false;
 }
+
+function getEditorHeaders() { return {}; }
 
 function setActiveTabUi(tab) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -121,7 +158,7 @@ function setActiveTabUi(tab) {
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
 async function switchTab(tab) {
-  // Locked sections (Scan, Plan) require the password and a non-expired session.
+  // All store views require the server-verified, non-expired employee session.
   // The 8h timer is fixed from unlock time — NOT refreshed on use — so the
   // session truly expires 8h after the password was entered (one per shift).
   if (LOCKED_TABS.has(tab) && !isUnlocked()) { showLockModal(tab); return; }
@@ -182,7 +219,7 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pageshow', () => { updateAppShellState(); updateNetworkStatus(); });
 window.addEventListener('pagehide', () => {
-  persistScanDraft(); persistAddDraft(); persistClientDraft();
+  if (isUnlocked()) { persistScanDraft(); persistAddDraft(); persistClientDraft(); }
   if (scannerStream || html5Scanner || quaggaActive) stopCamera();
 });
 
@@ -238,15 +275,15 @@ function runStartupTabEffects(tab) {
   if (tab === 'search') window.setTimeout(() => document.getElementById('searchInput')?.focus(), 50);
 }
 
-async function bootApp() {
+let _authenticatedAppLoaded = false;
+let _authenticatedLoadPromise = null;
+let _authenticatedLoadGeneration = 0;
+
+async function _loadAuthenticatedApp(preferredTab=null) {
   loadCursor();
   loadScanDraft();
   loadAddDraft();
   loadClientDraft();
-  updateDeviceSupport();
-  updateAppShellState();
-  updateNetworkStatus();
-  updateLockUi();
   ensureStoreSelected();
 
   // Every employee tab uses the same mapped products. Restore the last compact
@@ -254,7 +291,7 @@ async function bootApp() {
   // are useful immediately even while Render is waking up.
   if (typeof restorePlanSnapshot === 'function') restorePlanSnapshot();
 
-  const startTab = getStartupTab();
+  const startTab = preferredTab && LOCKED_TABS.has(preferredTab) ? preferredTab : getStartupTab();
   paintStartupTab(startTab);
   runImmediateStartupEffects(startTab);
 
@@ -278,9 +315,58 @@ async function bootApp() {
   updateNetworkStatus();
   updateLockUi();
   savePlanSnapshot();
-  const activeTabAfterLoad = localStorage.getItem(STORAGE_KEYS.activeTab) || startTab;
+  const activeTabAfterLoad = preferredTab || localStorage.getItem(STORAGE_KEYS.activeTab) || startTab;
   runStartupTabEffects(activeTabAfterLoad);
   if (activeTabAfterLoad === 'scan') focusScanInput();
+}
+
+async function resumeAuthenticatedApp(preferredTab=null) {
+  if (!isUnlocked()) {
+    showLockModal(preferredTab);
+    return false;
+  }
+  if (_authenticatedAppLoaded) {
+    if (preferredTab) await switchTab(preferredTab);
+    return true;
+  }
+  if (_authenticatedLoadPromise) return _authenticatedLoadPromise;
+  const generation = _authenticatedLoadGeneration;
+  _authenticatedLoadPromise = (async () => {
+    await _loadAuthenticatedApp(preferredTab);
+    if (generation !== _authenticatedLoadGeneration || !isUnlocked()) {
+      resetAuthenticatedAppState();
+      return false;
+    }
+    _authenticatedAppLoaded = true;
+    return true;
+  })().finally(() => { _authenticatedLoadPromise = null; });
+  return _authenticatedLoadPromise;
+}
+
+function resetAuthenticatedAppState() {
+  _authenticatedLoadGeneration += 1;
+  _authenticatedAppLoaded = false;
+  allProductsCache = [];
+  mapLayouts = [];
+  currentClientMatches = [];
+  dirtyLayoutAisles.clear();
+  for (const id of ['searchResults', 'clientAdvice', 'clientMatches', 'mapContent', 'scanResult']) {
+    const element = document.getElementById(id);
+    if (element) element.textContent = '';
+  }
+  if (scannerStream || html5Scanner || quaggaActive) void stopCamera();
+  setActiveTabUi('search');
+}
+
+async function bootApp() {
+  updateDeviceSupport();
+  updateAppShellState();
+  updateNetworkStatus();
+  updateLockUi();
+  paintStartupTab('search');
+  const authenticated = await initializeAuth();
+  if (!authenticated) return;
+  await resumeAuthenticatedApp();
 }
 
 bootApp();
@@ -295,11 +381,9 @@ if ('requestIdleCallback' in window) {
 // Enforce session expiry even with no navigation: every 30s, if the session has
 // expired while the user sits on a locked tab, re-lock the UI and leave the tab.
 window.setInterval(() => {
-  const activeTab = localStorage.getItem(STORAGE_KEYS.activeTab);
-  if (LOCKED_TABS.has(activeTab) && !isUnlocked()) {
-    updateLockUi();
-    switchTab('search');
-  }
+  if (!isUnlocked()) updateLockUi();
 }, 30000);
 
-window.AppMain = { switchTab, bootApp };
+window.resumeAuthenticatedApp = resumeAuthenticatedApp;
+window.resetAuthenticatedAppState = resetAuthenticatedAppState;
+window.AppMain = { switchTab, bootApp, resumeAuthenticatedApp, resetAuthenticatedAppState };

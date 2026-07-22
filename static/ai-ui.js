@@ -14,6 +14,12 @@ let _clientSearchMode = 'fast';
 let clientConversation = [];
 const CLIENT_MAX_MESSAGES = 12;
 const CLIENT_FAST_PRODUCT_LIMIT = 100;
+
+function safeClientHttpUrl(value) {
+  if (typeof safeHttpUrl === 'function') return safeHttpUrl(value);
+  const raw = String(value || '').trim().slice(0, 2048);
+  return /^https:\/\/[a-z0-9.-]+(?:[:/]|$)/i.test(raw) ? raw : '';
+}
 const CLIENT_CONTEXT_PRODUCT_LIMIT = 80;
 const CLIENT_MAX_PRODUCTS_PER_EXCHANGE = 100;
 
@@ -51,8 +57,8 @@ function clientProductForStorage(product, compact=false) {
     name: String(product.name || ''),
     brand: String(product.brand || ''),
     description: String(product.description || '').slice(0, compact ? 700 : 1800),
-    image_url: String(product.image_url || '').slice(0, 1600),
-    source_url: String(product.source_url || '').slice(0, 1600),
+    image_url: safeClientHttpUrl(product.image_url),
+    source_url: safeClientHttpUrl(product.source_url),
     search_terms: compact ? '' : String(product.search_terms || '').slice(0, 1200),
     usage_notes: String(product.usage_notes || '').slice(0, compact ? 700 : 1800),
     barcode: String(product.barcode || ''),
@@ -364,8 +370,7 @@ function clientDocumentationSourceDomId(exchangeId, index) {
 }
 
 function safeClientSourceUrl(value) {
-  const url = String(value || '').trim();
-  return /^https?:\/\//i.test(url) ? url : '';
+  return safeClientHttpUrl(value);
 }
 
 function showClientDocumentationSource(exchangeId, index) {

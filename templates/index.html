@@ -23,8 +23,8 @@
 </div>
 
 <div class="tabs">
-  <button class="tab" onclick="switchTab('search')">Recherche</button>
-  <button class="tab" onclick="switchTab('client')">Client</button>
+  <button class="tab" id="tabBtn-search" onclick="switchTab('search')">Recherche 🔒</button>
+  <button class="tab" id="tabBtn-client" onclick="switchTab('client')">Client 🔒</button>
   <button class="tab active" id="tabBtn-scan" onclick="switchTab('scan')">Scan 🔒</button>
   <button class="tab" id="tabBtn-add" onclick="switchTab('add')">Plan 🔒</button>
   <button id="lockButton" onclick="lockApp()" title="Verrouiller la session" style="display:none;flex:none;width:36px;padding:0;border:none;background:none;font-size:17px;cursor:pointer;color:#6b7280;touch-action:manipulation">🔓</button>
@@ -469,18 +469,6 @@
   </div>
 </div>
 
-<script src="/static/vendor/zxing-library-0.21.3.min.js{{ asset_q }}"></script>
-<script src="/static/scanner.js{{ asset_q }}"></script>
-<script src="/static/api.js{{ asset_q }}"></script>
-<script src="/static/config.js{{ asset_q }}"></script>
-<script src="/static/store.js{{ asset_q }}"></script>
-<script src="/static/lock.js{{ asset_q }}"></script>
-<script src="/static/search.js{{ asset_q }}"></script>
-<script src="/static/gist-ui.js{{ asset_q }}"></script>
-<script src="/static/ai-ui.js{{ asset_q }}"></script>
-<script src="/static/scan-ui.js{{ asset_q }}"></script>
-<script src="/static/layout-ui.js{{ asset_q }}"></script>
-<script src="/static/main.js{{ asset_q }}"></script>
 <!-- ── STORE SELECTION MODAL ── -->
 <div id="storeModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2100;align-items:center;justify-content:center">
   <div style="background:#fff;border-radius:18px;padding:30px 22px 22px;width:min(380px,92vw);box-shadow:0 12px 40px rgba(0,0,0,.35)">
@@ -499,20 +487,51 @@
 </div>
 
 <!-- ── LOCK MODAL ── -->
-<div id="lockModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2000;align-items:center;justify-content:center">
-  <div style="background:#fff;border-radius:18px;padding:32px 24px 24px;width:min(340px,90vw);box-shadow:0 12px 40px rgba(0,0,0,.35);text-align:center">
-    <div style="font-size:40px;margin-bottom:12px">🔒</div>
-    <div style="font-weight:700;font-size:18px;margin-bottom:6px;color:#1e293b">Zone protégée</div>
-    <div style="font-size:13px;color:#64748b;margin-bottom:22px;line-height:1.4">Scan, Plan et inventaire sont réservés au personnel autorisé. La session reste ouverte 8 heures (un déverrouillage par quart de travail).</div>
-    <input type="password" id="lockPasswordInput" placeholder="Mot de passe" autocomplete="current-password"
-      style="width:100%;padding:11px 14px;border:2px solid #e2e8f0;border-radius:9px;font-size:16px;box-sizing:border-box;margin-bottom:6px;outline:none;transition:border-color .15s"
-      onfocus="this.style.borderColor='#c8102e'" onblur="this.style.borderColor='#e2e8f0'"
-      onkeydown="if(event.key==='Enter')unlockApp()">
-    <div id="lockError" style="color:#c8102e;font-size:12px;height:16px;margin-bottom:10px;font-weight:600"></div>
-    <button onclick="unlockApp()" style="width:100%;padding:13px;background:#c8102e;color:#fff;border:none;border-radius:9px;font-weight:700;font-size:15px;cursor:pointer;touch-action:manipulation">Déverrouiller</button>
-    <button onclick="closeLockModal()" style="width:100%;padding:10px;background:none;border:none;color:#94a3b8;font-size:13px;cursor:pointer;margin-top:4px;touch-action:manipulation">Annuler</button>
+<div id="lockModal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.72);z-index:3000;align-items:center;justify-content:center;padding:16px">
+  <div style="background:#fff;border-radius:8px;padding:28px 22px 22px;width:min(380px,100%);box-shadow:0 16px 48px rgba(0,0,0,.35);text-align:center">
+    <div style="font-size:34px;margin-bottom:8px" aria-hidden="true">🔒</div>
+    <div style="font-weight:700;font-size:18px;margin-bottom:6px;color:#1e293b">Accès personnel</div>
+    <div style="font-size:13px;color:#64748b;margin-bottom:18px;line-height:1.45">Toutes les données du magasin sont protégées. La session expire automatiquement après 8 heures.</div>
+
+    <div id="lockLoginPanel">
+      <label class="label" for="lockEditorName" style="text-align:left">Nom de l’employé (optionnel)</label>
+      <input type="text" id="lockEditorName" placeholder="Ex: Amine" autocomplete="username" maxlength="60"
+        style="width:100%;padding:11px 14px;border:2px solid #e2e8f0;border-radius:8px;font-size:16px;box-sizing:border-box;margin-bottom:10px;outline:none">
+      <label class="label" for="lockPasswordInput" style="text-align:left">Mot de passe</label>
+      <input type="password" id="lockPasswordInput" placeholder="Mot de passe" autocomplete="current-password" maxlength="256"
+        style="width:100%;padding:11px 14px;border:2px solid #e2e8f0;border-radius:8px;font-size:16px;box-sizing:border-box;margin-bottom:6px;outline:none"
+        onkeydown="if(event.key==='Enter')unlockApp()">
+      <div id="lockError" role="alert" style="color:#c8102e;font-size:12px;min-height:18px;margin-bottom:10px;font-weight:600"></div>
+      <button id="lockLoginButton" onclick="unlockApp()" style="width:100%;padding:13px;background:#c8102e;color:#fff;border:none;border-radius:8px;font-weight:700;font-size:15px;cursor:pointer;touch-action:manipulation">Déverrouiller</button>
+    </div>
+
+    <div id="lockRotationPanel" hidden>
+      <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:10px 12px;margin:0 0 14px;color:#9a3412;font-size:12px;line-height:1.45;text-align:left">L’ancien verrou était enregistré dans le navigateur. Remplacez-le maintenant par une phrase secrète unique d’au moins 15 caractères.</div>
+      <label class="label" for="lockNewPassword" style="text-align:left">Nouveau mot de passe</label>
+      <input type="password" id="lockNewPassword" autocomplete="new-password" maxlength="128"
+        style="width:100%;padding:11px 14px;border:2px solid #e2e8f0;border-radius:8px;font-size:16px;box-sizing:border-box;margin-bottom:10px;outline:none">
+      <label class="label" for="lockNewPasswordConfirm" style="text-align:left">Confirmer le mot de passe</label>
+      <input type="password" id="lockNewPasswordConfirm" autocomplete="new-password" maxlength="128"
+        style="width:100%;padding:11px 14px;border:2px solid #e2e8f0;border-radius:8px;font-size:16px;box-sizing:border-box;margin-bottom:6px;outline:none"
+        onkeydown="if(event.key==='Enter')rotateAppPassword()">
+      <div id="lockRotationError" role="alert" style="color:#c8102e;font-size:12px;min-height:18px;margin-bottom:10px;font-weight:600"></div>
+      <button id="lockRotationButton" onclick="rotateAppPassword()" style="width:100%;padding:13px;background:#c8102e;color:#fff;border:none;border-radius:8px;font-weight:700;font-size:15px;cursor:pointer;touch-action:manipulation">Activer le nouveau mot de passe</button>
+    </div>
   </div>
 </div>
+
+<script src="/static/vendor/zxing-library-0.21.3.min.js{{ asset_q }}"></script>
+<script src="/static/scanner.js{{ asset_q }}"></script>
+<script src="/static/api.js{{ asset_q }}"></script>
+<script src="/static/config.js{{ asset_q }}"></script>
+<script src="/static/store.js{{ asset_q }}"></script>
+<script src="/static/lock.js{{ asset_q }}"></script>
+<script src="/static/search.js{{ asset_q }}"></script>
+<script src="/static/gist-ui.js{{ asset_q }}"></script>
+<script src="/static/ai-ui.js{{ asset_q }}"></script>
+<script src="/static/scan-ui.js{{ asset_q }}"></script>
+<script src="/static/layout-ui.js{{ asset_q }}"></script>
+<script src="/static/main.js{{ asset_q }}"></script>
 
 </body>
 </html>

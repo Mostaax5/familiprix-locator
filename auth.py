@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from flask import request
+from flask import current_app, g, jsonify
 from database import get_db
 
 
@@ -16,18 +16,21 @@ def side_display_label(side):
     return {"Gauche": "Côté A", "Droite": "Côté B"}.get(cleaned, cleaned)
 
 
-def auth_payload_from_request():
-    data = request.get_json(silent=True) or {}
-    username = (
-        request.headers.get("X-User-Name")
-        or data.get("_username")
-        or "appareil"
-    ).strip()
-    return username
-
-
 def require_editor():
-    username = auth_payload_from_request() or "appareil"
+    # Identity comes only from the verified server session.  X-User-Name used
+    # to let any caller impersonate an employee and was never authentication.
+    username = str(getattr(g, "auth_username", "") or "").strip()
+    if not username and current_app.testing and current_app.config.get("AUTH_TEST_BYPASS"):
+        username = "test-user"
+    if not username:
+        return None, (
+            jsonify({
+                "success": False,
+                "error": "Session absente ou expiree.",
+                "code": "authentication_required",
+            }),
+            401,
+        )
     db = get_db()
     db.execute(
         """

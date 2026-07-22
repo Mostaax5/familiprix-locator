@@ -452,7 +452,7 @@ function filterByHomeBrand(brand) {
   const products = allProductsCache.filter(p => brand ? p.brand?.toLowerCase().startsWith(brand.toLowerCase()) : isHomeBrand(p.brand));
   const div = document.getElementById('searchResults');
   if (!products.length) {
-    div.innerHTML = `<div class="empty">Aucun produit ${brand || 'marque maison'} cartographie pour le moment.</div>`;
+    div.innerHTML = `<div class="empty">Aucun produit ${esc(brand || 'marque maison')} cartographie pour le moment.</div>`;
     return;
   }
   const sorted = [...products].sort((a, b) => {
@@ -460,7 +460,7 @@ function filterByHomeBrand(brand) {
     const bKey = [b.aisle, b.side, b.section, b.shelf, b.position].join('-');
     return aKey.localeCompare(bKey);
   });
-  div.innerHTML = `<div class="card"><div class="section-title">★ ${brand || 'Marques maison'} — ${sorted.length} produit${sorted.length > 1 ? 's' : ''} cartographie${sorted.length > 1 ? 's' : ''}</div>${sorted.map(p => productCard(p, false, false)).join('')}</div>`;
+  div.innerHTML = `<div class="card"><div class="section-title">★ ${esc(brand || 'Marques maison')} — ${sorted.length} produit${sorted.length > 1 ? 's' : ''} cartographie${sorted.length > 1 ? 's' : ''}</div>${sorted.map(p => productCard(p, false, false)).join('')}</div>`;
   startSearchImagePolling(sorted);
 }
 

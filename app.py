@@ -1,12 +1,16 @@
 import os
+import re
 import time
 import traceback
 import codecs
-from collections import deque
-from flask import Flask, render_template, send_from_directory, jsonify, request
+import secrets
+from urllib.parse import urlsplit
+from flask import Flask, render_template, send_from_directory, jsonify, request, g
 from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
 from database import close_db, get_backend_summary, get_db, init_db
 from auth import utc_now_iso
+from security import auth_bp, install_security, internal_request_headers
 from routes.products import (
     products_bp, first_column, schedule_backfill_missing,
     schedule_reference_metadata_sync,
@@ -15,7 +19,6 @@ from routes.layout import layout_bp
 from routes.ai import ai_bp, configured_ai_provider, reference_count, maybe_resume_enrichment
 from routes.gist import gist_bp, _restore_from_gist_if_empty
 from routes.import_export import import_export_bp
-from memory_guard import memory_snapshot
 
 
 def _preload_idna_codec():
@@ -48,6 +51,38 @@ def _preload_idna_codec():
 _preload_idna_codec()
 
 app = Flask(__name__)
+
+
+def _bounded_env_int(name, default, minimum, maximum):
+    try:
+        return min(max(int(os.environ.get(name, default)), minimum), maximum)
+    except (TypeError, ValueError):
+        return default
+
+
+app.config.update(
+    MAX_CONTENT_LENGTH=_bounded_env_int("MAX_UPLOAD_MB", 32, 5, 64) * 1024 * 1024,
+    MAX_FORM_MEMORY_SIZE=2 * 1024 * 1024,
+    MAX_FORM_PARTS=30,
+)
+
+_RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+if _RENDER_EXTERNAL_URL:
+    # Render terminates TLS one trusted proxy hop in front of Gunicorn.
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+    render_host = urlsplit(_RENDER_EXTERNAL_URL).hostname
+    trusted = [host for host in (render_host, "localhost", "127.0.0.1", "[::1]") if host]
+    extra_hosts = [host.strip() for host in os.environ.get("TRUSTED_HOSTS", "").split(",") if host.strip()]
+    app.config["TRUSTED_HOSTS"] = list(dict.fromkeys(trusted + extra_hosts))
+
+
+@app.before_request
+def _assign_request_id():
+    supplied = (request.headers.get("X-Request-ID") or "").strip()
+    g.request_id = supplied if re.fullmatch(r"[A-Za-z0-9._-]{8,64}", supplied) else secrets.token_hex(8)
+
+
+install_security(app)
 try:
     # Gzip every JSON/HTML/JS response: /api/products alone is ~1 MB uncompressed,
     # which dominated the app's load time on store phones. Optional so a missing
@@ -82,6 +117,7 @@ app.register_blueprint(layout_bp)
 app.register_blueprint(ai_bp)
 app.register_blueprint(gist_bp)
 app.register_blueprint(import_export_bp)
+app.register_blueprint(auth_bp)
 
 
 def _asset_version():
@@ -139,46 +175,81 @@ def handle_any_error(exc):
     the Render logs with a full traceback instead of vanishing."""
     if isinstance(exc, HTTPException):
         if request.path.startswith("/api/"):
-            return jsonify({"success": False, "error": exc.description}), exc.code
+            if exc.code == 413:
+                return jsonify({
+                    "success": False,
+                    "error": "Fichier ou demande trop volumineuse.",
+                    "code": "request_too_large",
+                }), 413
+            return jsonify({
+                "success": False,
+                "error": exc.description,
+                "code": f"http_{exc.code}",
+            }), exc.code
         return exc
+    request_id = getattr(g, "request_id", secrets.token_hex(8))
+    print(f"[ERROR] request_id={request_id} path={request.path}")
     traceback.print_exc()
     if request.path.startswith("/api/"):
-        # detail = exception type + message so failures are diagnosable from the
-        # response itself (Render log access is not always at hand).
-        return jsonify({"success": False, "error": "Erreur interne du serveur.",
-                        "detail": f"{type(exc).__name__}: {exc}"[:300]}), 500
+        return jsonify({
+            "success": False,
+            "error": "Erreur interne du serveur.",
+            "code": "internal_error",
+            "request_id": request_id,
+        }), 500
     return "Erreur interne du serveur.", 500
-
-
-# Who is actually reaching the app? (time UTC, path, user-agent). Exposed in
-# /api/system/info to diagnose keep-alive: UptimeRobot pings should appear here
-# every 5 minutes — if they don't, the monitor isn't reaching the app at all.
-_RECENT_HITS = deque(maxlen=15)
-
-
-@app.before_request
-def _track_recent_hits():
-    try:
-        _RECENT_HITS.append({
-            "t": time.strftime("%H:%M:%S", time.gmtime()),
-            "path": str(request.path)[:40],
-            "ua": (request.headers.get("User-Agent") or "?")[:60],
-        })
-    except Exception:
-        pass
 
 
 @app.after_request
 def add_security_headers(response):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
-    response.headers.setdefault("Referrer-Policy", "same-origin")
+    response.headers.setdefault("X-XSS-Protection", "0")
+    response.headers.setdefault("X-Robots-Tag", "noindex, nofollow, noarchive")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("X-Permitted-Cross-Domain-Policies", "none")
+    response.headers.setdefault("X-DNS-Prefetch-Control", "off")
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
+    response.headers.setdefault("Origin-Agent-Cluster", "?1")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(self), geolocation=(), microphone=(), payment=(), usb=(), "
+        "accelerometer=(), gyroscope=(), magnetometer=(), browsing-topics=()",
+    )
+    csp = (
+        "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; frame-src 'none'; object-src 'none'; "
+        "form-action 'self'; script-src 'self'; script-src-attr 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; "
+        "font-src 'self'; connect-src 'self'; media-src 'self' blob:; "
+        "worker-src 'self' blob:; manifest-src 'self'"
+    )
+    if _RENDER_EXTERNAL_URL:
+        csp += "; upgrade-insecure-requests"
+    response.headers.setdefault("Content-Security-Policy", csp)
+    if _RENDER_EXTERNAL_URL and request.is_secure:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+
+    path = request.path
+    if path.startswith("/api/auth/") or path in {"/api/export", "/api/ai/logs/export", "/healthz"}:
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+    elif path.startswith("/api/"):
+        response.headers["Cache-Control"] = (
+            "private, no-cache, max-age=0, must-revalidate"
+            if request.method in {"GET", "HEAD"}
+            else "no-store, max-age=0"
+        )
+        response.vary.add("Cookie")
+    elif path in {"/", "/service-worker.js"}:
+        response.headers["Cache-Control"] = "no-cache, max-age=0, must-revalidate"
+    if path.startswith("/api/") and response.status_code == 401:
+        response.headers.setdefault("Clear-Site-Data", '"cache"')
+    response.headers["X-Request-ID"] = getattr(g, "request_id", secrets.token_hex(8))
     return response
 
 
 @app.route("/api/system/info", methods=["GET"])
 def get_system_info():
-    from database import pool_stats
     maybe_resume_enrichment()   # keep-alive pings land here — a dead enrichment
     ai_provider = configured_ai_provider()   # run recovers with no page open
     try:
@@ -188,9 +259,6 @@ def get_system_info():
         return jsonify({
             **get_backend_summary(),
             "db_unreachable": True,
-            "db_error": f"{type(exc).__name__}: {DB_BOOT_ERROR or exc}",
-            "pool": pool_stats(),
-            "memory": memory_snapshot(),
             "ai_enabled": bool(ai_provider["name"]),
             "ai_provider": ai_provider["name"],
             "ai_provider_label": ai_provider["label"],
@@ -224,13 +292,8 @@ def get_system_info():
         "duplicate_slots": int(first_column(duplicate_slots) or 0),
         "duplicate_barcodes": int(first_column(duplicate_barcodes) or 0),
         "reference_count": reference_count(),
-        "pool": pool_stats(),
-        # Deploy diagnostics: which commit is live + whether the self-ping armed.
-        # Guessing at "did the deploy actually land?" has burned us repeatedly.
         "version": os.environ.get("RENDER_GIT_COMMIT", "")[:7],
         "self_keepalive": _SELF_KEEPALIVE_ACTIVE,
-        "recent_hits": list(_RECENT_HITS),
-        "memory": memory_snapshot(),
     })
 
 
@@ -250,9 +313,29 @@ def _start_self_keepalive():
     if not base_url:
         print("[KEEPALIVE] RENDER_EXTERNAL_URL absent — auto-ping inactif (normal en local).")
         return
+    parsed_base = urlsplit(base_url)
+    if (
+        parsed_base.scheme != "https"
+        or not parsed_base.hostname
+        or parsed_base.username
+        or parsed_base.password
+        or parsed_base.path not in ("", "/")
+        or parsed_base.query
+        or parsed_base.fragment
+    ):
+        print("[SECURITY] RENDER_EXTERNAL_URL invalide — auto-ping inactif.")
+        return
     _SELF_KEEPALIVE_ACTIVE = True
     import threading
-    from urllib.request import urlopen
+    from urllib.request import HTTPRedirectHandler, Request as UrlRequest, build_opener
+
+    class RejectRedirects(HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = build_opener(RejectRedirects())
+
+    internal_headers = internal_request_headers()
 
     def worker():
         # Warm-up FIRST: right after any (re)start, hit the endpoints that build
@@ -261,14 +344,16 @@ def _start_self_keepalive():
         time.sleep(5)
         for path in ("/api/system/info", "/api/products", "/api/client/find?q=warmup&limit=1"):
             try:
-                with urlopen(f"{base_url}{path}", timeout=60) as resp:
+                req = UrlRequest(f"{base_url}{path}", headers=internal_headers)
+                with opener.open(req, timeout=60) as resp:
                     resp.read()
             except Exception:
                 pass
         while True:
             time.sleep(300)
             try:
-                with urlopen(f"{base_url}/api/system/info", timeout=30) as resp:
+                req = UrlRequest(f"{base_url}/api/system/info", headers=internal_headers)
+                with opener.open(req, timeout=30) as resp:
                     resp.read()
             except Exception:
                 pass   # transient failure — the next ping is 5 minutes away

@@ -20,6 +20,12 @@ from routes.products import (
 
 
 class PlanogramMetadataTests(unittest.TestCase):
+    def make_test_app(self):
+        app = Flask(__name__)
+        app.config.update(TESTING=True, AUTH_TEST_BYPASS=True)
+        app.register_blueprint(products_bp)
+        return app
+
     def make_db(self):
         db = sqlite3.connect(":memory:")
         db.row_factory = sqlite3.Row
@@ -244,8 +250,7 @@ class PlanogramMetadataTests(unittest.TestCase):
 
     def test_reference_image_endpoint_returns_known_images_and_queues_missing(self):
         db = self.make_db()
-        app = Flask(__name__)
-        app.register_blueprint(products_bp)
+        app = self.make_test_app()
         with patch("routes.products.get_db", return_value=db), \
              patch("routes.products.build_reference_metadata_index", return_value={
                  "041388316000": {"image_url": "https://img.test/blistex.jpg"},
@@ -272,8 +277,7 @@ class PlanogramMetadataTests(unittest.TestCase):
                VALUES ('0123456789012', 'Reference Brand', 'Reference description',
                        'https://img.test/ref.jpg', 'REF123')"""
         )
-        app = Flask(__name__)
-        app.register_blueprint(products_bp)
+        app = self.make_test_app()
         base_payload = {
             "aisle": "1", "side": "Gauche", "start_section": 1,
             "start_tablette": 1, "tablette_start": 1, "tablette_end": 1,
@@ -322,8 +326,7 @@ class PlanogramMetadataTests(unittest.TestCase):
 
     def test_bulk_import_reports_overflow_shelves_and_products_separately(self):
         db = self.make_plan_db()
-        app = Flask(__name__)
-        app.register_blueprint(products_bp)
+        app = self.make_test_app()
         payload = {
             "aisle": "1", "side": "Gauche", "start_section": 1,
             "start_tablette": 1, "tablette_start": 1, "tablette_end": 2,
@@ -352,8 +355,7 @@ class PlanogramMetadataTests(unittest.TestCase):
 
     def test_bulk_import_reports_non_stock_products_excluded_by_filter(self):
         db = self.make_plan_db()
-        app = Flask(__name__)
-        app.register_blueprint(products_bp)
+        app = self.make_test_app()
         payload = {
             "aisle": "1", "side": "Gauche", "start_section": 1,
             "start_tablette": 1, "tablette_start": 1, "tablette_end": 1,
@@ -409,8 +411,7 @@ class PlanogramMetadataTests(unittest.TestCase):
             "description='Enriched description' "
             "WHERE barcode='222222222222'"
         )
-        app = Flask(__name__)
-        app.register_blueprint(products_bp)
+        app = self.make_test_app()
         payload = {
             "aisle": "1", "side": "Gauche", "start_section": 1,
             "start_tablette": 1, "tablette_start": 1, "tablette_end": 1,
@@ -458,8 +459,7 @@ class PlanogramMetadataTests(unittest.TestCase):
                VALUES ('OLD PRODUCT', '111', '1', 'Gauche', '1', '1', '1')"""
         )
         db.commit()
-        app = Flask(__name__)
-        app.register_blueprint(products_bp)
+        app = self.make_test_app()
         payload = {
             "aisle": "1", "side": "Gauche", "start_section": 1,
             "start_tablette": 1, "tablette_start": 1, "tablette_end": 1,
@@ -511,8 +511,7 @@ class PlanogramMetadataTests(unittest.TestCase):
         )
         connection.commit()
         db = FailingProductInsertDb(connection)
-        app = Flask(__name__)
-        app.register_blueprint(products_bp)
+        app = self.make_test_app()
         payload = {
             "aisle": "1", "side": "Gauche", "start_section": 1,
             "start_tablette": 1, "tablette_start": 1, "tablette_end": 1,
@@ -547,8 +546,7 @@ class PlanogramMetadataTests(unittest.TestCase):
                VALUES ('OLD PRODUCT', '111', '1', 'Gauche', '1', '1', '1')"""
         )
         db.commit()
-        app = Flask(__name__)
-        app.register_blueprint(products_bp)
+        app = self.make_test_app()
         payload = {
             "aisle": "1", "side": "Gauche", "start_section": 1,
             "start_tablette": 1, "tablette_start": 1, "tablette_end": 1,
