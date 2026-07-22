@@ -1199,6 +1199,10 @@ let planStructureActiveDrop = null;
 let planStructurePointerTarget = null;
 let planStructureHoverNode = null;
 let planStructureSuppressClickUntil = 0;
+let planLastUndoAction = null;
+let planUndoBusy = false;
+const PLAN_MOVE_UNDO_STORAGE_KEY = 'familiprix_plan_move_undo_v1';
+const PLAN_MOVE_UNDO_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 function _planScopeKey(...parts) {
   return parts.map(part => String(part ?? '')).join('\x1f');
@@ -1335,6 +1339,7 @@ function syncPlanSelectionUi() {
     map.classList.toggle('plan-move-mode', planMoveMode && count > 0);
     map.classList.toggle('plan-has-selection', count > 0);
   }
+  document.getElementById('planMoveReceipt')?.classList?.toggle('above-plan-toolbar', count > 0);
 }
 
 function renderPlanBulkToolbar() {
@@ -1540,6 +1545,211 @@ function planStructureLabel(item) {
     return `Allée ${item.aisle} · ${sideDisplayLabel(item.side)} · Section ${Number(item.index) + 1}`;
   }
   return `Allée ${item.aisle} · ${sideDisplayLabel(item.side)} · Section ${Number(item.sectionIndex) + 1} · Tablette ${Number(item.index) + 1}`;
+}
+
+function planMoveList(values) {
+  const items = (values || []).map(value => String(value));
+  if (items.length < 2) return items[0] || '';
+  if (items.length === 2) return `${items[0]} et ${items[1]}`;
+  return `${items.slice(0, -1).join(', ')} et ${items[items.length - 1]}`;
+}
+
+function describePlanAisleMove(aisle, sourceIndex, finalIndex, beforeOrder, afterOrder) {
+  const previous = afterOrder[finalIndex - 1];
+  const next = afterOrder[finalIndex + 1];
+  let landing = '';
+  if (previous && next) landing = `entre les allées ${previous} et ${next}`;
+  else if (previous) landing = `après l’allée ${previous}`;
+  else if (next) landing = `avant l’allée ${next}`;
+
+  const start = Math.min(sourceIndex, finalIndex);
+  const end = Math.max(sourceIndex, finalIndex);
+  const shifted = beforeOrder.slice(start, end + 1).filter(value => String(value) !== String(aisle));
+  let detail = `Allée ${aisle} déplacée de la position ${sourceIndex + 1} à la position ${finalIndex + 1}`;
+  if (landing) detail += `, ${landing}`;
+  detail += '.';
+  if (shifted.length === 1) {
+    detail += ` Elle a échangé sa place avec l’allée ${shifted[0]}.`;
+  } else if (shifted.length > 1) {
+    detail += ` Allées décalées : ${planMoveList(shifted)}.`;
+  }
+  return detail;
+}
+
+function describePlanStructureMove(source, finalTarget) {
+  const sourceIndex = Number(source.index) + 1;
+  const finalIndex = Number(finalTarget.index) + 1;
+  if (source.kind === 'section') {
+    const from = `Allée ${source.aisle} · ${sideDisplayLabel(source.side)}`;
+    const destination = `Allée ${finalTarget.aisle} · ${sideDisplayLabel(finalTarget.side)}`;
+    if (String(source.aisle) === String(finalTarget.aisle) && source.side === finalTarget.side) {
+      return `Section ${sourceIndex} déplacée de la position ${sourceIndex} à la position ${finalIndex} dans ${destination}.`;
+    }
+    return `Section ${sourceIndex} (${from}) déplacée vers la position ${finalIndex} de ${destination}.`;
+  }
+  const sourceSection = Number(source.sectionIndex) + 1;
+  const finalSection = Number(finalTarget.section_index ?? finalTarget.sectionIndex) + 1;
+  const from = `Allée ${source.aisle} · ${sideDisplayLabel(source.side)} · Section ${sourceSection}`;
+  const destination = `Allée ${finalTarget.aisle} · ${sideDisplayLabel(finalTarget.side)} · Section ${finalSection}`;
+  const sameContainer = String(source.aisle) === String(finalTarget.aisle)
+    && source.side === finalTarget.side && sourceSection === finalSection;
+  if (sameContainer) {
+    return `Tablette ${sourceIndex} déplacée de la position ${sourceIndex} à la position ${finalIndex} dans ${destination}.`;
+  }
+  return `Tablette ${sourceIndex} (${from}) déplacée vers la position ${finalIndex} de ${destination}.`;
+}
+
+function buildPlanStructureInverse(source, finalTarget) {
+  const kind = source.kind;
+  const current = {
+    kind,
+    aisle: String(finalTarget.aisle),
+    side: String(finalTarget.side),
+    index: Number(finalTarget.index),
+  };
+  const destination = {
+    kind,
+    aisle: String(source.aisle),
+    side: String(source.side),
+    index: Number(source.index),
+  };
+  if (kind === 'shelf') {
+    current.sectionIndex = Number(finalTarget.section_index ?? finalTarget.sectionIndex);
+    destination.sectionIndex = Number(source.sectionIndex);
+  }
+  const sameContainer = kind === 'section'
+    ? current.aisle === destination.aisle && current.side === destination.side
+    : current.aisle === destination.aisle && current.side === destination.side
+      && current.sectionIndex === destination.sectionIndex;
+  if (sameContainer && destination.index > current.index) destination.index += 1;
+  return {source: current, target: destination};
+}
+
+function planStructureDropIsNoop(source, target) {
+  const sourceIndex = Number(source.index);
+  let itemCount = 0;
+  if (source.kind === 'aisle') {
+    const actualIndex = mapLayouts.findIndex(layout => String(layout.aisle) === String(source.aisle));
+    if (actualIndex < 0) return false;
+    let boundary = Math.max(0, Math.min(Number(target.index) || 0, mapLayouts.length));
+    if (boundary > actualIndex) boundary -= 1;
+    return Math.max(0, Math.min(boundary, mapLayouts.length - 1)) === actualIndex;
+  }
+  const sameContainer = source.kind === 'section'
+    ? String(source.aisle) === String(target.aisle) && source.side === target.side
+    : String(source.aisle) === String(target.aisle) && source.side === target.side
+      && Number(source.sectionIndex) === Number(target.sectionIndex);
+  if (!sameContainer) return false;
+  const layout = getMutableLayout(source.aisle);
+  if (source.kind === 'section') {
+    itemCount = layout?.config?.sides?.[source.side]?.sections?.length || 0;
+  } else {
+    itemCount = layout?.config?.sides?.[source.side]?.sections?.[Number(source.sectionIndex)]?.shelves?.length || 0;
+  }
+  let boundary = Math.max(0, Math.min(Number(target.index) || 0, itemCount));
+  if (boundary > sourceIndex) boundary -= 1;
+  return Math.max(0, Math.min(boundary, Math.max(0, itemCount - 1))) === sourceIndex;
+}
+
+function clearStoredPlanUndoAction() {
+  try { localStorage.removeItem(PLAN_MOVE_UNDO_STORAGE_KEY); } catch (_error) {}
+}
+
+function rememberPlanUndoAction(action) {
+  planLastUndoAction = action;
+  try { localStorage.setItem(PLAN_MOVE_UNDO_STORAGE_KEY, JSON.stringify(action)); } catch (_error) {}
+}
+
+function isValidStoredPlanUndoAction(action) {
+  if (!['aisle', 'section', 'shelf'].includes(action?.kind)) return false;
+  if (typeof action.description !== 'string' || !action.description.trim()) return false;
+  if (!action.expectedLayouts || typeof action.expectedLayouts !== 'object'
+      || !Object.keys(action.expectedLayouts).length) return false;
+  if (action.kind === 'aisle') {
+    return Array.isArray(action.previousOrder) && action.previousOrder.length > 0;
+  }
+  const source = action.inverse?.source;
+  const target = action.inverse?.target;
+  const commonValid = Boolean(source && target && source.kind === action.kind && target.kind === action.kind
+    && source.aisle && target.aisle && source.side && target.side
+    && Number.isInteger(Number(source.index)) && Number.isInteger(Number(target.index)));
+  return commonValid && (action.kind !== 'shelf'
+    || (Number.isInteger(Number(source.sectionIndex)) && Number.isInteger(Number(target.sectionIndex))));
+}
+
+function loadStoredPlanUndoAction() {
+  if (planLastUndoAction) return planLastUndoAction;
+  try {
+    const raw = localStorage.getItem?.(PLAN_MOVE_UNDO_STORAGE_KEY);
+    if (!raw) return null;
+    const action = JSON.parse(raw);
+    const age = Date.now() - Number(action?.createdAt || 0);
+    if (!isValidStoredPlanUndoAction(action) || age < 0 || age > PLAN_MOVE_UNDO_MAX_AGE_MS) {
+      clearStoredPlanUndoAction();
+      return null;
+    }
+    planLastUndoAction = action;
+    return action;
+  } catch (_error) {
+    clearStoredPlanUndoAction();
+    return null;
+  }
+}
+
+function ensurePlanMoveReceipt() {
+  let receipt = document.getElementById('planMoveReceipt');
+  if (receipt || typeof document.createElement !== 'function' || !document.body?.appendChild) return receipt;
+  receipt = document.createElement('div');
+  receipt.id = 'planMoveReceipt';
+  receipt.className = 'plan-move-receipt';
+  receipt.setAttribute('role', 'status');
+  receipt.setAttribute('aria-live', 'polite');
+  receipt.innerHTML = `<div class="plan-move-receipt-copy">
+      <div class="plan-move-receipt-heading"><strong>Dernier déplacement</strong><span id="planMoveReceiptTime"></span></div>
+      <div id="planMoveReceiptDetail" class="plan-move-receipt-detail"></div>
+      <div id="planMoveReceiptError" class="plan-move-receipt-error" hidden></div>
+    </div>
+    <div class="plan-move-receipt-actions">
+      <button type="button" id="planMoveUndoButton" class="btn btn-inline" onclick="undoLastPlanMove()">↶ Annuler</button>
+      <button type="button" class="plan-move-receipt-close" title="Fermer" aria-label="Fermer" onclick="dismissPlanMoveReceipt(true)">×</button>
+    </div>`;
+  document.body.appendChild(receipt);
+  return receipt;
+}
+
+function showPlanMoveReceipt(action, updatePageMessage=true) {
+  if (!action) return;
+  planLastUndoAction = action;
+  if (updatePageMessage) showPlanActionMessage(action.description, 'success');
+  const receipt = ensurePlanMoveReceipt();
+  if (!receipt) return;
+  receipt.classList.toggle('above-plan-toolbar', planSelectedProductIds.size > 0);
+  receipt.hidden = false;
+  const heading = receipt.querySelector?.('.plan-move-receipt-heading strong');
+  if (heading) heading.textContent = 'Dernier déplacement';
+  const detail = document.getElementById('planMoveReceiptDetail');
+  if (detail) detail.textContent = action.description;
+  const time = document.getElementById('planMoveReceiptTime');
+  if (time) {
+    time.textContent = new Date(action.createdAt).toLocaleTimeString('fr-CA', {hour: '2-digit', minute: '2-digit'});
+  }
+  const error = document.getElementById('planMoveReceiptError');
+  if (error) { error.hidden = true; error.textContent = ''; }
+  const button = document.getElementById('planMoveUndoButton');
+  if (button) { button.hidden = false; button.disabled = false; button.textContent = '↶ Annuler'; }
+}
+
+function restorePlanMoveReceipt() {
+  const action = loadStoredPlanUndoAction();
+  if (action) showPlanMoveReceipt(action, false);
+}
+
+function dismissPlanMoveReceipt(clearAction=false) {
+  document.getElementById('planMoveReceipt')?.remove();
+  if (clearAction) {
+    planLastUndoAction = null;
+    clearStoredPlanUndoAction();
+  }
 }
 
 function planStructureAttrs(kind, item) {
@@ -1911,27 +2121,34 @@ function finishPlanStructureMove(success=true) {
 }
 
 async function commitPlanStructureDrop(source, target) {
-  if (!source || !target || source.kind !== target.kind || planStructureMoveBusy) return;
-  if (!requireEditorSession('deplacer la structure du plan')) return;
+  if (!source || !target || source.kind !== target.kind || planStructureMoveBusy) return false;
+  if (!requireEditorSession('deplacer la structure du plan')) return false;
+  if (planStructureDropIsNoop(source, target)) {
+    finishPlanStructureMove(true);
+    showPlanActionMessage(`${planStructureLabel(source)} est déjà à cette position.`, 'info');
+    return true;
+  }
   const involvedAisles = source.kind === 'aisle'
     ? mapLayouts.map(layout => String(layout.aisle))
     : [String(source.aisle), String(target.aisle)];
   if (!await preparePlanStructureAisles(involvedAisles)) {
     showPlanActionMessage('Le plan doit etre sauvegarde avant ce deplacement.');
-    return;
+    return false;
   }
 
   planStructureMoveBusy = true;
   syncPlanStructureMoveUi();
   let data;
+  let undoAction = null;
   if (source.kind === 'aisle') {
+    const previousOrder = mapLayouts.map(layout => String(layout.aisle));
     const sourceIndex = mapLayouts.findIndex(
       layout => String(layout.aisle) === String(source.aisle)
     );
     if (sourceIndex < 0) {
       finishPlanStructureMove(false);
       showPlanActionMessage('Cette allee n existe plus. Rechargez le plan.');
-      return;
+      return false;
     }
     const nextLayouts = mapLayouts.slice();
     const [moving] = nextLayouts.splice(sourceIndex, 1);
@@ -1952,6 +2169,16 @@ async function commitPlanStructureDrop(source, target) {
       });
       lastLayoutsRefreshAt = Date.now();
       savePlanSnapshot();
+      const nextOrder = nextLayouts.map(layout => String(layout.aisle));
+      undoAction = {
+        kind: 'aisle',
+        createdAt: Date.now(),
+        description: describePlanAisleMove(
+          String(source.aisle), sourceIndex, insertionIndex, previousOrder, nextOrder
+        ),
+        previousOrder,
+        expectedLayouts: {...(data.layout_versions || planExpectedLayoutVersions(involvedAisles))},
+      };
     }
   } else {
     data = await apiMoveLayoutStructure(source.kind, {
@@ -1959,7 +2186,17 @@ async function commitPlanStructureDrop(source, target) {
       target,
       expected_layouts: planExpectedLayoutVersions(involvedAisles),
     });
-    if (data.success) applyPlanStructureResponse(data);
+    if (data.success) {
+      applyPlanStructureResponse(data);
+      const finalTarget = {kind: source.kind, ...data.target};
+      undoAction = {
+        kind: source.kind,
+        createdAt: Date.now(),
+        description: describePlanStructureMove(source, finalTarget),
+        inverse: buildPlanStructureInverse(source, finalTarget),
+        expectedLayouts: {...(data.layout_versions || planExpectedLayoutVersions(involvedAisles))},
+      };
+    }
   }
 
   if (!data?.success) {
@@ -1968,12 +2205,122 @@ async function commitPlanStructureDrop(source, target) {
     const targetText = document.getElementById('planStructureMoveTarget');
     if (targetText) targetText.textContent = message;
     showPlanActionMessage(message);
-    return;
+    return false;
   }
   finishPlanStructureMove(true);
+  rememberPlanUndoAction(undoAction);
   _skipPlanCaptureOnce = true;
   refreshPlanUi();
-  showPlanActionMessage(`${planStructureLabel(source)} deplace.`, 'success');
+  showPlanMoveReceipt(undoAction);
+  return true;
+}
+
+function setPlanUndoBusyUi(busy) {
+  planUndoBusy = Boolean(busy);
+  const button = document.getElementById('planMoveUndoButton');
+  if (button) {
+    button.disabled = planUndoBusy;
+    button.textContent = planUndoBusy ? 'Annulation…' : '↶ Annuler';
+  }
+}
+
+function showPlanUndoFailure(message) {
+  setPlanUndoBusyUi(false);
+  planStructureMoveBusy = false;
+  syncPlanStructureMoveUi();
+  const receipt = ensurePlanMoveReceipt();
+  if (receipt) receipt.hidden = false;
+  const error = document.getElementById('planMoveReceiptError');
+  if (error) { error.hidden = false; error.textContent = message; }
+  showPlanActionMessage(message, 'error');
+}
+
+function finishPlanUndoSuccess(action) {
+  planLastUndoAction = null;
+  clearStoredPlanUndoAction();
+  setPlanUndoBusyUi(false);
+  planStructureMoveBusy = false;
+  syncPlanStructureMoveUi();
+  _skipPlanCaptureOnce = true;
+  refreshPlanUi();
+  const receipt = ensurePlanMoveReceipt();
+  const heading = receipt?.querySelector?.('.plan-move-receipt-heading strong');
+  if (heading) heading.textContent = 'Déplacement annulé';
+  const detail = document.getElementById('planMoveReceiptDetail');
+  if (detail) detail.textContent = `Retour effectué. ${action.description}`;
+  const error = document.getElementById('planMoveReceiptError');
+  if (error) { error.hidden = true; error.textContent = ''; }
+  const button = document.getElementById('planMoveUndoButton');
+  if (button) button.hidden = true;
+  showPlanActionMessage(`Déplacement annulé. ${action.description}`, 'success');
+}
+
+async function undoLastPlanMove() {
+  const action = planLastUndoAction || loadStoredPlanUndoAction();
+  if (!action || planUndoBusy || planStructureMoveBusy) return false;
+  if (!requireEditorSession('annuler le dernier déplacement du plan')) return false;
+  const involvedAisles = action.kind === 'aisle'
+    ? (action.previousOrder || []).map(String)
+    : [...new Set([
+        String(action.inverse?.source?.aisle || ''),
+        String(action.inverse?.target?.aisle || ''),
+      ].filter(Boolean))];
+  for (const aisle of involvedAisles) {
+    await waitForLayoutSave(aisle);
+    if (dirtyLayoutAisles.has(String(aisle))) {
+      showPlanUndoFailure('Annulation protégée : sauvegardez ou rechargez les modifications en cours avant de réessayer.');
+      return false;
+    }
+  }
+  const expectedLayouts = action.expectedLayouts || {};
+  const localVersionsMatch = Object.entries(expectedLayouts).every(([aisle, version]) => {
+    const layout = getMutableLayout(aisle);
+    return layout && String(layout.modified_at || '') === String(version || '');
+  });
+  if (!localVersionsMatch) {
+    showPlanUndoFailure('Annulation refusée : le plan a changé depuis ce déplacement. Aucune donnée n’a été modifiée.');
+    return false;
+  }
+
+  planStructureMoveBusy = true;
+  setPlanUndoBusyUi(true);
+  syncPlanStructureMoveUi();
+  let data;
+  if (action.kind === 'aisle') {
+    const byAisle = new Map(mapLayouts.map(layout => [String(layout.aisle), layout]));
+    const previousOrder = (action.previousOrder || []).map(String);
+    if (previousOrder.length !== mapLayouts.length || previousOrder.some(aisle => !byAisle.has(aisle))) {
+      showPlanUndoFailure('Annulation refusée : la liste des allées a changé. Aucune donnée n’a été modifiée.');
+      return false;
+    }
+    data = await apiReorderLayoutAisles({
+      ordered_aisles: previousOrder,
+      expected_layouts: expectedLayouts,
+    });
+    if (data.success) {
+      mapLayouts = previousOrder.map(aisle => byAisle.get(aisle));
+      mapLayouts.forEach((layout, index) => {
+        layout.sort_order = index + 1;
+        layout.modified_at = data.layout_versions?.[String(layout.aisle)]
+          || layout.modified_at || nowIsoWithoutMs();
+      });
+      lastLayoutsRefreshAt = Date.now();
+      savePlanSnapshot();
+    }
+  } else {
+    data = await apiMoveLayoutStructure(action.kind, {
+      source: action.inverse?.source,
+      target: action.inverse?.target,
+      expected_layouts: expectedLayouts,
+    });
+    if (data.success) applyPlanStructureResponse(data);
+  }
+  if (!data?.success) {
+    showPlanUndoFailure(data?.error || 'Annulation impossible. Aucune donnée n’a été modifiée.');
+    return false;
+  }
+  finishPlanUndoSuccess(action);
+  return true;
 }
 
 // Products grouped by exact shelf, built once per cache version. Rendering a
@@ -2083,34 +2430,18 @@ async function confirmMoveSection(aisle, side, sectionIndex) {
   const target_aisle = document.getElementById('msAisle').value;
   const target_side  = document.getElementById('msSide').value;
   const targetPosition = Math.max(1, Number(document.getElementById('msPosition')?.value) || 1);
-  const aisleKeys = [...new Set([String(aisle), String(target_aisle)])];
-  if (!await preparePlanStructureAisles(aisleKeys)) {
-    if (msg) msg.textContent = 'Sauvegardez ou rechargez les allées avant de déplacer cette section.';
-    return;
-  }
-  const sourceLayout = getMutableLayout(aisle);
-  const targetLayout = getMutableLayout(target_aisle);
-  if (!sourceLayout || !targetLayout) {
-    if (msg) msg.textContent = 'Rechargez le plan avant de déplacer cette section.';
-    return;
-  }
   const sameContainer = String(aisle) === String(target_aisle) && side === target_side;
   const desiredIndex = targetPosition - 1;
   const targetBoundary = sameContainer && desiredIndex > sectionIndex
     ? desiredIndex + 1 : desiredIndex;
-  const data = await apiMoveLayoutStructure('section', {
-    source: {kind: 'section', aisle: String(aisle), side, index: sectionIndex},
-    target: {kind: 'section', aisle: String(target_aisle), side: target_side, index: targetBoundary},
-    expected_layouts: planExpectedLayoutVersions(aisleKeys),
-  });
-  if (data.success) {
-    applyPlanStructureResponse(data);
+  const moved = await commitPlanStructureDrop(
+    {kind: 'section', aisle: String(aisle), side, index: sectionIndex},
+    {kind: 'section', aisle: String(target_aisle), side: target_side, index: targetBoundary},
+  );
+  if (moved) {
     if (overlay) overlay.remove();
-    _skipPlanCaptureOnce = true;
-    refreshPlanUi();
-    showPlanActionMessage('Section déplacée.', 'success');
   } else if (msg) {
-    msg.textContent = data.error || 'Déplacement impossible.';
+    msg.textContent = document.getElementById('addMsg')?.textContent || 'Déplacement impossible.';
   }
 }
 
@@ -2486,6 +2817,7 @@ function renderMapEditor() {
     syncPlanSelectionUi();
     syncPlanStructureMoveUi();
   }
+  restorePlanMoveReceipt();
 }
 
 function planNodeIdsForAisle(layout) {

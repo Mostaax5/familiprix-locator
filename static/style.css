@@ -211,6 +211,18 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:#c8102e;box-sh
 .plan-structure-hover-before{box-shadow:0 -4px 0 #22c55e,0 1px 3px rgba(0,0,0,.05) !important}
 .plan-structure-hover-after{box-shadow:0 4px 0 #22c55e,0 1px 3px rgba(0,0,0,.05) !important}
 .plan-structure-active{padding-bottom:84px}
+.plan-move-receipt{position:fixed;right:14px;bottom:calc(14px + env(safe-area-inset-bottom));z-index:70;display:flex;align-items:center;gap:12px;width:min(560px,calc(100% - 28px));box-sizing:border-box;padding:11px 12px;border:1px solid #86efac;border-left:4px solid #16a34a;border-radius:8px;background:#fff;color:#14532d;box-shadow:0 9px 28px rgba(15,23,42,.24)}
+.plan-move-receipt[hidden]{display:none}
+.plan-move-receipt.above-plan-toolbar{bottom:calc(178px + env(safe-area-inset-bottom))}
+.plan-move-receipt-copy{flex:1;min-width:0}
+.plan-move-receipt-heading{display:flex;align-items:center;gap:8px;margin-bottom:3px}
+.plan-move-receipt-heading strong{font-size:12px;color:#166534}
+.plan-move-receipt-heading span{font-size:10px;color:#64748b}
+.plan-move-receipt-detail{font-size:12px;line-height:1.4;color:#334155;overflow-wrap:anywhere}
+.plan-move-receipt-error{margin-top:5px;font-size:11px;line-height:1.35;color:#b91c1c;font-weight:700}
+.plan-move-receipt-actions{display:flex;align-items:center;gap:6px;flex-shrink:0}
+.plan-move-receipt-actions .btn{width:auto;min-width:104px;min-height:42px;margin:0;padding:8px 11px;font-size:12px}
+.plan-move-receipt-close{display:inline-flex;align-items:center;justify-content:center;width:42px;min-width:42px !important;height:42px;min-height:42px !important;margin:0;padding:0 !important;border:1px solid #cbd5e1;border-radius:6px;background:#fff;color:#475569;font-size:20px;line-height:1;cursor:pointer}
 
 /* ── Client / Advice ── */
 .advice-card{background:#fafbfc;border:1px solid #e4e6ea;border-radius:12px;padding:14px;margin-top:10px}
@@ -394,6 +406,8 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:#c8102e;box-sh
   #mapContent.plan-has-selection{padding-bottom:180px}
   .plan-drop-action{width:100%;margin:4px 0 0;flex-basis:100%}
   .plan-structure-drop-zone{min-height:46px !important}
+  .plan-move-receipt{left:10px;right:10px;bottom:calc(10px + env(safe-area-inset-bottom));width:auto;align-items:flex-start}
+  .plan-move-receipt.above-plan-toolbar{bottom:calc(176px + env(safe-area-inset-bottom))}
 }
 @media (max-width:520px){
   .row2,.row3,.confirm-grid,.device-grid,.scan-tools,.btn-row{grid-template-columns:1fr}

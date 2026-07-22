@@ -9,6 +9,7 @@ const bulkMoveCalls = [];
 const bulkDeleteCalls = [];
 const structureMoveCalls = [];
 const aisleReorderCalls = [];
+const localStorageValues = new Map();
 const planMessage = {className: '', textContent: ''};
 const deleteButton = {
   dataset: {},
@@ -41,7 +42,11 @@ const context = {
   lastProductsRefreshAt: 0,
   STORAGE_KEYS: {planSnapshot: ''},
   document: {getElementById(id) { return id === 'addMsg' ? planMessage : null; }},
-  localStorage: {setItem() {}, removeItem() {}},
+  localStorage: {
+    setItem(key, value) { localStorageValues.set(String(key), String(value)); },
+    getItem(key) { return localStorageValues.get(String(key)) || null; },
+    removeItem(key) { localStorageValues.delete(String(key)); },
+  },
   confirm() { return true; },
   loadEditorSession() { return {username: 'tester'}; },
   nowIsoWithoutMs() { return '2026-07-13T12:00:00'; },
@@ -357,6 +362,7 @@ async function run() {
     structureMoveCalls.push({kind, payload});
     return {
       success: true,
+      target: {aisle: '1', side: 'Gauche', section_index: 0, index: 1},
       configs: {
         '1': {
           sides: {Gauche: {sections: [{shelves: [2, 4], labels: ['B', 'A']}]}, Droite: {sections: []}},
@@ -381,6 +387,61 @@ async function run() {
     'the committed tablet structure should paint locally without a full refetch',
   );
   assert.strictEqual(context.allProductsCache[0].shelf, '2');
+  const shelfUndoAction = vm.runInContext('planLastUndoAction', context);
+  assert(
+    shelfUndoAction.description.includes('Tablette 1')
+      && shelfUndoAction.description.includes('position 2'),
+    'the receipt should identify the moved tablet and its exact destination',
+  );
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(shelfUndoAction.inverse)),
+    {
+      source: {kind: 'shelf', aisle: '1', side: 'Gauche', index: 1, sectionIndex: 0},
+      target: {kind: 'shelf', aisle: '1', side: 'Gauche', index: 0, sectionIndex: 0},
+    },
+    'tablet undo should record the exact inverse coordinates',
+  );
+  const upwardSectionInverse = vm.runInContext(`buildPlanStructureInverse(
+    {kind:'section',aisle:'1',side:'Gauche',index:3},
+    {kind:'section',aisle:'1',side:'Gauche',index:1}
+  )`, context);
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(upwardSectionInverse)),
+    {
+      source: {kind: 'section', aisle: '1', side: 'Gauche', index: 1},
+      target: {kind: 'section', aisle: '1', side: 'Gauche', index: 4},
+    },
+    'undoing an upward move should compensate for insertion-boundary numbering',
+  );
+  context.apiMoveLayoutStructure = async (kind, payload) => {
+    structureMoveCalls.push({kind, payload});
+    return {
+      success: true,
+      configs: {
+        '1': {
+          sides: {Gauche: {sections: [{shelves: [4, 2], labels: ['A', 'B']}]}, Droite: {sections: []}},
+          facade_a: {shelves: [], labels: []}, facade_b: {shelves: [], labels: []}, presentoirs: [],
+        },
+      },
+      layout_versions: {'1': 'layout-v3'},
+      product_updates: [{
+        id: 201, aisle: '1', side: 'Gauche', section: '1', shelf: '1', position: '1', modified_at: 'product-v3',
+      }],
+    };
+  };
+  assert.strictEqual(await vm.runInContext('undoLastPlanMove()', context), true);
+  assert.strictEqual(structureMoveCalls.length, 2, 'undo should use one atomic inverse request');
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(structureMoveCalls[1].payload.expected_layouts)),
+    {'1': 'layout-v2'},
+    'undo should be guarded by the version produced by the original move',
+  );
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(context.mapLayouts[0].config.sides.Gauche.sections[0])),
+    {shelves: [4, 2], labels: ['A', 'B']},
+    'tablet undo should restore the prior structure locally',
+  );
+  assert.strictEqual(context.allProductsCache[0].shelf, '1');
 
   context.mapLayouts.push({
     aisle: '2', sort_order: 2, modified_at: '', max_section: '0', max_shelf: '0', max_position: '0',
@@ -403,6 +464,54 @@ async function run() {
     ['2', '1'],
     'the store should repaint in the persisted aisle order',
   );
+  const aisleUndoAction = vm.runInContext('planLastUndoAction', context);
+  assert(
+    aisleUndoAction.description.includes('Allée 1')
+      && aisleUndoAction.description.includes('position 1')
+      && aisleUndoAction.description.includes('position 2')
+      && aisleUndoAction.description.includes('allée 2'),
+    'the aisle receipt should name the aisle, both positions, and the displaced aisle',
+  );
+  assert.deepStrictEqual(
+    Array.from(aisleUndoAction.previousOrder),
+    ['1', '2'],
+    'aisle undo should retain the complete previous store order',
+  );
+  vm.runInContext('planLastUndoAction = null', context);
+  assert.strictEqual(
+    vm.runInContext('loadStoredPlanUndoAction().kind', context),
+    'aisle',
+    'the move receipt and safe undo token should survive a page refresh',
+  );
+  context.mapLayouts.find(layout => layout.aisle === '2').modified_at = 'newer-layout';
+  assert.strictEqual(await vm.runInContext('undoLastPlanMove()', context), false);
+  assert.strictEqual(
+    aisleReorderCalls.length,
+    1,
+    'a stale undo must be rejected before any server write',
+  );
+  context.mapLayouts.forEach(layout => { layout.modified_at = 'order-v2'; });
+  context.apiReorderLayoutAisles = async payload => {
+    aisleReorderCalls.push(payload);
+    return {success: true, layout_versions: {'1': 'order-v3', '2': 'order-v3'}};
+  };
+  assert.strictEqual(await vm.runInContext('undoLastPlanMove()', context), true);
+  assert.deepStrictEqual(
+    Array.from(aisleReorderCalls[1].ordered_aisles),
+    ['1', '2'],
+    'aisle undo should send the complete prior order',
+  );
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(aisleReorderCalls[1].expected_layouts)),
+    {'1': 'order-v2', '2': 'order-v2'},
+    'aisle undo should use the exact post-move versions',
+  );
+  assert.deepStrictEqual(
+    Array.from(context.mapLayouts, layout => layout.aisle),
+    ['1', '2'],
+    'aisle undo should repaint the original order',
+  );
+  assert.strictEqual(localStorageValues.has('familiprix_plan_move_undo_v1'), false);
   context.fakeSideNode = {dataset: {aisle: '2', side: 'Gauche'}};
   context.fakeSidePoint = {
     closest(selector) { return selector.includes('.plan-side') ? context.fakeSideNode : null; },

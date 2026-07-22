@@ -114,6 +114,8 @@ function setActiveTabUi(tab) {
   const tabs = ['search','client','scan','add'];
   const button = document.querySelectorAll('.tab')[tabs.indexOf(tab)];
   if (button) button.classList.add('active');
+  const moveReceipt = document.getElementById('planMoveReceipt');
+  if (moveReceipt) moveReceipt.hidden = tab !== 'add';
   localStorage.setItem(STORAGE_KEYS.activeTab, tab);
 }
 
