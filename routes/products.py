@@ -475,7 +475,8 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
 # small CPU, which also froze every other request behind it on the single worker.
 # The cache key (count, max id, max modified_at) changes on any insert/update/delete
 # (every write path stamps modified_at), so no explicit invalidation hooks are needed.
-_PROD_CACHE = {"key": None, "rows": []}
+_PROD_CACHE = {"key": None, "rows": [], "built_at": 0.0}
+_PROD_IDENTIFIER_DRIFT_TTL_S = 120.0
 
 
 def _public_product_identifiers(identifiers):
@@ -604,7 +605,7 @@ def product_identifier_state_key(db):
     return tuple(row.values()) if isinstance(row, dict) else tuple(row)
 
 
-def _products_corpus(db):
+def _products_corpus(db, allow_identifier_stale=False):
     """All placed products with their pre-normalized search fields: [(item, row)]."""
     try:
         alias_state = db.execute(
@@ -631,6 +632,17 @@ def _products_corpus(db):
         alias_key = evidence_key = identifier_key = ()
     key = (products_state_key(db), alias_key, evidence_key, identifier_key)
     if _PROD_CACHE["key"] == key:
+        return _PROD_CACHE["rows"]
+    # Regulatory enrichment can insert several candidate identifiers per minute.
+    # Product names and locations have not changed, so employee searches may use
+    # the recently built corpus while that metadata-only write burst continues.
+    previous_key = _PROD_CACHE.get("key")
+    if (
+        allow_identifier_stale and _PROD_CACHE["rows"] and previous_key
+        and previous_key[0] == key[0]
+        and time.time() - float(_PROD_CACHE.get("built_at", 0) or 0)
+        < _PROD_IDENTIFIER_DRIFT_TTL_S
+    ):
         return _PROD_CACHE["rows"]
     aliases_by_product = {}
     verified_by_product = {}
@@ -724,7 +736,7 @@ def _products_corpus(db):
         item["identifiers"] = _public_product_identifiers(identifiers)
         item["regulatory_identifiers"] = _public_regulatory_identifiers(identifiers)
         rows.append((item, _product_search_row(item, aliases, identifiers)))
-    _PROD_CACHE.update(key=key, rows=rows)
+    _PROD_CACHE.update(key=key, rows=rows, built_at=time.time())
     return rows
 
 
@@ -2303,7 +2315,7 @@ def _mapped_client_products(db):
             "position": str(item.get("position", "")).strip(),
         }
 
-    for item, row in _products_corpus(db):
+    for item, row in _products_corpus(db, allow_identifier_stale=True):
         key = product_key(item, row)
         if key in products_by_key:
             existing = products_by_key[key]["item"]
@@ -2558,7 +2570,9 @@ def search_products():
     field = (request.args.get("field") or "").strip().lower()
     limit = min(max(clamp_non_negative_int(request.args.get("limit", "60"), 60), 1), 120)
     db = get_db()
-    corpus = _products_corpus(db)   # cached: no per-request fetch + re-normalization
+    corpus = _products_corpus(
+        db, allow_identifier_stale=True
+    )  # enrichment writes cannot force a full rebuild per employee query
     if field:
         items = rank_products_by_field(
             [item for item, _ in corpus], query, field, limit=limit
