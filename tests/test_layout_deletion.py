@@ -38,6 +38,16 @@ class LayoutDeletionTests(unittest.TestCase):
                 last_location TEXT, product_json TEXT
             )"""
         )
+        for table in (
+            "product_identifiers", "product_field_evidence",
+            "product_data_issues", "product_aliases",
+        ):
+            self.db.execute(f"CREATE TABLE {table} (product_id INTEGER)")
+        self.db.execute(
+            """CREATE TABLE product_relationships (
+                source_product_id INTEGER, target_product_id INTEGER
+            )"""
+        )
         self.config = {
             "sides": {
                 "Gauche": {"sections": [

@@ -4,6 +4,8 @@ import unittest
 from unittest.mock import patch
 
 from flask import Flask
+from database import DatabaseConnection, init_sqlite_db
+from product_data import record_field_evidence, upsert_reference_candidate
 
 from routes import products as products_module
 from routes.layout import build_default_layout_config
@@ -27,31 +29,10 @@ class PlanogramMetadataTests(unittest.TestCase):
         return app
 
     def make_db(self):
-        db = sqlite3.connect(":memory:")
-        db.row_factory = sqlite3.Row
-        db.execute(
-            """CREATE TABLE product_reference (
-                barcode TEXT PRIMARY KEY,
-                brand TEXT DEFAULT '',
-                description TEXT DEFAULT '',
-                image_url TEXT DEFAULT '',
-                product_code TEXT DEFAULT '',
-                source_url TEXT DEFAULT '',
-                updated_at TEXT DEFAULT ''
-            )"""
-        )
-        db.execute(
-            """CREATE TABLE products (
-                id INTEGER PRIMARY KEY,
-                barcode TEXT DEFAULT '',
-                brand TEXT DEFAULT '',
-                description TEXT DEFAULT '',
-                image_url TEXT DEFAULT '',
-                product_code TEXT DEFAULT '',
-                source_url TEXT DEFAULT '',
-                modified_at TEXT DEFAULT ''
-            )"""
-        )
+        raw = sqlite3.connect(":memory:")
+        raw.row_factory = sqlite3.Row
+        db = DatabaseConnection(raw, "sqlite")
+        init_sqlite_db(db)
         return db
 
     def test_found_image_is_saved_for_placed_product_and_future_reimports(self):
@@ -60,12 +41,15 @@ class PlanogramMetadataTests(unittest.TestCase):
             "INSERT INTO product_reference (barcode) VALUES ('0063848966068')"
         )
         db.execute(
-            "INSERT INTO products (id, barcode) VALUES (1, '063848966068')"
+            """INSERT INTO products (id, name, barcode, aisle, side, section, shelf, position)
+               VALUES (1, 'Razor', '063848966068', '1', 'Gauche', '1', '1', '1')"""
         )
 
         changed = persist_image_for_barcode(
             db, "063848966068", "https://img.test/razor.jpg",
             now="2026-07-16T13:00:00+00:00",
+            source="Manufacturer exact product page",
+            source_url="https://manufacturer.test/063848966068",
         )
 
         placed = db.execute("SELECT image_url FROM products WHERE id=1").fetchone()[0]
@@ -101,45 +85,6 @@ class PlanogramMetadataTests(unittest.TestCase):
 
     def make_plan_db(self):
         db = self.make_db()
-        db.execute("CREATE TABLE users (username TEXT PRIMARY KEY, last_seen TEXT)")
-        db.execute(
-            """CREATE TABLE aisle_layouts (
-                aisle TEXT PRIMARY KEY, sort_order INTEGER DEFAULT 0,
-                max_section TEXT, max_shelf TEXT,
-                max_position TEXT, config_json TEXT, enabled INTEGER,
-                modified_by TEXT DEFAULT '', modified_at TEXT DEFAULT ''
-            )"""
-        )
-        db.execute("DROP TABLE products")
-        db.execute(
-            """CREATE TABLE products (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT DEFAULT '', brand TEXT DEFAULT '', description TEXT DEFAULT '',
-                image_url TEXT DEFAULT '', source_url TEXT DEFAULT '', search_terms TEXT DEFAULT '',
-                usage_notes TEXT DEFAULT '', alternative_suggestions TEXT DEFAULT '',
-                barcode TEXT DEFAULT '', product_code TEXT DEFAULT '', facings INTEGER DEFAULT 1,
-                aisle TEXT DEFAULT '', side TEXT DEFAULT '', section TEXT DEFAULT '1',
-                shelf TEXT DEFAULT '', position TEXT DEFAULT '', is_plano INTEGER DEFAULT 0,
-                in_stock INTEGER DEFAULT 1, flipped_label INTEGER DEFAULT 0,
-                created_by TEXT DEFAULT '', created_at TEXT DEFAULT '',
-                modified_by TEXT DEFAULT '', modified_at TEXT DEFAULT ''
-            )"""
-        )
-        db.execute(
-            """CREATE TABLE planogram_imports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, store TEXT,
-                employee TEXT, plano_name TEXT, plano_number TEXT, plano_version TEXT,
-                aisle TEXT, side TEXT, section TEXT, tablette_start INTEGER,
-                tablette_end INTEGER, imported INTEGER, skipped INTEGER
-            )"""
-        )
-        db.execute(
-            """CREATE TABLE removed_products (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, removed_at TEXT,
-                removed_by TEXT, barcode TEXT, name TEXT, last_location TEXT,
-                product_json TEXT
-            )"""
-        )
         config = build_default_layout_config(1, 1, 3)
         db.execute(
             """INSERT INTO aisle_layouts
@@ -152,18 +97,23 @@ class PlanogramMetadataTests(unittest.TestCase):
 
     def test_catalogue_metadata_backfills_equivalent_upcs_without_overwriting_edits(self):
         db = self.make_db()
-        db.execute(
-            """INSERT INTO product_reference
-               (barcode, brand, description, image_url, product_code, source_url)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            ("0123456789012", "Example", "Reference description", "https://img.test/p.jpg",
-             "F123", "https://source.test/reference"),
+        upsert_reference_candidate(
+            db, {
+                "barcode": "0123456789012", "name": "Example exact package",
+                "brand": "Example", "description": "Reference description",
+                "image_url": "https://img.test/p.jpg", "product_code": "F123",
+                "source": "Manufacturer exact product page",
+                "source_url": "https://source.test/reference",
+            }, imported_at="2026-07-12T00:00:00+00:00",
         )
-        db.execute("INSERT INTO products (id, barcode) VALUES (1, '123456789012')")
+        db.execute("""INSERT INTO products (id, name, barcode, aisle, side, section, shelf, position)
+                      VALUES (1, 'Example', '123456789012', '1', 'Gauche', '1', '1', '1')""")
         db.execute(
-            "INSERT INTO products (id, barcode, description) VALUES (2, '0123456789012', 'Manual description')"
+            """INSERT INTO products (id, name, barcode, description, aisle, side, section, shelf, position)
+               VALUES (2, 'Example', '0123456789012', 'Manual description', '1', 'Gauche', '1', '1', '2')"""
         )
-        db.execute("INSERT INTO products (id, barcode) VALUES (3, '999999999999')")
+        db.execute("""INSERT INTO products (id, name, barcode, aisle, side, section, shelf, position)
+                      VALUES (3, 'Other', '999999999999', '1', 'Gauche', '1', '1', '3')""")
 
         linked = sync_reference_metadata_to_products(db, now="2026-07-12T00:00:00+00:00")
 
@@ -204,28 +154,36 @@ class PlanogramMetadataTests(unittest.TestCase):
         self.assertEqual(same["description"], "Edited description")
         self.assertEqual(same["usage_notes"], "Employee note")
         self.assertEqual(same["product_code"], "PDF1")
-        self.assertEqual(changed["description"], "New product description")
+        self.assertEqual(changed["description"], "")
         self.assertEqual(changed["usage_notes"], "")
-        self.assertEqual(changed["source_url"], "https://source.test/new")
+        self.assertEqual(changed["source_url"], "")
         self.assertEqual(changed["product_code"], "PDF2")
 
-    def test_reference_index_prefers_the_richest_equivalent_upc_row(self):
+    def test_reference_index_never_combines_conflicting_equivalent_upc_rows(self):
         db = self.make_db()
-        db.execute(
-            """INSERT INTO product_reference (barcode, brand, product_code)
-               VALUES ('123456789012', 'Thin', 'F999')"""
+        first = upsert_reference_candidate(
+            db, {
+                "barcode": "123456789012", "name": "Thin product",
+                "brand": "Thin", "product_code": "F999",
+                "source": "Planogramme magasin",
+            }, imported_at="2026-07-12T00:00:00+00:00",
         )
-        db.execute(
-            """INSERT INTO product_reference
-               (barcode, brand, description, image_url) VALUES
-               ('0123456789012', 'Rich', 'Useful description', 'https://img.test/rich.jpg')"""
+        second = upsert_reference_candidate(
+            db, {
+                "barcode": "0123456789012", "name": "Rich product",
+                "brand": "Rich", "description": "Useful description",
+                "image_url": "https://img.test/rich.jpg",
+                "source": "Planogramme magasin",
+            }, imported_at="2026-07-12T00:01:00+00:00",
         )
 
         index = build_reference_metadata_index(db)
         reference = reference_metadata_for_barcode(index, "123456789012")
 
-        self.assertEqual(reference["brand"], "Rich")
-        self.assertEqual(reference["description"], "Useful description")
+        self.assertEqual(first["verification_status"], "verified")
+        self.assertEqual(second["verification_status"], "requires_review")
+        self.assertEqual(reference["brand"], "Thin")
+        self.assertEqual(reference.get("description", ""), "")
         self.assertEqual(reference["product_code"], "F999")
 
     def test_reference_search_includes_a_saved_product_image(self):
@@ -233,6 +191,7 @@ class PlanogramMetadataTests(unittest.TestCase):
         row = {
             "barcode": "041388316000", "name": "BLISTEX LIP MEDEX POT 7G",
             "brand": "Blistex", "description": "", "product_code": "699496",
+            "store_presence_status": "planogram_imported",
             "_bc": "041388316000", "_name": "blistex lip medex pot 7g",
             "_brand": "blistex", "_hay": "blistex lip medex pot 7g blistex",
             "_tokens": ["blistex", "lip", "medex", "pot", "7g"],
@@ -271,11 +230,14 @@ class PlanogramMetadataTests(unittest.TestCase):
 
     def test_bulk_planogram_import_attaches_reference_metadata_and_clears_old_upc_data(self):
         db = self.make_plan_db()
-        db.execute(
-            """INSERT INTO product_reference
-               (barcode, brand, description, image_url, product_code)
-               VALUES ('0123456789012', 'Reference Brand', 'Reference description',
-                       'https://img.test/ref.jpg', 'REF123')"""
+        upsert_reference_candidate(
+            db, {
+                "barcode": "0123456789012", "name": "PLAN NAME",
+                "brand": "Reference Brand", "description": "Reference description",
+                "image_url": "https://img.test/ref.jpg", "product_code": "REF123",
+                "source": "Planogramme magasin",
+                "store_presence_status": "planogram_imported",
+            }, imported_at="2026-07-12T00:00:00+00:00",
         )
         app = self.make_test_app()
         base_payload = {
@@ -402,14 +364,25 @@ class PlanogramMetadataTests(unittest.TestCase):
                VALUES (?, ?, '1', 'Gauche', '1', '1', ?)""",
             [
                 ("OLD AT ONE", "111111111111", "1"),
-                ("OLD IN GAP", "222222222222", "2"),
+                ("OLD IN GAP", "063848966068", "2"),
                 ("OLD AT THREE", "333333333333", "3"),
             ],
         )
         db.execute(
             "UPDATE products SET image_url='https://img.test/moved.jpg', "
-            "description='Enriched description' "
-            "WHERE barcode='222222222222'"
+            "description='Enriched description', image_status='verified', "
+            "description_status='verified' WHERE barcode='063848966068'"
+        )
+        source_id = db.execute(
+            "SELECT id FROM products WHERE barcode='063848966068'"
+        ).fetchone()[0]
+        record_field_evidence(
+            db, source_id, "image_url", "https://img.test/moved.jpg",
+            source="Manual verified", verification_status="verified", active=True,
+        )
+        record_field_evidence(
+            db, source_id, "description", "Enriched description",
+            source="Manual verified", verification_status="verified", active=True,
         )
         app = self.make_test_app()
         payload = {
@@ -418,7 +391,7 @@ class PlanogramMetadataTests(unittest.TestCase):
             "replace_existing": True,
             "products": [
                 {"tablette": 1, "position": 1, "barcode": "444444444444", "name": "NEW ONE"},
-                {"tablette": 1, "position": 3, "barcode": "222222222222", "name": "NEW THREE"},
+                {"tablette": 1, "position": 3, "barcode": "063848966068", "name": "NEW THREE"},
             ],
         }
 

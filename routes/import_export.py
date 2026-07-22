@@ -8,12 +8,25 @@ import secrets
 import tempfile
 import threading
 from flask import Blueprint, request, jsonify, Response, g
-from database import get_db, DatabaseIntegrityError
+from database import get_db
 from auth import require_editor, utc_now_iso
 from security import record_security_event
 from routes.layout import layout_metrics, normalize_layout_config, valid_aisle_name
 from routes.products import product_payload_error, safe_http_url
 from memory_guard import memory_intensive_task, release_unused_memory
+from product_data import (
+    assess_metadata_candidate,
+    create_review_issue,
+    gtin_identity_key,
+    normalize_identifier,
+    text_digits,
+    upsert_reference_candidate,
+)
+from product_backup import (
+    build_product_data_backup,
+    restore_product_backup_row,
+    restore_product_data_backup,
+)
 
 import_export_bp = Blueprint("import_export", __name__)
 
@@ -166,10 +179,11 @@ def export_database():
     products = [dict(p) for p in db.execute("SELECT * FROM products ORDER BY aisle, side, section, shelf, position").fetchall()]
     layouts  = [dict(r) for r in db.execute("SELECT * FROM aisle_layouts ORDER BY aisle").fetchall()]
     payload  = {
-        "export_version": 1,
+        "export_version": 2,
         "exported_at": utc_now_iso(),
         "products": products,
         "aisle_layouts": layouts,
+        "product_data": build_product_data_backup(db),
     }
     data = json.dumps(payload, ensure_ascii=False, indent=2)
     filename = f"familiprix-backup-{utc_now_iso()[:10]}.json"
@@ -188,7 +202,7 @@ def import_database():
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"success": False, "error": "Structure de sauvegarde invalide."}), 400
-    if payload.get("export_version") != 1:
+    if payload.get("export_version") not in {1, 2}:
         return jsonify({"success": False, "error": "Format de fichier non reconnu."}), 400
     layouts_payload = payload.get("aisle_layouts") or []
     products_payload = payload.get("products") or []
@@ -201,6 +215,7 @@ def import_database():
     imported_layouts = 0
     imported_products = 0
     skipped_products = 0
+    product_id_map = {}
 
     for layout in layouts_payload:
         if not isinstance(layout, dict):
@@ -241,6 +256,7 @@ def import_database():
         product = dict(product)
         product["image_url"] = safe_http_url(product.get("image_url"))
         product["source_url"] = safe_http_url(product.get("source_url"))
+        product["primary_source_url"] = safe_http_url(product.get("primary_source_url"))
         if product_payload_error(product):
             skipped_products += 1
             continue
@@ -253,39 +269,31 @@ def import_database():
         if not all([name, aisle, side, shelf, position]) or not valid_aisle_name(aisle):
             skipped_products += 1
             continue
-        try:
-            db.execute(
-                """
-                INSERT INTO products
-                    (name, brand, description, image_url, source_url, search_terms, usage_notes,
-                     alternative_suggestions, barcode, aisle, side, section, shelf, position,
-                     created_by, created_at, modified_by, modified_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(aisle, side, section, shelf, position) DO UPDATE SET
-                    name=excluded.name, brand=excluded.brand, description=excluded.description,
-                    image_url=excluded.image_url, source_url=excluded.source_url,
-                    search_terms=excluded.search_terms, usage_notes=excluded.usage_notes,
-                    alternative_suggestions=excluded.alternative_suggestions,
-                    barcode=excluded.barcode, modified_by=excluded.modified_by, modified_at=excluded.modified_at
-                """,
-                (
-                    name,
-                    str(product.get("brand", "")),
-                    str(product.get("description", "")),
-                    product["image_url"],
-                    product["source_url"],
-                    str(product.get("search_terms", "")),
-                    str(product.get("usage_notes", "")),
-                    str(product.get("alternative_suggestions", "")),
-                    str(product.get("barcode", "")),
-                    aisle, side, section, shelf, position,
-                    username, str(product.get("created_at", "") or utc_now_iso())[:64],
-                    username, utc_now_iso(),
-                ),
-            )
-            imported_products += 1
-        except DatabaseIntegrityError:
+        product.update({
+            "name": name,
+            "aisle": aisle,
+            "side": side,
+            "section": section,
+            "shelf": shelf,
+            "position": position,
+        })
+        restored_id = restore_product_backup_row(db, product, username, utc_now_iso())
+        if not restored_id:
             skipped_products += 1
+            continue
+        imported_products += 1
+        try:
+            old_id = int(product.get("id"))
+        except (TypeError, ValueError, OverflowError):
+            old_id = 0
+        if old_id:
+            product_id_map[old_id] = restored_id
+
+    product_data_result = restore_product_data_backup(
+        db,
+        payload.get("product_data"),
+        product_id_map,
+    )
 
     db.commit()
     return jsonify({
@@ -293,6 +301,8 @@ def import_database():
         "imported_layouts": imported_layouts,
         "imported_products": imported_products,
         "skipped_products": skipped_products,
+        "restored_product_data": product_data_result["restored"],
+        "skipped_product_data": product_data_result["skipped"],
     })
 
 
@@ -315,6 +325,11 @@ def reset_database():
     db = get_db()
     from routes.products import first_column
     product_count = first_column(db.execute("SELECT COUNT(*) FROM products").fetchone()) or 0
+    db.execute("DELETE FROM product_relationships")
+    db.execute("DELETE FROM product_aliases")
+    db.execute("DELETE FROM product_data_issues")
+    db.execute("DELETE FROM product_field_evidence")
+    db.execute("DELETE FROM product_identifiers")
     db.execute("DELETE FROM products")
     layout_count = 0
     if wipe_layouts:
@@ -537,13 +552,11 @@ def parse_planogram_status(job_id):
 
 @import_export_bp.route("/api/import/planogram-catalog", methods=["POST"])
 def import_planogram_catalog():
-    """Bulk-ingest a pre-parsed catalogue of ALL planograms (produced offline so the
-    server never has to parse 78 big PDFs over HTTP). It does two things, neither of
-    which touches product placement:
-      1. Upserts every product into product_reference so UPC lookup instantly returns
-         a real name/description — even for products that aren't placed yet.
-      2. Enriches products already placed in the plan (matched by barcode) by filling
-         in ONLY blank metadata plus pharmacy code/facings — never overwriting edits.
+    """Bulk-ingest a pre-parsed catalogue of all planograms.
+
+    UPC, retailer code, and the printed planogram name are store identity data.
+    Embedded descriptions and images are retained as review candidates because
+    they did not originate on the planogram page itself. Placement is untouched.
     Accepts a JSON file upload (field 'file') or a raw JSON body: a list of planogram
     objects {meta:{name,...}, file, products:[{barcode,name,code_familiprix,facings}]}.
     """
@@ -582,20 +595,27 @@ def import_planogram_catalog():
             return jsonify({"success": False, "error": "Le catalogue contient trop de produits."}), 413
 
     from routes.products import (
-        build_barcode_candidates, normalized_digits,
-        sync_reference_metadata_to_products,
+        _record_import_identifiers, audit_product_data,
+        sync_reference_metadata_to_products, update_product_metadata_from_reference,
     )
     db = get_db()
     now = utc_now_iso()
 
-    # Index placed products by every barcode variant so enrichment matches reliably.
+    # Exact package first, then a unique exact Familiprix code. Partial UPCs and
+    # name similarity are never identity keys.
     local_by_bc = {}
-    for r in db.execute("SELECT id, barcode, product_code, facings FROM products").fetchall():
+    local_by_code = {}
+    for r in db.execute("SELECT * FROM products").fetchall():
         d = dict(r)
-        for cand in build_barcode_candidates(d.get("barcode", "")):
-            local_by_bc.setdefault(cand, []).append(d)
+        gtin_key = gtin_identity_key(d.get("barcode", ""))
+        if gtin_key:
+            local_by_bc.setdefault(gtin_key, []).append(d)
+        code_key = normalize_identifier("FAMILIPRIX_CODE", d.get("product_code", ""))
+        if code_key:
+            local_by_code.setdefault(code_key, []).append(d)
 
-    planos = ref_upserts = enriched = products_seen = 0
+    planos = ref_upserts = enriched = products_seen = review_issues = 0
+    affected_ids = set()
     for plano in payload:
         if not isinstance(plano, dict):
             continue
@@ -608,7 +628,9 @@ def import_planogram_catalog():
         source_url = safe_http_url(plano.get("file"))
 
         for p in (plano.get("products") or []):
-            barcode = normalized_digits(p.get("barcode", ""))
+            if not isinstance(p.get("barcode", ""), str):
+                continue
+            barcode = text_digits(p.get("barcode", ""))
             name = str(p.get("name", "")).strip()[:300]
             if not barcode or len(barcode) > 14 or len(name) < 2:
                 continue
@@ -618,38 +640,99 @@ def import_planogram_catalog():
             description = str(p.get("description", "") or "").strip()[:6000]
             image_url = safe_http_url(p.get("image_url"))
 
-            # 1) Reference catalogue. Most generated plano JSON files contain only
-            # name/code/facings, but preserve richer metadata when a file has it.
-            db.execute(
-                """INSERT INTO product_reference (barcode, name, brand, description, image_url, source, source_url, product_code, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(barcode) DO UPDATE SET
-                       name = CASE WHEN TRIM(COALESCE(product_reference.name, '')) = ''
-                                   THEN excluded.name ELSE product_reference.name END,
-                       brand = CASE WHEN TRIM(COALESCE(product_reference.brand, '')) = ''
-                                   THEN excluded.brand ELSE product_reference.brand END,
-                       description = CASE WHEN TRIM(COALESCE(product_reference.description, '')) = ''
-                                   THEN excluded.description ELSE product_reference.description END,
-                       image_url = CASE WHEN TRIM(COALESCE(product_reference.image_url, '')) = ''
-                                   THEN excluded.image_url ELSE product_reference.image_url END,
-                       product_code = CASE WHEN TRIM(COALESCE(product_reference.product_code, '')) = ''
-                                   THEN excluded.product_code ELSE product_reference.product_code END,
-                       source = excluded.source, source_url = excluded.source_url,
-                       updated_at = excluded.updated_at""",
-                (barcode, name, brand, description, image_url, source, source_url, code, now),
+            identity_candidate = {
+                "barcode": barcode, "name": name,
+                "product_code": code, "source": source,
+                "source_url": source_url,
+                "store_presence_status": "planogram_imported",
+            }
+            metadata_candidate = {
+                "barcode": barcode, "name": name, "brand": brand,
+                "description": description, "image_url": image_url,
+                "product_code": code,
+                "source": "Metadonnees integrees au catalogue - a verifier",
+                "source_url": safe_http_url(
+                    p.get("metadata_source_url") or p.get("source_url")
+                ),
+                "store_presence_status": "planogram_imported",
+            }
+            for field in (
+                "package_size", "package_unit", "variant", "flavour", "colour",
+                "strength", "dosage_form", "manufacturer", "category",
+                "ingredients", "compatibility", "official_name_fr",
+                "official_name_en",
+            ):
+                metadata_candidate[field] = str(p.get(field, "") or "").strip()[:6000]
+            identity_result = upsert_reference_candidate(
+                db, identity_candidate, imported_at=now
             )
             ref_upserts += 1
+            has_supplemental_metadata = any(
+                str(metadata_candidate.get(field, "") or "").strip()
+                for field in (
+                    "brand", "description", "image_url", "package_size",
+                    "package_unit", "variant", "flavour", "colour", "strength",
+                    "dosage_form", "manufacturer", "category", "ingredients",
+                    "compatibility", "official_name_fr", "official_name_en",
+                )
+            )
+            metadata_result = {"issues": [], "confidence": 0.0}
+            if has_supplemental_metadata:
+                metadata_result = upsert_reference_candidate(
+                    db, metadata_candidate, imported_at=now
+                )
+                ref_upserts += 1
+            reference_issues = [
+                (issue, identity_candidate, identity_result)
+                for issue in identity_result.get("issues", [])
+            ] + [
+                (issue, metadata_candidate, metadata_result)
+                for issue in metadata_result.get("issues", [])
+            ]
 
             # 2) enrich placed products (fill blanks only) — match once per product row.
             try:
                 facings = int(p.get("facings", 1) or 1)
             except (TypeError, ValueError):
                 facings = 1
-            matched = {}
-            for cand in build_barcode_candidates(barcode):
-                for d in local_by_bc.get(cand, []):
-                    matched[d["id"]] = d
-            for d in matched.values():
+            matched = {
+                d["id"]: (d, "exact_gtin")
+                for d in local_by_bc.get(gtin_identity_key(barcode), [])
+            }
+            if not matched and code:
+                code_rows = local_by_code.get(
+                    normalize_identifier("FAMILIPRIX_CODE", code), []
+                )
+                if len(code_rows) == 1:
+                    assessment = assess_metadata_candidate(
+                        code_rows[0], identity_candidate,
+                        match_method="exact_familiprix_code",
+                    )
+                    if assessment.accepted:
+                        matched[code_rows[0]["id"]] = (
+                            code_rows[0], "exact_familiprix_code"
+                        )
+            for d, match_method in matched.values():
+                affected_ids.add(int(d["id"]))
+                _record_import_identifiers(
+                    db, d, now, source=source, payload=p
+                )
+                for issue, issue_candidate, issue_result in reference_issues:
+                    create_review_issue(
+                        db, d["id"], issue.get("type", "multiple_possible_matches"),
+                        field_name=issue.get("field", ""),
+                        existing_value=issue.get("existing", d.get(issue.get("field", ""), "")),
+                        candidate_value=issue.get(
+                            "candidate",
+                            issue_candidate.get(issue.get("field", ""), ""),
+                        ),
+                        source=issue_candidate.get("source", ""),
+                        source_url=issue_candidate.get("source_url", ""),
+                        match_method=match_method,
+                        confidence=issue_result.get("confidence", 0),
+                        details=issue, created_at=now,
+                    )
+                    review_issues += 1
                 changed = False
                 if code and not str(d.get("product_code", "")).strip():
                     db.execute(
@@ -665,12 +748,26 @@ def import_planogram_catalog():
                     )
                     d["facings"] = facings
                     changed = True
+                if update_product_metadata_from_reference(
+                    db, d, identity_candidate, now=now,
+                    match_method=match_method
+                ):
+                    changed = True
+                if has_supplemental_metadata and update_product_metadata_from_reference(
+                    db, d, metadata_candidate, now=now,
+                    match_method=match_method,
+                ):
+                    changed = True
                 if changed:
                     enriched += 1
 
     # Link descriptions/images that were enriched before this import to all
     # already-placed copies of the same UPC. Existing/manual values win.
     metadata_linked = sync_reference_metadata_to_products(db, now=now)
+    quality = audit_product_data(
+        db, sorted(affected_ids), trigger_type="planogram_catalog_import",
+        employee=username, now=now,
+    ) if affected_ids else {"success": True, "scanned": 0, "issues": 0, "statuses": {}}
     db.commit()
     try:
         from routes.products import bump_reference_cache
@@ -684,4 +781,6 @@ def import_planogram_catalog():
         "reference_upserts": ref_upserts,
         "enriched_products": enriched,
         "metadata_linked_products": metadata_linked,
+        "review_issues": review_issues,
+        "quality": quality,
     })

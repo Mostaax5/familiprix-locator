@@ -253,11 +253,15 @@ class ClientRagTests(unittest.TestCase):
 
     def test_product_can_reuse_reference_catalogue_image_by_upc(self):
         class Result:
-            def __init__(self, row):
+            def __init__(self, row=None, rows=None):
                 self.row = row
+                self.rows = rows or []
 
             def fetchone(self):
                 return self.row
+
+            def fetchall(self):
+                return self.rows
 
         class FakeDb:
             def __init__(self):
@@ -265,7 +269,9 @@ class ClientRagTests(unittest.TestCase):
 
             def execute(self, _query, _params):
                 self.calls += 1
-                return Result(None if self.calls == 1 else {"image_url": "https://example.test/advil.jpg"})
+                if "product_reference_evidence" in _query:
+                    return Result(rows=[{"field_value": "https://example.test/advil.jpg"}])
+                return Result(None)
 
         image = find_existing_image_for_barcode(FakeDb(), "12345678")
         self.assertEqual(image, "https://example.test/advil.jpg")

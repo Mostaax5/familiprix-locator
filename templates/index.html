@@ -361,7 +361,7 @@
 
   <div class="card">
     <div class="section-title">Catalogue — tous les planogrammes</div>
-    <div class="section-note">Importez le fichier <b>plano_catalog.json</b> (généré à partir de tous vos PDF). Cela enregistre <b>tous les produits</b> dans la base, même ceux pas encore placés. Les descriptions et images enrichies sont ensuite reliées automatiquement par UPC aux produits placés; l’import d’un PDF ajoute seulement leur emplacement. <b>N’affecte pas le placement.</b></div>
+    <div class="section-note">Importez le fichier <b>plano_catalog.json</b> (généré à partir de tous vos PDF). Cela enregistre <b>tous les produits</b> dans la base, même ceux pas encore placés. Seules les descriptions et images vérifiées pour l’UPC exact sont reliées aux produits placés; l’import d’un PDF ajoute leur emplacement. <b>N’affecte pas le placement.</b></div>
     <div class="tool-row">
       <label class="btn btn-outline btn-inline" style="cursor:pointer">
         🗂 Choisir le catalogue (JSON)
@@ -370,7 +370,7 @@
     </div>
     <div id="planoCatalogMsg" style="min-height:18px;font-size:13px;margin-top:6px"></div>
 
-    <div class="section-note" style="margin-top:12px">Optionnel : aller chercher en ligne les <b>vraies descriptions et images</b> pour les produits du catalogue. Chaque résultat est vérifié contre le nom Familiprix (jamais le mauvais produit). Ça tourne en arrière-plan et peut prendre un moment — gardez cette page ouverte.</div>
+    <div class="section-note" style="margin-top:12px">Optionnel : chercher en ligne des descriptions et images candidates. Les sources générales restent à vérifier et ne remplacent jamais automatiquement une donnée fiable.</div>
     <div class="tool-row" style="margin-top:6px">
       <button class="btn btn-outline btn-inline" onclick="startCatalogEnrich()">🌐 Enrichir descriptions & images en ligne</button>
       <button id="catalogEnrichStop" class="btn btn-outline btn-inline" style="display:none;color:#c8102e;border-color:#f1b8c2" onclick="stopCatalogEnrich()">⏹ Arrêter</button>
@@ -381,6 +381,35 @@
     </div>
     <div class="section-note">Les produits que l’enrichissement ne peut pas décrire de façon fiable sont marqués (statut «&nbsp;aucune correspondance&nbsp;») — cette liste vous permet de leur donner la bonne description plus tard.</div>
   </div>
+
+  <details class="card product-quality-card" id="productQualityPanel" ontoggle="if(this.open)loadProductQuality()">
+    <summary class="plano-history-summary">
+      <span>
+        <strong>Qualité des fiches produits</strong>
+        <small>Vérifier les identifiants, descriptions et images</small>
+      </span>
+      <span class="plano-history-count" id="productQualityCount">Ouvrir</span>
+    </summary>
+    <div class="product-quality-body">
+      <div id="productQualitySummary" class="product-quality-summary" aria-live="polite"></div>
+      <div class="product-quality-toolbar">
+        <select id="productQualityFilter" aria-label="Type d’anomalie" onchange="loadProductQuality(true)">
+          <option value="">Toutes les anomalies</option>
+          <option value="possible_wrong_image">Image possiblement incorrecte</option>
+          <option value="possible_wrong_description">Description possiblement incorrecte</option>
+          <option value="package_size_conflict">Conflit de format</option>
+          <option value="multiple_possible_matches">Plusieurs correspondances</option>
+          <option value="unverified_suggestion">Proposition à vérifier</option>
+          <option value="missing_description">Description manquante</option>
+          <option value="missing_image">Image manquante</option>
+          <option value="upc_conflict">UPC à vérifier</option>
+        </select>
+        <button class="btn btn-outline btn-inline" type="button" onclick="startProductQualityAudit()">Vérifier le catalogue</button>
+        <button class="btn btn-outline btn-inline" type="button" onclick="loadProductQuality(true)">Actualiser</button>
+      </div>
+      <div id="productQualityIssues" class="product-quality-list"><div class="small">Ouvrez pour charger les vérifications.</div></div>
+    </div>
+  </details>
 
   <div class="card">
     <div class="section-title">Catalogue de référence</div>

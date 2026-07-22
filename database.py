@@ -314,6 +314,211 @@ def ensure_auth_schema(db):
             raise
 
 
+_PRODUCT_DATA_TEXT_COLUMNS = (
+    "gtin_key", "data_status", "identity_status", "name_status",
+    "description_status", "image_status", "quality_checked_at",
+    "primary_source", "primary_source_url", "category", "package_size",
+    "package_unit", "variant", "flavour", "colour", "strength",
+    "dosage_form", "manufacturer", "ingredients", "compatibility",
+    "official_name_fr", "official_name_en",
+)
+
+
+def ensure_product_data_schema(db):
+    """Add the auditable product-data layer without changing plan locations."""
+    if db.backend == "postgres":
+        for column in _PRODUCT_DATA_TEXT_COLUMNS:
+            default = "complete_unverified" if column == "data_status" else "unverified" if column.endswith("_status") else ""
+            db.execute(f"ALTER TABLE products ADD COLUMN IF NOT EXISTS {column} TEXT DEFAULT '{default}'")
+        db.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS quality_issue_count INTEGER DEFAULT 0")
+        reference_columns = (
+            "gtin_key", "match_method", "verification_status", "last_verified_at",
+            "store_presence_status",
+            "package_size", "package_unit", "variant", "flavour", "colour",
+            "strength", "dosage_form", "manufacturer", "category", "ingredients",
+            "compatibility", "official_name_fr", "official_name_en",
+        )
+        for column in reference_columns:
+            db.execute(
+                f"ALTER TABLE product_reference ADD COLUMN IF NOT EXISTS {column} TEXT DEFAULT ''"
+            )
+        db.execute("ALTER TABLE product_reference ADD COLUMN IF NOT EXISTS source_priority INTEGER DEFAULT 0")
+        db.execute("ALTER TABLE product_reference ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION DEFAULT 0")
+    else:
+        product_columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(products)").fetchall()
+        }
+        for column in _PRODUCT_DATA_TEXT_COLUMNS:
+            if column in product_columns:
+                continue
+            default = "complete_unverified" if column == "data_status" else "unverified" if column.endswith("_status") else ""
+            db.execute(f"ALTER TABLE products ADD COLUMN {column} TEXT DEFAULT '{default}'")
+        if "quality_issue_count" not in product_columns:
+            db.execute("ALTER TABLE products ADD COLUMN quality_issue_count INTEGER DEFAULT 0")
+
+        reference_existing = {
+            row["name"] for row in db.execute("PRAGMA table_info(product_reference)").fetchall()
+        }
+        reference_columns = (
+            "gtin_key", "match_method", "verification_status", "last_verified_at",
+            "store_presence_status",
+            "package_size", "package_unit", "variant", "flavour", "colour",
+            "strength", "dosage_form", "manufacturer", "category", "ingredients",
+            "compatibility", "official_name_fr", "official_name_en",
+        )
+        for column in reference_columns:
+            if column not in reference_existing:
+                db.execute(f"ALTER TABLE product_reference ADD COLUMN {column} TEXT DEFAULT ''")
+        if "source_priority" not in reference_existing:
+            db.execute("ALTER TABLE product_reference ADD COLUMN source_priority INTEGER DEFAULT 0")
+        if "confidence" not in reference_existing:
+            db.execute("ALTER TABLE product_reference ADD COLUMN confidence REAL DEFAULT 0")
+
+    # Presence can be recovered safely from a historical planogram source even
+    # when its descriptive fields remain unverified.
+    db.execute(
+        """UPDATE product_reference SET store_presence_status='planogram_imported'
+           WHERE TRIM(COALESCE(store_presence_status,''))=''
+             AND LOWER(COALESCE(source,'')) LIKE '%planogram%'"""
+    )
+
+    id_type = "BIGSERIAL PRIMARY KEY" if db.backend == "postgres" else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    real_type = "DOUBLE PRECISION" if db.backend == "postgres" else "REAL"
+    db.execute(f"""
+        CREATE TABLE IF NOT EXISTS product_identifiers (
+            id                  {id_type},
+            product_id          BIGINT NOT NULL,
+            identifier_type     TEXT NOT NULL,
+            identifier_value    TEXT NOT NULL,
+            normalized_value    TEXT NOT NULL,
+            authority           TEXT NOT NULL DEFAULT '',
+            is_primary          INTEGER NOT NULL DEFAULT 0,
+            package_level       TEXT NOT NULL DEFAULT 'sellable_unit',
+            source              TEXT DEFAULT '',
+            source_url          TEXT DEFAULT '',
+            source_record_id    TEXT DEFAULT '',
+            match_method        TEXT DEFAULT '',
+            confidence          {real_type} NOT NULL DEFAULT 0,
+            verification_status TEXT NOT NULL DEFAULT 'unverified',
+            imported_at         TEXT DEFAULT '',
+            last_verified_at    TEXT DEFAULT '',
+            UNIQUE(product_id, identifier_type, normalized_value, authority)
+        )
+    """)
+    db.execute(f"""
+        CREATE TABLE IF NOT EXISTS product_field_evidence (
+            id                  {id_type},
+            product_id          BIGINT NOT NULL,
+            field_name          TEXT NOT NULL,
+            field_value         TEXT NOT NULL,
+            source              TEXT NOT NULL DEFAULT '',
+            source_type         TEXT NOT NULL DEFAULT 'unknown',
+            source_priority     INTEGER NOT NULL DEFAULT 0,
+            source_url          TEXT DEFAULT '',
+            source_record_id    TEXT DEFAULT '',
+            match_method        TEXT DEFAULT '',
+            confidence          {real_type} NOT NULL DEFAULT 0,
+            verification_status TEXT NOT NULL DEFAULT 'unverified',
+            imported_at         TEXT DEFAULT '',
+            last_verified_at    TEXT DEFAULT '',
+            active              INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(product_id, field_name, field_value, source, source_record_id)
+        )
+    """)
+    db.execute(f"""
+        CREATE TABLE IF NOT EXISTS product_reference_evidence (
+            id                  {id_type},
+            gtin_key            TEXT NOT NULL,
+            barcode             TEXT NOT NULL,
+            field_name          TEXT NOT NULL,
+            field_value         TEXT NOT NULL,
+            source              TEXT NOT NULL DEFAULT '',
+            source_type         TEXT NOT NULL DEFAULT 'unknown',
+            source_priority     INTEGER NOT NULL DEFAULT 0,
+            source_url          TEXT DEFAULT '',
+            source_record_id    TEXT DEFAULT '',
+            match_method        TEXT DEFAULT '',
+            confidence          {real_type} NOT NULL DEFAULT 0,
+            verification_status TEXT NOT NULL DEFAULT 'unverified',
+            imported_at         TEXT DEFAULT '',
+            last_verified_at    TEXT DEFAULT '',
+            active              INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(gtin_key, field_name, field_value, source, source_record_id)
+        )
+    """)
+    db.execute(f"""
+        CREATE TABLE IF NOT EXISTS product_data_issues (
+            id              {id_type},
+            product_id      BIGINT NOT NULL,
+            issue_type      TEXT NOT NULL,
+            field_name      TEXT DEFAULT '',
+            existing_value  TEXT DEFAULT '',
+            candidate_value TEXT DEFAULT '',
+            source          TEXT DEFAULT '',
+            source_url      TEXT DEFAULT '',
+            match_method    TEXT DEFAULT '',
+            confidence      {real_type} NOT NULL DEFAULT 0,
+            status          TEXT NOT NULL DEFAULT 'open',
+            details_json    TEXT DEFAULT '',
+            created_at      TEXT DEFAULT '',
+            resolved_at     TEXT DEFAULT '',
+            resolved_by     TEXT DEFAULT ''
+        )
+    """)
+    db.execute(f"""
+        CREATE TABLE IF NOT EXISTS product_aliases (
+            id                  {id_type},
+            product_id          BIGINT NOT NULL,
+            alias_type          TEXT NOT NULL,
+            alias_value         TEXT NOT NULL,
+            normalized_value    TEXT NOT NULL,
+            language            TEXT DEFAULT '',
+            source              TEXT DEFAULT '',
+            confidence          {real_type} NOT NULL DEFAULT 0,
+            verification_status TEXT NOT NULL DEFAULT 'unverified',
+            UNIQUE(product_id, alias_type, normalized_value)
+        )
+    """)
+    db.execute(f"""
+        CREATE TABLE IF NOT EXISTS product_relationships (
+            id                  {id_type},
+            source_product_id   BIGINT NOT NULL,
+            target_product_id   BIGINT NOT NULL,
+            relationship_type   TEXT NOT NULL,
+            source              TEXT DEFAULT '',
+            source_url          TEXT DEFAULT '',
+            confidence          {real_type} NOT NULL DEFAULT 0,
+            verification_status TEXT NOT NULL DEFAULT 'unverified',
+            approved_by         TEXT DEFAULT '',
+            approved_role       TEXT DEFAULT '',
+            created_at          TEXT DEFAULT '',
+            last_verified_at    TEXT DEFAULT '',
+            UNIQUE(source_product_id, target_product_id, relationship_type)
+        )
+    """)
+    db.execute(f"""
+        CREATE TABLE IF NOT EXISTS product_quality_runs (
+            id           {id_type},
+            started_at   TEXT DEFAULT '',
+            completed_at TEXT DEFAULT '',
+            trigger_type TEXT DEFAULT '',
+            status       TEXT DEFAULT '',
+            employee     TEXT DEFAULT '',
+            scanned      INTEGER DEFAULT 0,
+            updated      INTEGER DEFAULT 0,
+            issues       INTEGER DEFAULT 0
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_products_gtin_key ON products(gtin_key)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_reference_gtin_key ON product_reference(gtin_key)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_product_identifiers_value ON product_identifiers(identifier_type, normalized_value, authority)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_product_evidence_active ON product_field_evidence(product_id, field_name, active)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_reference_evidence_active ON product_reference_evidence(gtin_key, field_name, active)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_product_issues_open ON product_data_issues(status, issue_type, product_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_product_aliases_value ON product_aliases(normalized_value)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_product_relationships_source ON product_relationships(source_product_id, relationship_type)")
+
+
 def ensure_layout_sort_orders(db):
     """Give pre-existing aisles a stable visual order after the column migration."""
     rows = db.execute(
@@ -520,6 +725,7 @@ def init_postgres_db(db):
     """)
     db.execute("ALTER TABLE product_reference ADD COLUMN IF NOT EXISTS product_code TEXT DEFAULT ''")
     db.execute("ALTER TABLE product_reference ADD COLUMN IF NOT EXISTS enrich_status TEXT DEFAULT ''")
+    ensure_product_data_schema(db)
 
     db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS max_section TEXT NOT NULL DEFAULT '1'")
     db.execute("ALTER TABLE aisle_layouts ADD COLUMN IF NOT EXISTS config_json TEXT NOT NULL DEFAULT ''")
@@ -736,6 +942,7 @@ def init_sqlite_db(db):
         db.execute("ALTER TABLE product_reference ADD COLUMN product_code TEXT DEFAULT ''")
     if "enrich_status" not in ref_columns:
         db.execute("ALTER TABLE product_reference ADD COLUMN enrich_status TEXT DEFAULT ''")
+    ensure_product_data_schema(db)
 
     layout_columns = {
         row["name"] for row in db.execute("PRAGMA table_info(aisle_layouts)").fetchall()

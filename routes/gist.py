@@ -5,10 +5,16 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from flask import Blueprint, current_app, request, jsonify
-from database import get_db, DatabaseIntegrityError
+from database import get_db
 from auth import require_editor, utc_now_iso
 from routes.layout import layout_metrics, normalize_layout_config, valid_aisle_name
 from routes.products import product_payload_error, safe_http_url
+from product_backup import (
+    PRODUCT_DATA_TABLE_COLUMNS,
+    build_product_data_backup,
+    restore_product_backup_row,
+    restore_product_data_backup,
+)
 
 gist_bp = Blueprint("gist", __name__)
 
@@ -86,6 +92,7 @@ def _normalized_backup_product(product, now):
     cleaned = dict(product)
     cleaned["image_url"] = safe_http_url(cleaned.get("image_url"))
     cleaned["source_url"] = safe_http_url(cleaned.get("source_url"))
+    cleaned["primary_source_url"] = safe_http_url(cleaned.get("primary_source_url"))
     if product_payload_error(cleaned):
         return None
     for key in (
@@ -110,10 +117,11 @@ def _build_backup_payload(db):
     products = [dict(p) for p in db.execute("SELECT * FROM products ORDER BY aisle, side, section, shelf, position").fetchall()]
     layouts  = [dict(r) for r in db.execute("SELECT * FROM aisle_layouts ORDER BY aisle").fetchall()]
     return {
-        "export_version": 1,
+        "export_version": 2,
         "exported_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "products": products,
         "aisle_layouts": layouts,
+        "product_data": build_product_data_backup(db),
     }
 
 
@@ -148,13 +156,24 @@ def _gist_file_content(file_info):
 
 
 def _valid_backup_payload(payload):
-    return bool(
+    if not (
         isinstance(payload, dict)
-        and payload.get("export_version") == 1
+        and payload.get("export_version") in {1, 2}
         and isinstance(payload.get("products"), list)
         and isinstance(payload.get("aisle_layouts"), list)
         and len(payload["products"]) <= _MAX_GIST_PRODUCTS
         and len(payload["aisle_layouts"]) <= _MAX_GIST_LAYOUTS
+    ):
+        return False
+    if payload.get("export_version") == 1:
+        return True
+    product_data = payload.get("product_data")
+    if not isinstance(product_data, dict):
+        return False
+    return all(
+        isinstance(product_data.get(table, []), list)
+        and len(product_data.get(table, [])) <= 250_000
+        for table in PRODUCT_DATA_TABLE_COLUMNS
     )
 
 
@@ -291,29 +310,26 @@ def _restore_from_gist_if_empty():
                  layout["enabled"], "gist-restore", now),
             )
         imported = 0
+        product_id_map = {}
         for raw_product in (payload.get("products") or []):
             p = _normalized_backup_product(raw_product, now)
             if not p:
                 continue
-            name = p["name"]
+            restored_id = restore_product_backup_row(db, p, "gist-restore", now)
+            if not restored_id:
+                continue
+            imported += 1
             try:
-                db.execute(
-                    """
-                    INSERT INTO products (name, brand, description, image_url, source_url, search_terms, usage_notes,
-                        alternative_suggestions, barcode, product_code, facings, aisle, side, section, shelf, position,
-                        is_plano, in_stock, flipped_label, underneath_label, created_by, created_at, modified_by, modified_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (name, p["brand"], p["description"], p["image_url"],
-                     p["source_url"], p["search_terms"], p["usage_notes"],
-                     p["alternative_suggestions"], p["barcode"], p["product_code"], p["facings"],
-                     p["aisle"], p["side"], p["section"], p["shelf"], p["position"],
-                     p["is_plano"], p["in_stock"], p["flipped_label"], p["underneath_label"],
-                     "gist-restore", p["created_at"], "gist-restore", now),
-                )
-                imported += 1
-            except Exception:
-                pass
+                old_id = int(raw_product.get("id"))
+            except (TypeError, ValueError, OverflowError):
+                old_id = 0
+            if old_id:
+                product_id_map[old_id] = restored_id
+        data_result = restore_product_data_backup(
+            db,
+            payload.get("product_data"),
+            product_id_map,
+        )
         db.commit()
         db.close()
         print(f"[Gist] Base de données restauree automatiquement ({imported} produits)")
@@ -403,34 +419,34 @@ def gist_restore_now():
              layout["enabled"], username, now),
         )
         imported_layouts += 1
+    product_id_map = {}
     for raw_product in (payload.get("products") or []):
         p = _normalized_backup_product(raw_product, now)
         if not p:
             skipped_products += 1
             continue
-        name = p["name"]
-        try:
-            db.execute(
-                """
-                INSERT INTO products (name, brand, description, image_url, source_url, search_terms, usage_notes,
-                    alternative_suggestions, barcode, product_code, facings, aisle, side, section, shelf, position,
-                    is_plano, in_stock, flipped_label, underneath_label, created_by, created_at, modified_by, modified_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (name, p["brand"], p["description"], p["image_url"],
-                 p["source_url"], p["search_terms"], p["usage_notes"],
-                 p["alternative_suggestions"], p["barcode"], p["product_code"], p["facings"],
-                 p["aisle"], p["side"], p["section"], p["shelf"], p["position"],
-                 p["is_plano"], p["in_stock"], p["flipped_label"], p["underneath_label"],
-                 username, p["created_at"], username, now),
-            )
-            imported_products += 1
-        except DatabaseIntegrityError:
+        restored_id = restore_product_backup_row(db, p, username, now)
+        if not restored_id:
             skipped_products += 1
+            continue
+        imported_products += 1
+        try:
+            old_id = int(raw_product.get("id"))
+        except (TypeError, ValueError, OverflowError):
+            old_id = 0
+        if old_id:
+            product_id_map[old_id] = restored_id
+    product_data_result = restore_product_data_backup(
+        db,
+        payload.get("product_data"),
+        product_id_map,
+    )
     db.commit()
     return jsonify({
         "success": True,
         "imported_layouts": imported_layouts,
         "imported_products": imported_products,
         "skipped_products": skipped_products,
+        "restored_product_data": product_data_result["restored"],
+        "skipped_product_data": product_data_result["skipped"],
     })

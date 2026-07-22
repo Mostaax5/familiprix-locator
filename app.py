@@ -13,7 +13,7 @@ from auth import utc_now_iso
 from security import auth_bp, install_security, internal_request_headers
 from routes.products import (
     products_bp, first_column, schedule_backfill_missing,
-    schedule_reference_metadata_sync,
+    schedule_initial_product_quality_audit, schedule_reference_metadata_sync,
 )
 from routes.layout import layout_bp
 from routes.ai import ai_bp, configured_ai_provider, reference_count, maybe_resume_enrichment
@@ -381,6 +381,7 @@ def _finish_persistence_boot():
     if initialized:
         _restore_from_gist_if_empty()
     schedule_reference_metadata_sync()  # connect catalogue metadata to placed UPCs
+    schedule_initial_product_quality_audit()
     schedule_backfill_missing()  # fetch missing product images in background
 
 

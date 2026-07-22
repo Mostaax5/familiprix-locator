@@ -15,6 +15,25 @@ from database import get_db, DatabaseIntegrityError
 from auth import require_editor, utc_now_iso, side_display_label
 from routes.layout import validate_layout_slot, aisle_sort_key
 from memory_guard import memory_intensive_task, release_unused_memory
+from product_data import (
+    FIELD_NAMES,
+    IDENTIFIER_TYPES,
+    REFERENCE_FIELDS,
+    active_field_evidence,
+    assess_metadata_candidate,
+    canonical_gtin,
+    classify_source,
+    create_review_issue,
+    exact_gtin_variants,
+    field_evidence_for_value,
+    gtin_check_digit_valid,
+    gtin_identity_key,
+    record_field_evidence,
+    record_reference_evidence,
+    sync_basic_aliases,
+    upsert_product_identifier,
+    upsert_reference_candidate,
+)
 
 products_bp = Blueprint("products", __name__)
 
@@ -262,7 +281,15 @@ def _reference_state_key(db):
     row = db.execute(
         "SELECT COUNT(*) AS n, MAX(updated_at) AS max_upd FROM product_reference"
     ).fetchone()
-    return (tuple(row.values()) if isinstance(row, dict) else tuple(row))
+    evidence = db.execute(
+        """SELECT COUNT(*) AS n, MAX(id) AS max_id,
+                  MAX(last_verified_at) AS max_verified,
+                  SUM(CASE WHEN active=1 AND verification_status='verified' THEN 1 ELSE 0 END) AS verified_count
+           FROM product_reference_evidence"""
+    ).fetchone()
+    row_key = tuple(row.values()) if isinstance(row, dict) else tuple(row)
+    evidence_key = tuple(evidence.values()) if isinstance(evidence, dict) else tuple(evidence)
+    return (row_key, evidence_key)
 
 
 def _reference_corpus(db):
@@ -286,15 +313,42 @@ def _reference_corpus(db):
         if _fresh_enough():
             return _REF_CACHE["rows"]
         rows = []
-        for r in db.execute("SELECT barcode, name, brand, description, product_code FROM product_reference").fetchall():
+        verified_by_key = {}
+        for evidence_row in db.execute(
+            """SELECT gtin_key, field_name, field_value
+               FROM product_reference_evidence
+               WHERE active=1 AND verification_status='verified'"""
+        ).fetchall():
+            evidence = dict(evidence_row)
+            verified_by_key.setdefault(evidence["gtin_key"], {})[
+                evidence["field_name"]
+            ] = evidence["field_value"]
+        for r in db.execute(
+            """SELECT barcode, name, brand, description, product_code,
+                      store_presence_status, source, source_url
+               FROM product_reference"""
+        ).fetchall():
             d = dict(r)
-            name = normalize_search_text(d.get("name", ""))
-            brand = normalize_search_text(d.get("brand", ""))
-            desc = normalize_search_text(d.get("description", ""))
+            verified = verified_by_key.get(gtin_identity_key(d.get("barcode", "")), {})
+            source_type, _priority = classify_source(
+                d.get("source", ""), d.get("source_url", "")
+            )
+            store_identity = source_type == "store_catalog"
+            official_name = verified.get("name", "") or (
+                d.get("name", "") if store_identity else ""
+            )
+            verified_brand = verified.get("brand", "")
+            verified_description = verified.get("description", "")
+            name = normalize_search_text(official_name)
+            brand = normalize_search_text(verified_brand)
+            desc = normalize_search_text(verified_description)
             rows.append({
-                "barcode": d.get("barcode", ""), "name": d.get("name", ""),
-                "brand": d.get("brand", ""), "description": d.get("description", ""),
-                "product_code": d.get("product_code", ""),
+                "barcode": d.get("barcode", ""), "name": official_name,
+                "brand": verified_brand, "description": verified_description,
+                "product_code": verified.get("product_code", "") or (
+                    d.get("product_code", "") if store_identity else ""
+                ),
+                "store_presence_status": d.get("store_presence_status", ""),
                 "_bc": normalized_digits(d.get("barcode", "")),
                 "_name": name, "_brand": brand,
                 "_hay": " ".join([name, brand, desc]), "_tokens": name.split(),
@@ -386,17 +440,35 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
 _PROD_CACHE = {"key": None, "rows": []}
 
 
-def _product_search_row(item):
+def _product_search_row(item, aliases=(), identifiers=()):
     """Pre-normalized search fields for a placed product, in the shape
     _fast_reference_score expects — computed once per product, not once per term."""
+    verified_fields = set(item.get("_verified_fields") or [])
+
+    def verified(field):
+        return item.get(field, "") if field in verified_fields else ""
+
     name = normalize_search_text(item.get("name", ""))
-    brand = normalize_search_text(item.get("brand", ""))
+    brand = normalize_search_text(verified("brand"))
     hay = " ".join([
         name, brand,
-        normalize_search_text(item.get("description", "")),
-        normalize_search_text(item.get("search_terms", "")),
-        normalize_search_text(item.get("usage_notes", "")),
-        normalize_search_text(item.get("alternative_suggestions", "")),
+        normalize_search_text(verified("description")),
+        normalize_search_text(verified("official_name_fr")),
+        normalize_search_text(verified("official_name_en")),
+        normalize_search_text(verified("category")),
+        normalize_search_text(verified("variant")),
+        normalize_search_text(verified("flavour")),
+        normalize_search_text(verified("colour")),
+        normalize_search_text(verified("strength")),
+        normalize_search_text(verified("dosage_form")),
+        normalize_search_text(verified("manufacturer")),
+        normalize_search_text(verified("ingredients")),
+        normalize_search_text(verified("compatibility")),
+        " ".join(normalize_search_text(alias) for alias in aliases),
+        " ".join(
+            normalize_search_text(identifier.get("value", ""))
+            for identifier in identifiers
+        ),
     ])
     return {"_bc": normalized_digits(item.get("barcode", "")),
             "_name": name, "_brand": brand, "_hay": hay, "_tokens": name.split()}
@@ -417,22 +489,135 @@ def products_state_key(db):
     delete (every write path stamps modified_at). Drives the search-corpus cache
     AND the /api/products ETag."""
     key_row = db.execute(
-        "SELECT COUNT(*) AS n, MAX(id) AS max_id, MAX(modified_at) AS max_mod FROM products"
+        """SELECT COUNT(*) AS n, MAX(id) AS max_id,
+                  MAX(modified_at) AS max_mod,
+                  MAX(quality_checked_at) AS max_quality
+           FROM products"""
     ).fetchone()
     return (tuple(key_row.values()) if isinstance(key_row, dict) else tuple(key_row))
 
 
 def _products_corpus(db):
     """All placed products with their pre-normalized search fields: [(item, row)]."""
-    key = products_state_key(db)
+    try:
+        alias_state = db.execute(
+            """SELECT COUNT(*) AS n, MAX(id) AS max_id,
+                      SUM(CASE WHEN verification_status='verified' THEN 1 ELSE 0 END) AS verified_count
+               FROM product_aliases"""
+        ).fetchone()
+        evidence_state = db.execute(
+            """SELECT COUNT(*) AS n, MAX(id) AS max_id,
+                      MAX(last_verified_at) AS max_verified,
+                      SUM(CASE WHEN active=1 AND verification_status='verified' THEN 1 ELSE 0 END) AS verified_count
+               FROM product_field_evidence"""
+        ).fetchone()
+        identifier_state = db.execute(
+            """SELECT COUNT(*) AS n, MAX(id) AS max_id,
+                      MAX(last_verified_at) AS max_verified,
+                      SUM(CASE WHEN verification_status='verified' THEN 1 ELSE 0 END) AS verified_count
+               FROM product_identifiers"""
+        ).fetchone()
+        alias_key = tuple(alias_state.values()) if isinstance(alias_state, dict) else tuple(alias_state)
+        evidence_key = tuple(evidence_state.values()) if isinstance(evidence_state, dict) else tuple(evidence_state)
+        identifier_key = tuple(identifier_state.values()) if isinstance(identifier_state, dict) else tuple(identifier_state)
+    except Exception:
+        alias_key = evidence_key = identifier_key = ()
+    key = (products_state_key(db), alias_key, evidence_key, identifier_key)
     if _PROD_CACHE["key"] == key:
         return _PROD_CACHE["rows"]
+    aliases_by_product = {}
+    verified_by_product = {}
+    verified_values_by_product = {}
+    field_sources_by_product = {}
+    identifiers_by_product = {}
+    try:
+        for alias_row in db.execute(
+            "SELECT product_id, alias_value FROM product_aliases WHERE verification_status='verified'"
+        ).fetchall():
+            alias = dict(alias_row)
+            aliases_by_product.setdefault(int(alias["product_id"]), []).append(
+                str(alias.get("alias_value", "") or "")
+            )
+        for evidence_row in db.execute(
+            """SELECT product_id, field_name, field_value, source, source_url, last_verified_at,
+                      source_priority, confidence, id
+               FROM product_field_evidence
+               WHERE active=1 AND verification_status='verified'
+               ORDER BY source_priority, confidence, id"""
+        ).fetchall():
+            evidence = dict(evidence_row)
+            verified_by_product.setdefault(int(evidence["product_id"]), set()).add(
+                str(evidence.get("field_name", "") or "")
+            )
+            verified_values_by_product.setdefault(
+                int(evidence["product_id"]), {}
+            )[str(evidence.get("field_name", "") or "")] = str(
+                evidence.get("field_value", "") or ""
+            ).strip()
+            field_sources_by_product.setdefault(
+                int(evidence["product_id"]), {}
+            )[str(evidence.get("field_name", "") or "")] = {
+                "source": str(evidence.get("source", "") or ""),
+                "source_url": safe_http_url(evidence.get("source_url", "")),
+                "last_verified_at": str(
+                    evidence.get("last_verified_at", "") or ""
+                ),
+            }
+        for identifier_row in db.execute(
+            """SELECT product_id, identifier_type, identifier_value, authority,
+                      verification_status
+               FROM product_identifiers
+               WHERE verification_status='verified'"""
+        ).fetchall():
+            identifier = dict(identifier_row)
+            identifiers_by_product.setdefault(
+                int(identifier["product_id"]), []
+            ).append({
+                "type": identifier.get("identifier_type", ""),
+                "value": identifier.get("identifier_value", ""),
+                "authority": identifier.get("authority", ""),
+                "verification_status": identifier.get("verification_status", ""),
+            })
+    except Exception:
+        aliases_by_product = {}
+        verified_by_product = {}
+        verified_values_by_product = {}
+        field_sources_by_product = {}
+        identifiers_by_product = {}
     rows = []
     for r in db.execute("SELECT * FROM products").fetchall():
-        item = row_to_product(r)
-        rows.append((item, _product_search_row(item)))
+        raw_item = dict(r)
+        product_id = int(raw_item.get("id") or 0)
+        verified_values = verified_values_by_product.get(product_id, {})
+        matching_verified_fields = {
+            field for field in verified_by_product.get(product_id, set())
+            if str(raw_item.get(field, "") or "").strip()
+            == str(verified_values.get(field, "") or "").strip()
+        }
+        raw_item["_verified_fields"] = sorted(matching_verified_fields)
+        item = row_to_product(raw_item)
+        item["_field_sources"] = {
+            field: provenance
+            for field, provenance in field_sources_by_product.get(
+                product_id, {}
+            ).items()
+            if field in matching_verified_fields
+        }
+        aliases = aliases_by_product.get(product_id, [])
+        identifiers = identifiers_by_product.get(product_id, [])
+        item["_search_aliases"] = aliases
+        item["_identifiers"] = identifiers
+        rows.append((item, _product_search_row(item, aliases, identifiers)))
     _PROD_CACHE.update(key=key, rows=rows)
     return rows
+
+
+def public_product_payload(item):
+    """Keep provenance server-side unless a dedicated manager endpoint asks for it."""
+    return {
+        key: value for key, value in dict(item or {}).items()
+        if not str(key).startswith("_")
+    }
 
 
 def intent_expansion_terms(query):
@@ -591,31 +776,13 @@ def tokenize_search_query(query):
 
 
 def build_barcode_candidates(barcode):
-    raw = str(barcode or "").strip()
-    digits = normalized_digits(raw)
-    candidates = []
-    seen = set()
+    """Exact GTIN representations only.
 
-    def add(value):
-        cleaned = str(value or "").strip()
-        if cleaned and cleaned not in seen:
-            seen.add(cleaned)
-            candidates.append(cleaned)
-
-    add(raw)
-    add(digits)
-    if len(digits) == 13 and digits.startswith("0"):
-        add(digits[1:])
-    if len(digits) == 12:
-        add(f"0{digits}")
-    if len(digits) == 14 and digits.startswith("00"):
-        add(digits[2:])
-    stripped = digits.lstrip("0")
-    if stripped and stripped != digits:
-        add(stripped)
-        if len(stripped) == 12:
-            add(f"0{stripped}")
-    return candidates
+    This function used to lstrip arbitrary leading zeroes and was reused by
+    metadata imports. That made a fuzzy search convenience an identity merge.
+    Keep the historic name for callers, but its contract is now exact-package.
+    """
+    return exact_gtin_variants(barcode)
 
 
 def first_column(row):
@@ -649,11 +816,78 @@ def row_to_product(product):
     if not product:
         return None
     item = dict(product)
-    item["image_url"] = safe_http_url(item.get("image_url"))
+    raw_image = safe_http_url(item.get("image_url"))
+    raw_description = str(item.get("description", "") or "").strip()
+    image_status = str(item.get("image_status", "") or "")
+    description_status = str(item.get("description_status", "") or "")
+    has_evidence_context = "_verified_fields" in item
+    verified_fields = set(item.get("_verified_fields") or [])
+    image_is_verified = image_status == "verified" and (
+        not has_evidence_context or "image_url" in verified_fields
+    )
+    description_is_verified = description_status == "verified" and (
+        not has_evidence_context or "description" in verified_fields
+    )
+    item["image_available_unverified"] = bool(
+        raw_image and image_status and not image_is_verified
+    )
+    item["description_available_unverified"] = bool(
+        raw_description and description_status and not description_is_verified
+    )
+    item["image_url"] = (
+        raw_image if not image_status or image_is_verified else ""
+    )
+    item["description"] = (
+        raw_description
+        if not description_status or description_is_verified
+        else ""
+    )
+    for field in FIELD_NAMES - {"name", "description", "image_url"}:
+        if field not in verified_fields:
+            item[field] = ""
     item["source_url"] = safe_http_url(item.get("source_url"))
     item["last_change_by"] = item.get("modified_by") or item.get("created_by") or ""
     item["last_change_at"] = item.get("modified_at") or item.get("created_at") or ""
     return item
+
+
+def rows_to_verified_products(db, products):
+    """Apply field-level visibility to arbitrary product rows in bounded queries."""
+    items = [dict(product) for product in products if product]
+    by_id = {
+        int(item["id"]): item for item in items if item.get("id") is not None
+    }
+    verified = {product_id: set() for product_id in by_id}
+    product_ids = list(by_id)
+    for start in range(0, len(product_ids), 400):
+        chunk = product_ids[start:start + 400]
+        placeholders = ",".join("?" for _ in chunk)
+        for evidence_row in db.execute(
+            f"""SELECT product_id, field_name, field_value
+                FROM product_field_evidence
+                WHERE product_id IN ({placeholders}) AND active=1
+                  AND verification_status='verified'""",
+            tuple(chunk),
+        ).fetchall():
+            evidence = dict(evidence_row)
+            product_id = int(evidence["product_id"])
+            field = str(evidence.get("field_name", "") or "")
+            if (
+                field in FIELD_NAMES
+                and str(by_id[product_id].get(field, "") or "").strip()
+                == str(evidence.get("field_value", "") or "").strip()
+            ):
+                verified[product_id].add(field)
+    for item in items:
+        item["_verified_fields"] = sorted(
+            verified.get(int(item.get("id") or 0), set())
+        )
+    return [row_to_product(item) for item in items]
+
+
+def row_to_verified_product(db, product):
+    items = rows_to_verified_products(db, [product])
+    return items[0] if items else None
 
 
 def archive_and_delete_product(db, product, username, now=None):
@@ -688,6 +922,20 @@ def archive_and_delete_products(db, products, username, now=None):
         product_ids = [item.get("id") for item in chunk if item.get("id") is not None]
         if product_ids:
             id_placeholders = ",".join("?" for _id in product_ids)
+            for table in (
+                "product_identifiers", "product_field_evidence",
+                "product_data_issues", "product_aliases",
+            ):
+                db.execute(
+                    f"DELETE FROM {table} WHERE product_id IN ({id_placeholders})",
+                    tuple(product_ids),
+                )
+            db.execute(
+                f"""DELETE FROM product_relationships
+                    WHERE source_product_id IN ({id_placeholders})
+                       OR target_product_id IN ({id_placeholders})""",
+                tuple(product_ids) + tuple(product_ids),
+            )
             db.execute(
                 f"DELETE FROM products WHERE id IN ({id_placeholders})",
                 tuple(product_ids),
@@ -709,8 +957,9 @@ def find_existing_image_for_barcode(db, barcode, exclude_id=None):
     never lose a product picture when re-adding / moving / re-importing it."""
     if not str(barcode or "").strip():
         return ""
-    for candidate in build_barcode_candidates(barcode):
-        q = "SELECT image_url FROM products WHERE barcode=? AND TRIM(COALESCE(image_url,'')) <> ''"
+    found = set()
+    for candidate in exact_gtin_variants(barcode):
+        q = "SELECT image_url, image_status FROM products WHERE barcode=? AND TRIM(COALESCE(image_url,'')) <> ''"
         params = [candidate]
         if exclude_id is not None:
             q += " AND id<>?"
@@ -718,22 +967,34 @@ def find_existing_image_for_barcode(db, barcode, exclude_id=None):
         q += " ORDER BY id LIMIT 1"
         row = db.execute(q, tuple(params)).fetchone()
         if row:
-            return (row["image_url"] if isinstance(row, dict) else row[0]) or ""
+            item = dict(row)
+            image = item.get("image_url", "")
+            if image and item.get("image_status") == "verified":
+                found.add(str(image))
     # The broad catalogue is never used as Client inventory, but an image already
     # verified for the same UPC is safe to reuse on the real mapped product.
-    for candidate in build_barcode_candidates(barcode):
-        row = db.execute(
-            "SELECT image_url FROM product_reference "
-            "WHERE barcode=? AND TRIM(COALESCE(image_url,'')) <> '' LIMIT 1",
-            (candidate,),
-        ).fetchone()
-        if row:
-            return (row["image_url"] if isinstance(row, dict) else row[0]) or ""
-    return ""
+    key = gtin_identity_key(barcode)
+    if key:
+        rows = db.execute(
+            """SELECT field_value FROM product_reference_evidence
+               WHERE gtin_key=? AND field_name='image_url' AND active=1
+                 AND verification_status='verified'""",
+            (key,),
+        ).fetchall()
+        found.update(
+            str(dict(row).get("field_value", "") or "")
+            for row in rows if str(dict(row).get("field_value", "") or "").strip()
+        )
+    # Conflicting images for the same canonical GTIN are not resolved by row
+    # order. Leave the image missing so the quality audit can request review.
+    return next(iter(found)) if len(found) == 1 else ""
 
 
 _REFERENCE_METADATA_FIELDS = (
     "brand", "description", "image_url", "product_code", "source_url",
+    "package_size", "package_unit", "variant", "flavour", "colour",
+    "strength", "dosage_form", "manufacturer", "category", "ingredients",
+    "compatibility", "official_name_fr", "official_name_en",
 )
 
 
@@ -741,7 +1002,7 @@ def _barcode_query_values(barcodes):
     values = []
     seen = set()
     for barcode in barcodes or []:
-        for candidate in build_barcode_candidates(barcode):
+        for candidate in exact_gtin_variants(barcode):
             value = str(candidate or "").strip()
             if value and value not in seen:
                 seen.add(value)
@@ -766,71 +1027,104 @@ def _rows_for_barcodes(db, table, columns, barcodes):
 
 
 def build_reference_metadata_index(db, barcodes=None):
-    """Index trusted catalogue metadata by every equivalent UPC representation.
+    """Index catalogue metadata by exact canonical package identity.
 
     Planogram imports pass their UPCs so a 100-line import does not download and
     normalize the entire reference catalogue from Postgres first.
     """
     index = {}
 
-    def quality(item):
-        return sum(bool(str(item.get(field, "") or "").strip()) for field in _REFERENCE_METADATA_FIELDS)
-
     if barcodes is None:
-        rows = db.execute(
-            "SELECT barcode, brand, description, image_url, product_code, source_url FROM product_reference"
-        ).fetchall()
+        rows = db.execute("SELECT * FROM product_reference").fetchall()
     else:
         rows = _rows_for_barcodes(
-            db, "product_reference",
-            "barcode, brand, description, image_url, product_code, source_url",
-            barcodes,
+            db, "product_reference", "*", barcodes,
         )
+    keys = []
+    representative = {}
     for row in rows:
         item = dict(row)
-        keys = {
-            normalized_digits(candidate)
-            for candidate in build_barcode_candidates(item.get("barcode", ""))
-            if normalized_digits(candidate)
+        key = gtin_identity_key(item.get("barcode", ""))
+        if key and key not in representative:
+            representative[key] = item
+            keys.append(key)
+    evidence_rows = []
+    for start in range(0, len(keys), 400):
+        chunk = keys[start:start + 400]
+        placeholders = ",".join("?" for _ in chunk)
+        evidence_rows.extend(db.execute(
+            f"""SELECT * FROM product_reference_evidence
+                WHERE gtin_key IN ({placeholders}) AND active=1
+                  AND verification_status='verified'""",
+            tuple(chunk),
+        ).fetchall())
+    evidence_by_key = {}
+    for row in evidence_rows:
+        evidence = dict(row)
+        evidence_by_key.setdefault(evidence["gtin_key"], {}).setdefault(
+            evidence["field_name"], []
+        ).append(evidence)
+    for key, item in representative.items():
+        combined = {
+            "barcode": item.get("barcode", ""), "gtin_key": key,
+            "_conflicts": {}, "_field_evidence": {},
+            "verification_status": "verified",
         }
-        for key in keys:
-            current = index.get(key)
-            if current is None:
-                index[key] = dict(item)
+        highest = None
+        for field, field_rows in evidence_by_key.get(key, {}).items():
+            if field not in REFERENCE_FIELDS:
                 continue
-            combined = dict(current)
-            item_is_richer = quality(item) > quality(current)
-            for field in _REFERENCE_METADATA_FIELDS:
-                incoming = str(item.get(field, "") or "").strip()
-                if incoming and (item_is_richer or not str(combined.get(field, "") or "").strip()):
-                    combined[field] = incoming
-            index[key] = combined
+            values = {
+                str(evidence.get("field_value", "") or "").strip()
+                for evidence in field_rows
+                if str(evidence.get("field_value", "") or "").strip()
+            }
+            if len(values) == 1:
+                combined[field] = next(iter(values))
+                chosen = max(
+                    field_rows,
+                    key=lambda evidence: (
+                        int(evidence.get("source_priority") or 0),
+                        float(evidence.get("confidence") or 0),
+                        int(evidence.get("id") or 0),
+                    ),
+                )
+                combined["_field_evidence"][field] = chosen
+                if highest is None or int(chosen.get("source_priority") or 0) > int(highest.get("source_priority") or 0):
+                    highest = chosen
+            elif len(values) > 1:
+                combined["_conflicts"][field] = sorted(values)
+        if highest:
+            combined["source"] = highest.get("source", "")
+            combined["source_url"] = highest.get("source_url", "")
+            combined["source_priority"] = highest.get("source_priority", 0)
+            combined["confidence"] = highest.get("confidence", 1.0)
+        index[key] = combined
+        for variant in exact_gtin_variants(item.get("barcode", "")):
+            index[normalized_digits(variant)] = combined
     return index
 
 
 def reference_metadata_for_barcode(reference_index, barcode):
-    """Resolve a catalogue row from a raw UPC, including leading-zero variants."""
-    best = None
-    best_quality = -1
-    for candidate in build_barcode_candidates(barcode):
+    """Resolve one exact commercial package; partial UPCs never qualify."""
+    key = gtin_identity_key(barcode)
+    if key and key in reference_index:
+        return reference_index[key]
+    for candidate in exact_gtin_variants(barcode):
         item = reference_index.get(normalized_digits(candidate))
-        if not item:
-            continue
-        item_quality = sum(
-            bool(str(item.get(field, "") or "").strip())
-            for field in _REFERENCE_METADATA_FIELDS
-        )
-        if item_quality > best_quality:
-            best = item
-            best_quality = item_quality
-    return best or {}
+        if item:
+            return item
+    return {}
 
 
 def merge_reference_metadata(product, reference):
     """Fill blank product metadata from its UPC reference without overwriting edits."""
     merged = dict(product or {})
     reference = reference or {}
+    conflicts = reference.get("_conflicts") or {}
     for field in _REFERENCE_METADATA_FIELDS:
+        if field in conflicts:
+            continue
         if not str(merged.get(field, "") or "").strip():
             value = str(reference.get(field, "") or "").strip()
             if value:
@@ -841,17 +1135,16 @@ def merge_reference_metadata(product, reference):
 def planogram_metadata(existing, reference, barcode, product_code=""):
     """Resolve metadata for a plano row without carrying data across different UPCs."""
     existing = dict(existing or {})
-    incoming_keys = {
-        normalized_digits(candidate) for candidate in build_barcode_candidates(barcode)
-        if normalized_digits(candidate)
+    incoming_key = gtin_identity_key(barcode)
+    existing_key = gtin_identity_key(existing.get("barcode", ""))
+    prior = existing if incoming_key and incoming_key == existing_key else {}
+    anchor = prior or {
+        "barcode": barcode,
+        "name": str(reference.get("name", "") or ""),
+        "brand": str(reference.get("brand", "") or ""),
     }
-    existing_keys = {
-        normalized_digits(candidate)
-        for candidate in build_barcode_candidates(existing.get("barcode", ""))
-        if normalized_digits(candidate)
-    }
-    prior = existing if incoming_keys and incoming_keys & existing_keys else {}
-    metadata = merge_reference_metadata(prior, reference)
+    assessment = assess_metadata_candidate(anchor, reference, match_method="exact_gtin")
+    metadata = merge_reference_metadata(prior, reference) if assessment.auto_apply else dict(prior)
     return {
         "brand": str(metadata.get("brand", "") or "").strip(),
         "description": str(metadata.get("description", "") or "").strip(),
@@ -865,36 +1158,124 @@ def planogram_metadata(existing, reference, barcode, product_code=""):
     }
 
 
-def update_product_metadata_from_reference(db, product, reference, now=None):
-    """Persist a blank-field-only metadata merge for one placed product."""
+def update_product_metadata_from_reference(
+    db, product, reference, now=None, match_method="exact_gtin"
+):
+    """Attach only exact, trusted, conflict-free metadata and retain evidence."""
     original = dict(product or {})
-    merged = merge_reference_metadata(original, reference)
-    if not any(
-        str(merged.get(field, "") or "").strip() != str(original.get(field, "") or "").strip()
-        for field in _REFERENCE_METADATA_FIELDS
-    ):
+    if not original.get("id"):
         return False
-    db.execute(
-        """UPDATE products SET brand=?, description=?, image_url=?, product_code=?, source_url=?, modified_at=?
-           WHERE id=?""",
-        (merged.get("brand", ""), merged.get("description", ""),
-         merged.get("image_url", ""), merged.get("product_code", ""),
-         merged.get("source_url", ""),
-         now or utc_now_iso(), original["id"]),
-    )
-    product.update(merged)
-    return True
+    timestamp = now or utc_now_iso()
+    assessment = assess_metadata_candidate(original, reference, match_method=match_method)
+    source = str(reference.get("source", "") or "")
+    source_url = str(reference.get("source_url", "") or "")
+    conflicts = dict(reference.get("_conflicts") or {})
+    for issue in assessment.issues:
+        create_review_issue(
+            db, original["id"], issue["type"], field_name=issue.get("field", ""),
+            existing_value=original.get(issue.get("field", ""), ""),
+            candidate_value=reference.get(issue.get("field", ""), ""),
+            source=source, source_url=source_url, match_method=match_method,
+            confidence=assessment.confidence, details=issue, created_at=timestamp,
+        )
+    for field, values in conflicts.items():
+        create_review_issue(
+            db, original["id"], "multiple_possible_matches", field_name=field,
+            existing_value=original.get(field, ""), candidate_value=" | ".join(values),
+            source=source, source_url=source_url, match_method=match_method,
+            details={"reference_conflict": values}, created_at=timestamp,
+        )
+
+    merged = dict(original)
+    changed_fields = {}
+    for field in _REFERENCE_METADATA_FIELDS:
+        incoming = str(reference.get(field, "") or "").strip()
+        current = str(original.get(field, "") or "").strip()
+        if not incoming or field in conflicts:
+            continue
+        field_evidence = dict(
+            (reference.get("_field_evidence") or {}).get(field) or {}
+        )
+        field_source = str(field_evidence.get("source", "") or source)
+        field_source_url = str(
+            field_evidence.get("source_url", "") or source_url
+        )
+        field_confidence = float(
+            field_evidence.get("confidence", assessment.confidence) or 0
+        )
+        field_verified = (
+            field_evidence.get("verification_status") == "verified"
+        )
+        field_auto_apply = assessment.accepted and (
+            field_verified if field_evidence else assessment.auto_apply
+        )
+        previous_evidence = field_evidence_for_value(
+            db, original["id"], field, incoming
+        )
+        if previous_evidence.get("verification_status") == "rejected":
+            continue
+        status = "verified" if field_auto_apply else assessment.verification_status
+        record_field_evidence(
+            db, original["id"], field, incoming, source=field_source,
+            source_url=field_source_url, source_record_id=reference.get("barcode", ""),
+            match_method=match_method, confidence=field_confidence,
+            verification_status=status, imported_at=timestamp,
+            last_verified_at=timestamp if status == "verified" else "",
+            active=bool(current == incoming and status == "verified"),
+        )
+        if current and current != incoming:
+            issue_type = {
+                "image_url": "possible_wrong_image",
+                "description": "possible_wrong_description",
+            }.get(field, f"{field}_conflict")
+            create_review_issue(
+                db, original["id"], issue_type, field_name=field,
+                existing_value=current, candidate_value=incoming,
+                source=field_source, source_url=field_source_url, match_method=match_method,
+                confidence=field_confidence, created_at=timestamp,
+            )
+            continue
+        if not current and assessment.accepted and not field_auto_apply:
+            create_review_issue(
+                db, original["id"], "unverified_suggestion", field_name=field,
+                existing_value="", candidate_value=incoming,
+                source=field_source, source_url=field_source_url,
+                match_method=match_method, confidence=field_confidence,
+                details={"reason": "source_requires_manual_verification"},
+                created_at=timestamp,
+            )
+        if not current and field_auto_apply:
+            merged[field] = incoming
+            changed_fields[field] = incoming
+            record_field_evidence(
+                db, original["id"], field, incoming, source=field_source,
+                source_url=field_source_url, source_record_id=reference.get("barcode", ""),
+                match_method=match_method, confidence=field_confidence,
+                verification_status="verified", imported_at=timestamp,
+                last_verified_at=timestamp, active=True,
+            )
+    if changed_fields:
+        changed_fields["primary_source"] = source
+        changed_fields["primary_source_url"] = source_url
+        changed_fields["modified_at"] = timestamp
+        assignments = ", ".join(f"{field}=?" for field in changed_fields)
+        db.execute(
+            f"UPDATE products SET {assignments} WHERE id=?",
+            tuple(changed_fields.values()) + (original["id"],),
+        )
+        product.update(merged)
+        product.update(changed_fields)
+    return bool(changed_fields)
 
 
 def sync_reference_metadata_to_products(db, now=None):
-    """Backfill every placed product from the enriched catalogue by equivalent UPC."""
+    """Backfill only exact, trusted packages; uncertain rows become review issues."""
     reference_index = build_reference_metadata_index(db)
     if not reference_index:
         return 0
     linked = 0
     rows = db.execute(
-        """SELECT id, barcode, brand, description, image_url, product_code, source_url
-           FROM products WHERE TRIM(COALESCE(barcode,'')) <> ''"""
+        "SELECT * FROM products WHERE TRIM(COALESCE(barcode,'')) <> ''"
     ).fetchall()
     for row in rows:
         product = dict(row)
@@ -902,6 +1283,426 @@ def sync_reference_metadata_to_products(db, now=None):
         if reference and update_product_metadata_from_reference(db, product, reference, now=now):
             linked += 1
     return linked
+
+
+_QUALITY_ISSUE_TYPES = (
+    "upc_conflict", "identifier_conflict", "brand_conflict", "product_name_conflict",
+    "package_size_conflict", "strength_conflict", "variant_conflict",
+    "format_conflict", "multiple_possible_matches", "possible_wrong_image",
+    "possible_wrong_description", "missing_description", "missing_image",
+    "unverified_suggestion",
+)
+
+
+def _resolve_quality_issue(
+    db, product_id, issue_type, now, employee="system", field_name=None
+):
+    try:
+        field_clause = " AND field_name=?" if field_name is not None else ""
+        params = [now, str(employee or "system")[:80], int(product_id), issue_type]
+        if field_name is not None:
+            params.append(str(field_name))
+        db.execute(
+            """UPDATE product_data_issues SET status='resolved', resolved_at=?, resolved_by=?
+               WHERE product_id=? AND issue_type=? AND status='open'"""
+            + field_clause,
+            tuple(params),
+        )
+    except Exception:
+        pass
+
+
+def _field_verification_status(db, product_id, field_name, value):
+    if not str(value or "").strip():
+        return "missing"
+    evidence = active_field_evidence(db, product_id, field_name)
+    return "verified" if (
+        evidence.get("verification_status") == "verified"
+        and str(evidence.get("field_value", "") or "").strip()
+        == str(value or "").strip()
+    ) else "unverified"
+
+
+def _record_import_identifiers(db, product, now, source="Planogramme", payload=None):
+    raw = dict(payload or {})
+    product_id = product.get("id")
+    barcode = str(product.get("barcode", "") or "").strip()
+    code = str(
+        product.get("product_code", "") or raw.get("code_familiprix", "")
+        or raw.get("product_code", "") or ""
+    ).strip()
+    valid_gtin = bool(barcode and gtin_check_digit_valid(barcode))
+    if barcode:
+        upsert_product_identifier(
+            db, product_id, "GTIN", barcode, is_primary=True,
+            source=source, source_record_id=code, match_method="exact_gtin",
+            confidence=1.0 if valid_gtin else 0.5,
+            verification_status="verified" if valid_gtin else "requires_review",
+            imported_at=now, last_verified_at=now if valid_gtin else "",
+        )
+    if code:
+        upsert_product_identifier(
+            db, product_id, "FAMILIPRIX_CODE", code, is_primary=not barcode,
+            source=source, source_record_id=barcode,
+            match_method="exact_familiprix_code", confidence=1.0,
+            verification_status="verified", imported_at=now, last_verified_at=now,
+        )
+    identifier_fields = (
+        ("MANUFACTURER_PART_NUMBER", ("manufacturer_part_number", "mpn"), ""),
+        ("SUPPLIER_ITEM_NUMBER", ("supplier_item_number", "supplier_code"), ""),
+        ("WHOLESALER_ITEM_NUMBER", ("wholesaler_item_number", "wholesaler_code"), ""),
+        ("CASE_GTIN", ("case_gtin",), ""),
+        ("INNER_GTIN", ("inner_gtin", "inner_package_gtin"), ""),
+        ("DIN", ("din",), "Health Canada"),
+        ("NPN", ("npn",), "Health Canada"),
+        ("DIN_HM", ("din_hm", "din-hm"), "Health Canada"),
+        ("PIN", ("pin",), str(raw.get("pin_authority", "") or "")),
+        ("NIP", ("nip",), str(raw.get("nip_authority", "") or "")),
+        ("PSEUDO_DIN", ("pseudo_din", "pseudo-din"), str(raw.get("pseudo_din_authority", "") or "")),
+        ("RAMQ_BILLING_CODE", ("ramq_billing_code",), "RAMQ"),
+        ("INSURER_BILLING_CODE", ("insurer_billing_code",), str(raw.get("insurer_authority", "") or "")),
+        ("HEALTH_CANADA_ID", ("health_canada_id",), "Health Canada"),
+        ("CLINICAL_ID", ("clinical_identifier",), str(raw.get("clinical_identifier_authority", "") or "")),
+    )
+    source_type, _source_priority = classify_source(source, "")
+    regulated_types = {
+        "DIN", "NPN", "DIN_HM", "PIN", "NIP", "PSEUDO_DIN",
+        "RAMQ_BILLING_CODE", "INSURER_BILLING_CODE", "HEALTH_CANADA_ID",
+        "CLINICAL_ID",
+    }
+    for identifier_type, keys, authority in identifier_fields:
+        value = next((str(raw.get(key, "") or "").strip() for key in keys if str(raw.get(key, "") or "").strip()), "")
+        if not value:
+            continue
+        regulatory_verified = (
+            identifier_type not in regulated_types
+            or source_type in {"health_canada", "manual"}
+        )
+        saved = upsert_product_identifier(
+            db, product_id, identifier_type, value, authority=authority,
+            source=source, source_record_id=code or barcode,
+            match_method="imported_typed_identifier",
+            confidence=1.0 if regulatory_verified else 0.7,
+            verification_status="verified" if regulatory_verified else "requires_review",
+            imported_at=now,
+            last_verified_at=now if regulatory_verified else "",
+            package_level="case" if identifier_type == "CASE_GTIN" else (
+                "inner_package" if identifier_type == "INNER_GTIN" else "sellable_unit"
+            ),
+        )
+        if saved and not regulatory_verified:
+            create_review_issue(
+                db, product_id, "identifier_conflict",
+                existing_value="", candidate_value=f"{identifier_type}: {value}",
+                source=source, match_method="regulatory_identifier_requires_source",
+                confidence=0.7,
+                details={
+                    "identifier_type": identifier_type,
+                    "authority": authority,
+                    "reason": "official_or_manual_verification_required",
+                },
+                created_at=now,
+            )
+    alias_payload = dict(raw)
+    alias_payload.setdefault("name", product.get("name", ""))
+    alias_payload.setdefault("brand", product.get("brand", ""))
+    alias_payload.setdefault(
+        "name_fr", raw.get("official_name_fr", "")
+    )
+    alias_payload.setdefault(
+        "name_en", raw.get("official_name_en", "")
+    )
+    sync_basic_aliases(
+        db, product_id, alias_payload, source=source, verified=True
+    )
+    return valid_gtin
+
+
+def audit_product_data(db, product_ids=None, trigger_type="manual", employee="system", now=None):
+    """Audit package identity and metadata without guessing or changing location."""
+    timestamp = now or utc_now_iso()
+    params = []
+    query = "SELECT * FROM products"
+    clean_ids = []
+    for value in product_ids or []:
+        try:
+            product_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if product_id > 0 and product_id not in clean_ids:
+            clean_ids.append(product_id)
+    if clean_ids:
+        placeholders = ",".join("?" for _ in clean_ids)
+        query += f" WHERE id IN ({placeholders})"
+        params = clean_ids
+    rows = [dict(row) for row in db.execute(query, tuple(params)).fetchall()]
+    references = build_reference_metadata_index(
+        db, [row.get("barcode", "") for row in rows]
+    ) if rows else {}
+    review_reference_evidence = {}
+    review_keys = sorted({
+        gtin_identity_key(row.get("barcode", "")) for row in rows
+        if gtin_identity_key(row.get("barcode", ""))
+    })
+    for start in range(0, len(review_keys), 400):
+        chunk = review_keys[start:start + 400]
+        placeholders = ",".join("?" for _ in chunk)
+        candidate_rows = db.execute(
+            f"""SELECT * FROM product_reference_evidence
+                WHERE gtin_key IN ({placeholders}) AND active=0
+                  AND verification_status IN ('requires_review','unverified')
+                ORDER BY source_priority DESC, confidence DESC, id DESC""",
+            tuple(chunk),
+        ).fetchall()
+        for candidate_row in candidate_rows:
+            candidate = dict(candidate_row)
+            if candidate.get("field_name") not in FIELD_NAMES:
+                continue
+            review_reference_evidence.setdefault(
+                candidate["gtin_key"], {}
+            ).setdefault(candidate["field_name"], []).append(candidate)
+    run_id = 0
+    try:
+        cursor = db.execute(
+            """INSERT INTO product_quality_runs
+               (started_at, trigger_type, status, employee, scanned, updated, issues)
+               VALUES (?, ?, 'running', ?, 0, 0, 0)""",
+            (timestamp, str(trigger_type)[:80], str(employee or "system")[:80]),
+        )
+        run_id = int(getattr(cursor, "lastrowid", 0) or 0)
+        if not run_id:
+            run_row = db.execute(
+                """SELECT id FROM product_quality_runs
+                   WHERE started_at=? AND trigger_type=? AND employee=?
+                   ORDER BY id DESC LIMIT 1""",
+                (timestamp, str(trigger_type)[:80], str(employee or "system")[:80]),
+            ).fetchone()
+            run_id = int(first_column(run_row) or 0)
+    except Exception:
+        pass
+
+    scanned = updated = issue_total = 0
+    status_counts = {}
+    for product in rows:
+        scanned += 1
+        product_id = int(product["id"])
+
+        valid_gtin = _record_import_identifiers(db, product, timestamp)
+        barcode = str(product.get("barcode", "") or "").strip()
+        gtin_key = gtin_identity_key(barcode)
+        identity_status = "verified" if valid_gtin else "requires_review"
+        if not barcode:
+            identity_status = "missing"
+            create_review_issue(
+                db, product_id, "upc_conflict", field_name="barcode",
+                existing_value="", candidate_value="", source="Planogramme",
+                match_method="missing_identifier", details={"reason": "missing_gtin"},
+                created_at=timestamp,
+            )
+        elif not valid_gtin:
+            create_review_issue(
+                db, product_id, "upc_conflict", field_name="barcode",
+                existing_value=barcode, source="Planogramme",
+                match_method="invalid_gtin", confidence=0.5,
+                details={"reason": "invalid_or_nonstandard_gtin"}, created_at=timestamp,
+            )
+        else:
+            _resolve_quality_issue(
+                db, product_id, "upc_conflict", timestamp, employee
+            )
+
+        name = str(product.get("name", "") or "").strip()
+        if name:
+            current_name_evidence = active_field_evidence(
+                db, product_id, "name"
+            )
+            if not (
+                current_name_evidence.get("verification_status") == "verified"
+                and str(current_name_evidence.get("field_value", "") or "").strip()
+                == name
+            ):
+                record_field_evidence(
+                    db, product_id, "name", name,
+                    source="Planogramme" if product.get("is_plano") else "Fiche magasin",
+                    source_record_id=product.get("product_code", "") or barcode,
+                    match_method="exact_gtin" if barcode else "store_product_row",
+                    confidence=1.0, verification_status="verified",
+                    imported_at=timestamp, last_verified_at=timestamp,
+                    active=True,
+                )
+        sync_basic_aliases(db, product_id, product, source="Planogramme", verified=bool(name))
+
+        reference = reference_metadata_for_barcode(references, barcode)
+        if reference:
+            if update_product_metadata_from_reference(db, product, reference, now=timestamp):
+                updated += 1
+            refreshed = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
+            if refreshed:
+                product = dict(refreshed)
+
+        for field, candidate_rows in review_reference_evidence.get(
+            gtin_key, {}
+        ).items():
+            values = list(dict.fromkeys(
+                str(candidate.get("field_value", "") or "").strip()
+                for candidate in candidate_rows
+                if str(candidate.get("field_value", "") or "").strip()
+            ))
+            if not values:
+                continue
+            current = str(product.get(field, "") or "").strip()
+            active = active_field_evidence(db, product_id, field)
+            if (
+                len(values) == 1 and current == values[0]
+                and active.get("verification_status") == "verified"
+            ):
+                continue
+            top = candidate_rows[0]
+            if len(values) > 1:
+                issue_type = "multiple_possible_matches"
+                candidate_value = " | ".join(values[:8])
+            else:
+                issue_type = {
+                    "image_url": "possible_wrong_image",
+                    "description": "possible_wrong_description",
+                }.get(field, "unverified_suggestion")
+                candidate_value = values[0]
+            create_review_issue(
+                db, product_id, issue_type, field_name=field,
+                existing_value=current, candidate_value=candidate_value,
+                source=top.get("source", ""),
+                source_url=top.get("source_url", ""),
+                match_method=top.get("match_method", "exact_gtin"),
+                confidence=top.get("confidence", 0),
+                details={
+                    "reason": "reference_evidence_requires_review",
+                    "candidate_count": len(values),
+                },
+                created_at=timestamp,
+            )
+
+        description = str(product.get("description", "") or "").strip()
+        image_url = str(product.get("image_url", "") or "").strip()
+        if not description:
+            create_review_issue(
+                db, product_id, "missing_description", field_name="description",
+                source="quality_audit", match_method="missing_field", created_at=timestamp,
+            )
+        else:
+            _resolve_quality_issue(
+                db, product_id, "missing_description", timestamp, employee
+            )
+        if not image_url:
+            create_review_issue(
+                db, product_id, "missing_image", field_name="image_url",
+                source="quality_audit", match_method="missing_field", created_at=timestamp,
+            )
+        else:
+            _resolve_quality_issue(
+                db, product_id, "missing_image", timestamp, employee
+            )
+
+        name_status = _field_verification_status(db, product_id, "name", name)
+        description_status = _field_verification_status(
+            db, product_id, "description", description
+        )
+        image_status = _field_verification_status(db, product_id, "image_url", image_url)
+        if description and description_status != "verified":
+            create_review_issue(
+                db, product_id, "possible_wrong_description",
+                field_name="description", existing_value=description,
+                source=product.get("primary_source", "legacy_catalogue"),
+                source_url=product.get("primary_source_url", "") or product.get("source_url", ""),
+                match_method="legacy_value_without_evidence", confidence=0.0,
+                details={"reason": "no_verified_field_provenance"},
+                created_at=timestamp,
+            )
+        if image_url and image_status != "verified":
+            create_review_issue(
+                db, product_id, "possible_wrong_image",
+                field_name="image_url", existing_value=image_url,
+                source=product.get("primary_source", "legacy_catalogue"),
+                source_url=product.get("primary_source_url", "") or product.get("source_url", ""),
+                match_method="legacy_value_without_evidence", confidence=0.0,
+                details={"reason": "no_verified_field_provenance"},
+                created_at=timestamp,
+            )
+        for field in sorted(
+            FIELD_NAMES - {"name", "description", "image_url"}
+        ):
+            value = str(product.get(field, "") or "").strip()
+            if not value:
+                continue
+            evidence = active_field_evidence(db, product_id, field)
+            if (
+                evidence.get("verification_status") == "verified"
+                and str(evidence.get("field_value", "") or "").strip()
+                == value
+            ):
+                _resolve_quality_issue(
+                    db, product_id, "unverified_suggestion", timestamp,
+                    employee, field_name=field,
+                )
+                continue
+            create_review_issue(
+                db, product_id, "unverified_suggestion",
+                field_name=field, existing_value=value,
+                source=product.get("primary_source", "legacy_catalogue"),
+                source_url=(
+                    product.get("primary_source_url", "")
+                    or product.get("source_url", "")
+                ),
+                match_method="legacy_value_without_evidence", confidence=0.0,
+                details={"reason": "no_verified_field_provenance"},
+                created_at=timestamp,
+            )
+        open_issues = db.execute(
+            "SELECT issue_type FROM product_data_issues WHERE product_id=? AND status='open'",
+            (product_id,),
+        ).fetchall()
+        issue_types = {
+            row["issue_type"] if isinstance(row, dict) else row[0] for row in open_issues
+        }
+        conflict_issues = issue_types - {"missing_description", "missing_image"}
+        if conflict_issues:
+            data_status = "requires_manual_review"
+            if "possible_wrong_image" in conflict_issues:
+                image_status = "possible_wrong"
+            if "possible_wrong_description" in conflict_issues:
+                description_status = "possible_wrong"
+        elif not description:
+            data_status = "missing_description"
+        elif not image_url:
+            data_status = "missing_image"
+        elif all(status == "verified" for status in (
+            identity_status, name_status, description_status, image_status
+        )):
+            data_status = "complete_verified"
+        else:
+            data_status = "complete_unverified"
+        issue_count = len(issue_types)
+        issue_total += issue_count
+        status_counts[data_status] = status_counts.get(data_status, 0) + 1
+        db.execute(
+            """UPDATE products SET gtin_key=?, data_status=?, identity_status=?,
+               name_status=?, description_status=?, image_status=?,
+               quality_checked_at=?, quality_issue_count=? WHERE id=?""",
+            (
+                gtin_key, data_status, identity_status, name_status,
+                description_status, image_status, timestamp, issue_count, product_id,
+            ),
+        )
+
+    if run_id:
+        db.execute(
+            """UPDATE product_quality_runs SET completed_at=?, status='complete',
+               scanned=?, updated=?, issues=? WHERE id=?""",
+            (timestamp, scanned, updated, issue_total, run_id),
+        )
+    return {
+        "success": True, "run_id": run_id, "scanned": scanned,
+        "updated": updated, "issues": issue_total, "statuses": status_counts,
+    }
 
 
 # A coalescing queue keeps exactly one image worker alive. Repeated Client searches
@@ -916,26 +1717,37 @@ _IMAGE_MISS_RETRY_SECONDS = 15 * 60
 _IMAGE_ERROR_RETRY_SECONDS = 30
 
 
-def persist_image_for_barcode(db, barcode, image_url, now=None):
-    """Fill blank placed/reference images for every equivalent UPC spelling."""
+def persist_image_for_barcode(db, barcode, image_url, now=None, source="", source_url="", candidate=None):
+    """Store an exact-package image suggestion; auto-attach only if verified."""
     image_url = str(image_url or "").strip()
     if not image_url:
         return 0
     changed = 0
+    product_ids = set()
     timestamp = now or utc_now_iso()
-    for candidate in build_barcode_candidates(barcode):
-        cursor = db.execute(
-            "UPDATE products SET image_url=?, modified_at=? "
-            "WHERE barcode=? AND TRIM(COALESCE(image_url,'')) = ''",
-            (image_url, timestamp, candidate),
+    metadata = dict(candidate or {})
+    metadata.update({
+        "barcode": barcode,
+        "image_url": image_url,
+        "source": source or metadata.get("source", ""),
+        "source_url": source_url or metadata.get("source_url", ""),
+    })
+    for exact_value in exact_gtin_variants(barcode):
+        rows = db.execute("SELECT * FROM products WHERE barcode=?", (exact_value,)).fetchall()
+        for row in rows:
+            product = dict(row)
+            if product.get("id"):
+                product_ids.add(int(product["id"]))
+            if update_product_metadata_from_reference(db, product, metadata, now=timestamp):
+                changed += 1
+    result = upsert_reference_candidate(db, metadata, imported_at=timestamp)
+    if result.get("stored"):
+        changed += 1
+    if product_ids:
+        audit_product_data(
+            db, sorted(product_ids), trigger_type="background_enrichment",
+            employee="system", now=timestamp,
         )
-        changed += max(0, int(cursor.rowcount or 0))
-        reference_cursor = db.execute(
-            "UPDATE product_reference SET image_url=?, updated_at=? "
-            "WHERE barcode=? AND TRIM(COALESCE(image_url,'')) = ''",
-            (image_url, timestamp, candidate),
-        )
-        changed += max(0, int(reference_cursor.rowcount or 0))
     return changed
 
 
@@ -999,16 +1811,32 @@ def schedule_image_fill(barcodes, priority=True):
                     # Reuse an image already known for this UPC (including the
                     # reference catalogue); only then fan out to online sources.
                     img = find_existing_image_for_barcode(db, bc)
-                    if not img:
+                    product = None
+                    exact_values = exact_gtin_variants(bc)
+                    needs_description = False
+                    for exact_value in exact_values:
+                        status_rows = db.execute(
+                            """SELECT description, description_status FROM products
+                               WHERE barcode=?""",
+                            (exact_value,),
+                        ).fetchall()
+                        if any(
+                            not str(dict(row).get("description", "") or "").strip()
+                            or dict(row).get("description_status") != "verified"
+                            for row in status_rows
+                        ):
+                            needs_description = True
+                            break
+                    if not img or needs_description:
                         # Online pages and parsers are the memory-heavy part. Keep
                         # background lookups out of PDF parsing and wait for each
                         # lookup's source requests to finish before starting another.
                         with memory_intensive_task("product_image"):
                             product = lookup_product_online(
                                 bc, max_workers=2, wait_for_cleanup=True,
-                                require_image=True,
+                                require_image=not bool(img),
                             )
-                        img = str((product or {}).get("image_url", "")).strip()
+                        img = img or str((product or {}).get("image_url", "")).strip()
                         # Exact UPC sources are still checked against the imported
                         # catalogue name before their image is attached.
                         catalog_rows = _rows_for_barcodes(
@@ -1021,14 +1849,20 @@ def schedule_image_fill(barcodes, priority=True):
                         if img and catalog_rows:
                             catalog = dict(catalog_rows[0])
                             if not online_matches_catalog(
-                                catalog.get("name", ""), catalog.get("brand", ""), product
+                                catalog.get("name", ""), catalog.get("brand", ""),
+                                product, bc,
                             ):
                                 img = ""
                     if img:
                         now = utc_now_iso()
                         # Save both on the shelf and in the reusable UPC catalogue
                         # so a later re-import displays the picture immediately.
-                        changed = persist_image_for_barcode(db, bc, img, now=now)
+                        changed = persist_image_for_barcode(
+                            db, bc, img, now=now,
+                            source=(product or {}).get("source", "Manual verified exact GTIN cache"),
+                            source_url=(product or {}).get("source_url", ""),
+                            candidate=product,
+                        )
                         if changed:
                             db.commit()
                         with _IMAGE_FILL_STATE_LOCK:
@@ -1084,24 +1918,28 @@ def hydrate_candidate_images(products):
 
     barcodes = [product.get("barcode", "") for product in missing]
     image_by_barcode = {}
-    for table in ("products", "product_reference"):
-        for row in _rows_for_barcodes(db, table, "barcode, image_url", barcodes):
-            item = dict(row)
-            image_url = str(item.get("image_url", "") or "").strip()
-            if not image_url:
-                continue
-            for candidate in build_barcode_candidates(item.get("barcode", "")):
-                key = normalized_digits(candidate)
-                if key:
-                    image_by_barcode.setdefault(key, image_url)
+    for row in _rows_for_barcodes(
+        db, "products", "barcode, image_url, image_status", barcodes
+    ):
+        item = dict(row)
+        image_url = str(item.get("image_url", "") or "").strip()
+        if not image_url or item.get("image_status") != "verified":
+            continue
+        key = gtin_identity_key(item.get("barcode", ""))
+        if key:
+            image_by_barcode.setdefault(key, image_url)
+    references = build_reference_metadata_index(db, barcodes)
+    for barcode in barcodes:
+        reference = reference_metadata_for_barcode(references, barcode)
+        image_url = str(reference.get("image_url", "") or "").strip()
+        key = gtin_identity_key(barcode)
+        if key and image_url:
+            image_by_barcode.setdefault(key, image_url)
 
     for product in missing:
         barcode = str(product.get("barcode", "") or "").strip()
         image_url = ""
-        for candidate in build_barcode_candidates(barcode):
-            image_url = image_by_barcode.get(normalized_digits(candidate), "")
-            if image_url:
-                break
+        image_url = image_by_barcode.get(gtin_identity_key(barcode), "")
         if image_url:
             product["image_url"] = image_url
     # Persist reused images and resolve unknown ones off the request thread.
@@ -1187,6 +2025,8 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None):
     exclude = exclude_barcodes or set()
     ranked = []
     for row in _reference_corpus(db):
+        if row.get("store_presence_status") != "planogram_imported":
+            continue
         if row["_bc"] and row["_bc"] in exclude:
             continue
         score = _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs)
@@ -1427,7 +2267,10 @@ def get_products():
     etag = hashlib.sha256(repr(products_state_key(db)).encode()).hexdigest()
     if client_etag_matches(etag):
         return "", 304
-    products = sorted((item for item, _ in _products_corpus(db)), key=location_sort_key)
+    products = sorted(
+        (public_product_payload(item) for item, _ in _products_corpus(db)),
+        key=location_sort_key,
+    )
     response = jsonify(products)
     response.set_etag(etag, weak=True)
     return response
@@ -1453,12 +2296,15 @@ def get_product_images():
     images = {}
     placeholders = ",".join("?" for _ in ids)
     rows = db.execute(
-        f"SELECT id, image_url, barcode FROM products WHERE id IN ({placeholders})", tuple(ids)
+        f"SELECT id, image_url, image_status, barcode FROM products WHERE id IN ({placeholders})", tuple(ids)
     ).fetchall()
     missing_barcodes = []
     for row in rows:
         item = dict(row)
-        value = str(item.get("image_url", "") or "").strip()
+        value = (
+            str(item.get("image_url", "") or "").strip()
+            if item.get("image_status") == "verified" else ""
+        )
         if value:
             images[str(item["id"])] = value
         elif str(item.get("barcode", "") or "").strip():
@@ -1511,7 +2357,7 @@ def search_products():
     corpus = _products_corpus(db)   # cached: no per-request fetch + re-normalization
     if field == "code":
         items = rank_products_by_code([item for item, _ in corpus], query, limit=limit)
-        return jsonify(items)
+        return jsonify([public_product_payload(item) for item in items])
     nq = normalize_search_text(query)
     dq = normalized_digits(query)
     qtokens = list(dict.fromkeys(tokenize_search_query(query)))
@@ -1526,7 +2372,9 @@ def search_products():
             ranked.append((score, item))
     ranked.sort(key=lambda e: (-e[0], 1 if e[1].get("in_stock") == 0 else 0,
                                location_sort_key(e[1])))
-    return jsonify([item for _, item in ranked[:limit]])
+    return jsonify([
+        public_product_payload(item) for _, item in ranked[:limit]
+    ])
 
 
 @products_bp.route("/api/client/find", methods=["GET"])
@@ -1567,7 +2415,9 @@ def client_find():
         if s >= MIN_SCORE:
             scored.append((s, 0, item))
     scored.sort(key=lambda x: (-x[0], x[1], str(x[2].get("name", "")).lower()))
-    return jsonify([it for _, _, it in scored[:limit]])
+    return jsonify([
+        public_product_payload(item) for _, _, item in scored[:limit]
+    ])
 
 
 @products_bp.route("/api/products/reference-search", methods=["GET"])
@@ -1594,7 +2444,7 @@ def get_by_barcode(barcode):
             "SELECT * FROM products WHERE barcode = ? ORDER BY id LIMIT 1", (candidate,)
         ).fetchone()
         if product:
-            return jsonify(row_to_product(product))
+            return jsonify(row_to_verified_product(db, product))
     return jsonify({"error": "Produit non trouvé"}), 404
 
 
@@ -1658,15 +2508,23 @@ def add_product():
         return jsonify({"error": integrity_conflict_message(exc)}), 409
     db.commit()
     product_id = cursor.lastrowid
+    try:
+        audit_product_data(
+            db, [product_id], trigger_type="manual_product_add",
+            employee=username,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
     product = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
     from routes.gist import _schedule_gist_backup
     _schedule_gist_backup(db)
-    if not image_url and barcode:
-        schedule_image_fill([barcode])   # fetch a picture online in the background
+    if barcode and (not image_url or not description):
+        schedule_image_fill([barcode])
     return jsonify({
         "success": True,
         "message": f'"{name}" ajoute avec succes!',
-        "product": row_to_product(product) if product else None
+        "product": row_to_verified_product(db, product) if product else None
     })
 
 
@@ -1739,10 +2597,23 @@ def update_product(product_id):
     except DatabaseIntegrityError as exc:
         return jsonify({"error": integrity_conflict_message(exc)}), 409
     db.commit()
+    try:
+        audit_product_data(
+            db, [product_id], trigger_type="manual_product_update",
+            employee=username,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
     product = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
     from routes.gist import _schedule_gist_backup
     _schedule_gist_backup(db)
-    return jsonify({"success": True, "product": row_to_product(product)})
+    effective_description = str(
+        data.get("description", existing["description"]) or ""
+    ).strip()
+    if new_barcode and (not resolved_image or not effective_description):
+        schedule_image_fill([new_barcode])
+    return jsonify({"success": True, "product": row_to_verified_product(db, product)})
 
 
 @products_bp.route("/api/products/<int:product_id>", methods=["DELETE"])
@@ -1804,7 +2675,7 @@ def set_product_stock(product_id):
         return jsonify({"error": "Produit non trouvé."}), 404
     db.commit()
     product = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
-    return jsonify({"success": True, "product": row_to_product(product)})
+    return jsonify({"success": True, "product": row_to_verified_product(db, product)})
 
 
 @products_bp.route("/api/products/<int:product_id>/flipped-label", methods=["POST"])
@@ -1835,7 +2706,7 @@ def set_flipped_label(product_id):
         return jsonify({"error": "Produit non trouvé."}), 404
     db.commit()
     product = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
-    return jsonify({"success": True, "product": row_to_product(product)})
+    return jsonify({"success": True, "product": row_to_verified_product(db, product)})
 
 
 @products_bp.route("/api/products/<int:product_id>/plano", methods=["POST"])
@@ -1855,7 +2726,7 @@ def set_is_plano(product_id):
         return jsonify({"error": "Produit non trouvé."}), 404
     db.commit()
     product = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
-    return jsonify({"success": True, "product": row_to_product(product)})
+    return jsonify({"success": True, "product": row_to_verified_product(db, product)})
 
 
 def fixture_for_side(config, side):
@@ -2022,6 +2893,9 @@ def bulk_import_products():
     filtered_non_stock = 0
     lines = []
     for p in products:
+        if p.get("barcode") not in (None, "") and not isinstance(p.get("barcode"), str):
+            errors += 1
+            continue
         try:
             tab = int(p.get("tablette", 0))
             pos = int(p.get("position", 0))
@@ -2086,20 +2960,35 @@ def bulk_import_products():
         ).fetchall()
     ]
     existing_slots = {}
-    existing_by_barcode = {}
+    existing_by_barcode_rows = {}
     for d in existing_rows:
         existing_slots[(str(d["section"]), str(d["shelf"]), str(d["position"]))] = d
-        metadata_quality = sum(bool(str(d.get(field, "") or "").strip()) for field in (
-            "brand", "description", "image_url", "source_url", "usage_notes",
-            "alternative_suggestions", "product_code",
-        ))
-        for candidate in build_barcode_candidates(d.get("barcode", "")):
-            key = normalized_digits(candidate)
-            current = existing_by_barcode.get(key) if key else None
-            if key and (
-                current is None or metadata_quality > current[0]
-            ):
-                existing_by_barcode[key] = (metadata_quality, d)
+        key = gtin_identity_key(d.get("barcode", ""))
+        if key:
+            existing_by_barcode_rows.setdefault(key, []).append(d)
+
+    # Cross-location reuse is field-by-field and verified only. Selecting the
+    # row with the most filled columns silently carried corrupted descriptions
+    # and pictures into a fresh planogram import.
+    existing_by_barcode = {}
+    status_by_field = {
+        "description": "description_status", "image_url": "image_status",
+        "source_url": "description_status",
+    }
+    for key, rows_for_key in existing_by_barcode_rows.items():
+        snapshot = {"barcode": rows_for_key[0].get("barcode", "")}
+        snapshot["_verified_fields"] = []
+        for field, status_field in status_by_field.items():
+            values = {
+                str(item.get(field, "") or "").strip()
+                for item in rows_for_key
+                if str(item.get(field, "") or "").strip()
+                and str(item.get(status_field, "") or "") == "verified"
+            }
+            if len(values) == 1:
+                snapshot[field] = next(iter(values))
+                snapshot["_verified_fields"].append(field)
+        existing_by_barcode[key] = snapshot
 
     # Replacement is tablet-level, not position-level. Otherwise an old product
     # survives whenever the new plano leaves a gap inside the same tablet. Keep a
@@ -2114,15 +3003,17 @@ def bulk_import_products():
     reference_index = build_reference_metadata_index(db, incoming_barcodes)
     image_by_barcode = {}
     for r in _rows_for_barcodes(
-        db, "products", "barcode, image_url", incoming_barcodes
+        db, "products", "barcode, image_url, image_status", incoming_barcodes
     ):
         d = dict(r)
-        if not str(d.get("image_url", "") or "").strip():
+        if (
+            not str(d.get("image_url", "") or "").strip()
+            or d.get("image_status") != "verified"
+        ):
             continue
-        for candidate in build_barcode_candidates(d.get("barcode", "")):
-            key = normalized_digits(candidate)
-            if key:
-                image_by_barcode.setdefault(key, d["image_url"])
+        key = gtin_identity_key(d.get("barcode", ""))
+        if key:
+            image_by_barcode.setdefault(key, d["image_url"])
 
     replaced_removed = 0
     if replace and touched_shelves:
@@ -2141,6 +3032,7 @@ def bulk_import_products():
             db, replaced_rows, username, now
         )
 
+    imported_product_ids = []
     for (sec_no, shelf_no, pos_no, ln) in placements:
         p = ln["p"]
         section_s, shelf_s, position_s = str(sec_no), str(shelf_no), str(pos_no)
@@ -2168,22 +3060,10 @@ def bulk_import_products():
                 continue
             reference = reference_metadata_for_barcode(reference_index, barcode)
             metadata_source = existing
-            incoming_keys = {
-                normalized_digits(candidate)
-                for candidate in build_barcode_candidates(barcode)
-                if normalized_digits(candidate)
-            }
-            existing_keys = {
-                normalized_digits(candidate)
-                for candidate in build_barcode_candidates((existing or {}).get("barcode", ""))
-                if normalized_digits(candidate)
-            }
-            if not incoming_keys.intersection(existing_keys):
-                for key in incoming_keys:
-                    prior = existing_by_barcode.get(key)
-                    if prior:
-                        metadata_source = prior[1]
-                        break
+            incoming_key = gtin_identity_key(barcode)
+            existing_key = gtin_identity_key((existing or {}).get("barcode", ""))
+            if incoming_key != existing_key:
+                metadata_source = existing_by_barcode.get(incoming_key, {})
             metadata = planogram_metadata(
                 metadata_source, reference, barcode, product_code=code
             )
@@ -2196,13 +3076,10 @@ def bulk_import_products():
             alternatives = metadata["alternative_suggestions"]
 
             # Plano rows carry no image — reuse a verified image for the same UPC.
-            for cand in build_barcode_candidates(barcode):
-                key = normalized_digits(cand)
-                if not image_url and key in image_by_barcode:
-                    image_url = image_by_barcode[key]
-                    break
-            if not image_url and barcode:
-                image_barcodes.append(barcode)   # fetch online in background
+            if not image_url and incoming_key in image_by_barcode:
+                image_url = image_by_barcode[incoming_key]
+            if barcode and (not image_url or not description):
+                image_barcodes.append(barcode)   # verify missing metadata in background
             if row_id is not None:
                 db.execute(
                     """UPDATE products SET name=?, brand=?, description=?, image_url=?, source_url=?,
@@ -2213,8 +3090,9 @@ def bulk_import_products():
                      barcode, product_code, facings, notes, is_plano, in_stock, flipped,
                      username, now, row_id)
                 )
+                saved_product_id = int(row_id)
             else:
-                db.execute(
+                cursor = db.execute(
                     """INSERT INTO products
                        (name, brand, description, image_url, source_url, usage_notes,
                         alternative_suggestions, barcode, product_code, facings, aisle, side,
@@ -2225,6 +3103,50 @@ def bulk_import_products():
                      barcode, product_code, facings, aisle, side, section_s, shelf_s, position_s,
                      notes, is_plano, in_stock, flipped, username, now, username, now)
                 )
+                saved_product_id = int(getattr(cursor, "lastrowid", 0) or 0)
+            if saved_product_id:
+                imported_product_ids.append(saved_product_id)
+                _record_import_identifiers(
+                    db,
+                    {"id": saved_product_id, "barcode": barcode, "product_code": product_code},
+                    now,
+                    source="Planogramme magasin",
+                    payload=p,
+                )
+                upsert_reference_candidate(
+                    db,
+                    {
+                        "barcode": barcode,
+                        "name": name,
+                        "product_code": product_code,
+                        "source": "Planogramme magasin",
+                        "source_record_id": product_code or barcode,
+                        "store_presence_status": "planogram_imported",
+                    },
+                    imported_at=now,
+                )
+                verified_prior_fields = set(
+                    metadata_source.get("_verified_fields", [])
+                    if isinstance(metadata_source, dict) else []
+                )
+                for field, status_field in (
+                    ("description", "description_status"),
+                    ("image_url", "image_status"),
+                    ("source_url", "description_status"),
+                ):
+                    value = str(metadata.get(field, "") or "").strip()
+                    was_verified = field in verified_prior_fields or (
+                        isinstance(metadata_source, dict)
+                        and metadata_source.get(status_field) == "verified"
+                    )
+                    if value and was_verified and field in FIELD_NAMES:
+                        record_field_evidence(
+                            db, saved_product_id, field, value,
+                            source="Manual verified prior exact UPC",
+                            source_record_id=barcode, match_method="exact_gtin_reimport",
+                            confidence=1.0, verification_status="verified",
+                            imported_at=now, last_verified_at=now, active=True,
+                        )
             imported += 1
         except Exception as exc:
             db.rollback()
@@ -2317,9 +3239,30 @@ def bulk_import_products():
         }), 500
     db.commit()
 
+    # Placement is already durable at this point. The quality pass cannot undo
+    # or partially replace a plan; it only records provenance and review items.
+    quality = {"success": True, "scanned": 0, "issues": 0, "statuses": {}}
+    try:
+        quality = audit_product_data(
+            db, imported_product_ids, trigger_type="planogram_import",
+            employee=username, now=now,
+        )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        quality = {"success": False, "error": str(exc)[:240]}
+        print(f"[Qualite produits] audit apres import reporte: {type(exc).__name__}: {exc}")
+
+    # The audit may have added status fields used by the client cards.
+    final_side_rows = [
+        dict(product) for product in db.execute(
+            "SELECT * FROM products WHERE aisle=? AND side=?", (aisle, side)
+        ).fetchall()
+    ]
+
     # Return exactly the committed slice the browser must replace. This avoids
     # two full-list downloads before the planogram can visibly update.
-    affected_products = [row_to_product(product) for product in final_side_rows]
+    affected_products = rows_to_verified_products(db, final_side_rows)
     affected_products.sort(key=location_sort_key)
     aisle_product_count_row = db.execute(
         "SELECT COUNT(*) AS n FROM products WHERE aisle=?", (aisle,)
@@ -2346,8 +3289,488 @@ def bulk_import_products():
                     "selected_products": selected_products,
                     "filtered_non_stock": filtered_non_stock,
                     "pruned": pruned, "replaced_removed": replaced_removed,
+                    "quality": quality,
                     "layout": layout_payload,
                     "products": affected_products})
+
+
+_QUALITY_AUDIT_LOCK = threading.Lock()
+_QUALITY_AUDIT_STATE = {
+    "running": False, "scanned": 0, "total": 0, "issues": 0,
+    "started_at": "", "completed_at": "", "error": "",
+}
+
+
+@products_bp.route("/api/product-quality/summary", methods=["GET"])
+def product_quality_summary():
+    db = get_db()
+    status_rows = db.execute(
+        "SELECT data_status, COUNT(*) AS count FROM products GROUP BY data_status"
+    ).fetchall()
+    issue_rows = db.execute(
+        """SELECT issue_type, COUNT(*) AS count FROM product_data_issues
+           WHERE status='open' GROUP BY issue_type ORDER BY count DESC"""
+    ).fetchall()
+    total_row = db.execute("SELECT COUNT(*) AS count FROM products").fetchone()
+    complete_row = db.execute(
+        "SELECT COUNT(*) AS count FROM products WHERE data_status='complete_verified'"
+    ).fetchone()
+    with _QUALITY_AUDIT_LOCK:
+        job = dict(_QUALITY_AUDIT_STATE)
+    return jsonify({
+        "success": True,
+        "total_products": int(first_column(total_row) or 0),
+        "verified_products": int(first_column(complete_row) or 0),
+        "statuses": {
+            str(dict(row).get("data_status") or "complete_unverified"):
+            int(dict(row).get("count") or 0)
+            for row in status_rows
+        },
+        "open_issues": {
+            str(dict(row).get("issue_type") or "unknown"):
+            int(dict(row).get("count") or 0)
+            for row in issue_rows
+        },
+        "audit": job,
+    })
+
+
+@products_bp.route("/api/product-quality/issues", methods=["GET"])
+def product_quality_issues():
+    db = get_db()
+    issue_type = str(request.args.get("type", "") or "").strip()[:80]
+    status = str(request.args.get("status", "open") or "open").strip()
+    if status not in {"open", "resolved", "rejected", "all"}:
+        status = "open"
+    try:
+        limit = min(200, max(1, int(request.args.get("limit", 60))))
+        offset = max(0, int(request.args.get("offset", 0)))
+    except (TypeError, ValueError):
+        limit, offset = 60, 0
+    where = []
+    params = []
+    if status != "all":
+        where.append("i.status=?")
+        params.append(status)
+    if issue_type:
+        where.append("i.issue_type=?")
+        params.append(issue_type)
+    clause = " WHERE " + " AND ".join(where) if where else ""
+    rows = db.execute(
+        """SELECT i.*, p.name AS product_name, p.barcode, p.product_code,
+                  p.brand, p.description, p.image_url, p.data_status,
+                  p.aisle, p.side, p.section, p.shelf, p.position
+           FROM product_data_issues i
+           JOIN products p ON p.id=i.product_id"""
+        + clause + " ORDER BY i.id DESC LIMIT ? OFFSET ?",
+        tuple(params + [limit, offset]),
+    ).fetchall()
+    items = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["details"] = json.loads(item.get("details_json") or "{}")
+        except (TypeError, ValueError):
+            item["details"] = {}
+        item["image_url"] = safe_http_url(item.get("image_url"))
+        items.append(item)
+    return jsonify({"success": True, "issues": items, "limit": limit, "offset": offset})
+
+
+def _quality_audit_worker(product_ids, employee):
+    from database import connect_db
+    db = None
+    try:
+        db = connect_db()
+        if product_ids:
+            ids = list(product_ids)
+        else:
+            ids = [
+                int(first_column(row)) for row in db.execute(
+                    "SELECT id FROM products ORDER BY id"
+                ).fetchall()
+            ]
+        with _QUALITY_AUDIT_LOCK:
+            _QUALITY_AUDIT_STATE.update(total=len(ids), scanned=0, issues=0)
+        for start in range(0, len(ids), 200):
+            result = audit_product_data(
+                db, ids[start:start + 200], trigger_type="manager_audit",
+                employee=employee,
+            )
+            db.commit()
+            with _QUALITY_AUDIT_LOCK:
+                _QUALITY_AUDIT_STATE["scanned"] += int(result.get("scanned", 0))
+                _QUALITY_AUDIT_STATE["issues"] += int(result.get("issues", 0))
+            time.sleep(0.02)
+        with _QUALITY_AUDIT_LOCK:
+            _QUALITY_AUDIT_STATE["completed_at"] = utc_now_iso()
+    except Exception as exc:
+        if db is not None:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        with _QUALITY_AUDIT_LOCK:
+            _QUALITY_AUDIT_STATE["error"] = f"{type(exc).__name__}: {exc}"[:240]
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+        with _QUALITY_AUDIT_LOCK:
+            _QUALITY_AUDIT_STATE["running"] = False
+        release_unused_memory()
+
+
+@products_bp.route("/api/product-quality/audit", methods=["POST"])
+def start_product_quality_audit():
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json(silent=True) or {}
+    raw_ids = data.get("product_ids") if isinstance(data, dict) else []
+    product_ids = []
+    if isinstance(raw_ids, list):
+        for value in raw_ids[:1000]:
+            try:
+                product_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if product_id > 0 and product_id not in product_ids:
+                product_ids.append(product_id)
+    with _QUALITY_AUDIT_LOCK:
+        if _QUALITY_AUDIT_STATE["running"]:
+            return jsonify({"success": True, "started": False, "audit": dict(_QUALITY_AUDIT_STATE)})
+        _QUALITY_AUDIT_STATE.update({
+            "running": True, "scanned": 0, "total": len(product_ids),
+            "issues": 0, "started_at": utc_now_iso(),
+            "completed_at": "", "error": "",
+        })
+    threading.Thread(
+        target=_quality_audit_worker,
+        args=(product_ids, username), daemon=True,
+    ).start()
+    return jsonify({"success": True, "started": True, "audit": dict(_QUALITY_AUDIT_STATE)}), 202
+
+
+_MANUAL_REVIEW_FIELDS = set(FIELD_NAMES)
+
+
+@products_bp.route("/api/product-quality/issues/<int:issue_id>/resolve", methods=["POST"])
+def resolve_product_quality_issue(issue_id):
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json(silent=True) or {}
+    action = str(data.get("action", "") or "").strip()
+    if action not in {"accept_candidate", "keep_existing", "clear_field", "mark_verified"}:
+        return jsonify({"success": False, "error": "Action de vérification invalide."}), 400
+    db = get_db()
+    issue_row = db.execute(
+        """SELECT i.*, p.name AS product_name FROM product_data_issues i
+           JOIN products p ON p.id=i.product_id WHERE i.id=?""",
+        (issue_id,),
+    ).fetchone()
+    if not issue_row:
+        return jsonify({"success": False, "error": "Anomalie introuvable."}), 404
+    issue = dict(issue_row)
+    field = str(issue.get("field_name", "") or "")
+    if field not in _MANUAL_REVIEW_FIELDS:
+        return jsonify({
+            "success": False,
+            "error": "Cet identifiant doit être corrigé dans la fiche d'identifiants.",
+        }), 400
+    product = db.execute(
+        "SELECT * FROM products WHERE id=?", (issue["product_id"],)
+    ).fetchone()
+    if not product:
+        return jsonify({"success": False, "error": "Produit introuvable."}), 404
+    product = dict(product)
+    candidate = str(issue.get("candidate_value", "") or "").strip()
+    current = str(product.get(field, "") or "").strip()
+    now = utc_now_iso()
+    if action == "accept_candidate":
+        if not candidate:
+            return jsonify({"success": False, "error": "Aucune valeur candidate à accepter."}), 400
+        if field == "image_url" and not safe_http_url(candidate):
+            return jsonify({"success": False, "error": "Adresse d'image HTTPS invalide."}), 400
+        db.execute(f"UPDATE products SET {field}=?, modified_by=?, modified_at=? WHERE id=?",
+                   (candidate, username, now, issue["product_id"]))
+        db.execute(
+            """UPDATE product_field_evidence SET active=0
+               WHERE product_id=? AND field_name=?""",
+            (issue["product_id"], field),
+        )
+        db.execute(
+            """UPDATE product_field_evidence SET verification_status='unverified'
+               WHERE product_id=? AND field_name=? AND field_value=?""",
+            (issue["product_id"], field, candidate),
+        )
+        record_field_evidence(
+            db, issue["product_id"], field, candidate,
+            source=f"Validation manuelle: {username}", match_method="manual_review",
+            confidence=1.0, verification_status="verified", imported_at=now,
+            last_verified_at=now, active=True,
+        )
+    elif action == "clear_field":
+        db.execute(f"UPDATE products SET {field}='', modified_by=?, modified_at=? WHERE id=?",
+                   (username, now, issue["product_id"]))
+        db.execute(
+            "UPDATE product_field_evidence SET active=0 WHERE product_id=? AND field_name=?",
+            (issue["product_id"], field),
+        )
+    else:
+        if not current:
+            return jsonify({"success": False, "error": "Le champ actuel est vide."}), 400
+        record_field_evidence(
+            db, issue["product_id"], field, current,
+            source=f"Validation manuelle: {username}", match_method="manual_review",
+            confidence=1.0, verification_status="verified", imported_at=now,
+            last_verified_at=now, active=True,
+        )
+    if candidate and action in {"keep_existing", "clear_field"}:
+        db.execute(
+            """UPDATE product_field_evidence SET verification_status='rejected', active=0
+               WHERE product_id=? AND field_name=? AND field_value=?""",
+            (issue["product_id"], field, candidate),
+        )
+    barcode = str(product.get("barcode", "") or "").strip()
+    gtin_key = gtin_identity_key(barcode)
+    if candidate and gtin_key and action in {"keep_existing", "clear_field"}:
+        if issue.get("issue_type") == "multiple_possible_matches":
+            db.execute(
+                """UPDATE product_reference_evidence
+                   SET verification_status='rejected', active=0
+                   WHERE gtin_key=? AND field_name=? AND active=0
+                     AND verification_status IN ('requires_review','unverified')""",
+                (gtin_key, field),
+            )
+        else:
+            db.execute(
+                """UPDATE product_reference_evidence
+                   SET verification_status='rejected', active=0
+                   WHERE gtin_key=? AND field_name=? AND field_value=?""",
+                (gtin_key, field, candidate),
+            )
+    accepted_value = candidate if action == "accept_candidate" else (
+        current if action in {"keep_existing", "mark_verified"} else ""
+    )
+    if accepted_value and gtin_check_digit_valid(barcode):
+        record_reference_evidence(
+            db, barcode, field, accepted_value,
+            source=f"Validation manuelle: {username}",
+            source_record_id=barcode, match_method="manual_review",
+            confidence=1.0, verification_status="verified",
+            imported_at=now, last_verified_at=now, active=True,
+        )
+    db.execute(
+        """UPDATE product_data_issues SET status=?, resolved_at=?, resolved_by=?
+           WHERE id=?""",
+        ("rejected" if action in {"keep_existing", "clear_field"} else "resolved",
+         now, username, issue_id),
+    )
+    audit_product_data(
+        db, [issue["product_id"]], trigger_type="manual_review",
+        employee=username, now=now,
+    )
+    db.commit()
+    refreshed = db.execute(
+        "SELECT * FROM products WHERE id=?", (issue["product_id"],)
+    ).fetchone()
+    refreshed_payload = dict(refreshed) if refreshed else {}
+    refreshed_payload["_verified_fields"] = [
+        str(dict(row).get("field_name", "") or "")
+        for row in db.execute(
+            """SELECT field_name, field_value FROM product_field_evidence
+               WHERE product_id=? AND active=1
+                 AND verification_status='verified'""",
+            (issue["product_id"],),
+        ).fetchall()
+        if str(refreshed_payload.get(dict(row).get("field_name", ""), "") or "").strip()
+        == str(dict(row).get("field_value", "") or "").strip()
+    ]
+    return jsonify({
+        "success": True, "product": row_to_product(refreshed_payload)
+    })
+
+
+@products_bp.route("/api/products/<int:product_id>/data-record", methods=["GET"])
+def product_data_record(product_id):
+    db = get_db()
+    product = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
+    if not product:
+        return jsonify({"success": False, "error": "Produit introuvable."}), 404
+    identifiers = [dict(row) for row in db.execute(
+        "SELECT * FROM product_identifiers WHERE product_id=? ORDER BY is_primary DESC, identifier_type, id",
+        (product_id,),
+    ).fetchall()]
+    aliases = [dict(row) for row in db.execute(
+        "SELECT * FROM product_aliases WHERE product_id=? ORDER BY alias_type, alias_value",
+        (product_id,),
+    ).fetchall()]
+    evidence = [dict(row) for row in db.execute(
+        """SELECT * FROM product_field_evidence WHERE product_id=?
+           ORDER BY field_name, active DESC, source_priority DESC, id DESC""",
+        (product_id,),
+    ).fetchall()]
+    issues = [dict(row) for row in db.execute(
+        "SELECT * FROM product_data_issues WHERE product_id=? ORDER BY id DESC",
+        (product_id,),
+    ).fetchall()]
+    relationships = [dict(row) for row in db.execute(
+        """SELECT r.*, p.name AS target_name, p.barcode AS target_barcode
+           FROM product_relationships r JOIN products p ON p.id=r.target_product_id
+           WHERE r.source_product_id=? ORDER BY r.relationship_type, r.id""",
+        (product_id,),
+    ).fetchall()]
+    product_payload = dict(product)
+    product_payload["_verified_fields"] = [
+        item["field_name"] for item in evidence
+        if item.get("active") and item.get("verification_status") == "verified"
+        and str(product_payload.get(item.get("field_name", ""), "") or "").strip()
+        == str(item.get("field_value", "") or "").strip()
+    ]
+    return jsonify({
+        "success": True, "product": row_to_product(product_payload),
+        "identifiers": identifiers, "aliases": aliases, "evidence": evidence,
+        "issues": issues, "relationships": relationships,
+    })
+
+
+@products_bp.route("/api/products/<int:product_id>/identifiers", methods=["POST"])
+def add_product_identifier(product_id):
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json(silent=True) or {}
+    identifier_type = str(data.get("type", "") or "").upper().replace("-", "_")
+    value = str(data.get("value", "") or "").strip()
+    authority = str(data.get("authority", "") or "").strip()
+    if identifier_type not in IDENTIFIER_TYPES or not value:
+        return jsonify({"success": False, "error": "Identifiant invalide."}), 400
+    db = get_db()
+    if not db.execute("SELECT id FROM products WHERE id=?", (product_id,)).fetchone():
+        return jsonify({"success": False, "error": "Produit introuvable."}), 404
+    saved = upsert_product_identifier(
+        db, product_id, identifier_type, value, authority=authority,
+        source=f"Validation manuelle: {username}", match_method="manual_entry",
+        confidence=1.0, verification_status="verified",
+        imported_at=utc_now_iso(), last_verified_at=utc_now_iso(),
+        is_primary=bool(data.get("is_primary", False)),
+        package_level=str(data.get("package_level", "sellable_unit") or "sellable_unit"),
+    )
+    if not saved:
+        return jsonify({
+            "success": False,
+            "error": "Identifiant invalide ou autorité émettrice manquante.",
+        }), 400
+    db.commit()
+    return jsonify({"success": True})
+
+
+_ALIAS_TYPES = {
+    "official_name", "french_name", "english_name", "employee_short_name",
+    "common_name", "misspelling", "alternative_spelling", "brand",
+    "generic_name", "category_term", "keyword",
+}
+
+
+@products_bp.route("/api/products/<int:product_id>/aliases", methods=["POST"])
+def add_product_alias(product_id):
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json(silent=True) or {}
+    alias_type = str(data.get("alias_type", "common_name") or "common_name").strip()
+    value = str(data.get("value", "") or "").strip()[:500]
+    language = str(data.get("language", "") or "").strip()[:12]
+    normalized = normalize_search_text(value)[:500]
+    if alias_type not in _ALIAS_TYPES or not normalized:
+        return jsonify({"success": False, "error": "Alias invalide."}), 400
+    db = get_db()
+    if not db.execute("SELECT id FROM products WHERE id=?", (product_id,)).fetchone():
+        return jsonify({"success": False, "error": "Produit introuvable."}), 404
+    db.execute(
+        """INSERT INTO product_aliases
+           (product_id, alias_type, alias_value, normalized_value, language,
+            source, confidence, verification_status)
+           VALUES (?, ?, ?, ?, ?, ?, 1, 'verified')
+           ON CONFLICT(product_id, alias_type, normalized_value)
+           DO UPDATE SET alias_value=excluded.alias_value, language=excluded.language,
+             source=excluded.source, confidence=1, verification_status='verified'""",
+        (product_id, alias_type, value, normalized, language,
+         f"Validation manuelle: {username}"),
+    )
+    db.commit()
+    return jsonify({"success": True})
+
+
+_RELATIONSHIP_TYPES = {
+    "same_product_different_size", "same_din_different_upc",
+    "same_npn_different_upc", "refill_for", "accessory_for",
+    "compatible_with", "replacement_part_for", "commonly_purchased_together",
+    "same_product_family", "store_approved_alternative",
+}
+
+
+@products_bp.route("/api/products/<int:product_id>/relationships", methods=["POST"])
+def add_product_relationship(product_id):
+    username, error = require_editor()
+    if error:
+        return error
+    data = request.get_json(silent=True) or {}
+    relation = str(data.get("relationship_type", "") or "").strip()
+    try:
+        target_id = int(data.get("target_product_id"))
+    except (TypeError, ValueError):
+        target_id = 0
+    if relation not in _RELATIONSHIP_TYPES:
+        return jsonify({
+            "success": False,
+            "error": "Relation invalide. Les équivalences thérapeutiques ne peuvent pas être créées automatiquement.",
+        }), 400
+    if not target_id or target_id == product_id:
+        return jsonify({"success": False, "error": "Produit cible invalide."}), 400
+    db = get_db()
+    count_row = db.execute(
+        "SELECT COUNT(*) AS count FROM products WHERE id IN (?, ?)",
+        (product_id, target_id),
+    ).fetchone()
+    if int(first_column(count_row) or 0) != 2:
+        return jsonify({"success": False, "error": "Produit source ou cible introuvable."}), 404
+    now = utc_now_iso()
+    db.execute(
+        """INSERT INTO product_relationships
+           (source_product_id, target_product_id, relationship_type, source,
+            source_url, confidence, verification_status, approved_by,
+            approved_role, created_at, last_verified_at)
+           VALUES (?, ?, ?, ?, ?, 1, 'verified', ?, 'manager', ?, ?)
+           ON CONFLICT(source_product_id, target_product_id, relationship_type)
+           DO UPDATE SET source=excluded.source, source_url=excluded.source_url,
+             confidence=1, verification_status='verified', approved_by=excluded.approved_by,
+             approved_role=excluded.approved_role, last_verified_at=excluded.last_verified_at""",
+        (
+            product_id, target_id, relation, f"Validation manuelle: {username}",
+            safe_http_url(data.get("source_url")), username, now, now,
+        ),
+    )
+    db.commit()
+    return jsonify({"success": True})
+
+
+@products_bp.route("/api/products/<int:product_id>/relationships/<int:relationship_id>", methods=["DELETE"])
+def delete_product_relationship(product_id, relationship_id):
+    username, error = require_editor()
+    if error:
+        return error
+    db = get_db()
+    cursor = db.execute(
+        "DELETE FROM product_relationships WHERE id=? AND source_product_id=?",
+        (relationship_id, product_id),
+    )
+    db.commit()
+    return jsonify({"success": True, "deleted": max(0, int(cursor.rowcount or 0))})
 
 
 @products_bp.route("/api/planograms/history", methods=["GET"])
@@ -2395,6 +3818,79 @@ def schedule_reference_metadata_sync():
                         db.close()
                     except Exception:
                         pass
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+_INITIAL_QUALITY_AUDIT_STARTED = False
+
+
+def schedule_initial_product_quality_audit():
+    """Audit legacy rows once, in small batches, without delaying first paint."""
+    global _INITIAL_QUALITY_AUDIT_STARTED
+    with _QUALITY_AUDIT_LOCK:
+        if _INITIAL_QUALITY_AUDIT_STARTED:
+            return
+        _INITIAL_QUALITY_AUDIT_STARTED = True
+
+    def worker():
+        from database import connect_db
+        time.sleep(30)
+        db = None
+        try:
+            db = connect_db()
+            total_row = db.execute(
+                """SELECT COUNT(*) AS count FROM products
+                   WHERE TRIM(COALESCE(quality_checked_at,''))=''"""
+            ).fetchone()
+            total = int(first_column(total_row) or 0)
+            if not total:
+                return
+            with _QUALITY_AUDIT_LOCK:
+                if _QUALITY_AUDIT_STATE["running"]:
+                    return
+                _QUALITY_AUDIT_STATE.update({
+                    "running": True, "scanned": 0, "total": total,
+                    "issues": 0, "started_at": utc_now_iso(),
+                    "completed_at": "", "error": "",
+                })
+            while True:
+                rows = db.execute(
+                    """SELECT id FROM products
+                       WHERE TRIM(COALESCE(quality_checked_at,''))=''
+                       ORDER BY id LIMIT 150"""
+                ).fetchall()
+                ids = [int(first_column(row)) for row in rows]
+                if not ids:
+                    break
+                result = audit_product_data(
+                    db, ids, trigger_type="initial_catalog_audit",
+                    employee="system",
+                )
+                db.commit()
+                with _QUALITY_AUDIT_LOCK:
+                    _QUALITY_AUDIT_STATE["scanned"] += int(result.get("scanned", 0))
+                    _QUALITY_AUDIT_STATE["issues"] += int(result.get("issues", 0))
+                time.sleep(0.15)
+            with _QUALITY_AUDIT_LOCK:
+                _QUALITY_AUDIT_STATE["completed_at"] = utc_now_iso()
+        except Exception as exc:
+            if db is not None:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            with _QUALITY_AUDIT_LOCK:
+                _QUALITY_AUDIT_STATE["error"] = f"{type(exc).__name__}: {exc}"[:240]
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+            with _QUALITY_AUDIT_LOCK:
+                _QUALITY_AUDIT_STATE["running"] = False
+            release_unused_memory()
 
     threading.Thread(target=worker, daemon=True).start()
 

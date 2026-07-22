@@ -4552,4 +4552,139 @@ async function loadPlanogramHistory(force=false) {
   }
 }
 
-window.AppLayout = { renderMapEditor, loadMapEditor, refreshPlanUi, createAisleLayout, saveAisleLayout, refreshProductsCache, refreshLayoutsCache, loadPlanogramHistory };
+let productQualityPollTimer = null;
+
+const PRODUCT_QUALITY_LABELS = {
+  possible_wrong_image: 'Image possiblement incorrecte',
+  possible_wrong_description: 'Description possiblement incorrecte',
+  package_size_conflict: 'Conflit de format',
+  strength_conflict: 'Conflit de concentration',
+  variant_conflict: 'Conflit de variante',
+  format_conflict: 'Conflit de forme',
+  product_name_conflict: 'Nom incohérent',
+  multiple_possible_matches: 'Plusieurs correspondances',
+  unverified_suggestion: 'Proposition à vérifier',
+  missing_description: 'Description manquante',
+  missing_image: 'Image manquante',
+  upc_conflict: 'UPC à vérifier',
+  identifier_conflict: 'Identifiant incohérent',
+};
+
+function productQualityValue(value, field) {
+  const text = String(value || '').trim();
+  if (!text) return '<span class="product-quality-empty">Aucune valeur</span>';
+  if (field === 'image_url' && /^https:\/\//i.test(text)) {
+    return `<span class="product-quality-image-value"><img src="${esc(text)}" alt="" loading="lazy"/>${esc(text)}</span>`;
+  }
+  return esc(text);
+}
+
+function renderProductQualityIssues(issues) {
+  const box = document.getElementById('productQualityIssues');
+  if (!box) return;
+  if (!issues.length) {
+    box.innerHTML = '<div class="small product-quality-empty-list">Aucune anomalie ouverte dans ce filtre.</div>';
+    return;
+  }
+  box.innerHTML = issues.map(issue => {
+    const field = String(issue.field_name || '');
+    const current = String(issue.existing_value || issue[field] || '').trim();
+    const candidate = String(issue.candidate_value || '').trim();
+    const location = issue.aisle
+      ? `Allée ${esc(issue.aisle)} · ${esc(sideStaffLabel(issue.side))} · S${esc(issue.section)} T${esc(issue.shelf)} P${esc(issue.position)}`
+      : 'Position non confirmée';
+    const actions = [];
+    if (candidate) {
+      actions.push(`<button class="btn btn-inline" type="button" onclick="resolveProductQualityIssue(${Number(issue.id)},'accept_candidate')">Utiliser la proposition</button>`);
+      if (current) actions.push(`<button class="btn btn-outline btn-inline" type="button" onclick="resolveProductQualityIssue(${Number(issue.id)},'keep_existing')">Garder l’actuel</button>`);
+    } else if (current && field) {
+      actions.push(`<button class="btn btn-outline btn-inline" type="button" onclick="resolveProductQualityIssue(${Number(issue.id)},'mark_verified')">Marquer vérifié</button>`);
+      if (String(issue.issue_type || '').startsWith('possible_wrong')) {
+        actions.push(`<button class="btn btn-outline btn-inline btn-danger" type="button" onclick="resolveProductQualityIssue(${Number(issue.id)},'clear_field')">Retirer la valeur</button>`);
+      }
+    }
+    return `<div class="product-quality-item">
+      <div class="product-quality-item-head">
+        <div><strong>${esc(issue.product_name || 'Produit')}</strong><span>${esc(issue.barcode || 'UPC inconnu')}</span></div>
+        <span class="product-quality-issue-label">${esc(PRODUCT_QUALITY_LABELS[issue.issue_type] || issue.issue_type || 'À vérifier')}</span>
+      </div>
+      <div class="product-quality-location">${location}</div>
+      ${field ? `<div class="product-quality-values">
+        <div><span>Valeur actuelle</span>${productQualityValue(current, field)}</div>
+        ${candidate ? `<div><span>Proposition</span>${productQualityValue(candidate, field)}</div>` : ''}
+      </div>` : ''}
+      ${issue.source ? `<div class="product-quality-source">Source : ${esc(issue.source)}</div>` : ''}
+      ${actions.length ? `<div class="product-quality-actions">${actions.join('')}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+async function loadProductQuality(force=false) {
+  const panel = document.getElementById('productQualityPanel');
+  const summaryBox = document.getElementById('productQualitySummary');
+  const issueBox = document.getElementById('productQualityIssues');
+  const count = document.getElementById('productQualityCount');
+  if (!panel?.open || !summaryBox || !issueBox) return;
+  if (!force && issueBox.dataset.loading === '1') return;
+  issueBox.dataset.loading = '1';
+  const filter = document.getElementById('productQualityFilter')?.value || '';
+  try {
+    const [summaryResult, issuesResult] = await Promise.all([
+      apiFetch('/api/product-quality/summary'),
+      apiFetch(`/api/product-quality/issues?status=open&limit=80${filter ? `&type=${encodeURIComponent(filter)}` : ''}`),
+    ]);
+    if (!summaryResult.res.ok || !issuesResult.res.ok) throw new Error('quality-load');
+    const summary = summaryResult.data || {};
+    const issues = Array.isArray(issuesResult.data?.issues) ? issuesResult.data.issues : [];
+    const openTotal = Object.values(summary.open_issues || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+    const audit = summary.audit || {};
+    if (count) count.textContent = `${openTotal} à vérifier`;
+    const progress = audit.running
+      ? `<div class="product-quality-progress"><span style="width:${Math.min(100, audit.total ? (Number(audit.scanned || 0) / Number(audit.total)) * 100 : 4)}%"></span></div><small>Vérification ${Number(audit.scanned || 0)} / ${Number(audit.total || 0)}</small>`
+      : audit.error ? `<small class="product-quality-error">${esc(audit.error)}</small>` : '';
+    summaryBox.innerHTML = `<div><strong>${Number(summary.verified_products || 0)}</strong><span>fiches entièrement vérifiées</span></div>
+      <div><strong>${openTotal}</strong><span>points à examiner</span></div>
+      <div><strong>${Number(summary.total_products || 0)}</strong><span>produits dans le plan</span></div>${progress}`;
+    renderProductQualityIssues(issues);
+    clearTimeout(productQualityPollTimer);
+    if (audit.running) productQualityPollTimer = setTimeout(() => loadProductQuality(true), 1800);
+  } catch (_) {
+    issueBox.innerHTML = '<div class="small product-quality-error">Impossible de charger les vérifications.</div>';
+    if (count) count.textContent = 'Réessayer';
+  } finally {
+    issueBox.dataset.loading = '';
+  }
+}
+
+async function startProductQualityAudit() {
+  const summary = document.getElementById('productQualitySummary');
+  if (summary) summary.innerHTML = '<div class="small">Démarrage de la vérification...</div>';
+  try {
+    const {res, data} = await apiFetch('/api/product-quality/audit', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    if (!res.ok || !data?.success) throw new Error(data?.error || 'quality-start');
+    await loadProductQuality(true);
+  } catch (_) {
+    if (summary) summary.innerHTML = '<div class="small product-quality-error">La vérification n’a pas pu démarrer.</div>';
+  }
+}
+
+async function resolveProductQualityIssue(issueId, action) {
+  try {
+    const {res, data} = await apiFetch(`/api/product-quality/issues/${Number(issueId)}/resolve`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action}),
+    });
+    if (!res.ok || !data?.success) throw new Error(data?.error || 'quality-resolve');
+    await loadProductQuality(true);
+  } catch (error) {
+    const box = document.getElementById('productQualityIssues');
+    if (box) box.insertAdjacentHTML('afterbegin', `<div class="small product-quality-error">${esc(error.message || 'Impossible d’enregistrer la décision.')}</div>`);
+  }
+}
+
+window.AppLayout = { renderMapEditor, loadMapEditor, refreshPlanUi, createAisleLayout, saveAisleLayout, refreshProductsCache, refreshLayoutsCache, loadPlanogramHistory, loadProductQuality };
