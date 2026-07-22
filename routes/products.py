@@ -3315,6 +3315,10 @@ def product_quality_summary():
     complete_row = db.execute(
         "SELECT COUNT(*) AS count FROM products WHERE data_status='complete_verified'"
     ).fetchone()
+    unchecked_row = db.execute(
+        """SELECT COUNT(*) AS count FROM products
+           WHERE TRIM(COALESCE(quality_checked_at,''))=''"""
+    ).fetchone()
     identifier_rows = db.execute(
         """SELECT identifier_type, verification_status,
                   COUNT(DISTINCT product_id) AS count
@@ -3342,6 +3346,7 @@ def product_quality_summary():
         "success": True,
         "total_products": int(first_column(total_row) or 0),
         "verified_products": int(first_column(complete_row) or 0),
+        "unchecked_products": int(first_column(unchecked_row) or 0),
         "statuses": {
             str(dict(row).get("data_status") or "complete_unverified"):
             int(dict(row).get("count") or 0)
@@ -3404,7 +3409,7 @@ def product_quality_issues():
     return jsonify({"success": True, "issues": items, "limit": limit, "offset": offset})
 
 
-def _quality_audit_worker(product_ids, employee):
+def _quality_audit_worker(product_ids, employee, unchecked_only=False):
     from database import connect_db
     db = None
     try:
@@ -3412,9 +3417,13 @@ def _quality_audit_worker(product_ids, employee):
         if product_ids:
             ids = list(product_ids)
         else:
+            where = (
+                "WHERE TRIM(COALESCE(quality_checked_at,''))=''"
+                if unchecked_only else ""
+            )
             ids = [
                 int(first_column(row)) for row in db.execute(
-                    "SELECT id FROM products ORDER BY id"
+                    f"SELECT id FROM products {where} ORDER BY id"
                 ).fetchall()
             ]
         with _QUALITY_AUDIT_LOCK:
@@ -3456,6 +3465,9 @@ def start_product_quality_audit():
     if error:
         return error
     data = request.get_json(silent=True) or {}
+    unchecked_only = bool(
+        isinstance(data, dict) and data.get("unchecked_only") is True
+    )
     raw_ids = data.get("product_ids") if isinstance(data, dict) else []
     product_ids = []
     if isinstance(raw_ids, list):
@@ -3476,7 +3488,7 @@ def start_product_quality_audit():
         })
     threading.Thread(
         target=_quality_audit_worker,
-        args=(product_ids, username), daemon=True,
+        args=(product_ids, username, unchecked_only), daemon=True,
     ).start()
     return jsonify({"success": True, "started": True, "audit": dict(_QUALITY_AUDIT_STATE)}), 202
 

@@ -395,6 +395,7 @@ class ProductDataAccuracyTests(unittest.TestCase):
         self.assertEqual(payload["identifier_coverage"]["DIN"]["verified"], 1)
         self.assertEqual(payload["identifier_coverage"]["GTIN"]["verified"], 1)
         self.assertEqual(payload["verified_field_coverage"]["name"], 1)
+        self.assertEqual(payload["unchecked_products"], 0)
         db.close()
 
 
