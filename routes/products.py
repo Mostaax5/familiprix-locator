@@ -2353,7 +2353,7 @@ def bulk_import_products():
 @products_bp.route("/api/planograms/history", methods=["GET"])
 def planogram_history():
     db = get_db()
-    rows = db.execute("SELECT * FROM planogram_imports ORDER BY id DESC").fetchall()
+    rows = db.execute("SELECT * FROM planogram_imports ORDER BY id DESC LIMIT 100").fetchall()
     return jsonify([dict(r) for r in rows])
 
 

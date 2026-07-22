@@ -23,9 +23,9 @@
 </div>
 
 <div class="tabs">
-  <button class="tab" id="tabBtn-search" onclick="switchTab('search')">Recherche 🔒</button>
-  <button class="tab" id="tabBtn-client" onclick="switchTab('client')">Client 🔒</button>
-  <button class="tab active" id="tabBtn-scan" onclick="switchTab('scan')">Scan 🔒</button>
+  <button class="tab active" id="tabBtn-search" onclick="switchTab('search')">Recherche</button>
+  <button class="tab" id="tabBtn-client" onclick="switchTab('client')">Client</button>
+  <button class="tab" id="tabBtn-scan" onclick="switchTab('scan')">Scan 🔒</button>
   <button class="tab" id="tabBtn-add" onclick="switchTab('add')">Plan 🔒</button>
   <button id="lockButton" onclick="lockApp()" title="Verrouiller la session" style="display:none;flex:none;width:36px;padding:0;border:none;background:none;font-size:17px;cursor:pointer;color:#6b7280;touch-action:manipulation">🔓</button>
 </div>
@@ -54,7 +54,7 @@
 </div>
 
 <!-- ── SCAN TAB ── -->
-<div id="scan" class="section active content">
+<div id="scan" class="section content">
 
   <!-- Emplacement de scan -->
   <div class="card">
@@ -149,7 +149,7 @@
 </div>
 
 <!-- ── SEARCH TAB ── -->
-<div id="search" class="section content">
+<div id="search" class="section active content">
   <div class="card">
     <div class="section-title">Recherche rapide</div>
     <div class="section-note">Scannez un code-barres avec la camera pour trouver directement le produit. Vous pouvez aussi chercher par nom, marque, mots-clés clients ou les 4 derniers chiffres du code.</div>
@@ -342,6 +342,23 @@
     </div>
   </div>
 
+  <details class="card plano-history-card" id="planoHistoryPanel" ontoggle="if(this.open)loadPlanogramHistory()">
+    <summary class="plano-history-summary">
+      <span>
+        <strong>Historique des planogrammes</strong>
+        <small>Consulter les imports précédents</small>
+      </span>
+      <span class="plano-history-count" id="planoHistoryCount">Ouvrir</span>
+    </summary>
+    <div class="plano-history-body">
+      <div class="plano-history-toolbar">
+        <span>Les 100 imports les plus récents</span>
+        <button class="btn btn-outline btn-inline" type="button" onclick="event.preventDefault();loadPlanogramHistory(true)">Actualiser</button>
+      </div>
+      <div id="planoHistory" class="plano-history-list"><div class="small">Ouvrez pour charger l’historique.</div></div>
+    </div>
+  </details>
+
   <div class="card">
     <div class="section-title">Catalogue — tous les planogrammes</div>
     <div class="section-note">Importez le fichier <b>plano_catalog.json</b> (généré à partir de tous vos PDF). Cela enregistre <b>tous les produits</b> dans la base, même ceux pas encore placés. Les descriptions et images enrichies sont ensuite reliées automatiquement par UPC aux produits placés; l’import d’un PDF ajoute seulement leur emplacement. <b>N’affecte pas le placement.</b></div>
@@ -364,16 +381,6 @@
     </div>
     <div class="section-note">Les produits que l’enrichissement ne peut pas décrire de façon fiable sont marqués (statut «&nbsp;aucune correspondance&nbsp;») — cette liste vous permet de leur donner la bonne description plus tard.</div>
   </div>
-
-  <div class="card">
-    <div style="display:flex;align-items:center;justify-content:space-between">
-      <div class="section-title" style="margin:0">Historique des planogrammes</div>
-      <button class="btn btn-outline btn-inline" style="font-size:11px;padding:3px 10px;width:auto;margin:0" onclick="loadPlanogramHistory()">↻</button>
-    </div>
-    <div class="section-note">Tous les planogrammes importés, du plus récent au plus ancien.</div>
-    <div id="planoHistory" style="margin-top:8px"><div class="small" style="color:#94a3b8">Chargement…</div></div>
-  </div>
-
 
   <div class="card">
     <div class="section-title">Catalogue de référence</div>
@@ -474,13 +481,9 @@
   <div style="background:#fff;border-radius:18px;padding:30px 22px 22px;width:min(380px,92vw);box-shadow:0 12px 40px rgba(0,0,0,.35)">
     <div style="font-size:34px;text-align:center;margin-bottom:8px">🏪</div>
     <div style="font-weight:700;font-size:17px;text-align:center;margin-bottom:4px;color:#1e293b">Sélectionnez votre magasin</div>
-    <div style="font-size:13px;color:#64748b;text-align:center;margin-bottom:18px;line-height:1.4">Confirmez le bon magasin avant de commencer.</div>
+    <div style="font-size:13px;color:#64748b;text-align:center;margin-bottom:18px;line-height:1.4">Choisissez le magasin utilisé sur cet appareil.</div>
     <label class="label">Magasin</label>
     <select id="storeSelect" style="margin-bottom:12px"></select>
-    <label class="label">Code du magasin</label>
-    <input type="password" id="storePassword" inputmode="numeric" placeholder="Code"
-      style="width:100%;padding:11px 14px;border:2px solid #e2e8f0;border-radius:9px;font-size:16px;box-sizing:border-box;margin-bottom:6px;outline:none"
-      onkeydown="if(event.key==='Enter')confirmStore()">
     <div id="storeError" style="color:#c8102e;font-size:12px;height:16px;margin-bottom:10px;font-weight:600"></div>
     <button onclick="confirmStore()" style="width:100%;padding:13px;background:#c8102e;color:#fff;border:none;border-radius:9px;font-weight:700;font-size:15px;cursor:pointer;touch-action:manipulation">Confirmer</button>
   </div>
@@ -490,33 +493,15 @@
 <div id="lockModal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.72);z-index:3000;align-items:center;justify-content:center;padding:16px">
   <div style="background:#fff;border-radius:8px;padding:28px 22px 22px;width:min(380px,100%);box-shadow:0 16px 48px rgba(0,0,0,.35);text-align:center">
     <div style="font-size:34px;margin-bottom:8px" aria-hidden="true">🔒</div>
-    <div style="font-weight:700;font-size:18px;margin-bottom:6px;color:#1e293b">Accès personnel</div>
-    <div style="font-size:13px;color:#64748b;margin-bottom:18px;line-height:1.45">Toutes les données du magasin sont protégées. La session expire automatiquement après 8 heures.</div>
-
-    <div id="lockLoginPanel">
-      <label class="label" for="lockEditorName" style="text-align:left">Nom de l’employé (optionnel)</label>
-      <input type="text" id="lockEditorName" placeholder="Ex: Amine" autocomplete="username" maxlength="60"
-        style="width:100%;padding:11px 14px;border:2px solid #e2e8f0;border-radius:8px;font-size:16px;box-sizing:border-box;margin-bottom:10px;outline:none">
-      <label class="label" for="lockPasswordInput" style="text-align:left">Mot de passe</label>
-      <input type="password" id="lockPasswordInput" placeholder="Mot de passe" autocomplete="current-password" maxlength="256"
-        style="width:100%;padding:11px 14px;border:2px solid #e2e8f0;border-radius:8px;font-size:16px;box-sizing:border-box;margin-bottom:6px;outline:none"
-        onkeydown="if(event.key==='Enter')unlockApp()">
-      <div id="lockError" role="alert" style="color:#c8102e;font-size:12px;min-height:18px;margin-bottom:10px;font-weight:600"></div>
-      <button id="lockLoginButton" onclick="unlockApp()" style="width:100%;padding:13px;background:#c8102e;color:#fff;border:none;border-radius:8px;font-weight:700;font-size:15px;cursor:pointer;touch-action:manipulation">Déverrouiller</button>
-    </div>
-
-    <div id="lockRotationPanel" hidden>
-      <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:10px 12px;margin:0 0 14px;color:#9a3412;font-size:12px;line-height:1.45;text-align:left">L’ancien verrou était enregistré dans le navigateur. Remplacez-le maintenant par une phrase secrète unique d’au moins 15 caractères.</div>
-      <label class="label" for="lockNewPassword" style="text-align:left">Nouveau mot de passe</label>
-      <input type="password" id="lockNewPassword" autocomplete="new-password" maxlength="128"
-        style="width:100%;padding:11px 14px;border:2px solid #e2e8f0;border-radius:8px;font-size:16px;box-sizing:border-box;margin-bottom:10px;outline:none">
-      <label class="label" for="lockNewPasswordConfirm" style="text-align:left">Confirmer le mot de passe</label>
-      <input type="password" id="lockNewPasswordConfirm" autocomplete="new-password" maxlength="128"
-        style="width:100%;padding:11px 14px;border:2px solid #e2e8f0;border-radius:8px;font-size:16px;box-sizing:border-box;margin-bottom:6px;outline:none"
-        onkeydown="if(event.key==='Enter')rotateAppPassword()">
-      <div id="lockRotationError" role="alert" style="color:#c8102e;font-size:12px;min-height:18px;margin-bottom:10px;font-weight:600"></div>
-      <button id="lockRotationButton" onclick="rotateAppPassword()" style="width:100%;padding:13px;background:#c8102e;color:#fff;border:none;border-radius:8px;font-weight:700;font-size:15px;cursor:pointer;touch-action:manipulation">Activer le nouveau mot de passe</button>
-    </div>
+    <div style="font-weight:700;font-size:18px;margin-bottom:6px;color:#1e293b">Zone protégée</div>
+    <div style="font-size:13px;color:#64748b;margin-bottom:18px;line-height:1.45">Le mot de passe est demandé uniquement pour utiliser Scan et modifier le Plan.</div>
+    <label class="label" for="lockPasswordInput" style="text-align:left">Mot de passe</label>
+    <input type="password" id="lockPasswordInput" placeholder="Mot de passe" autocomplete="current-password" maxlength="256"
+      style="width:100%;padding:11px 14px;border:2px solid #e2e8f0;border-radius:8px;font-size:16px;box-sizing:border-box;margin-bottom:6px;outline:none"
+      onkeydown="if(event.key==='Enter')unlockApp()">
+    <div id="lockError" role="alert" style="color:#c8102e;font-size:12px;min-height:18px;margin-bottom:10px;font-weight:600"></div>
+    <button id="lockLoginButton" onclick="unlockApp()" style="width:100%;padding:13px;background:#c8102e;color:#fff;border:none;border-radius:8px;font-weight:700;font-size:15px;cursor:pointer;touch-action:manipulation">Déverrouiller</button>
+    <button onclick="dismissLockModal()" style="width:100%;padding:10px;background:none;border:none;color:#64748b;font-size:13px;cursor:pointer;margin-top:4px;touch-action:manipulation">Annuler</button>
   </div>
 </div>
 

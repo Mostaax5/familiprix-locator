@@ -108,6 +108,26 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:#c8102e;box-sh
 .details-summary::-webkit-details-marker{display:none}
 .details-body{margin-top:12px}
 
+/* Planogram history stays compact until it is deliberately opened. */
+.plano-history-card{padding:0;overflow:hidden}
+.plano-history-summary{list-style:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;min-height:56px;touch-action:manipulation}
+.plano-history-summary::-webkit-details-marker{display:none}
+.plano-history-summary::before{content:'▸';color:#c8102e;font-size:13px;flex:0 0 auto}
+.plano-history-card[open] .plano-history-summary::before{content:'▾'}
+.plano-history-summary>span:first-of-type{display:flex;flex:1;min-width:0;flex-direction:column}
+.plano-history-summary strong{font-size:13px;color:#1a1a1a}
+.plano-history-summary small{font-size:11px;color:#6b7280;font-weight:500}
+.plano-history-count{flex:0 0 auto;border:1px solid #dbe1e8;background:#f8fafc;color:#475569;border-radius:6px;padding:4px 8px;font-size:11px;font-weight:700}
+.plano-history-body{border-top:1px solid #e5e7eb;padding:10px 14px 14px}
+.plano-history-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;color:#64748b;font-size:11px}
+.plano-history-toolbar .btn{width:auto;min-height:36px;padding:7px 10px}
+.plano-history-list{max-height:300px;overflow:auto;overscroll-behavior:contain;border:1px solid #e5e7eb;border-radius:6px;background:#fff}
+.plano-history-item{padding:9px 11px;border-bottom:1px solid #eef1f4}
+.plano-history-item:last-child{border-bottom:0}
+.plano-history-title{font-weight:700;font-size:12px;color:#1f2937}
+.plano-history-location{font-size:11px;color:#475569;margin-top:2px}
+.plano-history-meta{font-size:10px;color:#94a3b8;margin-top:2px}
+
 /* ── Grids & rows ── */
 .confirm-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
 .tool-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}

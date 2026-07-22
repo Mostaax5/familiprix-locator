@@ -17,14 +17,15 @@ files, screenshots, logs, or chat. Use a unique passphrase of at least 15
 characters and store it in a password manager.
 
 Changing `APP_PASSWORD_HASH` immediately invalidates every existing session.
-Without that variable, the first deployment accepts the old app password only to
-force a one-time migration to a salted scrypt hash stored in the database. All
-other API access remains blocked until that migration is complete.
+The existing Scan/Plan password is also accepted temporarily for compatibility,
+without storing its plaintext in the browser or repository.
 
 ## Deployed protections
 
-- Every product, plan, AI, import, export, backup, and diagnostic API requires a
-  server-validated session.
+- Product search, product images, barcode lookup, and Client assistance are
+  intentionally public so employees can answer customers immediately.
+- Every product/location mutation, Scan action, Plan change, import, export,
+  backup, and destructive action requires a server-validated session.
 - Session tokens are random, stored only as SHA-256 fingerprints in the database,
   sent in `Secure`, `HttpOnly`, `SameSite=Strict` cookies, expire after 8 hours,
   and close after 30 minutes without activity.

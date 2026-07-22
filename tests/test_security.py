@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 from urllib.request import Request
 
-from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.security import generate_password_hash
 
 from app import app
 from database import DatabaseConnection, init_sqlite_db
@@ -70,11 +70,10 @@ class SecurityBoundaryTests(unittest.TestCase):
     def test_forged_browser_identity_cannot_read_private_api(self):
         for path in (
             "/api/export",
-            "/api/products",
-            "/api/layout/aisles",
-            "/api/client/find?q=test",
+            "/api/products/removed",
+            "/api/planograms/history",
             "/api/gist/status",
-            "/api/system/info",
+            "/api/ai/logs/count",
             "/api/not-a-real-route",
         ):
             with self.subTest(path=path):
@@ -86,6 +85,47 @@ class SecurityBoundaryTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 401)
                 self.assertEqual(response.get_json()["code"], "authentication_required")
                 self.assertEqual(response.headers.get("Clear-Site-Data"), '"cache"')
+
+    def test_search_and_client_help_are_public_but_cross_site_posts_are_rejected(self):
+        search = self.client.get(
+            "/api/products/search?q=",
+            base_url="https://localhost",
+        )
+        self.assertEqual(search.status_code, 200)
+        self.assertEqual(search.get_json(), [])
+
+        client_find = self.client.get(
+            "/api/client/find?q=",
+            base_url="https://localhost",
+        )
+        self.assertEqual(client_find.status_code, 200)
+        self.assertEqual(client_find.get_json(), [])
+
+        with patch("routes.products.get_db", return_value=self.db):
+            products = self.client.get("/api/products", base_url="https://localhost")
+        self.assertEqual(products.status_code, 200)
+
+        with patch("routes.layout.get_db", return_value=self.db):
+            layouts = self.client.get("/api/layout/aisles", base_url="https://localhost")
+        self.assertEqual(layouts.status_code, 200)
+
+        same_origin = self.client.post(
+            "/api/client/help",
+            json={},
+            headers={"Origin": "https://localhost"},
+            base_url="https://localhost",
+        )
+        self.assertEqual(same_origin.status_code, 400)
+        self.assertNotEqual(same_origin.get_json().get("code"), "authentication_required")
+
+        cross_site = self.client.post(
+            "/api/client/help",
+            json={"question": "test"},
+            headers={"Origin": "https://attacker.example"},
+            base_url="https://localhost",
+        )
+        self.assertEqual(cross_site.status_code, 403)
+        self.assertEqual(cross_site.get_json()["code"], "origin_rejected")
 
     def test_login_rejects_cross_site_and_non_object_json(self):
         cross_site = self.client.post(
@@ -224,53 +264,25 @@ class SecurityBoundaryTests(unittest.TestCase):
         ).fetchone()
         self.assertGreater(int(row["revoked_at"]), 0)
 
-    def test_legacy_password_must_be_replaced_with_scrypt(self):
+    def test_temporary_protected_area_password_does_not_force_rotation(self):
         self.password_patcher.stop()
-        legacy_password = "Legacy password only for this test"
-        legacy_digest = hashlib.sha256(legacy_password.encode("utf-8")).hexdigest()
-
-        def password_record(db):
-            stored = security._get_setting(db, security.PASSWORD_SETTING)
-            if stored:
-                return stored, False, "database"
-            return legacy_digest, True, "legacy"
-
-        self.password_patcher = patch("security._password_record", side_effect=password_record)
+        replacement_hash = generate_password_hash(
+            "A different configured passphrase 2026",
+            method="scrypt:32768:8:1",
+            salt_length=32,
+        )
+        self.password_patcher = patch(
+            "security._password_record",
+            return_value=(replacement_hash, False, "environment"),
+        )
         self.password_patcher.start()
-        response = self.client.post(
-            "/api/auth/login",
-            json={"password": legacy_password, "username": "Owner"},
-            headers={"Origin": "https://localhost"},
-            base_url="https://localhost",
-        )
-        payload = response.get_json()
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(payload["rotation_required"])
-
-        blocked = self.client.get("/api/export", base_url="https://localhost")
-        self.assertEqual(blocked.status_code, 428)
-        self.assertEqual(blocked.get_json()["code"], "password_rotation_required")
-
-        weak = self.client.post(
-            "/api/auth/password",
-            json={"new_password": "too short"},
-            headers={"Origin": "https://localhost", "X-CSRF-Token": payload["csrf_token"]},
-            base_url="https://localhost",
-        )
-        self.assertEqual(weak.status_code, 400)
-
-        strong_password = "A new private store passphrase for 2026"
-        changed = self.client.post(
-            "/api/auth/password",
-            json={"new_password": strong_password},
-            headers={"Origin": "https://localhost", "X-CSRF-Token": payload["csrf_token"]},
-            base_url="https://localhost",
-        )
-        self.assertEqual(changed.status_code, 200)
-        self.assertFalse(changed.get_json()["rotation_required"])
-        stored = security._get_setting(self.db, security.PASSWORD_SETTING)
-        self.assertTrue(stored.startswith("scrypt:"))
-        self.assertTrue(check_password_hash(stored, strong_password))
+        temporary_digest = hashlib.sha256(self.password.encode("utf-8")).hexdigest()
+        with patch.object(security, "_LEGACY_PASSWORD_SHA256", temporary_digest):
+            response, payload = self.login()
+            self.assertFalse(payload["rotation_required"])
+            with patch("routes.import_export.get_db", return_value=self.db):
+                protected = self.client.get("/api/export", base_url="https://localhost")
+        self.assertEqual(protected.status_code, 200)
 
     def test_security_headers_are_present_without_leaking_error_details(self):
         response = self.client.get("/", base_url="https://localhost")

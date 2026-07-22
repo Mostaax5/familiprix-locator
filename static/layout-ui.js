@@ -4509,28 +4509,46 @@ async function importPlanogram() {
   btn.disabled = false; btn.textContent = 'Importer dans le plan';
 }
 
-async function loadPlanogramHistory() {
+async function loadPlanogramHistory(force=false) {
+  const panel = document.getElementById('planoHistoryPanel');
   const box = document.getElementById('planoHistory');
+  const count = document.getElementById('planoHistoryCount');
   if (!box) return;
+  if (!panel?.open) {
+    box.dataset.loaded = '';
+    if (count) count.textContent = 'Nouveau';
+    return;
+  }
+  if (!force && box.dataset.loaded === '1') return;
+  if (box.dataset.loading === '1') return;
+  box.dataset.loading = '1';
+  box.innerHTML = '<div class="small" style="padding:12px">Chargement...</div>';
   try {
     const {res, data} = await apiFetch('/api/planograms/history');
     if (!res.ok || !Array.isArray(data) || !data.length) {
-      box.innerHTML = '<div class="small" style="color:#94a3b8">Aucun planogramme importé pour le moment.</div>';
+      box.innerHTML = '<div class="small" style="padding:12px">Aucun planogramme importé pour le moment.</div>';
+      box.dataset.loaded = '1';
+      if (count) count.textContent = '0 import';
       return;
     }
+    if (count) count.textContent = `${data.length} récent${data.length > 1 ? 's' : ''}`;
     box.innerHTML = data.map(h => {
       const title = [h.plano_name, h.plano_number ? `#${h.plano_number}` : '', h.plano_version ? `(${h.plano_version})` : '']
         .filter(Boolean).join(' ') || 'Planogramme';
       const when = (h.created_at || '').replace('T', ' ').slice(0, 16);
       const loc = `Allée ${esc(h.aisle)} · ${esc(sideStaffLabel(h.side))} · S${esc(h.section)} · T${esc(h.tablette_start)}–${esc(h.tablette_end)}`;
-      return `<div style="padding:8px 0;border-bottom:1px solid #f1f5f9">
-        <div style="font-weight:600;font-size:13px">📋 ${esc(title)}</div>
-        <div style="font-size:11px;color:#64748b">${loc}</div>
-        <div style="font-size:11px;color:#94a3b8">${esc(when)} · ${esc(h.employee || '—')}${h.store ? ' · ' + esc(h.store) : ''} · ${h.imported} importé(s), ${h.skipped} ignoré(s)</div>
+      return `<div class="plano-history-item">
+        <div class="plano-history-title">${esc(title)}</div>
+        <div class="plano-history-location">${loc}</div>
+        <div class="plano-history-meta">${esc(when)} · ${esc(h.employee || '—')}${h.store ? ' · ' + esc(h.store) : ''} · ${esc(h.imported)} importé(s), ${esc(h.skipped)} ignoré(s)</div>
       </div>`;
     }).join('');
+    box.dataset.loaded = '1';
   } catch (e) {
-    box.innerHTML = '<div class="small" style="color:#c8102e">Impossible de charger l’historique.</div>';
+    box.innerHTML = '<div class="small" style="padding:12px;color:#c8102e">Impossible de charger l’historique.</div>';
+    if (count) count.textContent = 'Réessayer';
+  } finally {
+    box.dataset.loading = '';
   }
 }
 

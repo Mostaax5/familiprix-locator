@@ -26,20 +26,18 @@ const STORAGE_KEYS = {
   store: 'familiprixStore'
 };
 
-// Known stores. Add new ones here as they come online. `pass` is a simple
-// "right store" confirmation code (not security) — currently '0'.
+// Known stores. Add new ones here as they come online.
 const STORES = [
   {
     id: 'richelieu',
     name: 'Familiprix Richelieu',
-    address: '1111 Chemin des Patriotes, Richelieu, Quebec J3L 4W6',
-    pass: '0'
+    address: '1111 Chemin des Patriotes, Richelieu, Quebec J3L 4W6'
   }
 ];
 
-// Every employee view contains store data, so every tab now requires the same
-// server-verified session. No password material is shipped to the browser.
-const LOCKED_TABS = new Set(['search', 'client', 'scan', 'add']);
+// Customer service stays immediately available. Only the two tabs that can
+// change product locations or the store plan require a server-verified session.
+const LOCKED_TABS = new Set(['scan', 'add']);
 
 let backendInfo = {
   backend: 'sqlite',

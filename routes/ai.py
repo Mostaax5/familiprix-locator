@@ -3388,7 +3388,9 @@ def assist_product():
 @ai_bp.route("/api/client/help", methods=["POST"])
 def client_help():
     started_at = time.perf_counter()
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "error": "Une demande JSON valide est requise."}), 400
     question = str(data.get("question", "")).strip()
     history = normalize_client_history(data.get("history"))
     follow_up = bool(data.get("follow_up", False))
@@ -3603,7 +3605,9 @@ def client_help():
 def ai_feedback():
     """Optional, non-blocking thumbs feedback on an AI answer. Stored as its own
     training row (kind='feedback') so we never need to mutate an existing log."""
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"success": False}), 400
     question = str(data.get("question", "")).strip()
     rating = str(data.get("rating", "")).strip()  # 'up' | 'down'
     if rating not in ("up", "down"):

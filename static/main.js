@@ -219,7 +219,8 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pageshow', () => { updateAppShellState(); updateNetworkStatus(); });
 window.addEventListener('pagehide', () => {
-  if (isUnlocked()) { persistScanDraft(); persistAddDraft(); persistClientDraft(); }
+  persistClientDraft();
+  if (isUnlocked()) { persistScanDraft(); persistAddDraft(); }
   if (scannerStream || html5Scanner || quaggaActive) stopCamera();
 });
 
@@ -258,7 +259,6 @@ function runImmediateStartupEffects(tab) {
 function runStartupTabEffects(tab) {
   if (tab === 'add') {
     refreshPlanUi();
-    loadPlanogramHistory();
     loadReferenceCount();
   }
   if (tab === 'search') {
@@ -275,15 +275,16 @@ function runStartupTabEffects(tab) {
   if (tab === 'search') window.setTimeout(() => document.getElementById('searchInput')?.focus(), 50);
 }
 
-let _authenticatedAppLoaded = false;
-let _authenticatedLoadPromise = null;
-let _authenticatedLoadGeneration = 0;
+let _appDataLoaded = false;
+let _appLoadPromise = null;
 
-async function _loadAuthenticatedApp(preferredTab=null) {
+async function _loadAppData(preferredTab=null) {
   loadCursor();
-  loadScanDraft();
-  loadAddDraft();
   loadClientDraft();
+  if (isUnlocked()) {
+    loadScanDraft();
+    loadAddDraft();
+  }
   ensureStoreSelected();
 
   // Every employee tab uses the same mapped products. Restore the last compact
@@ -325,37 +326,34 @@ async function resumeAuthenticatedApp(preferredTab=null) {
     showLockModal(preferredTab);
     return false;
   }
-  if (_authenticatedAppLoaded) {
+  if (_appDataLoaded) {
+    loadScanDraft();
+    loadAddDraft();
     if (preferredTab) await switchTab(preferredTab);
     return true;
   }
-  if (_authenticatedLoadPromise) return _authenticatedLoadPromise;
-  const generation = _authenticatedLoadGeneration;
-  _authenticatedLoadPromise = (async () => {
-    await _loadAuthenticatedApp(preferredTab);
-    if (generation !== _authenticatedLoadGeneration || !isUnlocked()) {
-      resetAuthenticatedAppState();
-      return false;
-    }
-    _authenticatedAppLoaded = true;
+  if (_appLoadPromise) {
+    await _appLoadPromise;
+    if (preferredTab) await switchTab(preferredTab);
     return true;
-  })().finally(() => { _authenticatedLoadPromise = null; });
-  return _authenticatedLoadPromise;
+  }
+  _appLoadPromise = (async () => {
+    await _loadAppData(preferredTab);
+    _appDataLoaded = true;
+    return true;
+  })().finally(() => { _appLoadPromise = null; });
+  return _appLoadPromise;
 }
 
 function resetAuthenticatedAppState() {
-  _authenticatedLoadGeneration += 1;
-  _authenticatedAppLoaded = false;
-  allProductsCache = [];
-  mapLayouts = [];
-  currentClientMatches = [];
   dirtyLayoutAisles.clear();
-  for (const id of ['searchResults', 'clientAdvice', 'clientMatches', 'mapContent', 'scanResult']) {
+  for (const id of ['mapContent', 'scanResult']) {
     const element = document.getElementById(id);
     if (element) element.textContent = '';
   }
   if (scannerStream || html5Scanner || quaggaActive) void stopCamera();
-  setActiveTabUi('search');
+  const activeTab = localStorage.getItem(STORAGE_KEYS.activeTab) || 'search';
+  if (LOCKED_TABS.has(activeTab)) setActiveTabUi('search');
 }
 
 async function bootApp() {
@@ -364,9 +362,12 @@ async function bootApp() {
   updateNetworkStatus();
   updateLockUi();
   paintStartupTab('search');
-  const authenticated = await initializeAuth();
-  if (!authenticated) return;
-  await resumeAuthenticatedApp();
+  await initializeAuth();
+  _appLoadPromise = _loadAppData().then(() => {
+    _appDataLoaded = true;
+    return true;
+  }).finally(() => { _appLoadPromise = null; });
+  await _appLoadPromise;
 }
 
 bootApp();
@@ -381,7 +382,8 @@ if ('requestIdleCallback' in window) {
 // Enforce session expiry even with no navigation: every 30s, if the session has
 // expired while the user sits on a locked tab, re-lock the UI and leave the tab.
 window.setInterval(() => {
-  if (!isUnlocked()) updateLockUi();
+  window.AppLock?.enforceSessionExpiry?.();
+  updateLockUi();
 }, 30000);
 
 window.resumeAuthenticatedApp = resumeAuthenticatedApp;

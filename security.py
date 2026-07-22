@@ -44,6 +44,24 @@ _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _PUBLIC_AUTH_PATHS = {"/api/auth/login", "/api/auth/status"}
 _ROTATION_PATHS = {"/api/auth/password", "/api/auth/logout", "/api/auth/status"}
 _INTERNAL_GET_PATHS = {"/api/system/info", "/api/products", "/api/client/find"}
+_PUBLIC_API_GET_PATHS = {
+    "/api/system/info",
+    "/api/products",
+    "/api/products/images",
+    "/api/products/reference-images",
+    "/api/products/search",
+    "/api/products/reference-search",
+    "/api/client/find",
+    "/api/layout/aisles",
+}
+_PUBLIC_API_GET_PREFIXES = (
+    "/api/products/barcode/",
+    "/api/products/lookup/",
+)
+_PUBLIC_API_POST_PATHS = {
+    "/api/client/help",
+    "/api/ai/feedback",
+}
 
 _rate_lock = threading.Lock()
 _login_failures: dict[str, list[float]] = defaultdict(list)
@@ -145,17 +163,21 @@ def _password_record(db):
     stored = _get_setting(db, PASSWORD_SETTING)
     if stored:
         return stored, False, "database"
-    return _LEGACY_PASSWORD_SHA256, True, "legacy"
+    return _LEGACY_PASSWORD_SHA256, False, "legacy"
 
 
 def _verify_password(db, password: str):
     password = _normalize_password(password)
     if not password or len(password) > 256:
-        return False, True, "legacy"
+        return False, False, "legacy"
+    supplied = _sha256(password)
+    # Temporary compatibility requested for the Scan and Plan tabs. The
+    # plaintext is never shipped to the browser or stored in this repository.
+    if hmac.compare_digest(supplied, _LEGACY_PASSWORD_SHA256):
+        return True, False, "protected_area"
     stored, rotation_required, source = _password_record(db)
     if source == "legacy":
-        supplied = _sha256(password)
-        return hmac.compare_digest(supplied, stored), True, source
+        return hmac.compare_digest(supplied, stored), False, source
     try:
         return bool(check_password_hash(stored, password)), rotation_required, source
     except (ValueError, TypeError):
@@ -399,6 +421,15 @@ def _is_internal_request() -> bool:
     )
 
 
+def _is_public_api_request() -> bool:
+    if request.method == "GET":
+        return (
+            request.path in _PUBLIC_API_GET_PATHS
+            or request.path.startswith(_PUBLIC_API_GET_PREFIXES)
+        )
+    return request.method == "POST" and request.path in _PUBLIC_API_POST_PATHS
+
+
 def protect_api_request():
     """Flask before-request hook: authenticate every non-auth API endpoint."""
     if not request.path.startswith("/api/"):
@@ -416,6 +447,16 @@ def protect_api_request():
         g.auth_expires_at = int(time.time()) + 60
         return None
     if request.path in _PUBLIC_AUTH_PATHS:
+        return None
+    if _is_public_api_request():
+        if request.method in _UNSAFE_METHODS and not _same_origin_request():
+            return _json_error("Origine de la demande refusee.", 403, "origin_rejected")
+        if (
+            request.method in _UNSAFE_METHODS
+            and request.content_length is not None
+            and request.content_length > 256 * 1024
+        ):
+            return _json_error("Demande trop volumineuse.", 413, "request_too_large")
         return None
     try:
         session = _load_session()
@@ -452,11 +493,13 @@ def internal_request_headers():
 @auth_bp.route("/api/auth/status", methods=["GET"])
 def auth_status():
     try:
+        had_cookie = bool(request.cookies.get(_session_cookie_name(), ""))
         session = _load_session()
         if not session:
             response = jsonify({"authenticated": False})
-            _clear_session_cookie(response)
-            response.headers["Clear-Site-Data"] = '"cache"'
+            if had_cookie:
+                _clear_session_cookie(response)
+                response.headers["Clear-Site-Data"] = '"cache"'
             return response
         db = get_db()
         if not _session_matches_password(db, session):

@@ -27,24 +27,40 @@ class PerformanceContractTests(unittest.TestCase):
 
     def test_startup_restores_local_plan_before_network_wait(self):
         source = (ROOT / "static" / "main.js").read_text(encoding="utf-8")
-        authenticated_load = source.index("async function _loadAuthenticatedApp")
-        restore = source.index("restorePlanSnapshot()", authenticated_load)
-        network_wait = source.index("await Promise.allSettled", authenticated_load)
+        app_load = source.index("async function _loadAppData")
+        restore = source.index("restorePlanSnapshot()", app_load)
+        network_wait = source.index("await Promise.allSettled", app_load)
         self.assertLess(restore, network_wait)
         boot = source.index("async function bootApp()")
         auth_check = source.index("await initializeAuth()", boot)
-        resume = source.index("await resumeAuthenticatedApp()", auth_check)
-        self.assertLess(auth_check, resume)
+        public_load = source.index("_appLoadPromise = _loadAppData()", auth_check)
+        self.assertLess(auth_check, public_load)
+        self.assertNotIn("if (!authenticated) return", source[boot:public_load])
 
     def test_planogram_import_paints_committed_delta_before_revalidation(self):
         source = (ROOT / "static" / "layout-ui.js").read_text(encoding="utf-8")
         start = source.index("async function importPlanogram()")
-        end = source.index("async function loadPlanogramHistory()", start)
+        end = source.index("async function loadPlanogramHistory", start)
         import_body = source[start:end]
         apply_delta = import_body.index("applyPlanogramImportResult(aisle, side, data)")
         background_refresh = import_body.index("void Promise.allSettled")
         self.assertLess(apply_delta, background_refresh)
         self.assertNotIn("await refreshProductsCache(true)", import_body)
+
+    def test_public_tabs_and_planogram_history_are_compact_by_default(self):
+        source = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("const LOCKED_TABS = new Set(['scan', 'add'])", (
+            ROOT / "static" / "config.js"
+        ).read_text(encoding="utf-8"))
+        self.assertIn('id="tabBtn-search" onclick="switchTab(\'search\')">Recherche</button>', source)
+        self.assertIn('id="tabBtn-client" onclick="switchTab(\'client\')">Client</button>', source)
+        self.assertIn('<details class="card plano-history-card" id="planoHistoryPanel"', source)
+        self.assertNotIn('<details class="card plano-history-card" id="planoHistoryPanel" open', source)
+        self.assertLess(source.index('id="planoHistoryPanel"'), source.index('Catalogue — tous les planogrammes'))
+        self.assertNotIn('id="storePassword"', source)
+        self.assertIn("STORES.length === 1", (
+            ROOT / "static" / "store.js"
+        ).read_text(encoding="utf-8"))
 
     def test_client_fast_mode_is_independent_from_ai_answer(self):
         source = (ROOT / "static" / "ai-ui.js").read_text(encoding="utf-8")
