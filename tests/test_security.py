@@ -8,7 +8,7 @@ from urllib.request import Request
 from werkzeug.security import generate_password_hash
 
 from app import app
-from database import DatabaseConnection, init_sqlite_db
+from database import DatabaseConnection, ensure_auth_schema, init_sqlite_db
 import security
 from routes.layout import normalize_layout_config, valid_aisle_name
 from routes.gist import _github_urlopen, _normalized_backup_product
@@ -66,6 +66,29 @@ class SecurityBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         return response, response.get_json()
+
+    def test_auth_schema_repairs_a_partially_initialized_database(self):
+        connection = sqlite3.connect(":memory:", check_same_thread=False)
+        connection.row_factory = sqlite3.Row
+        partial_db = DatabaseConnection(connection, "sqlite")
+        try:
+            ensure_auth_schema(partial_db)
+            tables = {
+                row["name"] for row in partial_db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            self.assertTrue({
+                "users", "app_settings", "auth_sessions", "security_events",
+            }.issubset(tables))
+            columns = {
+                row["name"] for row in partial_db.execute(
+                    "PRAGMA table_info(auth_sessions)"
+                ).fetchall()
+            }
+            self.assertIn("password_fingerprint", columns)
+        finally:
+            partial_db.close()
 
     def test_forged_browser_identity_cannot_read_private_api(self):
         for path in (

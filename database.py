@@ -25,6 +25,7 @@ INTEGRITY_ERRORS = [sqlite3.IntegrityError]
 if psycopg is not None:
     INTEGRITY_ERRORS.append(psycopg.IntegrityError)
 INTEGRITY_ERRORS = tuple(INTEGRITY_ERRORS)
+_AUTH_SCHEMA_LOCK = threading.Lock()
 
 
 class DatabaseIntegrityError(Exception):
@@ -216,6 +217,87 @@ def init_db():
         raise
     finally:
         db.close()
+
+
+def ensure_auth_schema(db):
+    """Create only the small authentication tables when a full migration was delayed.
+
+    Render starts the web worker before best-effort schema maintenance finishes.
+    Product reads can therefore work while a lock timeout prevented the newer
+    auth tables from being created. Login calls this idempotent repair before it
+    reads or writes authentication state; no product or plan table is touched.
+    """
+    with _AUTH_SCHEMA_LOCK:
+        try:
+            if db.backend == "postgres":
+                db.execute("SELECT set_config('lock_timeout', ?, true)", ("5s",))
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    username   TEXT PRIMARY KEY,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    last_seen  TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    setting_key   TEXT PRIMARY KEY,
+                    setting_value TEXT NOT NULL DEFAULT '',
+                    updated_at    BIGINT NOT NULL DEFAULT 0
+                )
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS auth_sessions (
+                    token_hash      TEXT PRIMARY KEY,
+                    csrf_token      TEXT NOT NULL,
+                    username        TEXT NOT NULL,
+                    created_at      BIGINT NOT NULL,
+                    expires_at      BIGINT NOT NULL,
+                    last_seen       BIGINT NOT NULL,
+                    revoked_at      BIGINT NOT NULL DEFAULT 0,
+                    client_hash     TEXT DEFAULT '',
+                    user_agent_hash TEXT DEFAULT '',
+                    password_fingerprint TEXT DEFAULT ''
+                )
+            """)
+            event_id = (
+                "BIGSERIAL PRIMARY KEY"
+                if db.backend == "postgres"
+                else "INTEGER PRIMARY KEY AUTOINCREMENT"
+            )
+            db.execute(f"""
+                CREATE TABLE IF NOT EXISTS security_events (
+                    id              {event_id},
+                    created_at      BIGINT NOT NULL,
+                    action          TEXT NOT NULL,
+                    username        TEXT DEFAULT '',
+                    client_hash     TEXT DEFAULT '',
+                    user_agent_hash TEXT DEFAULT '',
+                    detail_json     TEXT DEFAULT ''
+                )
+            """)
+            db.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_security_events_created ON security_events(created_at)")
+            if db.backend == "postgres":
+                db.execute(
+                    "ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS "
+                    "password_fingerprint TEXT DEFAULT ''"
+                )
+            else:
+                columns = {
+                    row["name"] for row in db.execute("PRAGMA table_info(auth_sessions)").fetchall()
+                }
+                if "password_fingerprint" not in columns:
+                    db.execute(
+                        "ALTER TABLE auth_sessions ADD COLUMN "
+                        "password_fingerprint TEXT DEFAULT ''"
+                    )
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            raise
 
 
 def ensure_layout_sort_orders(db):

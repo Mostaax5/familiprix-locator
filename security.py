@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 from flask import Blueprint, current_app, g, jsonify, request
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from database import get_db
+from database import ensure_auth_schema, get_db
 
 
 auth_bp = Blueprint("auth", __name__)
@@ -543,6 +543,7 @@ def auth_login():
     username = _normalize_username(body.get("username"))
     try:
         db = get_db()
+        ensure_auth_schema(db)
         valid, rotation_required, _source = _verify_password(db, password)
     except Exception:
         current_app.logger.exception("Authentication database unavailable")
