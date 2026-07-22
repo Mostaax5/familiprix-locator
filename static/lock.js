@@ -131,19 +131,31 @@ async function unlockApp() {
   }
   if (error) error.textContent = '';
   try {
-    const response = await secureFetch('/api/auth/login', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        password: passwordInput.value,
-        username: _savedEditorName(),
-      }),
-      skipAuthHandling: true,
+    const credentials = JSON.stringify({
+      password: passwordInput.value,
+      username: _savedEditorName(),
     });
-    const data = await response.json();
+    let response = null;
+    let data = {};
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      response = await secureFetch('/api/auth/login', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: credentials,
+        skipAuthHandling: true,
+      });
+      try { data = await response.json(); } catch (_) { data = {}; }
+      const transient = response.status >= 500 || data.code === 'auth_unavailable';
+      if (!transient || attempt > 0) break;
+      if (button) button.textContent = 'Preparation du Plan...';
+      await new Promise(resolve => window.setTimeout(resolve, 250));
+    }
     passwordInput.value = '';
     if (!response.ok || !data.authenticated) {
-      if (error) error.textContent = data.error || 'Mot de passe incorrect.';
+      const unavailable = response.status >= 500 || data.code === 'auth_unavailable';
+      if (error) error.textContent = unavailable
+        ? 'Le Plan se prepare. Reessayez dans un instant.'
+        : (data.error || 'Mot de passe incorrect.');
       passwordInput.focus();
       return;
     }

@@ -28,6 +28,7 @@ const storage = new Map();
 const resumedTabs = [];
 let protectedResetCount = 0;
 let authenticated = false;
+let loginAttempts = 0;
 
 const context = {
   console,
@@ -51,8 +52,14 @@ const context = {
       return {ok: true, async json() { return {authenticated}; }};
     }
     if (url === '/api/auth/login') {
+      loginAttempts += 1;
+      if (loginAttempts === 1) {
+        return {ok: false, status: 503, async json() {
+          return {code: 'auth_unavailable', error: 'temporary'};
+        }};
+      }
       authenticated = true;
-      return {ok: true, async json() {
+      return {ok: true, status: 200, async json() {
         return {
           authenticated: true,
           csrf_token: 'csrf-test-token',
@@ -94,6 +101,7 @@ async function run() {
   lock.showLockModal('scan');
   elements.get('lockPasswordInput').value = 'test-only-password';
   await lock.unlockApp();
+  assert.strictEqual(loginAttempts, 2, 'a transient startup failure should retry once');
   assert.strictEqual(elements.get('lockModal').style.display, 'none');
   assert.deepStrictEqual(resumedTabs, ['scan']);
   assert.strictEqual(elements.get('tabBtn-scan').textContent, 'Scan');

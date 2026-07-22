@@ -37,6 +37,13 @@ class PerformanceContractTests(unittest.TestCase):
         self.assertLess(auth_check, public_load)
         self.assertNotIn("if (!authenticated) return", source[boot:public_load])
 
+        resume = source.index("async function resumeAuthenticatedApp")
+        load_branch = source.index("if (_appLoadPromise)", resume)
+        branch_end = source.index("return true;", load_branch)
+        branch = source[load_branch:branch_end]
+        self.assertIn("await switchTab(preferredTab)", branch)
+        self.assertNotIn("await _appLoadPromise", branch)
+
     def test_planogram_import_paints_committed_delta_before_revalidation(self):
         source = (ROOT / "static" / "layout-ui.js").read_text(encoding="utf-8")
         start = source.index("async function importPlanogram()")

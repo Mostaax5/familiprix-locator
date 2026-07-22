@@ -249,6 +249,17 @@ class SecurityBoundaryTests(unittest.TestCase):
         status = self.client.get("/api/auth/status", base_url="https://localhost")
         self.assertFalse(status.get_json()["authenticated"])
 
+    def test_login_transaction_failure_is_retryable_not_internal_error(self):
+        with patch("security._create_session", side_effect=RuntimeError("temporary database failure")):
+            response = self.client.post(
+                "/api/auth/login",
+                json={"password": self.password, "username": "Security Tester"},
+                headers={"Origin": "https://localhost"},
+                base_url="https://localhost",
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["code"], "auth_unavailable")
+
     def test_password_secret_rotation_revokes_existing_sessions(self):
         self.login()
         self.password_patcher.stop()

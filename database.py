@@ -26,6 +26,7 @@ if psycopg is not None:
     INTEGRITY_ERRORS.append(psycopg.IntegrityError)
 INTEGRITY_ERRORS = tuple(INTEGRITY_ERRORS)
 _AUTH_SCHEMA_LOCK = threading.Lock()
+_POSTGRES_AUTH_SCHEMA_READY = False
 
 
 class DatabaseIntegrityError(Exception):
@@ -194,6 +195,7 @@ def close_db(_error=None):
 
 
 def init_db():
+    global _POSTGRES_AUTH_SCHEMA_READY
     db = connect_db()
     try:
         if db.backend == "postgres":
@@ -201,6 +203,9 @@ def init_db():
             # schema lock. A later worker can retry a best-effort migration.
             db.execute("SELECT set_config('lock_timeout', ?, false)", ("5s",))
             db.execute("SELECT set_config('statement_timeout', ?, false)", ("30s",))
+            # Commit authentication first so Scan/Plan never waits for the
+            # larger product and planogram migration running at startup.
+            ensure_auth_schema(db)
             init_postgres_db(db)
             print("Base de données partagee prete : PostgreSQL")
         else:
@@ -209,6 +214,8 @@ def init_db():
         db.commit()
         ensure_best_effort_unique_indexes(db)
         db.commit()
+        if db.backend == "postgres":
+            _POSTGRES_AUTH_SCHEMA_READY = True
     except Exception:
         try:
             db.rollback()
@@ -227,7 +234,12 @@ def ensure_auth_schema(db):
     auth tables from being created. Login calls this idempotent repair before it
     reads or writes authentication state; no product or plan table is touched.
     """
+    global _POSTGRES_AUTH_SCHEMA_READY
+    if db.backend == "postgres" and _POSTGRES_AUTH_SCHEMA_READY:
+        return
     with _AUTH_SCHEMA_LOCK:
+        if db.backend == "postgres" and _POSTGRES_AUTH_SCHEMA_READY:
+            return
         try:
             if db.backend == "postgres":
                 db.execute("SELECT set_config('lock_timeout', ?, true)", ("5s",))
@@ -292,6 +304,8 @@ def ensure_auth_schema(db):
                         "password_fingerprint TEXT DEFAULT ''"
                     )
             db.commit()
+            if db.backend == "postgres":
+                _POSTGRES_AUTH_SCHEMA_READY = True
         except Exception:
             try:
                 db.rollback()

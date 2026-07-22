@@ -560,25 +560,37 @@ def auth_login():
             return response, status
         return _json_error("Identifiants invalides.", 401, "invalid_credentials")
 
-    _clear_login_failures(key)
-    now = int(time.time())
-    current_cookie = request.cookies.get(_session_cookie_name(), "")
-    if current_cookie and len(current_cookie) <= 200:
+    try:
+        _clear_login_failures(key)
+        now = int(time.time())
+        current_cookie = request.cookies.get(_session_cookie_name(), "")
+        if current_cookie and len(current_cookie) <= 200:
+            db.execute(
+                "UPDATE auth_sessions SET revoked_at=? WHERE token_hash=? AND revoked_at=0",
+                (now, _sha256(current_cookie)),
+            )
         db.execute(
-            "UPDATE auth_sessions SET revoked_at=? WHERE token_hash=? AND revoked_at=0",
-            (now, _sha256(current_cookie)),
+            """
+            INSERT INTO users (username, last_seen) VALUES (?, ?)
+            ON CONFLICT(username) DO UPDATE SET last_seen=excluded.last_seen
+            """,
+            (username, str(now)),
         )
-    db.execute(
-        """
-        INSERT INTO users (username, last_seen) VALUES (?, ?)
-        ON CONFLICT(username) DO UPDATE SET last_seen=excluded.last_seen
-        """,
-        (username, str(now)),
-    )
-    _prune_auth_data(db)
-    raw_token, token_hash, csrf_token, expires_at = _create_session(db, username)
-    _record_event(db, "login", username, {"rotation_required": rotation_required})
-    db.commit()
+        _prune_auth_data(db)
+        raw_token, token_hash, csrf_token, expires_at = _create_session(db, username)
+        _record_event(db, "login", username, {"rotation_required": rotation_required})
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        current_app.logger.exception("Authentication session creation failed")
+        return _json_error(
+            "Connexion temporairement indisponible. Reessayez dans un instant.",
+            503,
+            "auth_unavailable",
+        )
     g.auth_session_hash = token_hash
     response = jsonify({
         "success": True,

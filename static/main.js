@@ -333,7 +333,8 @@ async function resumeAuthenticatedApp(preferredTab=null) {
     return true;
   }
   if (_appLoadPromise) {
-    await _appLoadPromise;
+    // Open from the saved Plan while the large public catalog refresh keeps
+    // running. The refresh reconciles this view in the background.
     if (preferredTab) await switchTab(preferredTab);
     return true;
   }
