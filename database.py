@@ -27,6 +27,8 @@ if psycopg is not None:
 INTEGRITY_ERRORS = tuple(INTEGRITY_ERRORS)
 _AUTH_SCHEMA_LOCK = threading.Lock()
 _POSTGRES_AUTH_SCHEMA_READY = False
+_PRODUCT_SCHEMA_LOCK = threading.RLock()
+_POSTGRES_PRODUCT_SCHEMA_READY = False
 
 
 class DatabaseIntegrityError(Exception):
@@ -195,7 +197,7 @@ def close_db(_error=None):
 
 
 def init_db():
-    global _POSTGRES_AUTH_SCHEMA_READY
+    global _POSTGRES_AUTH_SCHEMA_READY, _POSTGRES_PRODUCT_SCHEMA_READY
     db = connect_db()
     try:
         if db.backend == "postgres":
@@ -206,12 +208,15 @@ def init_db():
             # Commit authentication first so Scan/Plan never waits for the
             # larger product and planogram migration running at startup.
             ensure_auth_schema(db)
-            init_postgres_db(db)
+            with _PRODUCT_SCHEMA_LOCK:
+                init_postgres_db(db)
+                db.commit()
+                _POSTGRES_PRODUCT_SCHEMA_READY = True
             print("Base de données partagee prete : PostgreSQL")
         else:
             init_sqlite_db(db)
             print(f"Base de données prete : {DB_PATH}")
-        db.commit()
+            db.commit()
         ensure_best_effort_unique_indexes(db)
         db.commit()
         if db.backend == "postgres":
@@ -517,6 +522,90 @@ def ensure_product_data_schema(db):
     db.execute("CREATE INDEX IF NOT EXISTS idx_product_issues_open ON product_data_issues(status, issue_type, product_id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_product_aliases_value ON product_aliases(normalized_value)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_product_relationships_source ON product_relationships(source_product_id, relationship_type)")
+
+
+_PRODUCT_DATA_TABLES = (
+    "product_identifiers", "product_field_evidence",
+    "product_reference_evidence", "product_data_issues", "product_aliases",
+    "product_relationships", "product_quality_runs",
+)
+
+_PRODUCT_REFERENCE_DATA_COLUMNS = (
+    "gtin_key", "match_method", "verification_status", "last_verified_at",
+    "store_presence_status", "package_size", "package_unit", "variant",
+    "flavour", "colour", "strength", "dosage_form", "manufacturer",
+    "category", "ingredients", "compatibility", "official_name_fr",
+    "official_name_en", "source_priority", "confidence",
+)
+
+
+def _result_count(row):
+    if not row:
+        return 0
+    if isinstance(row, dict):
+        return int(next(iter(row.values()), 0) or 0)
+    return int(row[0] or 0)
+
+
+def _postgres_product_data_schema_complete(db):
+    product_columns = tuple(_PRODUCT_DATA_TEXT_COLUMNS) + ("quality_issue_count",)
+    product_placeholders = ",".join("?" for _ in product_columns)
+    product_count = _result_count(db.execute(
+        f"""SELECT COUNT(DISTINCT column_name) AS count
+            FROM information_schema.columns
+            WHERE table_schema=current_schema() AND table_name='products'
+              AND column_name IN ({product_placeholders})""",
+        product_columns,
+    ).fetchone())
+    if product_count != len(product_columns):
+        return False
+
+    reference_placeholders = ",".join("?" for _ in _PRODUCT_REFERENCE_DATA_COLUMNS)
+    reference_count = _result_count(db.execute(
+        f"""SELECT COUNT(DISTINCT column_name) AS count
+            FROM information_schema.columns
+            WHERE table_schema=current_schema() AND table_name='product_reference'
+              AND column_name IN ({reference_placeholders})""",
+        _PRODUCT_REFERENCE_DATA_COLUMNS,
+    ).fetchone())
+    if reference_count != len(_PRODUCT_REFERENCE_DATA_COLUMNS):
+        return False
+
+    table_placeholders = ",".join("?" for _ in _PRODUCT_DATA_TABLES)
+    table_count = _result_count(db.execute(
+        f"""SELECT COUNT(DISTINCT table_name) AS count
+            FROM information_schema.tables
+            WHERE table_schema=current_schema()
+              AND table_name IN ({table_placeholders})""",
+        _PRODUCT_DATA_TABLES,
+    ).fetchone())
+    return table_count == len(_PRODUCT_DATA_TABLES)
+
+
+def ensure_product_data_ready(db):
+    """Repair a delayed Render migration before product-data routes run."""
+    global _POSTGRES_PRODUCT_SCHEMA_READY
+    if db.backend != "postgres" or _POSTGRES_PRODUCT_SCHEMA_READY:
+        return True
+    with _PRODUCT_SCHEMA_LOCK:
+        if _POSTGRES_PRODUCT_SCHEMA_READY:
+            return True
+        if _postgres_product_data_schema_complete(db):
+            _POSTGRES_PRODUCT_SCHEMA_READY = True
+            return True
+        try:
+            db.execute("SELECT set_config('lock_timeout', ?, true)", ("12s",))
+            db.execute("SELECT set_config('statement_timeout', ?, true)", ("60s",))
+            ensure_product_data_schema(db)
+            db.commit()
+            _POSTGRES_PRODUCT_SCHEMA_READY = True
+            return True
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            raise
 
 
 def ensure_layout_sort_orders(db):

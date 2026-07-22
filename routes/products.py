@@ -3315,6 +3315,27 @@ def product_quality_summary():
     complete_row = db.execute(
         "SELECT COUNT(*) AS count FROM products WHERE data_status='complete_verified'"
     ).fetchone()
+    identifier_rows = db.execute(
+        """SELECT identifier_type, verification_status,
+                  COUNT(DISTINCT product_id) AS count
+           FROM product_identifiers
+           GROUP BY identifier_type, verification_status
+           ORDER BY identifier_type, verification_status"""
+    ).fetchall()
+    field_rows = db.execute(
+        """SELECT field_name, COUNT(DISTINCT product_id) AS count
+           FROM product_field_evidence
+           WHERE active=1 AND verification_status='verified'
+           GROUP BY field_name ORDER BY field_name"""
+    ).fetchall()
+    identifier_coverage = {}
+    for row in identifier_rows:
+        item = dict(row)
+        identifier_coverage.setdefault(
+            str(item.get("identifier_type") or "UNKNOWN"), {}
+        )[str(item.get("verification_status") or "unverified")] = int(
+            item.get("count") or 0
+        )
     with _QUALITY_AUDIT_LOCK:
         job = dict(_QUALITY_AUDIT_STATE)
     return jsonify({
@@ -3330,6 +3351,12 @@ def product_quality_summary():
             str(dict(row).get("issue_type") or "unknown"):
             int(dict(row).get("count") or 0)
             for row in issue_rows
+        },
+        "identifier_coverage": identifier_coverage,
+        "verified_field_coverage": {
+            str(dict(row).get("field_name") or "unknown"):
+            int(dict(row).get("count") or 0)
+            for row in field_rows
         },
         "audit": job,
     })

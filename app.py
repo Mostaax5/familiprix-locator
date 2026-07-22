@@ -8,7 +8,9 @@ from urllib.parse import urlsplit
 from flask import Flask, render_template, send_from_directory, jsonify, request, g
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
-from database import close_db, get_backend_summary, get_db, init_db
+from database import (
+    close_db, ensure_product_data_ready, get_backend_summary, get_db, init_db,
+)
 from auth import utc_now_iso
 from security import auth_bp, install_security, internal_request_headers
 from routes.products import (
@@ -118,6 +120,25 @@ app.register_blueprint(ai_bp)
 app.register_blueprint(gist_bp)
 app.register_blueprint(import_export_bp)
 app.register_blueprint(auth_bp)
+
+
+_PRODUCT_DATA_BLUEPRINTS = {"products", "ai", "gist", "import_export"}
+
+
+@app.before_request
+def _ensure_product_schema_before_catalogue_request():
+    if request.blueprint not in _PRODUCT_DATA_BLUEPRINTS:
+        return None
+    try:
+        ensure_product_data_ready(get_db())
+    except Exception:
+        app.logger.exception("Product-data schema is not ready")
+        return jsonify({
+            "success": False,
+            "error": "Le catalogue se prépare. Réessayez dans un instant.",
+            "code": "catalogue_initializing",
+        }), 503
+    return None
 
 
 def _asset_version():
@@ -368,21 +389,28 @@ def _finish_persistence_boot():
     global DB_BOOT_ERROR, DB_BOOT_PENDING
     initialized = not _ASYNC_RENDER_BOOT
     if _ASYNC_RENDER_BOOT:
-        try:
-            init_db()
-            initialized = True
-            DB_BOOT_ERROR = ""
-        except Exception as exc:  # noqa: BLE001 — health endpoint must stay alive
-            DB_BOOT_ERROR = str(exc)
-            print(f"[BOOT] Initialisation PostgreSQL différée impossible: {exc}")
-        finally:
-            DB_BOOT_PENDING = False
+        retry_delays = (0, 2, 5, 10, 20, 30)
+        for attempt, delay in enumerate(retry_delays, start=1):
+            if delay:
+                time.sleep(delay)
+            try:
+                init_db()
+                initialized = True
+                DB_BOOT_ERROR = ""
+                break
+            except Exception as exc:  # noqa: BLE001 — health endpoint must stay alive
+                DB_BOOT_ERROR = str(exc)
+                print(
+                    f"[BOOT] Initialisation PostgreSQL tentative "
+                    f"{attempt}/{len(retry_delays)} impossible: {exc}"
+                )
+        DB_BOOT_PENDING = False
 
     if initialized:
         _restore_from_gist_if_empty()
-    schedule_reference_metadata_sync()  # connect catalogue metadata to placed UPCs
-    schedule_initial_product_quality_audit()
-    schedule_backfill_missing()  # fetch missing product images in background
+        schedule_reference_metadata_sync()  # connect catalogue metadata to placed UPCs
+        schedule_initial_product_quality_audit()
+        schedule_backfill_missing()  # fetch missing product images in background
 
 
 if _ASYNC_RENDER_BOOT:

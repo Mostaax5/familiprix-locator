@@ -1,7 +1,11 @@
 import sqlite3
 import unittest
+from unittest.mock import patch
 
-from database import DatabaseConnection, init_sqlite_db
+from flask import Flask
+
+import database as database_module
+from database import DatabaseConnection, ensure_product_data_ready, init_sqlite_db
 from product_backup import (
     build_product_data_backup,
     restore_product_backup_row,
@@ -336,6 +340,62 @@ class ProductDataAccuracyTests(unittest.TestCase):
         self.assertEqual(evidence["active"], 1)
         source.close()
         target.close()
+
+    def test_delayed_postgres_product_schema_repairs_once(self):
+        class FakePostgres:
+            backend = "postgres"
+
+            def __init__(self):
+                self.executed = []
+                self.commits = 0
+                self.rollbacks = 0
+
+            def execute(self, query, params=()):
+                self.executed.append((query, params))
+                return None
+
+            def commit(self):
+                self.commits += 1
+
+            def rollback(self):
+                self.rollbacks += 1
+
+        db = FakePostgres()
+        original_ready = database_module._POSTGRES_PRODUCT_SCHEMA_READY
+        database_module._POSTGRES_PRODUCT_SCHEMA_READY = False
+        try:
+            with patch.object(
+                database_module, "_postgres_product_data_schema_complete",
+                return_value=False,
+            ), patch.object(database_module, "ensure_product_data_schema") as migrate:
+                self.assertTrue(ensure_product_data_ready(db))
+                self.assertTrue(ensure_product_data_ready(db))
+                migrate.assert_called_once_with(db)
+            self.assertEqual(db.commits, 1)
+            self.assertEqual(db.rollbacks, 0)
+        finally:
+            database_module._POSTGRES_PRODUCT_SCHEMA_READY = original_ready
+
+    def test_quality_summary_reports_identifier_and_field_coverage(self):
+        db = self.make_db()
+        product_id = self.insert_product(db, name="Verified package")
+        upsert_product_identifier(
+            db, product_id, "DIN", "12345678", source="Health Canada",
+            verification_status="verified",
+        )
+        audit_product_data(
+            db, [product_id], now="2026-07-22T00:00:00+00:00"
+        )
+        app = Flask(__name__)
+        app.register_blueprint(products_module.products_bp)
+        with patch.object(products_module, "get_db", return_value=db):
+            response = app.test_client().get("/api/product-quality/summary")
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["identifier_coverage"]["DIN"]["verified"], 1)
+        self.assertEqual(payload["identifier_coverage"]["GTIN"]["verified"], 1)
+        self.assertEqual(payload["verified_field_coverage"]["name"], 1)
+        db.close()
 
 
 if __name__ == "__main__":
