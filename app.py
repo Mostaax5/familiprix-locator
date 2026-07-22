@@ -10,6 +10,7 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from database import (
     close_db, ensure_product_data_ready, get_backend_summary, get_db, init_db,
+    product_data_schema_status,
 )
 from auth import utc_now_iso
 from security import auth_bp, install_security, internal_request_headers
@@ -315,6 +316,7 @@ def get_system_info():
         "reference_count": reference_count(),
         "version": os.environ.get("RENDER_GIT_COMMIT", "")[:7],
         "self_keepalive": _SELF_KEEPALIVE_ACTIVE,
+        "catalogue_schema": product_data_schema_status(),
     })
 
 

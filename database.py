@@ -29,6 +29,7 @@ _AUTH_SCHEMA_LOCK = threading.Lock()
 _POSTGRES_AUTH_SCHEMA_READY = False
 _PRODUCT_SCHEMA_LOCK = threading.RLock()
 _POSTGRES_PRODUCT_SCHEMA_READY = False
+_POSTGRES_PRODUCT_SCHEMA_ERROR = ""
 
 
 class DatabaseIntegrityError(Exception):
@@ -198,6 +199,7 @@ def close_db(_error=None):
 
 def init_db():
     global _POSTGRES_AUTH_SCHEMA_READY, _POSTGRES_PRODUCT_SCHEMA_READY
+    global _POSTGRES_PRODUCT_SCHEMA_ERROR
     db = connect_db()
     try:
         if db.backend == "postgres":
@@ -212,6 +214,7 @@ def init_db():
                 init_postgres_db(db)
                 db.commit()
                 _POSTGRES_PRODUCT_SCHEMA_READY = True
+                _POSTGRES_PRODUCT_SCHEMA_ERROR = ""
             print("Base de données partagee prete : PostgreSQL")
         else:
             init_sqlite_db(db)
@@ -584,7 +587,7 @@ def _postgres_product_data_schema_complete(db):
 
 def ensure_product_data_ready(db):
     """Repair a delayed Render migration before product-data routes run."""
-    global _POSTGRES_PRODUCT_SCHEMA_READY
+    global _POSTGRES_PRODUCT_SCHEMA_READY, _POSTGRES_PRODUCT_SCHEMA_ERROR
     if db.backend != "postgres" or _POSTGRES_PRODUCT_SCHEMA_READY:
         return True
     with _PRODUCT_SCHEMA_LOCK:
@@ -592,6 +595,7 @@ def ensure_product_data_ready(db):
             return True
         if _postgres_product_data_schema_complete(db):
             _POSTGRES_PRODUCT_SCHEMA_READY = True
+            _POSTGRES_PRODUCT_SCHEMA_ERROR = ""
             return True
         try:
             db.execute("SELECT set_config('lock_timeout', ?, true)", ("12s",))
@@ -599,13 +603,24 @@ def ensure_product_data_ready(db):
             ensure_product_data_schema(db)
             db.commit()
             _POSTGRES_PRODUCT_SCHEMA_READY = True
+            _POSTGRES_PRODUCT_SCHEMA_ERROR = ""
             return True
-        except Exception:
+        except Exception as exc:
+            _POSTGRES_PRODUCT_SCHEMA_ERROR = (
+                f"{type(exc).__name__}: {exc}"
+            )[:600]
             try:
                 db.rollback()
             except Exception:
                 pass
             raise
+
+
+def product_data_schema_status():
+    return {
+        "ready": bool(_POSTGRES_PRODUCT_SCHEMA_READY),
+        "error": _POSTGRES_PRODUCT_SCHEMA_ERROR,
+    }
 
 
 def ensure_layout_sort_orders(db):
