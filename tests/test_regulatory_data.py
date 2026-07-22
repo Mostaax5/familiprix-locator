@@ -23,6 +23,7 @@ from routes.regulatory import _seed_catalogue_label_candidates
 from routes.ai import _prefer_lookup_result, product_context_for_client_rag
 from routes.products import (
     _PROD_CACHE,
+    _direct_identifier_products,
     _fast_reference_score,
     _products_corpus,
     normalize_search_text,
@@ -337,6 +338,12 @@ class RegulatoryDataTests(unittest.TestCase):
         self.assertEqual(
             [match["id"] for match in rank_products_by_field(
                 [item], "01234567", "din"
+            )],
+            [product_id],
+        )
+        self.assertEqual(
+            [match["id"] for match in _direct_identifier_products(
+                db, "01234567", "din", limit=5
             )],
             [product_id],
         )

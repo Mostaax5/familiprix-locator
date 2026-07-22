@@ -2210,6 +2210,111 @@ def rank_products_by_field(products, query, field, limit=60):
     return items[:limit] if limit else items
 
 
+def _direct_identifier_products(db, query, field, limit=60):
+    """Indexed cold-start path for explicit identifiers.
+
+    This avoids building the complete product corpus just to resolve one DIN,
+    NPN, UPC, supplier number, or other selected identifier.
+    """
+    field = str(field or "").strip().lower()
+    if field == "name":
+        return None
+    known_fields = {
+        "upc", "gtin", "code", "familiprix_code", "identifier",
+        "all_identifiers", *_IDENTIFIER_SEARCH_FIELDS.keys(),
+    }
+    if field not in known_fields:
+        return []
+    raw_query = str(query or "").strip()
+    numeric_query = bool(re.fullmatch(r"[\d\s.\-]+", raw_query))
+    needle = (
+        normalized_digits(raw_query) if numeric_query
+        else re.sub(r"[\s\-]+", "", unicodedata.normalize("NFKC", raw_query).upper())
+    )
+    if not needle:
+        return []
+    escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pattern = f"%{escaped}%"
+    id_status = """(
+        pi.verification_status='verified'
+        OR (pi.verification_status='requires_review' AND pi.confidence>=0.25)
+    )"""
+    barcode_expr = "REPLACE(REPLACE(UPPER(COALESCE(p.barcode,'')),'-',''),' ','')"
+    code_expr = "REPLACE(REPLACE(UPPER(COALESCE(p.product_code,'')),'-',''),' ','')"
+    identifier_expr = "UPPER(COALESCE(pi.normalized_value,''))"
+    params = []
+    if field in {"upc", "gtin"}:
+        condition = (
+            f"({barcode_expr} LIKE ? ESCAPE '\\' OR "
+            f"(pi.identifier_type IN ('UPC','GTIN') AND {identifier_expr} LIKE ? ESCAPE '\\'))"
+        )
+        params.extend([pattern, pattern])
+    elif field in {"code", "familiprix_code"}:
+        condition = (
+            f"({code_expr} LIKE ? ESCAPE '\\' OR "
+            f"(pi.identifier_type='FAMILIPRIX_CODE' AND {identifier_expr} LIKE ? ESCAPE '\\'))"
+        )
+        params.extend([pattern, pattern])
+    elif field in {"identifier", "all_identifiers"}:
+        condition = (
+            f"({barcode_expr} LIKE ? ESCAPE '\\' OR {code_expr} LIKE ? ESCAPE '\\' "
+            f"OR {identifier_expr} LIKE ? ESCAPE '\\')"
+        )
+        params.extend([pattern, pattern, pattern])
+    else:
+        allowed = sorted(_IDENTIFIER_SEARCH_FIELDS[field])
+        placeholders = ",".join("?" for _ in allowed)
+        condition = (
+            f"pi.identifier_type IN ({placeholders}) "
+            f"AND {identifier_expr} LIKE ? ESCAPE '\\'"
+        )
+        params.extend(allowed)
+        params.append(pattern)
+    rows = db.execute(
+        f"""SELECT DISTINCT p.*
+            FROM products p
+            LEFT JOIN product_identifiers pi
+              ON pi.product_id=p.id AND {id_status}
+            WHERE {condition}
+            LIMIT ?""",
+        tuple(params + [min(max(int(limit or 60) * 4, 80), 400)]),
+    ).fetchall()
+    items = rows_to_verified_products(db, rows)
+    product_ids = [int(item["id"]) for item in items if item.get("id") is not None]
+    identifiers_by_product = {}
+    for start in range(0, len(product_ids), 300):
+        chunk = product_ids[start:start + 300]
+        placeholders = ",".join("?" for _ in chunk)
+        for identifier_row in db.execute(
+            f"""SELECT product_id, identifier_type, identifier_value, authority,
+                       source, source_url, verification_status, match_method, confidence
+                FROM product_identifiers
+                WHERE product_id IN ({placeholders})
+                  AND (verification_status='verified'
+                       OR (verification_status='requires_review' AND confidence>=0.25))
+                ORDER BY CASE WHEN verification_status='verified' THEN 0 ELSE 1 END,
+                         confidence DESC, id""",
+            tuple(chunk),
+        ).fetchall():
+            identifier = dict(identifier_row)
+            identifiers_by_product.setdefault(int(identifier["product_id"]), []).append({
+                "type": identifier.get("identifier_type", ""),
+                "value": identifier.get("identifier_value", ""),
+                "authority": identifier.get("authority", ""),
+                "source": identifier.get("source", ""),
+                "source_url": identifier.get("source_url", ""),
+                "verification_status": identifier.get("verification_status", ""),
+                "match_method": identifier.get("match_method", ""),
+                "confidence": identifier.get("confidence", 0),
+            })
+    for item in items:
+        identifiers = identifiers_by_product.get(int(item.get("id") or 0), [])
+        item["_identifiers"] = identifiers
+        item["identifiers"] = _public_product_identifiers(identifiers)
+        item["regulatory_identifiers"] = _public_regulatory_identifiers(identifiers)
+    return rank_products_by_field(items, query, field, limit=limit)
+
+
 def rank_products_by_code(products, query, limit=60):
     """Backward-compatible Familiprix-code search helper."""
     return rank_products_by_field(products, query, "code", limit=limit)
@@ -2572,6 +2677,9 @@ def search_products():
     field = (request.args.get("field") or "").strip().lower()
     limit = min(max(clamp_non_negative_int(request.args.get("limit", "60"), 60), 1), 120)
     db = get_db()
+    if field and field != "name":
+        items = _direct_identifier_products(db, query, field, limit=limit)
+        return jsonify([public_product_payload(item) for item in items])
     corpus = _products_corpus(
         db, allow_identifier_stale=True
     )  # enrichment writes cannot force a full rebuild per employee query
