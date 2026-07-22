@@ -1,10 +1,9 @@
 """Authoritative Canadian regulatory product-data helpers.
 
-DIN matching uses Health Canada's DPD packaging extract because it contains the
-exact commercial UPC and the related drug record. NPN and DIN-HM do not have an
-equivalent public UPC table; those identifiers are accepted only when an
-exact-UPC source explicitly labels the number and Health Canada confirms the
-licence and product identity.
+Health Canada removed UPC values from the public DPD packaging feed in May
+2025. DIN, NPN, and DIN-HM associations therefore start with an exact-UPC
+product source that explicitly labels the identifier, then Health Canada is
+used to confirm the regulatory identifier and product identity.
 """
 
 from __future__ import annotations
@@ -29,6 +28,10 @@ from product_data import gtin_identity_key, normalize_text, text_digits
 HEALTH_CANADA_DPD_SOURCE = "Health Canada DPD"
 HEALTH_CANADA_LNHPD_SOURCE = "Health Canada LNHPD"
 HEALTH_CANADA_AUTHORITY = "Health Canada"
+HEALTH_CANADA_DPD_UPC_NOTICE = (
+    "Health Canada DPD public packaging data no longer includes UPC values "
+    "(since 2025-05-01)"
+)
 HEALTH_CANADA_DPD_PAGE = (
     "https://www.canada.ca/en/health-canada/services/drugs-health-products/"
     "drug-products/drug-product-database/what-data-extract-drug-product-database.html"
@@ -368,48 +371,15 @@ def _download_to_temp(url, *, timeout=45, max_bytes=_MAX_EXTRACT_BYTES):
 
 
 def download_dpd_matches(wanted_gtin_keys, progress=None):
-    """Return exact marketed UPC/DIN matches from official Health Canada data.
+    """Return no bulk matches because the current official feed omits UPCs.
 
-    The documented JSON API is primary because it is reliable from Render. The
-    Canada.ca ZIP extracts remain a bounded fallback for API outages.
+    Keeping this boundary explicit prevents accidental name- or DIN-only joins
+    while callers migrate to exact-UPC labelled evidence plus official identity
+    verification.
     """
-    api_error_text = ""
-    try:
-        return _download_dpd_api_matches(wanted_gtin_keys, progress=progress)
-    except Exception as api_error:
-        api_error_text = str(api_error)
-        if progress:
-            progress("api_fallback_zip")
-    package_path = drug_path = ""
-    versions = []
-    try:
-        if progress:
-            progress("download_packages")
-        package_path, version = _download_to_temp(_DPD_PACKAGE_URL)
-        versions.append(version)
-        if progress:
-            progress("download_drugs")
-        drug_path, version = _download_to_temp(_DPD_DRUG_URL)
-        versions.append(version)
-        if progress:
-            progress("match_exact_upc")
-        try:
-            matches = parse_dpd_extracts(
-                package_path, drug_path, wanted_gtin_keys
-            )
-        except Exception as zip_error:
-            raise RuntimeError(
-                f"Health Canada API failed ({api_error_text}); "
-                f"ZIP fallback failed ({zip_error})"
-            ) from zip_error
-        return matches, " | ".join(value for value in versions if value)
-    finally:
-        for path in (package_path, drug_path):
-            if path:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+    if progress:
+        progress("dpd_upc_retired")
+    return [], HEALTH_CANADA_DPD_UPC_NOTICE
 
 
 def _read_json_url(url, timeout=8):
@@ -486,9 +456,38 @@ def verify_regulatory_candidate(candidate, catalog_name="", fetch_json=None):
                         "match_method": "exact_gtin_health_canada_packaging",
                         "confidence": 1.0,
                     }
+                official_name = str(record.get("brand_name", "") or "").strip()
+                if regulatory_name_match(
+                    product_name or catalog_name, official_name
+                ):
+                    return {
+                        "verified": True,
+                        "identifier_type": "DIN",
+                        "value": value,
+                        "source": HEALTH_CANADA_DPD_SOURCE,
+                        "source_url": HEALTH_CANADA_DPD_PAGE,
+                        "source_record_id": code,
+                        "official_name": official_name,
+                        "manufacturer": str(
+                            record.get("company_name", "") or ""
+                        ).strip(),
+                        "match_method": (
+                            "exact_gtin_label_plus_health_canada_drug"
+                        ),
+                        "confidence": 0.98,
+                    }
+            if records:
+                return {
+                    "verified": False,
+                    "probable": True,
+                    "reason": "official_din_name_unconfirmed",
+                    "official_name": str(
+                        records[0].get("brand_name", "") or ""
+                    ).strip(),
+                }
             return {
                 "verified": False,
-                "reason": "din_package_not_confirmed" if records else "din_not_found",
+                "reason": "din_not_found",
             }
 
         url = f"{_LNHPD_API}/productlicence/?{urlencode({'id': value, 'lang': 'en', 'type': 'json'})}"

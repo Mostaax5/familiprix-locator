@@ -20,7 +20,8 @@ from regulatory_data import (
     HEALTH_CANADA_AUTHORITY,
     HEALTH_CANADA_DPD_PAGE,
     HEALTH_CANADA_DPD_SOURCE,
-    download_dpd_matches,
+    HEALTH_CANADA_DPD_UPC_NOTICE,
+    extract_regulatory_identifiers,
     group_unambiguous_dpd_matches,
     merge_regulatory_candidates,
     verify_regulatory_candidate,
@@ -152,6 +153,53 @@ def _product_rows_by_key(db):
         if key:
             rows.setdefault(key, []).append(product)
     return rows
+
+
+def _seed_catalogue_label_candidates(db, now):
+    """Preserve regulatory labels already attached to an exact catalogue UPC."""
+    queries = (
+        """SELECT barcode, name, description, ingredients, source, source_url
+           FROM product_reference
+           WHERE TRIM(COALESCE(barcode,''))<>''""",
+        """SELECT barcode, name, description, ingredients,
+                  COALESCE(primary_source, '') AS source,
+                  COALESCE(NULLIF(primary_source_url,''), source_url, '')
+                    AS source_url
+           FROM products
+           WHERE TRIM(COALESCE(barcode,''))<>''""",
+    )
+    seeded = 0
+    seen = set()
+    for query in queries:
+        for raw in db.execute(query).fetchall():
+            row = dict(raw)
+            barcode = str(row.get("barcode", "") or "").strip()
+            gtin_key = gtin_identity_key(barcode)
+            if not gtin_key:
+                continue
+            for identifier in extract_regulatory_identifiers(
+                row.get("name", ""), row.get("description", ""),
+                row.get("ingredients", ""),
+            ):
+                key = (
+                    gtin_key, identifier["type"], identifier["value"]
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                saved = upsert_reference_identifier(
+                    db, barcode, identifier["type"], identifier["value"],
+                    authority=HEALTH_CANADA_AUTHORITY,
+                    source=str(row.get("source", "") or "Catalogue exact UPC"),
+                    source_url=str(row.get("source_url", "") or ""),
+                    source_record_id=str(row.get("name", "") or ""),
+                    match_method="exact_gtin_labeled_source",
+                    confidence=0.75,
+                    verification_status="requires_review",
+                    imported_at=now,
+                )
+                seeded += int(bool(saved))
+    return seeded
 
 
 def _checked_keys(db, source):
@@ -593,29 +641,20 @@ def _regulatory_worker(force=False):
         _save_state(db)
         db.commit()
 
-        checked_dpd = set() if force else _checked_keys(db, _DPD_CHECK_SOURCE)
-        dpd_items = {
-            key: item for key, item in items.items() if key not in checked_dpd
-        }
+        _state_update(phase="read_existing_identifier_labels")
+        _seed_catalogue_label_candidates(db, now)
+        db.commit()
+
+        # Health Canada removed UPC values from its DPD packaging feed in May
+        # 2025. Do not download the complete feed or infer DINs by name. Exact
+        # UPC sources are inspected below and each labelled identifier is then
+        # checked against the appropriate official Health Canada database.
+        dpd_items = {}
         dpd_result = {
             "exact_matches": 0, "verified_identifiers": 0,
             "conflicts": 0, "affected_ids": set(),
         }
-        version = ""
-        if dpd_items and not _STOP_EVENT.is_set():
-            def progress(phase):
-                _state_update(phase=phase)
-
-            with memory_intensive_task("regulatory_health_canada"):
-                matches, version = download_dpd_matches(
-                    set(dpd_items), progress=progress
-                )
-            _state_update(phase="save_exact_matches", source_version=version)
-            dpd_result = _store_dpd_results(
-                db, dpd_items, matches, version, now, products_by_key
-            )
-            affected_ids.update(dpd_result["affected_ids"])
-            db.commit()
+        version = HEALTH_CANADA_DPD_UPC_NOTICE
         _state_update(
             checked_gtins=len(dpd_items),
             exact_matches=dpd_result["exact_matches"],

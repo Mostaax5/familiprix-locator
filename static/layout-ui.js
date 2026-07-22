@@ -4070,6 +4070,8 @@ let regulatorySyncWasRunning = false;
 
 const REGULATORY_PHASE_LABELS = {
   prepare: 'Préparation du catalogue',
+  read_existing_identifier_labels: 'Lecture des DIN et NPN déjà trouvés',
+  dpd_upc_retired: 'Vérification des sources UPC exactes',
   download_packages_api: 'Lecture des emballages Santé Canada',
   download_drugs_api: 'Lecture des médicaments Santé Canada',
   api_fallback_zip: 'Repli vers les fichiers Santé Canada',

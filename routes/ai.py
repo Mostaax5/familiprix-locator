@@ -3275,7 +3275,7 @@ def lookup_regulatory_product_online(barcode):
     if not barcode:
         return None
     candidates = build_barcode_candidates(barcode)
-    tasks = [
+    fast_tasks = [
         lambda: lookup_familiprix_product(barcode, candidates),
         lambda: lookup_open_facts_product(
             "Open Drug Facts", "https://world.opendrugfacts.org", barcode
@@ -3283,9 +3283,25 @@ def lookup_regulatory_product_online(barcode):
         lambda: lookup_open_facts_product(
             "Open Products Facts", "https://world.openproductsfacts.org", barcode
         ),
+        lambda: lookup_upcitemdb(barcode),
     ]
-    best, _score = best_lookup_result(
-        tasks, max_workers=3, good_enough=None, wait_for_cleanup=True
+    best, score = best_lookup_result(
+        fast_tasks, max_workers=4, good_enough=None, wait_for_cleanup=True
+    )
+    if (best or {}).get("regulatory_identifiers"):
+        return best
+
+    # These exact-barcode pages are slower, so use them only when the structured
+    # sources did not expose a labelled identifier.
+    slower_tasks = [
+        lambda: lookup_barcodelookup(barcode),
+        lambda: lookup_go_upc(barcode),
+    ]
+    slower, slower_score = best_lookup_result(
+        slower_tasks, max_workers=2, good_enough=None, wait_for_cleanup=True
+    )
+    best, _score = _prefer_lookup_result(
+        best, score, slower, slower_score
     )
     return best
 

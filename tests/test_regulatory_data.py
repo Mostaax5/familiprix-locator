@@ -10,12 +10,15 @@ from product_data import (
     upsert_reference_identifier,
 )
 from regulatory_data import (
+    HEALTH_CANADA_DPD_UPC_NOTICE,
+    download_dpd_matches,
     extract_regulatory_identifiers,
     group_unambiguous_dpd_matches,
     parse_dpd_api_records,
     parse_dpd_extracts,
     verify_regulatory_candidate,
 )
+from routes.regulatory import _seed_catalogue_label_candidates
 from routes.ai import _prefer_lookup_result, product_context_for_client_rag
 from routes.products import (
     _PROD_CACHE,
@@ -114,6 +117,75 @@ class RegulatoryDataTests(unittest.TestCase):
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0]["din"], "01234567")
         self.assertEqual(matches[0]["barcode"], "063848966068")
+
+    def test_current_dpd_bulk_feed_is_not_used_for_upc_inference(self):
+        phases = []
+        matches, version = download_dpd_matches(
+            {"gtin:00063848966068"}, progress=phases.append
+        )
+        self.assertEqual(matches, [])
+        self.assertEqual(version, HEALTH_CANADA_DPD_UPC_NOTICE)
+        self.assertEqual(phases, ["dpd_upc_retired"])
+
+    def test_exact_upc_label_plus_official_din_name_is_verified(self):
+        def fetch(url):
+            if "drugproduct" in url:
+                return [{
+                    "drug_code": 42,
+                    "drug_identification_number": "01234567",
+                    "brand_name": "Advil Liqui-Gels 200 mg",
+                    "company_name": "Haleon",
+                }]
+            if "packaging" in url:
+                return [{"drug_code": 42, "upc": ""}]
+            return []
+
+        result = verify_regulatory_candidate({
+            "type": "DIN", "value": "01234567",
+            "barcode": "063848966068",
+            "product_name": "Advil Liqui-Gels 200 mg 40 capsules",
+        }, fetch_json=fetch)
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["confidence"], 0.98)
+        self.assertEqual(
+            result["match_method"],
+            "exact_gtin_label_plus_health_canada_drug",
+        )
+
+        probable = verify_regulatory_candidate({
+            "type": "DIN", "value": "01234567",
+            "barcode": "063848966068",
+            "product_name": "Unrelated shampoo",
+        }, fetch_json=fetch)
+        self.assertFalse(probable["verified"])
+        self.assertTrue(probable["probable"])
+
+    def test_existing_exact_upc_description_seeds_identifier_candidate(self):
+        db = self.make_db()
+        db.execute(
+            """INSERT INTO product_reference
+               (barcode, name, description, source, source_url)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                "063848966068", "Natural sleep product",
+                "Melatonin tablets. NPN 80123456.",
+                "Exact retailer page", "https://example.test/product",
+            ),
+        )
+        seeded = _seed_catalogue_label_candidates(
+            db, "2026-07-22T00:00:00+00:00"
+        )
+        row = db.execute(
+            """SELECT identifier_type, identifier_value, match_method,
+                      verification_status
+               FROM product_reference_identifiers"""
+        ).fetchone()
+        self.assertEqual(seeded, 1)
+        self.assertEqual(row["identifier_type"], "NPN")
+        self.assertEqual(row["identifier_value"], "80123456")
+        self.assertEqual(row["match_method"], "exact_gtin_labeled_source")
+        self.assertEqual(row["verification_status"], "requires_review")
+        db.close()
 
     def test_multiple_dins_for_one_exact_upc_are_a_conflict(self):
         rows = [
