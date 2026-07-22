@@ -639,7 +639,9 @@ def _products_corpus(db, allow_identifier_stale=False):
     previous_key = _PROD_CACHE.get("key")
     if (
         allow_identifier_stale and _PROD_CACHE["rows"] and previous_key
-        and previous_key[0] == key[0]
+        # Ignore audit-only quality_checked_at drift. Count, max id, and
+        # modified_at still make every real product/plan edit invalidate now.
+        and previous_key[0][:3] == key[0][:3]
         and time.time() - float(_PROD_CACHE.get("built_at", 0) or 0)
         < _PROD_IDENTIFIER_DRIFT_TTL_S
     ):
