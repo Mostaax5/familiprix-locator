@@ -391,7 +391,7 @@ def _finish_persistence_boot():
     global DB_BOOT_ERROR, DB_BOOT_PENDING
     initialized = not _ASYNC_RENDER_BOOT
     if _ASYNC_RENDER_BOOT:
-        retry_delays = (0, 2, 5, 10, 20, 30)
+        retry_delays = (0, 3, 8, 15)
         for attempt, delay in enumerate(retry_delays, start=1):
             if delay:
                 time.sleep(delay)

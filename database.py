@@ -205,8 +205,8 @@ def init_db():
         if db.backend == "postgres":
             # A deploy must never wait forever behind a transaction holding a
             # schema lock. A later worker can retry a best-effort migration.
-            db.execute("SELECT set_config('lock_timeout', ?, false)", ("5s",))
-            db.execute("SELECT set_config('statement_timeout', ?, false)", ("30s",))
+            db.execute("SELECT set_config('lock_timeout', ?, false)", ("3s",))
+            db.execute("SELECT set_config('statement_timeout', ?, false)", ("20s",))
             # Commit authentication first so Scan/Plan never waits for the
             # larger product and planogram migration running at startup.
             ensure_auth_schema(db)
@@ -590,7 +590,11 @@ def ensure_product_data_ready(db):
     global _POSTGRES_PRODUCT_SCHEMA_READY, _POSTGRES_PRODUCT_SCHEMA_ERROR
     if db.backend != "postgres" or _POSTGRES_PRODUCT_SCHEMA_READY:
         return True
-    with _PRODUCT_SCHEMA_LOCK:
+    acquired = _PRODUCT_SCHEMA_LOCK.acquire(timeout=0.25)
+    if not acquired:
+        _POSTGRES_PRODUCT_SCHEMA_ERROR = "migration_in_progress"
+        raise RuntimeError("product data migration is already in progress")
+    try:
         if _POSTGRES_PRODUCT_SCHEMA_READY:
             return True
         if _postgres_product_data_schema_complete(db):
@@ -598,8 +602,8 @@ def ensure_product_data_ready(db):
             _POSTGRES_PRODUCT_SCHEMA_ERROR = ""
             return True
         try:
-            db.execute("SELECT set_config('lock_timeout', ?, true)", ("12s",))
-            db.execute("SELECT set_config('statement_timeout', ?, true)", ("60s",))
+            db.execute("SELECT set_config('lock_timeout', ?, true)", ("5s",))
+            db.execute("SELECT set_config('statement_timeout', ?, true)", ("30s",))
             ensure_product_data_schema(db)
             db.commit()
             _POSTGRES_PRODUCT_SCHEMA_READY = True
@@ -614,6 +618,8 @@ def ensure_product_data_ready(db):
             except Exception:
                 pass
             raise
+    finally:
+        _PRODUCT_SCHEMA_LOCK.release()
 
 
 def product_data_schema_status():
@@ -670,51 +676,9 @@ def init_postgres_db(db):
         )
     """)
 
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            username   TEXT PRIMARY KEY,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            last_seen  TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS app_settings (
-            setting_key   TEXT PRIMARY KEY,
-            setting_value TEXT NOT NULL DEFAULT '',
-            updated_at    BIGINT NOT NULL DEFAULT 0
-        )
-    """)
-
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS auth_sessions (
-            token_hash      TEXT PRIMARY KEY,
-            csrf_token      TEXT NOT NULL,
-            username        TEXT NOT NULL,
-            created_at      BIGINT NOT NULL,
-            expires_at      BIGINT NOT NULL,
-            last_seen       BIGINT NOT NULL,
-            revoked_at      BIGINT NOT NULL DEFAULT 0,
-            client_hash     TEXT DEFAULT '',
-            user_agent_hash TEXT DEFAULT '',
-            password_fingerprint TEXT DEFAULT ''
-        )
-    """)
-
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS security_events (
-            id              BIGSERIAL PRIMARY KEY,
-            created_at      BIGINT NOT NULL,
-            action          TEXT NOT NULL,
-            username        TEXT DEFAULT '',
-            client_hash     TEXT DEFAULT '',
-            user_agent_hash TEXT DEFAULT '',
-            detail_json     TEXT DEFAULT ''
-        )
-    """)
-    db.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)")
-    db.execute("CREATE INDEX IF NOT EXISTS idx_security_events_created ON security_events(created_at)")
-    db.execute("ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS password_fingerprint TEXT DEFAULT ''")
+    # Authentication is migrated and committed by ensure_auth_schema() before
+    # this larger transaction begins. Do not reacquire auth-table locks here:
+    # a delayed product ALTER must never block Scan/Plan login.
 
     db.execute("""
         CREATE TABLE IF NOT EXISTS aisle_layouts (
