@@ -24,6 +24,7 @@ from regulatory_data import (
     HEALTH_CANADA_DPD_SOURCE,
     HEALTH_CANADA_DPD_UPC_NOTICE,
     extract_regulatory_identifiers,
+    find_dpd_name_candidates,
     group_unambiguous_dpd_matches,
     merge_regulatory_candidates,
     verify_regulatory_candidate,
@@ -34,7 +35,7 @@ regulatory_bp = Blueprint("regulatory", __name__)
 
 _SYNC_SOURCE = "health_canada_regulatory"
 _DPD_CHECK_SOURCE = "health_canada_dpd_marketed"
-_ONLINE_CHECK_SOURCE = "exact_upc_regulatory_labels"
+_ONLINE_CHECK_SOURCE = "regulatory_candidates_v2"
 _SYNC_LOCK = threading.Lock()
 _STOP_EVENT = threading.Event()
 _STATE = {
@@ -560,10 +561,21 @@ def _discover_online(db, batch, now, remaining_after_batch=0):
         }
 
     def lookup(item):
+        online = None
+        lookup_error = ""
         try:
-            return item, lookup_regulatory_product_online(item["barcode"]), ""
+            online = lookup_regulatory_product_online(item["barcode"])
         except Exception as exc:
-            return item, None, f"{type(exc).__name__}: {exc}"[:200]
+            lookup_error = f"{type(exc).__name__}: {exc}"[:200]
+        source_candidates = merge_regulatory_candidates(
+            (online or {}).get("regulatory_identifiers")
+        )
+        name_candidates = []
+        if not source_candidates:
+            name_candidates = find_dpd_name_candidates(
+                item.get("name", ""), item.get("brand", ""), limit=3
+            )
+        return item, online, source_candidates, name_candidates, lookup_error
 
     checked = verified = review = 0
     affected_ids = set()
@@ -573,7 +585,7 @@ def _discover_online(db, batch, now, remaining_after_batch=0):
         for future in as_completed(futures):
             if _STOP_EVENT.is_set():
                 break
-            item, online, lookup_error = future.result()
+            item, online, source_candidates, name_candidates, lookup_error = future.result()
             checked += 1
             status = "no_labeled_identifier"
             details = {}
@@ -582,9 +594,6 @@ def _discover_online(db, batch, now, remaining_after_batch=0):
                 details = {"error": lookup_error}
             elif online:
                 _reference_upsert(db, online)
-                source_candidates = merge_regulatory_candidates(
-                    online.get("regulatory_identifiers")
-                )
                 if source_candidates:
                     status = "candidate_review"
                 for candidate in source_candidates:
@@ -632,6 +641,36 @@ def _discover_online(db, batch, now, remaining_after_batch=0):
                     "candidate_count": len(source_candidates),
                     "source": str(online.get("source", "") or ""),
                 }
+            if status != "verified" and name_candidates:
+                stored_candidates = 0
+                for candidate in name_candidates:
+                    stored_candidates += int(bool(upsert_reference_identifier(
+                        db, item["barcode"], "DIN", candidate.get("value", ""),
+                        authority=HEALTH_CANADA_AUTHORITY,
+                        source=candidate.get("source", HEALTH_CANADA_DPD_SOURCE),
+                        source_url=candidate.get("source_url", HEALTH_CANADA_DPD_PAGE),
+                        source_record_id=candidate.get("source_record_id", ""),
+                        match_method="health_canada_name_candidate",
+                        confidence=candidate.get("confidence", 0.25),
+                        verification_status="requires_review", imported_at=now,
+                    )))
+                for product in _product_rows_for_key(
+                    db, item["gtin_key"], item.get("barcode", "")
+                ):
+                    sync_reference_identifiers_to_product(
+                        db, product, imported_at=now
+                    )
+                    affected_ids.add(int(product["id"]))
+                review += stored_candidates
+                status = "name_candidate_review"
+                details.update({
+                    "name_candidate_count": stored_candidates,
+                    "name_candidate_source": HEALTH_CANADA_DPD_SOURCE,
+                    "official_names": [
+                        str(candidate.get("official_name", ""))[:160]
+                        for candidate in name_candidates
+                    ],
+                })
             checks.append({
                 "gtin_key": item["gtin_key"], "barcode": item["barcode"],
                 "status": status, "checked_at": now, "source_version": "",
@@ -858,8 +897,7 @@ def regulatory_status():
                           THEN 1 ELSE 0 END) AS confirmed,
                  SUM(CASE WHEN verification_status='requires_review'
                            AND identifier_type IN ('DIN','NPN','DIN_HM')
-                           AND match_method IN ('exact_gtin_labeled_source','imported_typed_identifier')
-                           AND confidence>=0.7
+                           AND confidence>=0.25
                           THEN 1 ELSE 0 END) AS probable
                FROM product_identifiers"""
         ).fetchone()

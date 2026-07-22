@@ -13,6 +13,7 @@ from regulatory_data import (
     HEALTH_CANADA_DPD_UPC_NOTICE,
     download_dpd_matches,
     extract_regulatory_identifiers,
+    find_dpd_name_candidates,
     group_unambiguous_dpd_matches,
     parse_dpd_api_records,
     parse_dpd_extracts,
@@ -26,6 +27,7 @@ from routes.products import (
     _products_corpus,
     normalize_search_text,
     normalized_digits,
+    rank_products_by_field,
     tokenize_search_query,
 )
 
@@ -160,6 +162,40 @@ class RegulatoryDataTests(unittest.TestCase):
         self.assertFalse(probable["verified"])
         self.assertTrue(probable["probable"])
 
+    def test_official_name_candidate_is_real_but_requires_review(self):
+        def fetch(url):
+            self.assertIn("brandname=advil", url)
+            return [
+                {
+                    "drug_code": 42,
+                    "drug_identification_number": "01234567",
+                    "brand_name": "Advil Liqui-Gels 200 mg",
+                    "company_name": "Haleon",
+                },
+                {
+                    "drug_code": 99,
+                    "drug_identification_number": "07654321",
+                    "brand_name": "Unrelated shampoo",
+                },
+            ]
+
+        candidates = find_dpd_name_candidates(
+            "Advil Liqui-Gels 200 mg 40 capsules", fetch_json=fetch
+        )
+        self.assertEqual([item["value"] for item in candidates], ["01234567"])
+        self.assertEqual(
+            candidates[0]["match_method"], "health_canada_name_candidate"
+        )
+        self.assertLess(candidates[0]["confidence"], 1.0)
+
+        self.assertEqual(
+            find_dpd_name_candidates(
+                "Natural melatonin 5 mg",
+                fetch_json=lambda _url: self.fail("generic terms must not query DPD"),
+            ),
+            [],
+        )
+
     def test_existing_exact_upc_description_seeds_identifier_candidate(self):
         db = self.make_db()
         db.execute(
@@ -277,6 +313,41 @@ class RegulatoryDataTests(unittest.TestCase):
             (product_id,),
         ).fetchone()
         self.assertEqual(promoted["verification_status"], "verified")
+        db.close()
+
+    def test_name_candidate_is_searchable_and_never_an_ai_fact(self):
+        db = self.make_db()
+        product_id = db.execute(
+            """INSERT INTO products
+               (name, barcode, aisle, side, section, shelf, position)
+               VALUES ('Advil 200 mg', '063848966068', '1', 'Gauche', '1', '1', '1')"""
+        ).lastrowid
+        upsert_reference_identifier(
+            db, "063848966068", "DIN", "01234567",
+            authority="Health Canada", source="Health Canada DPD",
+            source_record_id="42", match_method="health_canada_name_candidate",
+            confidence=0.61, verification_status="requires_review",
+        )
+        product = dict(db.execute(
+            "SELECT * FROM products WHERE id=?", (product_id,)
+        ).fetchone())
+        self.assertEqual(sync_reference_identifiers_to_product(db, product), 1)
+        _PROD_CACHE.update(key=None, rows=[])
+        item, _row = _products_corpus(db)[0]
+        self.assertEqual(
+            [match["id"] for match in rank_products_by_field(
+                [item], "01234567", "din"
+            )],
+            [product_id],
+        )
+        self.assertEqual(item["regulatory_identifiers"][0]["status"], "probable")
+        self.assertEqual(
+            item["regulatory_identifiers"][0]["match_method"],
+            "health_canada_name_candidate",
+        )
+        self.assertEqual(
+            product_context_for_client_rag(item)["verified_identifiers"], []
+        )
         db.close()
 
     def test_npn_requires_exact_official_licence_and_matching_name(self):

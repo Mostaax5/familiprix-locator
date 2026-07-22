@@ -1056,9 +1056,42 @@ function regulatoryIdentifiersMarkup(product) {
     const type = identifier.type === 'DIN_HM' ? 'DIN-HM' : identifier.type;
     const title = confirmed
       ? 'Correspondance confirmée par une source officielle'
-      : 'Correspondance probable liée à cet UPC, à confirmer sur l’emballage';
+      : (identifier.match_method === 'health_canada_name_candidate'
+        ? 'Candidat officiel trouvé par ressemblance du nom; confirmer le numéro sur l’emballage'
+        : 'Correspondance probable liée à cet UPC, à confirmer sur l’emballage');
     return `<div class="meta-row"><span class="meta-label">${esc(type)}</span><span class="barcode-text">${esc(identifier.value)}</span><span title="${esc(title)}" style="font-size:10px;font-weight:700;color:${confirmed ? '#047857' : '#b45309'}">${confirmed ? 'CONFIRMÉ' : 'À CONFIRMER'}</span></div>`;
   }).join('');
+}
+
+function otherIdentifiersMarkup(product) {
+  const labels = {
+    UPC: 'UPC', GTIN: 'GTIN', FAMILIPRIX_CODE: 'Code Familiprix',
+    MANUFACTURER_PART_NUMBER: 'No fabricant', SUPPLIER_ITEM_NUMBER: 'No fournisseur',
+    WHOLESALER_ITEM_NUMBER: 'No grossiste', CASE_GTIN: 'GTIN caisse',
+    INNER_GTIN: 'GTIN intérieur', PIN: 'PIN', NIP: 'NIP',
+    PSEUDO_DIN: 'Pseudo-DIN', RAMQ_BILLING_CODE: 'Code RAMQ',
+    INSURER_BILLING_CODE: 'Code assureur', HEALTH_CANADA_ID: 'ID Santé Canada',
+    CLINICAL_ID: 'ID clinique',
+  };
+  const seen = new Set();
+  return (Array.isArray(product?.identifiers) ? product.identifiers : [])
+    .filter(identifier => !['DIN', 'NPN', 'DIN_HM'].includes(identifier.type))
+    .filter(identifier => {
+      const key = `${identifier.type}:${identifier.value}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      if (['UPC', 'GTIN'].includes(identifier.type)
+          && normalizedDigits(identifier.value) === normalizedDigits(product.barcode)) return false;
+      if (identifier.type === 'FAMILIPRIX_CODE'
+          && String(identifier.value) === String(product.product_code)) return false;
+      return true;
+    })
+    .slice(0, 8)
+    .map(identifier => {
+      const confirmed = identifier.status === 'confirmed';
+      const status = confirmed ? '' : '<span style="font-size:10px;font-weight:700;color:#b45309">À CONFIRMER</span>';
+      return `<div class="meta-row"><span class="meta-label">${esc(labels[identifier.type] || identifier.type)}</span><span class="barcode-text">${esc(identifier.value)}</span>${status}</div>`;
+    }).join('');
 }
 
 function productCard(p, showDelete=true, showAiButton=true) {
@@ -1114,6 +1147,7 @@ function productCard(p, showDelete=true, showAiButton=true) {
       ${p.barcode ? `<div class="meta-row"><span class="meta-label">Code-barres</span><span class="barcode-text">${esc(p.barcode)}</span></div>` : ''}
       ${p.product_code ? `<div class="meta-row"><span class="meta-label">Code pharmacie</span><span class="barcode-text">${esc(p.product_code)}</span></div>` : ''}
       ${regulatoryIdentifiersMarkup(p)}
+      ${otherIdentifiersMarkup(p)}
       ${p.facings > 1 ? `<div class="meta-row"><span class="meta-label">Façades</span><span>${esc(p.facings)} positions</span></div>` : ''}
       ${p.last_change_by ? `<div class="meta-row"><span class="meta-label">Modifié par</span><span>${esc(p.last_change_by)}</span></div>` : ''}
       ${p.description ? `<div class="desc-text">${esc(p.description)}</div>` : ''}

@@ -537,13 +537,13 @@ def reference_identifiers_for_barcode(db, barcode, statuses=("verified",)):
 
 
 def sync_reference_identifiers_to_product(db, product, *, imported_at=""):
-    """Copy safe exact-package identifiers to a placed product.
+    """Copy useful identifiers and clearly flagged candidates to a product.
 
     Official matches remain ``verified``.  An explicitly labelled DIN/NPN/
     DIN-HM found on a page for the exact UPC is also copied as
-    ``requires_review`` so employees can search it immediately, while the UI
-    and AI continue to distinguish it from a confirmed regulatory fact.
-    Conflicts and name-only suggestions never cross this boundary.
+    ``requires_review``. A real Health Canada name candidate may also be copied
+    at lower confidence. Employees can search both immediately, while the UI
+    and AI continue to distinguish candidates from confirmed regulatory facts.
     """
     item = dict(product or {})
     product_id = item.get("id")
@@ -557,12 +557,22 @@ def sync_reference_identifiers_to_product(db, product, *, imported_at=""):
         status = str(reference.get("verification_status", "") or "")
         identifier_type = str(reference.get("identifier_type", "") or "")
         match_method = str(reference.get("match_method", "") or "")
-        if status == "requires_review" and not (
-            identifier_type in {"DIN", "NPN", "DIN_HM"}
-            and match_method == "exact_gtin_labeled_source"
-            and float(reference.get("confidence", 0) or 0) >= 0.7
-        ):
-            continue
+        if status == "requires_review":
+            confidence = float(reference.get("confidence", 0) or 0)
+            allowed_candidate = (
+                identifier_type in {"DIN", "NPN", "DIN_HM"}
+                and (
+                    (match_method in {
+                        "exact_gtin_labeled_source", "imported_typed_identifier",
+                    } and confidence >= 0.7)
+                    or (
+                        match_method == "health_canada_name_candidate"
+                        and confidence >= 0.25
+                    )
+                )
+            )
+            if not allowed_candidate:
+                continue
         if upsert_product_identifier(
             db, product_id, identifier_type,
             reference.get("identifier_value", ""),

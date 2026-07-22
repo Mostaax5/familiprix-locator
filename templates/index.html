@@ -175,9 +175,33 @@
     <div class="field">
       <label class="label" for="searchInput">Recherche</label>
       <div style="display:flex;gap:6px;align-items:stretch">
-        <select id="searchField" onchange="onSearchFieldChange()" title="Choisir le champ de recherche" style="flex:0 0 auto;width:auto;font-size:13px">
-          <option value="">Nom / Code-barres</option>
-          <option value="code">Code pharmacie</option>
+        <select id="searchField" onchange="onSearchFieldChange()" title="Choisir le champ de recherche" style="flex:0 1 190px;min-width:125px;max-width:190px;font-size:13px">
+          <option value="">Tout rechercher</option>
+          <option value="name">Nom / marque</option>
+          <option value="upc">UPC / GTIN</option>
+          <option value="code">Code Familiprix</option>
+          <option value="identifier">Tous les identifiants</option>
+          <optgroup label="Réglementaire">
+            <option value="din">DIN</option>
+            <option value="npn">NPN</option>
+            <option value="din_hm">DIN-HM</option>
+            <option value="pin">PIN</option>
+            <option value="nip">NIP</option>
+            <option value="pseudo_din">Pseudo-DIN</option>
+          </optgroup>
+          <optgroup label="Fabrication et fournisseur">
+            <option value="manufacturer_part_number">No fabricant</option>
+            <option value="supplier_item_number">No fournisseur</option>
+            <option value="wholesaler_item_number">No grossiste</option>
+            <option value="case_gtin">GTIN caisse</option>
+            <option value="inner_gtin">GTIN emballage intérieur</option>
+          </optgroup>
+          <optgroup label="Santé et facturation">
+            <option value="ramq_billing_code">Code RAMQ</option>
+            <option value="insurer_billing_code">Code assureur</option>
+            <option value="health_canada_id">ID Santé Canada</option>
+            <option value="clinical_id">ID clinique</option>
+          </optgroup>
         </select>
         <input type="text" id="searchInput" placeholder="Nom, code-barres ou 4 derniers chiffres..." oninput="scheduleSearch()" style="flex:1 1 auto;min-width:0"/>
       </div>

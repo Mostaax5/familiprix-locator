@@ -334,13 +334,10 @@ def _reference_corpus(db):
             ] = evidence["field_value"]
         for identifier_row in db.execute(
             """SELECT gtin_key, identifier_type, identifier_value, authority,
-                      source, verification_status, match_method, confidence
+                      source, source_url, verification_status, match_method, confidence
                FROM product_reference_identifiers
                WHERE verification_status='verified'
-                  OR (verification_status='requires_review'
-                      AND identifier_type IN ('DIN','NPN','DIN_HM')
-                      AND match_method IN ('exact_gtin_labeled_source','imported_typed_identifier')
-                      AND confidence>=0.7)
+                  OR (verification_status='requires_review' AND confidence>=0.25)
                ORDER BY CASE WHEN verification_status='verified' THEN 0 ELSE 1 END,
                         confidence DESC, id"""
         ).fetchall():
@@ -350,7 +347,10 @@ def _reference_corpus(db):
                 "value": identifier.get("identifier_value", ""),
                 "authority": identifier.get("authority", ""),
                 "source": identifier.get("source", ""),
+                "source_url": identifier.get("source_url", ""),
                 "verification_status": identifier.get("verification_status", ""),
+                "match_method": identifier.get("match_method", ""),
+                "confidence": identifier.get("confidence", 0),
             })
         for r in db.execute(
             """SELECT barcode, name, brand, description, product_code,
@@ -380,6 +380,7 @@ def _reference_corpus(db):
                     d.get("product_code", "") if store_identity else ""
                 ),
                 "store_presence_status": d.get("store_presence_status", ""),
+                "identifiers": _public_product_identifiers(identifiers),
                 "regulatory_identifiers": _public_regulatory_identifiers(identifiers),
                 "_identifiers": identifiers,
                 "_bc": normalized_digits(d.get("barcode", "")),
@@ -477,6 +478,33 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
 _PROD_CACHE = {"key": None, "rows": []}
 
 
+def _public_product_identifiers(identifiers):
+    """Expose verified and clearly marked candidate identifiers for search."""
+    result = []
+    seen = set()
+    for raw in identifiers or []:
+        identifier_type = str(raw.get("type", "") or "").upper().replace("-", "_")
+        value = str(raw.get("value", "") or "").strip()
+        if identifier_type not in IDENTIFIER_TYPES or not value:
+            continue
+        key = (identifier_type, value, str(raw.get("authority", "") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        confirmed = raw.get("verification_status") == "verified"
+        result.append({
+            "type": identifier_type,
+            "value": value,
+            "authority": str(raw.get("authority", "") or ""),
+            "source": str(raw.get("source", "") or ""),
+            "status": "confirmed" if confirmed else "probable",
+            "label": "Confirmé" if confirmed else "À confirmer",
+            "match_method": str(raw.get("match_method", "") or ""),
+            "confidence": round(float(raw.get("confidence", 0) or 0), 3),
+        })
+    return result
+
+
 def _public_regulatory_identifiers(identifiers):
     """Expose useful regulatory IDs without disguising probable data as fact."""
     result = []
@@ -498,6 +526,8 @@ def _public_regulatory_identifiers(identifiers):
             "source": str(raw.get("source", "") or ""),
             "status": "confirmed" if confirmed else "probable",
             "label": "Confirmé" if confirmed else "À confirmer",
+            "match_method": str(raw.get("match_method", "") or ""),
+            "confidence": round(float(raw.get("confidence", 0) or 0), 3),
         })
     return result
 
@@ -642,13 +672,10 @@ def _products_corpus(db):
             }
         for identifier_row in db.execute(
             """SELECT product_id, identifier_type, identifier_value, authority,
-                      source, verification_status, match_method, confidence
+                      source, source_url, verification_status, match_method, confidence
                FROM product_identifiers
                WHERE verification_status='verified'
-                  OR (verification_status='requires_review'
-                      AND identifier_type IN ('DIN','NPN','DIN_HM')
-                      AND match_method IN ('exact_gtin_labeled_source','imported_typed_identifier')
-                      AND confidence>=0.7)
+                  OR (verification_status='requires_review' AND confidence>=0.25)
                ORDER BY CASE WHEN verification_status='verified' THEN 0 ELSE 1 END,
                         confidence DESC, id"""
         ).fetchall():
@@ -660,7 +687,10 @@ def _products_corpus(db):
                 "value": identifier.get("identifier_value", ""),
                 "authority": identifier.get("authority", ""),
                 "source": identifier.get("source", ""),
+                "source_url": identifier.get("source_url", ""),
                 "verification_status": identifier.get("verification_status", ""),
+                "match_method": identifier.get("match_method", ""),
+                "confidence": identifier.get("confidence", 0),
             })
     except Exception:
         aliases_by_product = {}
@@ -691,6 +721,7 @@ def _products_corpus(db):
         identifiers = identifiers_by_product.get(product_id, [])
         item["_search_aliases"] = aliases
         item["_identifiers"] = identifiers
+        item["identifiers"] = _public_product_identifiers(identifiers)
         item["regulatory_identifiers"] = _public_regulatory_identifiers(identifiers)
         rows.append((item, _product_search_row(item, aliases, identifiers)))
     _PROD_CACHE.update(key=key, rows=rows)
@@ -2091,35 +2122,86 @@ def rank_products_for_query(products, query, limit=60):
     return items[:limit] if limit else items
 
 
-def rank_products_by_code(products, query, limit=60):
-    """Search strictly on the Familiprix/pharmacy code — never on barcode or
-    name — so this is the explicit "Code" mode and cannot be confused with a UPC."""
-    needle = normalized_digits(query) or normalize_search_text(query)
-    if not needle:
+_IDENTIFIER_SEARCH_FIELDS = {
+    "din": {"DIN"}, "npn": {"NPN"}, "din_hm": {"DIN_HM"},
+    "pin": {"PIN"}, "nip": {"NIP"}, "pseudo_din": {"PSEUDO_DIN"},
+    "manufacturer_part_number": {"MANUFACTURER_PART_NUMBER"},
+    "supplier_item_number": {"SUPPLIER_ITEM_NUMBER"},
+    "wholesaler_item_number": {"WHOLESALER_ITEM_NUMBER"},
+    "case_gtin": {"CASE_GTIN"}, "inner_gtin": {"INNER_GTIN"},
+    "ramq_billing_code": {"RAMQ_BILLING_CODE"},
+    "insurer_billing_code": {"INSURER_BILLING_CODE"},
+    "health_canada_id": {"HEALTH_CANADA_ID"},
+    "clinical_id": {"CLINICAL_ID"},
+}
+
+
+def _strict_identifier_values(product, field):
+    field = str(field or "").strip().lower()
+    identifiers = product.get("_identifiers") or product.get("identifiers") or []
+    values = []
+    if field == "name":
+        return [product.get("name", ""), product.get("brand", "")]
+    if field in {"upc", "gtin"}:
+        values.append(product.get("barcode", ""))
+        allowed = {"UPC", "GTIN"}
+    elif field in {"code", "familiprix_code"}:
+        values.append(product.get("product_code", ""))
+        allowed = {"FAMILIPRIX_CODE"}
+    elif field in {"identifier", "all_identifiers"}:
+        values.extend([product.get("barcode", ""), product.get("product_code", "")])
+        allowed = None
+    elif field in _IDENTIFIER_SEARCH_FIELDS:
+        allowed = _IDENTIFIER_SEARCH_FIELDS[field]
+    else:
         return []
+    for identifier in identifiers:
+        identifier_type = str(identifier.get("type", "") or "").upper().replace("-", "_")
+        if allowed is None or identifier_type in allowed:
+            values.append(identifier.get("value", ""))
+    return [str(value or "").strip() for value in values if str(value or "").strip()]
+
+
+def _strict_identifier_score(value, query):
+    raw_query = str(query or "").strip()
+    numeric_query = bool(re.fullmatch(r"[\d\s.\-]+", raw_query))
+    needle = normalized_digits(raw_query) if numeric_query else normalize_search_text(raw_query)
+    haystack = normalized_digits(value) if numeric_query else normalize_search_text(value)
+    if not needle or not haystack:
+        return 0
+    if haystack == needle:
+        return 1200
+    if numeric_query and len(needle) >= 4 and haystack.endswith(needle):
+        return 900
+    if haystack.startswith(needle):
+        return 700
+    if needle in haystack:
+        return 400
+    return 0
+
+
+def rank_products_by_field(products, query, field, limit=60):
+    """Search only the selected identity field, including review candidates."""
     ranked = []
     for product in products:
-        code = str(product.get("product_code", "")).strip()
-        if not code:
-            continue
-        haystack = normalized_digits(code) or normalize_search_text(code)
-        if not haystack:
-            continue
-        if haystack == needle:
-            score = 1000
-        elif haystack.startswith(needle):
-            score = 700
-        elif needle in haystack:
-            score = 400
-        else:
-            continue
-        ranked.append((score, product))
+        score = max(
+            (_strict_identifier_score(value, query)
+             for value in _strict_identifier_values(product, field)),
+            default=0,
+        )
+        if score:
+            ranked.append((score, product))
     ranked.sort(key=lambda item: (-item[0], location_sort_key(item[1])))
     items = [product for _, product in ranked]
     return items[:limit] if limit else items
 
 
-def rank_reference_for_query(query, limit=40, exclude_barcodes=None):
+def rank_products_by_code(products, query, limit=60):
+    """Backward-compatible Familiprix-code search helper."""
+    return rank_products_by_field(products, query, "code", limit=limit)
+
+
+def rank_reference_for_query(query, limit=40, exclude_barcodes=None, field=""):
     """Rank the reference catalogue (all products imported from planograms + past
     scans) for a name/keyword query. These products have NO shelf location yet, so each
     is flagged catalog_only=True and the UI shows 'position à confirmer'. Uses the same
@@ -2139,7 +2221,15 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None):
             continue
         if row["_bc"] and row["_bc"] in exclude:
             continue
-        score = _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs)
+        score = (
+            max(
+                (_strict_identifier_score(value, query)
+                 for value in _strict_identifier_values(row, field)),
+                default=0,
+            )
+            if field else
+            _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs)
+        )
         if score > 0:
             ranked.append((score, row))
     ranked.sort(key=lambda x: (-x[0], x[1]["_name"]))
@@ -2157,6 +2247,7 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None):
             or ""
         ).strip(),
         "product_code": row["product_code"],
+        "identifiers": row.get("identifiers", []),
         "regulatory_identifiers": row.get("regulatory_identifiers", []),
         "catalog_only": True,
         "in_stock": 1,
@@ -2468,8 +2559,10 @@ def search_products():
     limit = min(max(clamp_non_negative_int(request.args.get("limit", "60"), 60), 1), 120)
     db = get_db()
     corpus = _products_corpus(db)   # cached: no per-request fetch + re-normalization
-    if field == "code":
-        items = rank_products_by_code([item for item, _ in corpus], query, limit=limit)
+    if field:
+        items = rank_products_by_field(
+            [item for item, _ in corpus], query, field, limit=limit
+        )
         return jsonify([public_product_payload(item) for item in items])
     nq = normalize_search_text(query)
     dq = normalized_digits(query)
@@ -2541,10 +2634,13 @@ def reference_search():
     if not query:
         return jsonify([])
     limit = min(max(clamp_non_negative_int(request.args.get("limit", "40"), 40), 1), 80)
+    field = (request.args.get("field") or "").strip().lower()
     db = get_db()
     placed = {normalized_digits(r["barcode"]) for r in
               db.execute("SELECT barcode FROM products WHERE TRIM(COALESCE(barcode,'')) <> ''").fetchall()}
-    return jsonify(rank_reference_for_query(query, limit=limit, exclude_barcodes=placed))
+    return jsonify(rank_reference_for_query(
+        query, limit=limit, exclude_barcodes=placed, field=field
+    ))
 
 
 @products_bp.route("/api/products/barcode/<barcode>", methods=["GET"])

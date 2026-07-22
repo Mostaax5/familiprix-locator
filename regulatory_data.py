@@ -416,6 +416,121 @@ def regulatory_name_match(left, right):
     return len(shared) >= 2 or len(shared) / max(1, min(len(left_tokens), len(right_tokens))) >= 0.5
 
 
+def _candidate_brand_query(product_name, brand=""):
+    """Choose one narrow term for the official DPD brand-name endpoint."""
+    ignored = _NAME_NOISE | {
+        "adult", "adulte", "biomedic", "children", "complete", "enfant",
+        "essentiel", "familiprix", "generic", "generique", "homeopathique",
+        "magnesium", "melatonine", "melatonin", "mineral", "natural",
+        "naturel", "original", "pharmacie", "probiotic", "probiotique",
+        "product", "produit", "regular", "regulier", "supplement",
+        "vitamin", "vitamine",
+    }
+    for raw in (brand, product_name):
+        tokens = [
+            token for token in normalize_text(raw).split()
+            if len(token) >= 4 and token not in ignored
+            and not any(character.isdigit() for character in token)
+        ]
+        if tokens:
+            return tokens[0][:60]
+    return ""
+
+
+def _strength_signatures(value):
+    text = normalize_text(value).replace(",", ".")
+    return {
+        f"{amount}{unit}"
+        for amount, unit in re.findall(
+            r"\b(\d+(?:\.\d+)?)\s*(mg|mcg|ug|g|ml|ui|iu|%)\b", text
+        )
+    }
+
+
+def _candidate_name_score(catalog_name, official_name, query):
+    catalog_tokens = _name_tokens(catalog_name)
+    official_tokens = _name_tokens(official_name)
+    if not catalog_tokens or not official_tokens:
+        return 0.0
+    matched_catalog = {
+        token for token in catalog_tokens
+        if any(
+            token == other
+            or (
+                len(token) >= 4 and len(other) >= 4
+                and (token.startswith(other) or other.startswith(token))
+            )
+            for other in official_tokens
+        )
+    }
+    if not matched_catalog:
+        return 0.0
+    coverage = len(matched_catalog) / max(1, min(
+        len(catalog_tokens), len(official_tokens)
+    ))
+    confidence = 0.28 + min(0.42, coverage * 0.42)
+    if any(
+        token == query or token.startswith(query) or query.startswith(token)
+        for token in official_tokens if len(token) >= 4
+    ):
+        confidence += 0.08
+    catalog_strengths = _strength_signatures(catalog_name)
+    official_strengths = _strength_signatures(official_name)
+    if catalog_strengths and official_strengths:
+        if catalog_strengths & official_strengths:
+            confidence += 0.08
+        else:
+            confidence -= 0.22
+    return max(0.0, min(confidence, 0.82))
+
+
+def find_dpd_name_candidates(
+    product_name, brand="", fetch_json=None, limit=3,
+):
+    """Return real official DIN candidates when exact UPC evidence is absent.
+
+    These are deliberately *not* verified package matches.  The returned DINs
+    exist in Health Canada's DPD and have a similar official brand name, but the
+    catalogue UPC/package still needs confirmation.
+    """
+    name = str(product_name or "").strip()
+    query = _candidate_brand_query(name, brand)
+    if not name or not query:
+        return []
+    fetch = fetch_json or _read_json_url
+    url = f"{_DPD_API}/drugproduct/?{urlencode({'brandname': query, 'status': 2, 'lang': 'en', 'type': 'json'})}"
+    try:
+        records = _api_records(fetch(url))
+    except Exception:
+        return []
+    ranked = []
+    seen = set()
+    catalog_name = " ".join(part for part in (brand, name) if part)
+    for record in records:
+        value = text_digits(record.get("drug_identification_number", ""))
+        official_name = str(record.get("brand_name", "") or "").strip()
+        if len(value) != 8 or value in seen or not official_name:
+            continue
+        confidence = _candidate_name_score(catalog_name, official_name, query)
+        if confidence < 0.28:
+            continue
+        seen.add(value)
+        ranked.append((confidence, {
+            "type": "DIN",
+            "value": value,
+            "source": HEALTH_CANADA_DPD_SOURCE,
+            "source_url": HEALTH_CANADA_DPD_PAGE,
+            "source_record_id": str(record.get("drug_code", "") or value),
+            "product_name": name,
+            "official_name": official_name,
+            "manufacturer": str(record.get("company_name", "") or "").strip(),
+            "match_method": "health_canada_name_candidate",
+            "confidence": round(confidence, 3),
+        }))
+    ranked.sort(key=lambda item: (-item[0], item[1]["official_name"]))
+    return [item for _score, item in ranked[:max(1, min(int(limit or 3), 5))]]
+
+
 def verify_regulatory_candidate(candidate, catalog_name="", fetch_json=None):
     """Verify a labelled exact-UPC candidate against the relevant official API."""
     item = dict(candidate or {})

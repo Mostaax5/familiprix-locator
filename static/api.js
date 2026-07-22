@@ -61,11 +61,12 @@ async function apiClientFind(query, limit=30, signal) {
   }
 }
 
-async function apiSearchReference(query, limit=40) {
+async function apiSearchReference(query, limit=40, field='') {
   const trimmed = String(query || '').trim();
   if (!trimmed) return [];
   try {
-    const {res, data} = await apiFetch(`/api/products/reference-search?q=${encodeURIComponent(trimmed)}&limit=${limit}`);
+    const fieldParam = field ? `&field=${encodeURIComponent(field)}` : '';
+    const {res, data} = await apiFetch(`/api/products/reference-search?q=${encodeURIComponent(trimmed)}&limit=${limit}${fieldParam}`);
     return res.ok && Array.isArray(data) ? data.map(normalizeProduct) : [];
   } catch (e) {
     return [];

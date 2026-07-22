@@ -15,6 +15,12 @@ const products = Array.from({length: 12000}, (_, index) => ({
 }));
 products[450].barcode = '063848904961';
 products[900].barcode = '123456784961';
+products[100].identifiers = [
+  {type: 'NPN', value: '80123456', status: 'probable'},
+  {type: 'MANUFACTURER_PART_NUMBER', value: 'MFG-ABC-900'},
+];
+products[101].identifiers = [{type: 'DIN', value: '01234567'}];
+products[101].product_code = 'FAM-7711';
 
 const configSource = fs.readFileSync('static/config.js', 'utf8');
 const stopwordMatch = configSource.match(/const SEARCH_STOPWORDS = new Set\(\[([\s\S]*?)\]\);/);
@@ -52,6 +58,27 @@ assert(elapsed < 300, `12k-product last-four search took ${elapsed.toFixed(1)} m
 assert(
   !Object.prototype.hasOwnProperty.call(products[0], '_sf'),
   'numeric lookup should use the barcode index instead of scoring every product'
+);
+
+assert.deepStrictEqual(
+  Array.from(context.window.AppSearch.searchProductsByFieldFromCache('80123456', 'npn'), product => product.id),
+  [101],
+  'NPN mode should search only NPN identifiers, including probable candidates'
+);
+assert.deepStrictEqual(
+  Array.from(context.window.AppSearch.searchProductsByFieldFromCache('MFG-ABC-900', 'manufacturer_part_number'), product => product.id),
+  [101],
+  'manufacturer mode should search the manufacturer identifier'
+);
+assert.deepStrictEqual(
+  Array.from(context.window.AppSearch.searchProductsByFieldFromCache('01234567', 'npn'), product => product.id),
+  [],
+  'an explicit identifier mode must not leak matches from another identifier type'
+);
+assert.deepStrictEqual(
+  Array.from(context.window.AppSearch.searchProductsByFieldFromCache('FAM-7711', 'code'), product => product.id),
+  [102],
+  'Familiprix-code mode should remain strict and support alphanumeric codes'
 );
 
 const exactMatches = context.window.AppSearch.productsByBarcodeFromCache('0063848904961');

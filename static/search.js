@@ -162,17 +162,30 @@ function productSearchFields(product) {
     const usageNotes = normalizeSearchText(product.usage_notes);
     const alternatives = normalizeSearchText(product.alternative_suggestions);
     const barcode = normalizedDigits(product.barcode);
-    const regulatoryValues = (Array.isArray(product.regulatory_identifiers)
-      ? product.regulatory_identifiers : [])
-      .map(identifier => normalizeSearchText(identifier?.value || ''))
-      .filter(Boolean);
+    const rawIdentifiers = [
+      ...(Array.isArray(product.identifiers) ? product.identifiers : []),
+      ...(Array.isArray(product.regulatory_identifiers) ? product.regulatory_identifiers : []),
+    ];
+    const identifierValuesByType = {};
+    const identifierValues = [];
+    for (const identifier of rawIdentifiers) {
+      const type = String(identifier?.type || '').trim().toUpperCase().replace(/-/g, '_');
+      const value = normalizeSearchText(identifier?.value || '');
+      if (!type || !value) continue;
+      if (!identifierValues.includes(value)) identifierValues.push(value);
+      if (!identifierValuesByType[type]) identifierValuesByType[type] = [];
+      if (!identifierValuesByType[type].includes(value)) identifierValuesByType[type].push(value);
+    }
+    const regulatoryValues = ['DIN', 'NPN', 'DIN_HM']
+      .flatMap(type => identifierValuesByType[type] || []);
     const haystack = [name, brand, description, searchTerms, usageNotes, alternatives,
-      regulatoryValues.join(' ')].join(' ');
+      identifierValues.join(' ')].join(' ');
     const nameTokens = name ? name.split(' ') : [];
     // non-enumerable so it never gets copied into API payloads (e.g. {...product})
     Object.defineProperty(product, '_sf', {
       value: {name, brand, description, searchTerms, usageNotes, alternatives,
-        barcode, regulatoryValues, haystack, nameTokens},
+        barcode, regulatoryValues, identifierValues, identifierValuesByType,
+        haystack, nameTokens},
       enumerable: false, writable: true, configurable: true,
     });
   }
@@ -341,7 +354,66 @@ function searchProductsByCodeFromCache(query, limit=40) {
   return ranked.slice(0, limit).map(item => item.product);
 }
 
-// Which field the search box targets: '' = name/brand/UPC (default), 'code' = pharmacy code.
+const IDENTIFIER_FIELD_TYPES = {
+  din: ['DIN'], npn: ['NPN'], din_hm: ['DIN_HM'],
+  pin: ['PIN'], nip: ['NIP'], pseudo_din: ['PSEUDO_DIN'],
+  manufacturer_part_number: ['MANUFACTURER_PART_NUMBER'],
+  supplier_item_number: ['SUPPLIER_ITEM_NUMBER'],
+  wholesaler_item_number: ['WHOLESALER_ITEM_NUMBER'],
+  case_gtin: ['CASE_GTIN'], inner_gtin: ['INNER_GTIN'],
+  ramq_billing_code: ['RAMQ_BILLING_CODE'],
+  insurer_billing_code: ['INSURER_BILLING_CODE'],
+  health_canada_id: ['HEALTH_CANADA_ID'], clinical_id: ['CLINICAL_ID'],
+};
+
+function strictSearchValues(product, field) {
+  const f = productSearchFields(product);
+  if (field === 'name') return [f.name, f.brand].filter(Boolean);
+  if (field === 'upc' || field === 'gtin') {
+    return [f.barcode, ...(f.identifierValuesByType.UPC || []),
+      ...(f.identifierValuesByType.GTIN || [])].filter(Boolean);
+  }
+  if (field === 'code' || field === 'familiprix_code') {
+    return [normalizeSearchText(product.product_code),
+      ...(f.identifierValuesByType.FAMILIPRIX_CODE || [])].filter(Boolean);
+  }
+  if (field === 'identifier' || field === 'all_identifiers') {
+    return [f.barcode, normalizeSearchText(product.product_code),
+      ...f.identifierValues].filter(Boolean);
+  }
+  const types = IDENTIFIER_FIELD_TYPES[field] || [];
+  return types.flatMap(type => f.identifierValuesByType[type] || []);
+}
+
+function strictSearchScore(value, query) {
+  const rawQuery = String(query || '').trim();
+  const numeric = /^[\d\s.\-]+$/.test(rawQuery);
+  const needle = numeric ? normalizedDigits(rawQuery) : normalizeSearchText(rawQuery);
+  const haystack = numeric ? normalizedDigits(value) : normalizeSearchText(value);
+  if (!needle || !haystack) return 0;
+  if (haystack === needle) return 1200;
+  if (numeric && needle.length >= 4 && haystack.endsWith(needle)) return 900;
+  if (haystack.startsWith(needle)) return 700;
+  if (haystack.includes(needle)) return 400;
+  return 0;
+}
+
+function searchProductsByFieldFromCache(query, field, limit=40) {
+  if (!field) return searchProductsFromCache(query, limit);
+  const ranked = [];
+  for (const product of allProductsCache) {
+    let score = 0;
+    for (const value of strictSearchValues(product, field)) {
+      score = Math.max(score, strictSearchScore(value, query));
+    }
+    if (score) ranked.push({score, product});
+  }
+  ranked.sort((a, b) => (b.score - a.score)
+    || String(a.product.name || '').localeCompare(String(b.product.name || '')));
+  return ranked.slice(0, limit).map(item => item.product);
+}
+
+// Which field the search box targets. Empty means the broad employee search.
 function getSearchField() {
   return document.getElementById('searchField')?.value || '';
 }
@@ -349,9 +421,20 @@ function getSearchField() {
 function onSearchFieldChange() {
   const input = document.getElementById('searchInput');
   if (input) {
-    input.placeholder = getSearchField() === 'code'
-      ? 'Code pharmacie (ex: 123456)…'
-      : 'Nom, code-barres ou 4 derniers chiffres...';
+    const placeholders = {
+      name: 'Nom ou marque du produit…', upc: 'UPC / GTIN ou derniers chiffres…',
+      code: 'Code Familiprix…', identifier: 'N’importe quel identifiant…',
+      din: 'DIN (8 chiffres)…', npn: 'NPN (8 chiffres)…',
+      din_hm: 'DIN-HM (8 chiffres)…', pin: 'PIN…', nip: 'NIP…',
+      pseudo_din: 'Pseudo-DIN…', manufacturer_part_number: 'Numéro du fabricant…',
+      supplier_item_number: 'Numéro du fournisseur…',
+      wholesaler_item_number: 'Numéro du grossiste…', case_gtin: 'GTIN de caisse…',
+      inner_gtin: 'GTIN de l’emballage intérieur…', ramq_billing_code: 'Code RAMQ…',
+      insurer_billing_code: 'Code assureur…', health_canada_id: 'ID Santé Canada…',
+      clinical_id: 'Identifiant clinique…',
+    };
+    input.placeholder = placeholders[getSearchField()]
+      || 'Nom, identifiant ou derniers chiffres…';
   }
   doSearch();
 }
@@ -491,18 +574,22 @@ async function doSearchValue(q) {
   }
   cancelReferenceImagePolling();
 
-  // Explicit "Code" mode: match only the pharmacy code, never barcode/name.
-  if (getSearchField() === 'code') {
-    const cachedByCode = searchProductsByCodeFromCache(q, 40);
-    if (cachedByCode.length || allProductsCache.length) {
-      div.innerHTML = cachedByCode.length
-        ? groupAndRenderSearchResults(cachedByCode)
-        : '<div class="empty">Aucun produit avec ce code.</div>';
+  const field = getSearchField();
+  if (field) {
+    const cachedByField = searchProductsByFieldFromCache(q, field, 40);
+    if (cachedByField.length || allProductsCache.length) {
+      div.innerHTML = cachedByField.length
+        ? groupAndRenderSearchResults(cachedByField)
+        : '<div class="empty">Aucun produit placé. Recherche dans le catalogue…</div>';
+      appendReferenceMatches(q, div, cachedByField, field);
       return;
     }
     try {
-      const data = await apiSearchProducts(q, 'code');
-      div.innerHTML = data.length ? groupAndRenderSearchResults(data) : '<div class="empty">Aucun produit avec ce code.</div>';
+      const data = await apiSearchProducts(q, field);
+      div.innerHTML = data.length
+        ? groupAndRenderSearchResults(data)
+        : '<div class="empty">Aucun produit placé. Recherche dans le catalogue…</div>';
+      appendReferenceMatches(q, div, data, field);
     } catch (e) {
       div.innerHTML = '<div class="msg error">Impossible de rechercher pour le moment.</div>';
     }
@@ -554,11 +641,11 @@ async function doSearchValue(q) {
 
 // Fetch catalogue-only products (imported planograms, not placed yet) and append them
 // below the placed results. Server-side search, so it's light on the device.
-async function appendReferenceMatches(q, div, placed) {
+async function appendReferenceMatches(q, div, placed, field='') {
   let ref = [];
-  try { ref = await apiSearchReference(q, 30); } catch (_) {}
+  try { ref = await apiSearchReference(q, 30, field); } catch (_) {}
   const current = document.getElementById('searchInput')?.value.trim();
-  if (current !== q) return;                      // user moved on — ignore stale results
+  if (current !== q || getSearchField() !== field) return;
   if (!ref.length) {
     if (!placed.length) div.innerHTML = '<div class="empty">Aucun produit trouvé.</div>';
     return;
@@ -620,7 +707,8 @@ function productCardMultiLocation(entries) {
 
 window.AppSearch = {
   doSearch, doSearchValue, filterByHomeBrand, scheduleSearch, onSearchFieldChange,
-  searchProductsFromCache, productsByBarcodeFromCache, invalidateProductSearchIndexes,
+  searchProductsFromCache, searchProductsByFieldFromCache,
+  productsByBarcodeFromCache, invalidateProductSearchIndexes,
   startSearchImagePolling, cancelSearchImagePolling,
   startReferenceImagePolling, cancelReferenceImagePolling,
 };
