@@ -234,6 +234,28 @@ def init_db():
         db.close()
 
 
+def _postgres_auth_schema_complete(db):
+    row = db.execute(
+        """SELECT
+             (SELECT COUNT(DISTINCT table_name)
+                FROM information_schema.tables
+               WHERE table_schema=current_schema()
+                 AND table_name IN
+                     ('users','app_settings','auth_sessions','security_events'))
+               AS table_count,
+             (SELECT COUNT(*)
+                FROM information_schema.columns
+               WHERE table_schema=current_schema()
+                 AND table_name='auth_sessions'
+                 AND column_name='password_fingerprint') AS column_count"""
+    ).fetchone()
+    values = dict(row) if row else {}
+    return (
+        int(values.get("table_count") or 0) == 4
+        and int(values.get("column_count") or 0) == 1
+    )
+
+
 def ensure_auth_schema(db):
     """Create only the small authentication tables when a full migration was delayed.
 
@@ -245,8 +267,14 @@ def ensure_auth_schema(db):
     global _POSTGRES_AUTH_SCHEMA_READY
     if db.backend == "postgres" and _POSTGRES_AUTH_SCHEMA_READY:
         return
+    if db.backend == "postgres" and _postgres_auth_schema_complete(db):
+        _POSTGRES_AUTH_SCHEMA_READY = True
+        return
     with _AUTH_SCHEMA_LOCK:
         if db.backend == "postgres" and _POSTGRES_AUTH_SCHEMA_READY:
+            return
+        if db.backend == "postgres" and _postgres_auth_schema_complete(db):
+            _POSTGRES_AUTH_SCHEMA_READY = True
             return
         try:
             if db.backend == "postgres":

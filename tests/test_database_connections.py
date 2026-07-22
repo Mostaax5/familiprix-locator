@@ -45,6 +45,32 @@ class DatabaseConnectionTests(unittest.TestCase):
         with patch.object(database, "PG_POOL_ENABLED", False):
             self.assertEqual(database.pool_stats(), {"enabled": False})
 
+    def test_existing_postgres_auth_schema_skips_locking_ddl(self):
+        db = Mock(backend="postgres")
+        with patch.object(database, "_POSTGRES_AUTH_SCHEMA_READY", False), \
+             patch.object(
+                 database, "_postgres_auth_schema_complete", return_value=True
+             ) as complete:
+            database.ensure_auth_schema(db)
+
+            complete.assert_called_once_with(db)
+            db.execute.assert_not_called()
+            self.assertTrue(database._POSTGRES_AUTH_SCHEMA_READY)
+
+    def test_postgres_auth_schema_requires_all_tables_and_session_column(self):
+        db = Mock()
+        db.execute.return_value.fetchone.return_value = {
+            "table_count": 4,
+            "column_count": 1,
+        }
+        self.assertTrue(database._postgres_auth_schema_complete(db))
+
+        db.execute.return_value.fetchone.return_value = {
+            "table_count": 4,
+            "column_count": 0,
+        }
+        self.assertFalse(database._postgres_auth_schema_complete(db))
+
 
 if __name__ == "__main__":
     unittest.main()
