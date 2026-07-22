@@ -90,6 +90,19 @@ const context = {
 vm.createContext(context);
 vm.runInContext(fs.readFileSync('static/layout-ui.js', 'utf8'), context);
 
+const missingDinMarkup = vm.runInContext(
+  "regulatoryIdentifiersMarkup({regulatory_identifiers: []})", context
+);
+assert(missingDinMarkup.includes('DIN / DIN-HM'));
+assert(missingDinMarkup.includes('Non disponible'));
+const probableDinHmMarkup = vm.runInContext(
+  "regulatoryIdentifiersMarkup({regulatory_identifiers: [{type:'DIN_HM',value:'80000001',status:'probable'}]})",
+  context
+);
+assert(probableDinHmMarkup.includes('DIN-HM'));
+assert(probableDinHmMarkup.includes('À CONFIRMER'));
+assert(!probableDinHmMarkup.includes('Non disponible'));
+
 async function run() {
   vm.runInContext("markLayoutDirty('1')", context);
   assert(context.dirtyLayoutAisles.has('1'), 'editing should mark the aisle dirty');

@@ -68,6 +68,7 @@ vm.createContext(context);
 const source = fs.readFileSync('static/ai-ui.js', 'utf8');
 vm.runInContext(`${source}\n;globalThis.__quoteTest = {
   renderQuotableClientAnswer,
+  clientRegulatoryIdentifiers,
   clientQuoteButton,
   quoteClientPassage,
   clearClientSelectedQuote,
@@ -113,6 +114,13 @@ const longAnswer = [
   'Troisième phrase qui termine ce long passage avec une recommandation prudente.',
   'Quatrième phrase ajoutée pour dépasser la taille maximale d’un seul passage sur téléphone.',
 ].join(' ');
+const missingDinMarkup = context.__quoteTest.clientRegulatoryIdentifiers({regulatory_identifiers: []});
+assert.ok(missingDinMarkup.includes('DIN / DIN-HM : non disponible'));
+const confirmedDinMarkup = context.__quoteTest.clientRegulatoryIdentifiers({
+  regulatory_identifiers: [{type: 'DIN', value: '12345678', status: 'confirmed'}],
+});
+assert.ok(confirmedDinMarkup.includes('DIN 12345678'));
+assert.ok(!confirmedDinMarkup.includes('non disponible'));
 const rendered = context.__quoteTest.renderQuotableClientAnswer(longAnswer, []);
 assert.ok((rendered.match(/client-quote-action/g) || []).length >= 2);
 

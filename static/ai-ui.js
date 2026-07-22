@@ -662,11 +662,15 @@ function clientProductLocations(product) {
 function clientRegulatoryIdentifiers(product) {
   const identifiers = Array.isArray(product?.regulatory_identifiers)
     ? product.regulatory_identifiers : [];
-  return identifiers.map(identifier => {
+  const rendered = identifiers.map(identifier => {
     const type = identifier.type === 'DIN_HM' ? 'DIN-HM' : identifier.type;
     const confirmed = identifier.status === 'confirmed';
     return `<span title="${confirmed ? 'Confirmé par une source officielle' : 'À confirmer sur l’emballage'}">${esc(type)} ${esc(identifier.value)} · ${confirmed ? 'Confirmé' : 'À confirmer'}</span>`;
   }).join('');
+  const hasDin = identifiers.some(identifier =>
+    ['DIN', 'DIN_HM'].includes(String(identifier?.type || '').toUpperCase().replace('-', '_'))
+  );
+  return rendered + (hasDin ? '' : '<span title="Aucun DIN ou DIN-HM associé dans le catalogue">DIN / DIN-HM : non disponible</span>');
 }
 
 function openClientProductDetails(candidateId) {

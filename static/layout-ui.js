@@ -1051,7 +1051,7 @@ function startScanFromSection(aisle, side, sectionIndex) {
 function regulatoryIdentifiersMarkup(product) {
   const identifiers = Array.isArray(product?.regulatory_identifiers)
     ? product.regulatory_identifiers : [];
-  return identifiers.map(identifier => {
+  const rendered = identifiers.map(identifier => {
     const confirmed = identifier.status === 'confirmed';
     const type = identifier.type === 'DIN_HM' ? 'DIN-HM' : identifier.type;
     const title = confirmed
@@ -1061,6 +1061,11 @@ function regulatoryIdentifiersMarkup(product) {
         : 'Correspondance probable liée à cet UPC, à confirmer sur l’emballage');
     return `<div class="meta-row"><span class="meta-label">${esc(type)}</span><span class="barcode-text">${esc(identifier.value)}</span><span title="${esc(title)}" style="font-size:10px;font-weight:700;color:${confirmed ? '#047857' : '#b45309'}">${confirmed ? 'CONFIRMÉ' : 'À CONFIRMER'}</span></div>`;
   }).join('');
+  const hasDin = identifiers.some(identifier =>
+    ['DIN', 'DIN_HM'].includes(String(identifier?.type || '').toUpperCase().replace('-', '_'))
+  );
+  const unavailable = hasDin ? '' : `<div class="meta-row" title="Aucun DIN ou DIN-HM n'est actuellement associé à ce produit dans le catalogue"><span class="meta-label">DIN / DIN-HM</span><span class="small">Non disponible</span></div>`;
+  return rendered + unavailable;
 }
 
 function otherIdentifiersMarkup(product) {
