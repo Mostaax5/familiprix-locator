@@ -12,6 +12,7 @@ from product_data import (
 from regulatory_data import (
     extract_regulatory_identifiers,
     group_unambiguous_dpd_matches,
+    parse_dpd_api_records,
     parse_dpd_extracts,
     verify_regulatory_candidate,
 )
@@ -69,6 +70,46 @@ class RegulatoryDataTests(unittest.TestCase):
         ])
         matches = parse_dpd_extracts(
             package_path, drug_path, {"gtin:00063848966068"}
+        )
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["din"], "01234567")
+        self.assertEqual(matches[0]["barcode"], "063848966068")
+
+    def test_dpd_api_joins_din_only_through_exact_upc(self):
+        packages = [
+            {
+                "drug_code": 42,
+                "upc": "063848966068",
+                "package_size_unit": "EA",
+                "package_type": "Bottle",
+                "package_size": "50",
+                "product_information": "50 tablets",
+            },
+            {
+                "drug_code": 43,
+                "upc": "041388316000",
+                "package_size_unit": "EA",
+                "package_type": "Bottle",
+                "package_size": "100",
+                "product_information": "100 tablets",
+            },
+        ]
+        drugs = [
+            {
+                "drug_code": 42,
+                "drug_identification_number": "01234567",
+                "brand_name": "EXACT DRUG",
+                "descriptor": "200 MG",
+                "last_update_date": "2026-07-01",
+            },
+            {
+                "drug_code": 43,
+                "drug_identification_number": "07654321",
+                "brand_name": "OTHER DRUG",
+            },
+        ]
+        matches = parse_dpd_api_records(
+            packages, drugs, {"gtin:00063848966068"}
         )
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0]["din"], "01234567")

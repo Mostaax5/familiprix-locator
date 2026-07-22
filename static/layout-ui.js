@@ -4070,6 +4070,9 @@ let regulatorySyncWasRunning = false;
 
 const REGULATORY_PHASE_LABELS = {
   prepare: 'Préparation du catalogue',
+  download_packages_api: 'Lecture des emballages Santé Canada',
+  download_drugs_api: 'Lecture des médicaments Santé Canada',
+  api_fallback_zip: 'Repli vers les fichiers Santé Canada',
   download_packages: 'Téléchargement des emballages Santé Canada',
   download_drugs: 'Téléchargement des médicaments Santé Canada',
   match_exact_upc: 'Correspondance exacte des UPC',

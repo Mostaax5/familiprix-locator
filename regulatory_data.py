@@ -10,6 +10,7 @@ licence and product identity.
 from __future__ import annotations
 
 import csv
+import gc
 import html
 import json
 import os
@@ -47,6 +48,7 @@ _DPD_API = "https://health-products.canada.ca/api/drug"
 _LNHPD_API = "https://health-products.canada.ca/api/natural-licences"
 _MAX_EXTRACT_BYTES = 64 * 1024 * 1024
 _MAX_API_BYTES = 2 * 1024 * 1024
+_MAX_BULK_API_BYTES = 16 * 1024 * 1024
 
 
 _REGULATORY_PATTERNS = (
@@ -205,13 +207,136 @@ def parse_dpd_extracts(package_path, drug_path, wanted_gtin_keys):
     return joined
 
 
-def _download_to_temp(url, *, timeout=180, max_bytes=_MAX_EXTRACT_BYTES):
+def _payload_records(payload):
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        if isinstance(data, dict):
+            return [data]
+        return [payload]
+    return []
+
+
+def _select_dpd_api_packages(package_records, wanted_gtin_keys):
+    wanted = {str(key) for key in wanted_gtin_keys or [] if str(key)}
+    selected = []
+    for row in package_records or []:
+        if not isinstance(row, dict):
+            continue
+        barcode = text_digits(row.get("upc", ""))
+        key = gtin_identity_key(barcode)
+        if not key or key not in wanted:
+            continue
+        drug_code = text_digits(row.get("drug_code", ""))
+        if not drug_code:
+            continue
+        selected.append({
+            "gtin_key": key,
+            "barcode": barcode,
+            "drug_code": drug_code,
+            "package_size_unit": str(
+                row.get("package_size_unit", "") or ""
+            ).strip(),
+            "package_type": str(row.get("package_type", "") or "").strip(),
+            "package_size": str(row.get("package_size", "") or "").strip(),
+            "product_information": str(
+                row.get("product_information", "") or ""
+            ).strip(),
+        })
+    return selected
+
+
+def _join_dpd_api_products(packages, drug_records):
+    wanted_codes = {package["drug_code"] for package in packages}
+    products = {}
+    for row in drug_records or []:
+        if not isinstance(row, dict):
+            continue
+        drug_code = text_digits(row.get("drug_code", ""))
+        if drug_code not in wanted_codes:
+            continue
+        din = text_digits(row.get("drug_identification_number", ""))
+        if len(din) != 8:
+            continue
+        products[drug_code] = {
+            "drug_code": drug_code,
+            "din": din,
+            "brand_name": str(row.get("brand_name", "") or "").strip(),
+            "descriptor": str(row.get("descriptor", "") or "").strip(),
+            "last_update_date": str(
+                row.get("last_update_date", "") or ""
+            ).strip(),
+            "brand_name_fr": "",
+            "descriptor_fr": "",
+        }
+    return [
+        {**package, **products[package["drug_code"]]}
+        for package in packages
+        if package["drug_code"] in products
+    ]
+
+
+def parse_dpd_api_records(package_records, drug_records, wanted_gtin_keys):
+    """Join official DPD JSON records through exact UPC and drug code."""
+    return _join_dpd_api_products(
+        _select_dpd_api_packages(package_records, wanted_gtin_keys),
+        drug_records,
+    )
+
+
+def _read_json_response(url, *, timeout=60, max_bytes=_MAX_API_BYTES):
+    request = Request(url, headers={
+        "User-Agent": "FamiliprixLocator/1.0",
+        "Accept": "application/json",
+    })
+    with urlopen(request, timeout=timeout) as response:
+        payload = response.read(max_bytes + 1)
+        version = str(
+            response.headers.get("Last-Modified")
+            or response.headers.get("Date") or ""
+        )
+    if len(payload) > max_bytes:
+        raise ValueError("Health Canada API response exceeds size limit")
+    return json.loads(payload.decode("utf-8", errors="replace")), version
+
+
+def _download_dpd_api_matches(wanted_gtin_keys, progress=None):
+    if progress:
+        progress("download_packages_api")
+    package_payload, package_version = _read_json_response(
+        f"{_DPD_API}/packaging/?type=json",
+        timeout=90, max_bytes=_MAX_BULK_API_BYTES,
+    )
+    packages = _select_dpd_api_packages(
+        _payload_records(package_payload), wanted_gtin_keys
+    )
+    del package_payload
+    gc.collect()
+
+    if progress:
+        progress("download_drugs_api")
+    drug_payload, drug_version = _read_json_response(
+        f"{_DPD_API}/drugproduct/?status=2&lang=en&type=json",
+        timeout=90, max_bytes=_MAX_BULK_API_BYTES,
+    )
+    matches = _join_dpd_api_products(packages, _payload_records(drug_payload))
+    del drug_payload
+    gc.collect()
+    return matches, " | ".join(
+        value for value in (package_version, drug_version) if value
+    )
+
+
+def _download_to_temp(url, *, timeout=45, max_bytes=_MAX_EXTRACT_BYTES):
     request = Request(url, headers={
         "User-Agent": "FamiliprixLocator/1.0",
         "Accept": "application/zip,application/octet-stream",
     })
     last_error = None
-    for attempt in range(3):
+    for attempt in range(2):
         path = ""
         try:
             with urlopen(request, timeout=timeout) as response:
@@ -237,13 +362,24 @@ def _download_to_temp(url, *, timeout=180, max_bytes=_MAX_EXTRACT_BYTES):
                     os.remove(path)
                 except OSError:
                     pass
-            if attempt < 2:
+            if attempt < 1:
                 time.sleep(2 ** attempt)
     raise RuntimeError(f"Health Canada download failed: {last_error}")
 
 
 def download_dpd_matches(wanted_gtin_keys, progress=None):
-    """Download current marketed extracts and return exact package matches."""
+    """Return exact marketed UPC/DIN matches from official Health Canada data.
+
+    The documented JSON API is primary because it is reliable from Render. The
+    Canada.ca ZIP extracts remain a bounded fallback for API outages.
+    """
+    api_error_text = ""
+    try:
+        return _download_dpd_api_matches(wanted_gtin_keys, progress=progress)
+    except Exception as api_error:
+        api_error_text = str(api_error)
+        if progress:
+            progress("api_fallback_zip")
     package_path = drug_path = ""
     versions = []
     try:
@@ -257,9 +393,16 @@ def download_dpd_matches(wanted_gtin_keys, progress=None):
         versions.append(version)
         if progress:
             progress("match_exact_upc")
-        return parse_dpd_extracts(package_path, drug_path, wanted_gtin_keys), " | ".join(
-            value for value in versions if value
-        )
+        try:
+            matches = parse_dpd_extracts(
+                package_path, drug_path, wanted_gtin_keys
+            )
+        except Exception as zip_error:
+            raise RuntimeError(
+                f"Health Canada API failed ({api_error_text}); "
+                f"ZIP fallback failed ({zip_error})"
+            ) from zip_error
+        return matches, " | ".join(value for value in versions if value)
     finally:
         for path in (package_path, drug_path):
             if path:
@@ -270,28 +413,14 @@ def download_dpd_matches(wanted_gtin_keys, progress=None):
 
 
 def _read_json_url(url, timeout=8):
-    request = Request(url, headers={
-        "User-Agent": "FamiliprixLocator/1.0",
-        "Accept": "application/json",
-    })
-    with urlopen(request, timeout=timeout) as response:
-        payload = response.read(_MAX_API_BYTES + 1)
-    if len(payload) > _MAX_API_BYTES:
-        raise ValueError("Health Canada API response exceeds size limit")
-    return json.loads(payload.decode("utf-8", errors="replace"))
+    payload, _version = _read_json_response(
+        url, timeout=timeout, max_bytes=_MAX_API_BYTES
+    )
+    return payload
 
 
 def _api_records(payload):
-    if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)]
-    if isinstance(payload, dict):
-        data = payload.get("data")
-        if isinstance(data, list):
-            return [item for item in data if isinstance(item, dict)]
-        if isinstance(data, dict):
-            return [data]
-        return [payload]
-    return []
+    return _payload_records(payload)
 
 
 def _name_tokens(value):
