@@ -233,7 +233,7 @@ async function autoSaveAisleLayout(aisle) {
 
 function compactPlanProduct(product) {
   if (!String(product?.aisle || '').trim()) return null;
-  return {
+  const compact = {
     id: product.id ?? null,
     name: String(product.name || ''),
     brand: String(product.brand || ''),
@@ -262,6 +262,119 @@ function compactPlanProduct(product) {
     last_change_by: String(product.last_change_by || product.modified_by || product.created_by || ''),
     last_change_at: String(product.last_change_at || product.modified_at || product.created_at || '')
   };
+  const regulatoryIdentifiers = (Array.isArray(product.regulatory_identifiers)
+    ? product.regulatory_identifiers : []).slice(0, 12).map(identifier => ({
+      type: String(identifier?.type || ''),
+      value: String(identifier?.value || ''),
+      authority: String(identifier?.authority || ''),
+      status: String(identifier?.status || 'probable'),
+      label: String(identifier?.label || ''),
+      confidence: Number(identifier?.confidence || 0),
+    })).filter(identifier => identifier.type && identifier.value);
+  if (regulatoryIdentifiers.length) compact.regulatory_identifiers = regulatoryIdentifiers;
+  return compact;
+}
+
+function compactSnapshotText(product, keepImage=true) {
+  const {
+    description, search_terms, usage_notes, alternative_suggestions, ...compact
+  } = product;
+  if (!keepImage) delete compact.image_url;
+  return compact;
+}
+
+const PRODUCT_MEDIA_DB_NAME = 'familiprix-locator-product-media';
+const PRODUCT_MEDIA_STORE = 'snapshots';
+const PRODUCT_MEDIA_KEY = 'placed-media-v2';
+let _productMediaDbPromise = null;
+
+function openProductMediaDb() {
+  if (!globalThis.indexedDB) return Promise.resolve(null);
+  if (_productMediaDbPromise) return _productMediaDbPromise;
+  _productMediaDbPromise = new Promise(resolve => {
+    let request;
+    try {
+      request = globalThis.indexedDB.open(PRODUCT_MEDIA_DB_NAME, 1);
+    } catch (_) {
+      resolve(null);
+      return;
+    }
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(PRODUCT_MEDIA_STORE)) {
+        request.result.createObjectStore(PRODUCT_MEDIA_STORE);
+      }
+    };
+    request.onerror = () => resolve(null);
+    request.onsuccess = () => {
+      request.result.onversionchange = () => request.result.close();
+      resolve(request.result);
+    };
+  });
+  return _productMediaDbPromise;
+}
+
+async function saveProductMediaSnapshot(products=allProductsCache) {
+  const db = await openProductMediaDb();
+  if (!db) return false;
+  const entries = {};
+  for (const product of products || []) {
+    const id = Number(product?.id);
+    if (!Number.isInteger(id)) continue;
+    const imageUrl = String(product.image_url || '');
+    const regulatoryIdentifiers = Array.isArray(product.regulatory_identifiers)
+      ? product.regulatory_identifiers : [];
+    if (!imageUrl && !regulatoryIdentifiers.length) continue;
+    entries[id] = {
+      barcode: String(product.barcode || ''),
+      image_url: imageUrl,
+      regulatory_identifiers: regulatoryIdentifiers,
+    };
+  }
+  return new Promise(resolve => {
+    try {
+      const transaction = db.transaction(PRODUCT_MEDIA_STORE, 'readwrite');
+      transaction.objectStore(PRODUCT_MEDIA_STORE).put(
+        {savedAt: Date.now(), entries}, PRODUCT_MEDIA_KEY
+      );
+      transaction.oncomplete = () => resolve(true);
+      transaction.onerror = () => resolve(false);
+      transaction.onabort = () => resolve(false);
+    } catch (_) {
+      resolve(false);
+    }
+  });
+}
+
+async function restoreProductMediaSnapshot() {
+  if (!allProductsCache.length) return 0;
+  const db = await openProductMediaDb();
+  if (!db) return 0;
+  const record = await new Promise(resolve => {
+    try {
+      const request = db.transaction(PRODUCT_MEDIA_STORE, 'readonly')
+        .objectStore(PRODUCT_MEDIA_STORE).get(PRODUCT_MEDIA_KEY);
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => resolve(null);
+    } catch (_) {
+      resolve(null);
+    }
+  });
+  const entries = record?.entries || {};
+  let restored = 0;
+  for (const product of allProductsCache) {
+    const cached = entries[Number(product.id)];
+    if (!cached || String(cached.barcode || '') !== String(product.barcode || '')) continue;
+    if (!product.image_url && cached.image_url) {
+      product.image_url = cached.image_url;
+      restored += 1;
+    }
+    if ((!Array.isArray(product.regulatory_identifiers) || !product.regulatory_identifiers.length)
+        && Array.isArray(cached.regulatory_identifiers)) {
+      product.regulatory_identifiers = cached.regulatory_identifiers;
+      restored += 1;
+    }
+  }
+  return restored;
 }
 
 function savePlanSnapshot() {
@@ -280,13 +393,13 @@ function savePlanSnapshot() {
     };
     let serialized = JSON.stringify(snapshot);
     if (serialized.length > 3800000) {
-      snapshot.products = products.map(product => {
-        const {
-          description, image_url, search_terms, usage_notes,
-          alternative_suggestions, ...compact
-        } = product;
-        return compact;
-      });
+      // Descriptions consume most of the phone's local quota. Keep image URLs and
+      // regulatory identifiers in the fast snapshot whenever they still fit.
+      snapshot.products = products.map(product => compactSnapshotText(product, true));
+      serialized = JSON.stringify(snapshot);
+    }
+    if (serialized.length > 3800000) {
+      snapshot.products = products.map(product => compactSnapshotText(product, false));
       serialized = JSON.stringify(snapshot);
     }
     localStorage.setItem(STORAGE_KEYS.planSnapshot, serialized);
@@ -294,13 +407,8 @@ function savePlanSnapshot() {
     // A compact location/name snapshot is still far better than a blank app on
     // devices with a small localStorage quota.
     try {
-      const products = allProductsCache.map(compactPlanProduct).filter(Boolean).map(product => {
-        const {
-          description, image_url, search_terms, usage_notes,
-          alternative_suggestions, ...compact
-        } = product;
-        return compact;
-      });
+      const products = allProductsCache.map(compactPlanProduct).filter(Boolean)
+        .map(product => compactSnapshotText(product, false));
       localStorage.setItem(STORAGE_KEYS.planSnapshot, JSON.stringify({
         savedAt: Date.now(), layouts: mapLayouts, products
       }));
@@ -530,6 +638,7 @@ async function refreshProductsCache(force=false) {
       mapLayouts.forEach(layout => syncLayoutRecord(layout));
       lastProductsRefreshAt = Date.now();
       savePlanSnapshot();
+      void saveProductMediaSnapshot(allProductsCache);
     } catch (e) {}
     return allProductsCache;
   })();
@@ -1019,12 +1128,16 @@ function hydratePlanNode(node) {
     return;
   } else if (kind === 'side' && config) {
     node.outerHTML = renderSide(aisle, node.dataset.side || '', config);
+    scheduleRenderedProductImageHydration();
     return;
   } else if (kind === 'section' && config) {
     const side = node.dataset.side || '';
     const sectionIndex = Number(node.dataset.sectionIndex || 0);
     const section = config.sides?.[side]?.sections?.[sectionIndex];
-    if (section) node.outerHTML = renderSection(aisle, side, sectionIndex, section);
+    if (section) {
+      node.outerHTML = renderSection(aisle, side, sectionIndex, section);
+      scheduleRenderedProductImageHydration();
+    }
   }
 }
 
@@ -1099,7 +1212,7 @@ function otherIdentifiersMarkup(product) {
     }).join('');
 }
 
-function productCard(p, showDelete=true, showAiButton=true) {
+function productCard(p, showDelete=true, showAiButton=true, imagePriority=false) {
   // Catalog-only products come from the imported planograms and have no shelf yet.
   const catalogOnly = p.catalog_only || !String(p.aisle || '').trim();
   const referenceImageBarcode = catalogOnly
@@ -1134,7 +1247,7 @@ function productCard(p, showDelete=true, showAiButton=true) {
     ${isHomeBrand(p.brand) ? `<div class="home-badge">★ Marque maison Familiprix</div>` : ''}
     <div class="product-layout">
       ${p.image_url
-        ? `<img class="product-thumb" src="${esc(p.image_url)}" alt="Image produit">`
+        ? `<img class="product-thumb" src="${esc(p.image_url)}" alt="Image produit" loading="${imagePriority ? 'eager' : 'lazy'}" decoding="async" fetchpriority="${imagePriority ? 'high' : 'low'}">`
         : (p.id
           ? `<span class="product-thumb product-thumb-placeholder" data-product-image-id="${Number(p.id)}" aria-label="Photo en attente"></span>`
           : (referenceImageBarcode
@@ -1162,6 +1275,60 @@ function productCard(p, showDelete=true, showAiButton=true) {
       ${showAiButton && p.id && backendInfo.ai_enabled ? `<div class="tool-row"><button class="btn btn-outline btn-inline" onclick="enrichStoredProductWithAi(${p.id})">Générer aide client (IA)</button></div>` : ''}
     </div>
   </div>`;
+}
+
+let _renderedImageHydrationQueued = false;
+
+function scheduleRenderedProductImageHydration() {
+  if (_renderedImageHydrationQueued || typeof apiGetProductImages !== 'function') return;
+  _renderedImageHydrationQueued = true;
+  const run = () => {
+    _renderedImageHydrationQueued = false;
+    void hydrateRenderedProductImages();
+  };
+  if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(run);
+  else window.setTimeout(run, 0);
+}
+
+async function hydrateRenderedProductImages() {
+  if (typeof document.querySelectorAll !== 'function') return 0;
+  const ids = [...new Set([...document.querySelectorAll('#mapContent [data-product-image-id]')]
+    .map(node => Number(node.dataset?.productImageId))
+    .filter(Number.isInteger))].slice(0, 100);
+  if (!ids.length) return 0;
+  let data;
+  try {
+    data = await apiGetProductImages(ids);
+  } catch (_) {
+    return 0;
+  }
+  const images = data?.images || {};
+  const productsById = new Map(allProductsCache
+    .filter(product => Number.isInteger(Number(product.id)))
+    .map(product => [Number(product.id), product]));
+  let updated = 0;
+  for (const [rawId, imageUrl] of Object.entries(images)) {
+    const id = Number(rawId);
+    if (!Number.isInteger(id) || !imageUrl) continue;
+    const product = productsById.get(id);
+    if (product && !product.image_url) product.image_url = imageUrl;
+    document.querySelectorAll(`#mapContent [data-product-image-id="${id}"]`).forEach(placeholder => {
+      const img = document.createElement('img');
+      img.className = 'product-thumb';
+      img.src = imageUrl;
+      img.alt = 'Image produit';
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      img.onerror = () => img.remove();
+      placeholder.replaceWith(img);
+      updated += 1;
+    });
+  }
+  if (updated) {
+    savePlanSnapshot();
+    void saveProductMediaSnapshot(allProductsCache);
+  }
+  return updated;
 }
 
 async function toggleProductStock(productId, inStock) {
@@ -2870,10 +3037,12 @@ function renderMapEditor() {
     window.requestAnimationFrame(() => {
       syncPlanSelectionUi();
       syncPlanStructureMoveUi();
+      scheduleRenderedProductImageHydration();
     });
   } else {
     syncPlanSelectionUi();
     syncPlanStructureMoveUi();
+    scheduleRenderedProductImageHydration();
   }
   restorePlanMoveReceipt();
 }
@@ -2919,6 +3088,7 @@ function setPlanAisleTrees(aisle, open) {
 
 async function loadMapEditor(forceServer=false) {
   const restoredSnapshot = restorePlanSnapshot();
+  if (restoredSnapshot) await restoreProductMediaSnapshot();
   if (mapLayouts.length) refreshPlanUi();   // instant paint from boot memory or local snapshot
   else showPlanLoading();
   await Promise.allSettled([

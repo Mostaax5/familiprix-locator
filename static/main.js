@@ -335,7 +335,11 @@ async function _loadAppData(preferredTab=null) {
   // Every employee tab uses the same mapped products. Restore the last compact
   // server snapshot before the first network await so Plan, Search and Client
   // are useful immediately even while Render is waking up.
-  if (typeof restorePlanSnapshot === 'function') restorePlanSnapshot();
+  const restoredPlanSnapshot = typeof restorePlanSnapshot === 'function'
+    ? restorePlanSnapshot() : false;
+  if (restoredPlanSnapshot && typeof restoreProductMediaSnapshot === 'function') {
+    await restoreProductMediaSnapshot();
+  }
 
   const startTab = preferredTab && LOCKED_TABS.has(preferredTab) ? preferredTab : getStartupTab();
   paintStartupTab(startTab);

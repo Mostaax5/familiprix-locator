@@ -642,10 +642,10 @@ function productInitials(product) {
   return words.slice(0, 2).map(word => word[0]).join('').toUpperCase() || 'P';
 }
 
-function clientProductImage(product) {
+function clientProductImage(product, imagePriority=false) {
   return `<div class="client-product-media" data-client-image-id="${esc(product.id || '')}">
     <div class="client-product-image-fallback">${esc(productInitials(product))}</div>
-    ${product.image_url ? `<img src="${esc(product.image_url)}" alt="${esc(product.name)}" loading="lazy" onload="this.previousElementSibling.hidden=true" onerror="this.remove()">` : ''}
+    ${product.image_url ? `<img src="${esc(product.image_url)}" alt="${esc(product.name)}" loading="${imagePriority ? 'eager' : 'lazy'}" decoding="async" fetchpriority="${imagePriority ? 'high' : 'low'}" onload="this.previousElementSibling.hidden=true" onerror="this.remove()">` : ''}
   </div>`;
 }
 
@@ -749,11 +749,11 @@ async function askAboutClientProduct() {
   await runClientRequest(question, {followUp: true, focusProductId, selectedText});
 }
 
-function clientProductCard(product) {
+function clientProductCard(product, index=0) {
   const description = product.usage_notes || product.description || '';
   const productQuote = description ? `${product.name}: ${description}` : '';
   return `<article class="client-result-card${product.in_stock === 0 ? ' is-out-of-stock' : ''}" id="${clientProductDomId(product)}" data-client-id="${esc(product.client_id || '')}" onclick="if(!(window.getSelection?.()?.toString()||'').trim())openClientProductDetails(this.dataset.clientId)">
-    ${clientProductImage(product)}
+    ${clientProductImage(product, index < 3)}
     <div class="client-result-body">
       <div class="client-result-badges">
         <span class="client-plan-badge ${product.is_plano ? 'is-plano' : 'is-hors-plano'}">${product.is_plano ? 'PLANO' : 'HORS-PLANO'}</span>
@@ -1014,6 +1014,7 @@ function updateClientImages(images) {
     img.src = imageUrl;
     img.alt = product.name;
     img.loading = 'lazy';
+    img.decoding = 'async';
     img.onload = () => { const fallback = media.querySelector('.client-product-image-fallback'); if (fallback) fallback.hidden = true; };
     img.onerror = () => img.remove();
     media.appendChild(img);

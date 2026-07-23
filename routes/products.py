@@ -489,6 +489,7 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
 # (every write path stamps modified_at), so no explicit invalidation hooks are needed.
 _PROD_CACHE = {"key": None, "rows": [], "built_at": 0.0}
 _PROD_IDENTIFIER_DRIFT_TTL_S = 120.0
+_PRODUCTS_PAYLOAD_VERSION = "media-regulatory-v2"
 
 
 def _public_product_identifiers(identifiers):
@@ -1960,6 +1961,201 @@ def audit_product_data(db, product_ids=None, trigger_type="manual", employee="sy
     }
 
 
+_PLANOGRAM_POST_IMPORT_LOCK = threading.Lock()
+_PLANOGRAM_POST_IMPORT_PENDING = deque()
+_PLANOGRAM_POST_IMPORT_ACTIVE = False
+_PLANOGRAM_IDENTIFIER_PAYLOAD_KEYS = (
+    "manufacturer_part_number", "mpn",
+    "supplier_item_number", "supplier_code",
+    "wholesaler_item_number", "wholesaler_code",
+    "case_gtin", "inner_gtin", "inner_package_gtin",
+    "din", "npn", "din_hm", "din-hm",
+    "pin", "pin_authority", "nip", "nip_authority",
+    "pseudo_din", "pseudo-din", "pseudo_din_authority",
+    "ramq_billing_code", "insurer_billing_code", "insurer_authority",
+    "health_canada_id", "clinical_identifier",
+    "clinical_identifier_authority",
+    "official_name_fr", "official_name_en", "name_fr", "name_en",
+    "short_name", "aliases", "misspellings", "keywords",
+)
+
+
+def compact_planogram_identifier_payload(payload):
+    """Keep only small identifier/alias fields needed after placement commits."""
+    compact = {}
+    source = payload if isinstance(payload, dict) else {}
+    for key in _PLANOGRAM_IDENTIFIER_PAYLOAD_KEYS:
+        value = source.get(key)
+        if value in (None, "", []):
+            continue
+        if isinstance(value, list):
+            compact[key] = [
+                str(item or "").strip()[:500]
+                for item in value[:40] if str(item or "").strip()
+            ]
+        elif not isinstance(value, (dict, tuple, set)):
+            compact[key] = str(value).strip()[:1000]
+    return compact
+
+
+def _process_planogram_post_import_job(job):
+    from database import connect_db
+
+    db = None
+    try:
+        db = connect_db()
+        valid_ids = []
+        items = list(job.get("items") or [])
+        for start in range(0, len(items), 100):
+            chunk = items[start:start + 100]
+            ids = [
+                int(item["id"]) for item in chunk
+                if int(item.get("id") or 0) > 0
+            ]
+            if not ids:
+                continue
+            placeholders = ",".join("?" for _ in ids)
+            current_rows = db.execute(
+                f"SELECT * FROM products WHERE id IN ({placeholders})",
+                tuple(ids),
+            ).fetchall()
+            current_by_id = {
+                int(dict(row)["id"]): dict(row) for row in current_rows
+            }
+            chunk_valid_ids = []
+            try:
+                for item in chunk:
+                    product_id = int(item.get("id") or 0)
+                    product = current_by_id.get(product_id)
+                    if not product:
+                        continue
+                    if (
+                        str(product.get("modified_at", "") or "")
+                        != str(item.get("modified_at", "") or "")
+                    ):
+                        continue
+                    expected_key = str(item.get("gtin_key", "") or "")
+                    current_key = gtin_identity_key(product.get("barcode", ""))
+                    if expected_key:
+                        if current_key != expected_key:
+                            continue
+                    elif (
+                        str(product.get("barcode", "") or "").strip()
+                        != str(item.get("barcode", "") or "").strip()
+                    ):
+                        continue
+
+                    _record_import_identifiers(
+                        db, product, job["imported_at"],
+                        source="Planogramme magasin",
+                        payload=item.get("identifier_payload") or {},
+                    )
+                    upsert_reference_candidate(
+                        db,
+                        {
+                            "barcode": product.get("barcode", ""),
+                            "name": product.get("name", ""),
+                            "product_code": product.get("product_code", ""),
+                            "source": "Planogramme magasin",
+                            "source_record_id": (
+                                product.get("product_code", "")
+                                or product.get("barcode", "")
+                            ),
+                            "store_presence_status": "planogram_imported",
+                        },
+                        imported_at=job["imported_at"],
+                    )
+                    for field in item.get("verified_fields") or []:
+                        if field not in FIELD_NAMES:
+                            continue
+                        value = str(product.get(field, "") or "").strip()
+                        if not value:
+                            continue
+                        record_field_evidence(
+                            db, product_id, field, value,
+                            source="Manual verified prior exact UPC",
+                            source_record_id=product.get("barcode", ""),
+                            match_method="exact_gtin_reimport",
+                            confidence=1.0, verification_status="verified",
+                            imported_at=job["imported_at"],
+                            last_verified_at=job["imported_at"], active=True,
+                        )
+                    chunk_valid_ids.append(product_id)
+                db.commit()
+                valid_ids.extend(chunk_valid_ids)
+            except Exception as exc:
+                db.rollback()
+                print(
+                    "[Planogramme] enrichissement differe reporte pour un lot: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        for start in range(0, len(valid_ids), 100):
+            try:
+                audit_product_data(
+                    db, valid_ids[start:start + 100],
+                    trigger_type="planogram_import",
+                    employee=job.get("employee") or "system",
+                    now=job["imported_at"],
+                )
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                print(
+                    "[Qualite produits] audit differe apres import reporte: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            time.sleep(0.01)
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+        release_unused_memory()
+
+
+def schedule_planogram_post_import(items, employee, imported_at):
+    """Serialize heavy metadata work so plan placement returns immediately."""
+    global _PLANOGRAM_POST_IMPORT_ACTIVE
+    clean_items = [dict(item) for item in (items or []) if item.get("id")]
+    if not clean_items:
+        return False
+    job = {
+        "items": clean_items,
+        "employee": str(employee or "system")[:80],
+        "imported_at": str(imported_at or utc_now_iso()),
+    }
+    with _PLANOGRAM_POST_IMPORT_LOCK:
+        _PLANOGRAM_POST_IMPORT_PENDING.append(job)
+        if _PLANOGRAM_POST_IMPORT_ACTIVE:
+            return True
+        _PLANOGRAM_POST_IMPORT_ACTIVE = True
+
+    def worker():
+        global _PLANOGRAM_POST_IMPORT_ACTIVE
+        # Give the browser and the request connection time to finish first.
+        time.sleep(0.35)
+        while True:
+            with _PLANOGRAM_POST_IMPORT_LOCK:
+                if not _PLANOGRAM_POST_IMPORT_PENDING:
+                    _PLANOGRAM_POST_IMPORT_ACTIVE = False
+                    return
+                queued_job = _PLANOGRAM_POST_IMPORT_PENDING.popleft()
+            try:
+                _process_planogram_post_import_job(queued_job)
+            except Exception as exc:
+                print(
+                    "[Planogramme] traitement differe impossible: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+    threading.Thread(
+        target=worker, daemon=True, name="planogram-post-import",
+    ).start()
+    return True
+
+
 # A coalescing queue keeps exactly one image worker alive. Repeated Client searches
 # can safely request the same missing UPCs without creating waiting background threads.
 _IMAGE_FILL_STATE_LOCK = threading.Lock()
@@ -2686,7 +2882,8 @@ def get_products():
     switch, and used to re-serialize ~1 MB of JSON every time."""
     db = get_db()
     etag = hashlib.sha256(repr((
-        products_state_key(db), product_identifier_state_key(db)
+        _PRODUCTS_PAYLOAD_VERSION, products_state_key(db),
+        product_identifier_state_key(db)
     )).encode()).hexdigest()
     if client_etag_matches(etag):
         return "", 304
@@ -3491,7 +3688,7 @@ def bulk_import_products():
             db, replaced_rows, username, now
         )
 
-    imported_product_ids = []
+    post_import_items = []
     for (sec_no, shelf_no, pos_no, ln) in placements:
         p = ln["p"]
         section_s, shelf_s, position_s = str(sec_no), str(shelf_no), str(pos_no)
@@ -3564,26 +3761,6 @@ def bulk_import_products():
                 )
                 saved_product_id = int(getattr(cursor, "lastrowid", 0) or 0)
             if saved_product_id:
-                imported_product_ids.append(saved_product_id)
-                _record_import_identifiers(
-                    db,
-                    {"id": saved_product_id, "barcode": barcode, "product_code": product_code},
-                    now,
-                    source="Planogramme magasin",
-                    payload=p,
-                )
-                upsert_reference_candidate(
-                    db,
-                    {
-                        "barcode": barcode,
-                        "name": name,
-                        "product_code": product_code,
-                        "source": "Planogramme magasin",
-                        "source_record_id": product_code or barcode,
-                        "store_presence_status": "planogram_imported",
-                    },
-                    imported_at=now,
-                )
                 verified_prior_fields = set(
                     metadata_source.get("_verified_fields", [])
                     if isinstance(metadata_source, dict) else []
@@ -3599,13 +3776,18 @@ def bulk_import_products():
                         and metadata_source.get(status_field) == "verified"
                     )
                     if value and was_verified and field in FIELD_NAMES:
-                        record_field_evidence(
-                            db, saved_product_id, field, value,
-                            source="Manual verified prior exact UPC",
-                            source_record_id=barcode, match_method="exact_gtin_reimport",
-                            confidence=1.0, verification_status="verified",
-                            imported_at=now, last_verified_at=now, active=True,
-                        )
+                        verified_prior_fields.add(field)
+                post_import_items.append({
+                    "id": saved_product_id,
+                    "barcode": barcode,
+                    "gtin_key": incoming_key,
+                    "modified_at": now,
+                    "identifier_payload": compact_planogram_identifier_payload(p),
+                    "verified_fields": sorted(
+                        field for field in verified_prior_fields
+                        if field in FIELD_NAMES
+                    ),
+                })
             imported += 1
         except Exception as exc:
             db.rollback()
@@ -3698,30 +3880,9 @@ def bulk_import_products():
         }), 500
     db.commit()
 
-    # Placement is already durable at this point. The quality pass cannot undo
-    # or partially replace a plan; it only records provenance and review items.
-    quality = {"success": True, "scanned": 0, "issues": 0, "statuses": {}}
-    try:
-        quality = audit_product_data(
-            db, imported_product_ids, trigger_type="planogram_import",
-            employee=username, now=now,
-        )
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        quality = {"success": False, "error": str(exc)[:240]}
-        print(f"[Qualite produits] audit apres import reporte: {type(exc).__name__}: {exc}")
-
-    # The audit may have added status fields used by the client cards.
-    final_side_rows = [
-        dict(product) for product in db.execute(
-            "SELECT * FROM products WHERE aisle=? AND side=?", (aisle, side)
-        ).fetchall()
-    ]
-
     # Return exactly the committed slice the browser must replace. This avoids
-    # two full-list downloads before the planogram can visibly update.
-    affected_products = rows_to_verified_products(db, final_side_rows)
+    # another database read before the planogram can visibly update.
+    affected_products = [row_to_product(product) for product in final_side_rows]
     affected_products.sort(key=location_sort_key)
     aisle_product_count_row = db.execute(
         "SELECT COUNT(*) AS n FROM products WHERE aisle=?", (aisle,)
@@ -3741,12 +3902,14 @@ def bulk_import_products():
 
     from routes.gist import _schedule_gist_backup
     _schedule_gist_backup(db)
+    quality_queued = schedule_planogram_post_import(
+        post_import_items, username, now
+    )
     schedule_image_fill(image_barcodes)   # fetch missing plano pictures automatically
-    try:
-        from routes.regulatory import schedule_regulatory_enrichment
-        schedule_regulatory_enrichment()
-    except Exception:
-        pass
+    quality = {
+        "success": True, "queued": quality_queued,
+        "scanned": 0, "issues": 0, "statuses": {},
+    }
     return jsonify({"success": True, "imported": imported, "skipped": skipped,
                     "errors": errors, "overflow": overflow,
                     "overflow_shelves": overflow, "overflow_products": overflow_products,

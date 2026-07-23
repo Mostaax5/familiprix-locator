@@ -32,6 +32,7 @@ const context = {
       .replace(/\u2029/g, '\\u2029');
   },
   isHomeBrand() { return false; },
+  sideStaffLabel(side) { return side; },
   sideDisplayLabel(side) { return side === 'Gauche' ? 'Côté A' : 'Côté B'; },
   mapLayouts: [{
     aisle: '1', max_section: '1', max_shelf: '1', max_position: '4',
@@ -104,6 +105,33 @@ assert(probableDinHmMarkup.includes('À CONFIRMER'));
 assert(!probableDinHmMarkup.includes('Non disponible'));
 
 async function run() {
+  context.STORAGE_KEYS.planSnapshot = 'planSnapshot';
+  vm.runInContext(`
+    allProductsCache = [{
+      id: 99, name: 'Produit photo', aisle: '1', side: 'Gauche', section: '1',
+      shelf: '1', position: '1', image_url: 'https://img.test/product.jpg',
+      description: 'x'.repeat(3900000),
+      regulatory_identifiers: [{type:'DIN', value:'01234567', status:'confirmed'}]
+    }];
+    savePlanSnapshot();
+  `, context);
+  const fastSnapshot = JSON.parse(localStorageValues.get('planSnapshot'));
+  assert.strictEqual(fastSnapshot.products[0].image_url, 'https://img.test/product.jpg',
+    'large snapshots should discard heavy text before product pictures');
+  assert.strictEqual(fastSnapshot.products[0].description, undefined);
+  assert.strictEqual(fastSnapshot.products[0].regulatory_identifiers[0].value, '01234567',
+    'the instant plan snapshot should retain regulatory identifiers');
+  const lazyImageCard = vm.runInContext(
+    "productCard(allProductsCache[0], false, false)", context
+  );
+  assert(lazyImageCard.includes('loading="lazy"'));
+  assert(lazyImageCard.includes('decoding="async"'));
+  const priorityImageCard = vm.runInContext(
+    "productCard(allProductsCache[0], false, false, true)", context
+  );
+  assert(priorityImageCard.includes('loading="eager"'));
+  assert(priorityImageCard.includes('fetchpriority="high"'));
+
   vm.runInContext("markLayoutDirty('1')", context);
   assert(context.dirtyLayoutAisles.has('1'), 'editing should mark the aisle dirty');
   assert.strictEqual(scheduled.at(-1).delay, 700, 'autosave should be debounced');

@@ -485,6 +485,7 @@ function startSearchImagePolling(products) {
         img.src = imageUrl;
         img.alt = 'Image produit';
         img.loading = 'lazy';
+        img.decoding = 'async';
         img.onerror = () => img.remove();
         placeholder.replaceWith(img);
       });
@@ -527,6 +528,7 @@ function startReferenceImagePolling(products) {
         img.src = imageUrl;
         img.alt = 'Image produit';
         img.loading = 'lazy';
+        img.decoding = 'async';
         img.onerror = () => img.remove();
         placeholder.replaceWith(img);
       });
@@ -674,10 +676,12 @@ function groupAndRenderSearchResults(products) {
     const group = products.filter(x => String(x.barcode || '').trim() === bc);
     groups.push(group);
   }
-  return groups.map(g => g.length > 1 ? productCardMultiLocation(g) : productCard(g[0])).join('');
+  return groups.map((g, index) => g.length > 1
+    ? productCardMultiLocation(g, index < 3)
+    : productCard(g[0], true, true, index < 3)).join('');
 }
 
-function productCardMultiLocation(entries) {
+function productCardMultiLocation(entries, imagePriority=false) {
   const primary = entries[0];
   const locBadges = entries.map(p => {
     return `<span style="display:inline-block;background:#fff0f0;color:#c8102e;border-radius:12px;padding:3px 9px;font-size:11px;font-weight:600;margin:2px">
@@ -688,7 +692,7 @@ function productCardMultiLocation(entries) {
     ${entries.some(p => isHomeBrand(p.brand)) ? `<div class="home-badge">★ Marque maison Familiprix</div>` : ''}
     <div class="product-layout">
       ${primary.image_url
-        ? `<img class="product-thumb" src="${esc(primary.image_url)}" alt="Image produit">`
+        ? `<img class="product-thumb" src="${esc(primary.image_url)}" alt="Image produit" loading="${imagePriority ? 'eager' : 'lazy'}" decoding="async" fetchpriority="${imagePriority ? 'high' : 'low'}">`
         : (primary.id ? `<span class="product-thumb product-thumb-placeholder" data-product-image-id="${Number(primary.id)}" aria-label="Photo en attente"></span>` : '')}
       <div class="product-info">
         <div class="name">${esc(primary.name)}</div>

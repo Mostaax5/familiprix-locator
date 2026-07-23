@@ -10,6 +10,7 @@ from product_data import record_field_evidence, upsert_reference_candidate
 from routes import products as products_module
 from routes.layout import build_default_layout_config
 from routes.products import (
+    _process_planogram_post_import_job,
     build_reference_metadata_index,
     plan_planogram_flow,
     planogram_metadata,
@@ -22,6 +23,14 @@ from routes.products import (
 
 
 class PlanogramMetadataTests(unittest.TestCase):
+    def setUp(self):
+        self.post_import_patcher = patch(
+            "routes.products.schedule_planogram_post_import",
+            return_value=True,
+        )
+        self.schedule_post_import = self.post_import_patcher.start()
+        self.addCleanup(self.post_import_patcher.stop)
+
     def make_test_app(self):
         app = Flask(__name__)
         app.config.update(TESTING=True, AUTH_TEST_BYPASS=True)
@@ -336,6 +345,121 @@ class PlanogramMetadataTests(unittest.TestCase):
         self.assertEqual(after_second["description"], "")
         self.assertEqual(after_second["image_url"], "")
         self.assertEqual(after_second["product_code"], "NEW777")
+        db.close()
+
+    def test_bulk_import_returns_before_identifier_and_quality_enrichment(self):
+        db = self.make_plan_db()
+        app = self.make_test_app()
+        payload = {
+            "aisle": "1", "side": "Gauche", "start_section": 1,
+            "start_tablette": 1, "tablette_start": 1, "tablette_end": 1,
+            "replace_existing": True,
+            "products": [{
+                "tablette": 1, "position": 1,
+                "barcode": "063848966068", "name": "FAST PRODUCT",
+                "code_familiprix": "FAST1", "din": "01938371",
+            }],
+        }
+
+        with patch("routes.products.get_db", return_value=db), \
+             patch("auth.get_db", return_value=db), \
+             patch("routes.products.schedule_image_fill"), \
+             patch("routes.gist._schedule_gist_backup"), \
+             patch(
+                 "routes.products._record_import_identifiers",
+                 side_effect=AssertionError("identifier work ran in request"),
+             ), \
+             patch(
+                 "routes.products.audit_product_data",
+                 side_effect=AssertionError("quality audit ran in request"),
+             ), \
+             patch(
+                 "routes.products.upsert_reference_candidate",
+                 side_effect=AssertionError("reference work ran in request"),
+             ):
+            with app.test_client() as client:
+                response = client.post("/api/products/bulk-import", json=payload)
+
+        result = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(result["imported"], 1)
+        self.assertTrue(result["quality"]["queued"])
+        queued_items, employee, imported_at = self.schedule_post_import.call_args.args
+        self.assertEqual(employee, "test-user")
+        self.assertTrue(imported_at)
+        self.assertEqual(queued_items[0]["barcode"], "063848966068")
+        self.assertEqual(
+            queued_items[0]["identifier_payload"]["din"], "01938371"
+        )
+        self.assertEqual(
+            db.execute("SELECT name FROM products").fetchone()[0],
+            "FAST PRODUCT",
+        )
+        db.close()
+
+    def test_deferred_planogram_work_links_identifiers_and_reference(self):
+        db = self.make_plan_db()
+        db.execute(
+            """INSERT INTO products
+               (id, name, barcode, product_code, image_url, aisle, side,
+                section, shelf, position, modified_at)
+               VALUES (10, 'DEFERRED PRODUCT', '063848966068', 'FAST1',
+                       'https://img.test/fast.jpg', '1', 'Gauche',
+                       '1', '1', '1', 'import-v1')"""
+        )
+        db.commit()
+
+        class KeepOpenDb:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+
+            def close(self):
+                pass
+
+        job = {
+            "employee": "test",
+            "imported_at": "2026-07-23T12:00:00+00:00",
+            "items": [{
+                "id": 10,
+                "barcode": "063848966068",
+                "gtin_key": products_module.gtin_identity_key("063848966068"),
+                "modified_at": "import-v1",
+                "identifier_payload": {"din": "01938371"},
+                "verified_fields": ["image_url"],
+            }],
+        }
+        with patch("database.connect_db", return_value=KeepOpenDb(db)), \
+             patch("routes.products.audit_product_data", return_value={
+                 "success": True, "scanned": 1, "issues": 0, "statuses": {},
+             }), \
+             patch("routes.products.release_unused_memory"):
+            _process_planogram_post_import_job(job)
+
+        identifiers = {
+            (row["identifier_type"], row["identifier_value"])
+            for row in db.execute(
+                "SELECT identifier_type, identifier_value "
+                "FROM product_identifiers WHERE product_id=10"
+            ).fetchall()
+        }
+        reference = db.execute(
+            "SELECT name, product_code FROM product_reference "
+            "WHERE gtin_key=?",
+            (products_module.gtin_identity_key("063848966068"),),
+        ).fetchone()
+        evidence = db.execute(
+            """SELECT verification_status FROM product_field_evidence
+               WHERE product_id=10 AND field_name='image_url' AND active=1"""
+        ).fetchone()
+
+        self.assertIn(("GTIN", "063848966068"), identifiers)
+        self.assertIn(("FAMILIPRIX_CODE", "FAST1"), identifiers)
+        self.assertIn(("DIN", "01938371"), identifiers)
+        self.assertEqual(tuple(reference), ("DEFERRED PRODUCT", "FAST1"))
+        self.assertEqual(evidence[0], "verified")
         db.close()
 
     def test_bulk_import_reports_overflow_shelves_and_products_separately(self):

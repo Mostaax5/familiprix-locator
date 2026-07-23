@@ -54,6 +54,33 @@ class PerformanceContractTests(unittest.TestCase):
         self.assertLess(apply_delta, background_refresh)
         self.assertNotIn("await refreshProductsCache(true)", import_body)
 
+    def test_planogram_import_defers_metadata_and_quality_work(self):
+        source = (ROOT / "routes" / "products.py").read_text(encoding="utf-8")
+        start = source.index("def bulk_import_products():")
+        end = source.index("_QUALITY_AUDIT_LOCK", start)
+        import_body = source[start:end]
+        commit = import_body.index("db.commit()")
+        queue = import_body.index("schedule_planogram_post_import(")
+
+        self.assertLess(commit, queue)
+        self.assertNotIn("_record_import_identifiers(", import_body)
+        self.assertNotIn("audit_product_data(", import_body)
+        self.assertNotIn("rows_to_verified_products(", import_body)
+
+    def test_product_media_is_cached_and_loaded_without_request_flooding(self):
+        product_routes = (ROOT / "routes" / "products.py").read_text(encoding="utf-8")
+        layout_ui = (ROOT / "static" / "layout-ui.js").read_text(encoding="utf-8")
+        search_ui = (ROOT / "static" / "search.js").read_text(encoding="utf-8")
+        template = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('_PRODUCTS_PAYLOAD_VERSION = "media-regulatory-v2"', product_routes)
+        etag_start = product_routes.index("etag = hashlib.sha256")
+        self.assertIn("_PRODUCTS_PAYLOAD_VERSION", product_routes[etag_start:etag_start + 300])
+        self.assertIn('rel="preconnect" href="https://magasiner.familiprix.com"', template)
+        self.assertIn("scheduleRenderedProductImageHydration();", layout_ui)
+        self.assertIn('loading="${imagePriority ? \'eager\' : \'lazy\'}"', layout_ui)
+        self.assertIn("productCard(g[0], true, true, index < 3)", search_ui)
+
     def test_public_tabs_and_planogram_history_are_compact_by_default(self):
         source = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
         self.assertIn("const LOCKED_TABS = new Set(['scan', 'add'])", (
