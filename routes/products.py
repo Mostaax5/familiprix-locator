@@ -2566,6 +2566,7 @@ def _direct_identifier_products(db, query, field, limit=60):
         )
         params.extend(allowed)
         params.append(pattern)
+    row_limit = min(max(int(limit or 60) * 4, 80), 400)
     rows = db.execute(
         f"""SELECT DISTINCT p.*
             FROM products p
@@ -2573,9 +2574,100 @@ def _direct_identifier_products(db, query, field, limit=60):
               ON pi.product_id=p.id AND {id_status}
             WHERE {condition}
             LIMIT ?""",
-        tuple(params + [min(max(int(limit or 60) * 4, 80), 400)]),
+        tuple(params + [row_limit]),
     ).fetchall()
-    items = rows_to_verified_products(db, rows)
+
+    # Regulatory synchronisation records an identifier against the exact GTIN
+    # first, then copies it to each placed product. Search that indexed reference
+    # table too so an immediately usable "À confirmer" candidate cannot disappear
+    # during the short interval before the copy finishes (or in an older record
+    # that predates that copy step).
+    reference_status = """(
+        pri.verification_status='verified'
+        OR (pri.verification_status='requires_review' AND pri.confidence>=0.25)
+    )"""
+    reference_expr = "UPPER(COALESCE(pri.normalized_value,''))"
+    reference_barcode_expr = (
+        "REPLACE(REPLACE(UPPER(COALESCE(pri.barcode,'')),'-',''),' ','')"
+    )
+    reference_params = []
+    if field in {"upc", "gtin"}:
+        reference_condition = (
+            f"({reference_barcode_expr} LIKE ? ESCAPE '\\' OR "
+            f"(pri.identifier_type IN ('UPC','GTIN') "
+            f"AND {reference_expr} LIKE ? ESCAPE '\\'))"
+        )
+        reference_params.extend([pattern, pattern])
+    elif field in {"code", "familiprix_code"}:
+        reference_condition = (
+            f"pri.identifier_type='FAMILIPRIX_CODE' "
+            f"AND {reference_expr} LIKE ? ESCAPE '\\'"
+        )
+        reference_params.append(pattern)
+    elif field in {"identifier", "all_identifiers"}:
+        reference_condition = (
+            f"({reference_barcode_expr} LIKE ? ESCAPE '\\' "
+            f"OR {reference_expr} LIKE ? ESCAPE '\\')"
+        )
+        reference_params.extend([pattern, pattern])
+    else:
+        allowed = sorted(_IDENTIFIER_SEARCH_FIELDS[field])
+        placeholders = ",".join("?" for _ in allowed)
+        reference_condition = (
+            f"pri.identifier_type IN ({placeholders}) "
+            f"AND {reference_expr} LIKE ? ESCAPE '\\'"
+        )
+        reference_params.extend(allowed)
+        reference_params.append(pattern)
+    matching_references = [
+        dict(row) for row in db.execute(
+            f"""SELECT pri.*
+                FROM product_reference_identifiers pri
+                WHERE {reference_status} AND {reference_condition}
+                ORDER BY CASE WHEN pri.verification_status='verified' THEN 0 ELSE 1 END,
+                         pri.confidence DESC, pri.id
+                LIMIT ?""",
+            tuple(reference_params + [row_limit]),
+        ).fetchall()
+    ]
+
+    rows_by_id = {
+        int(dict(row)["id"]): row for row in rows if dict(row).get("id") is not None
+    }
+    reference_keys = sorted({
+        str(row.get("gtin_key", "") or "") for row in matching_references
+        if str(row.get("gtin_key", "") or "")
+    })
+    reference_barcodes = sorted({
+        str(row.get("barcode", "") or "") for row in matching_references
+        if str(row.get("barcode", "") or "")
+    })
+    # Bound each lookup to keep SQLite below its parameter limit while retaining
+    # the products table's GTIN index on the normal path.
+    for start in range(0, max(len(reference_keys), len(reference_barcodes)), 180):
+        keys = reference_keys[start:start + 180]
+        barcodes = reference_barcodes[start:start + 180]
+        clauses = []
+        lookup_params = []
+        if keys:
+            clauses.append(f"gtin_key IN ({','.join('?' for _ in keys)})")
+            lookup_params.extend(keys)
+        if barcodes:
+            clauses.append(f"barcode IN ({','.join('?' for _ in barcodes)})")
+            lookup_params.extend(barcodes)
+        if not clauses:
+            continue
+        for row in db.execute(
+            f"""SELECT * FROM products
+                WHERE {' OR '.join(clauses)}
+                LIMIT ?""",
+            tuple(lookup_params + [row_limit]),
+        ).fetchall():
+            item = dict(row)
+            if item.get("id") is not None:
+                rows_by_id[int(item["id"])] = row
+
+    items = rows_to_verified_products(db, rows_by_id.values())
     product_ids = [int(item["id"]) for item in items if item.get("id") is not None]
     identifiers_by_product = {}
     for start in range(0, len(product_ids), 300):
@@ -2603,8 +2695,75 @@ def _direct_identifier_products(db, query, field, limit=60):
                 "match_method": identifier.get("match_method", ""),
                 "confidence": identifier.get("confidence", 0),
             })
+
+    reference_identifiers_by_key = {}
+    product_keys = sorted({
+        str(item.get("gtin_key", "") or "") or gtin_identity_key(item.get("barcode", ""))
+        for item in items
+        if str(item.get("gtin_key", "") or "") or gtin_identity_key(item.get("barcode", ""))
+    })
+    for start in range(0, len(product_keys), 300):
+        chunk = product_keys[start:start + 300]
+        placeholders = ",".join("?" for _ in chunk)
+        for identifier_row in db.execute(
+            f"""SELECT gtin_key, identifier_type, identifier_value, authority,
+                       source, source_url, verification_status, match_method, confidence
+                FROM product_reference_identifiers
+                WHERE gtin_key IN ({placeholders})
+                  AND (verification_status='verified'
+                       OR (verification_status='requires_review' AND confidence>=0.25))
+                ORDER BY CASE WHEN verification_status='verified' THEN 0 ELSE 1 END,
+                         confidence DESC, id""",
+            tuple(chunk),
+        ).fetchall():
+            identifier = dict(identifier_row)
+            reference_identifiers_by_key.setdefault(
+                str(identifier.get("gtin_key", "") or ""), []
+            ).append({
+                "type": identifier.get("identifier_type", ""),
+                "value": identifier.get("identifier_value", ""),
+                "authority": identifier.get("authority", ""),
+                "source": identifier.get("source", ""),
+                "source_url": identifier.get("source_url", ""),
+                "verification_status": identifier.get("verification_status", ""),
+                "match_method": identifier.get("match_method", ""),
+                "confidence": identifier.get("confidence", 0),
+            })
     for item in items:
-        identifiers = identifiers_by_product.get(int(item.get("id") or 0), [])
+        key = str(item.get("gtin_key", "") or "") or gtin_identity_key(
+            item.get("barcode", "")
+        )
+        candidates = (
+            identifiers_by_product.get(int(item.get("id") or 0), [])
+            + reference_identifiers_by_key.get(key, [])
+        )
+        identifiers_by_key = {}
+        for identifier in candidates:
+            identifier_key = (
+                str(identifier.get("type", "") or "").upper().replace("-", "_"),
+                str(identifier.get("value", "") or "").strip(),
+                str(identifier.get("authority", "") or "").strip(),
+            )
+            current = identifiers_by_key.get(identifier_key)
+            candidate_rank = (
+                1 if identifier.get("verification_status") == "verified" else 0,
+                float(identifier.get("confidence", 0) or 0),
+            )
+            current_rank = (
+                1 if current and current.get("verification_status") == "verified" else 0,
+                float(current.get("confidence", 0) or 0) if current else -1,
+            )
+            if current is None or candidate_rank > current_rank:
+                identifiers_by_key[identifier_key] = identifier
+        identifiers = sorted(
+            identifiers_by_key.values(),
+            key=lambda identifier: (
+                0 if identifier.get("verification_status") == "verified" else 1,
+                -float(identifier.get("confidence", 0) or 0),
+                str(identifier.get("type", "")),
+                str(identifier.get("value", "")),
+            ),
+        )
         item["_identifiers"] = identifiers
         item["identifiers"] = _public_product_identifiers(identifiers)
         item["regulatory_identifiers"] = _public_regulatory_identifiers(identifiers)
@@ -3688,7 +3847,8 @@ def bulk_import_products():
             db, replaced_rows, username, now
         )
 
-    post_import_items = []
+    pending_insert_values = []
+    pending_post_import = []
     for (sec_no, shelf_no, pos_no, ln) in placements:
         p = ln["p"]
         section_s, shelf_s, position_s = str(sec_no), str(shelf_no), str(pos_no)
@@ -3708,9 +3868,7 @@ def bulk_import_products():
         try:
             existing = existing_slots.get((section_s, shelf_s, position_s))
             # In replace mode every destination tablet was cleared above. The
-            # old row is retained only as a metadata source, never as an UPDATE
-            # target after it has been archived.
-            row_id = existing.get("id") if existing and not replace else None
+            # old row is retained only as a metadata source after it is archived.
             if existing is not None and not replace:
                 skipped += 1
                 continue
@@ -3736,58 +3894,39 @@ def bulk_import_products():
                 image_url = image_by_barcode[incoming_key]
             if barcode and (not image_url or not description):
                 image_barcodes.append(barcode)   # verify missing metadata in background
-            if row_id is not None:
-                db.execute(
-                    """UPDATE products SET name=?, brand=?, description=?, image_url=?, source_url=?,
-                       usage_notes=?, alternative_suggestions=?, barcode=?, product_code=?, facings=?,
-                       search_terms=?, is_plano=?, in_stock=?, flipped_label=?, modified_by=?, modified_at=?
-                       WHERE id=?""",
-                    (name, brand, description, image_url, source_url, usage_notes, alternatives,
-                     barcode, product_code, facings, notes, is_plano, in_stock, flipped,
-                     username, now, row_id)
+            pending_insert_values.append((
+                name, brand, description, image_url, source_url, usage_notes,
+                alternatives, barcode, incoming_key, product_code, facings,
+                aisle, side, section_s, shelf_s, position_s, notes, is_plano,
+                in_stock, flipped, username, now, username, now,
+            ))
+            verified_prior_fields = set(
+                metadata_source.get("_verified_fields", [])
+                if isinstance(metadata_source, dict) else []
+            )
+            for field, status_field in (
+                ("description", "description_status"),
+                ("image_url", "image_status"),
+                ("source_url", "description_status"),
+            ):
+                value = str(metadata.get(field, "") or "").strip()
+                was_verified = field in verified_prior_fields or (
+                    isinstance(metadata_source, dict)
+                    and metadata_source.get(status_field) == "verified"
                 )
-                saved_product_id = int(row_id)
-            else:
-                cursor = db.execute(
-                    """INSERT INTO products
-                       (name, brand, description, image_url, source_url, usage_notes,
-                        alternative_suggestions, barcode, product_code, facings, aisle, side,
-                        section, shelf, position, search_terms, is_plano, in_stock, flipped_label,
-                        created_by, created_at, modified_by, modified_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (name, brand, description, image_url, source_url, usage_notes, alternatives,
-                     barcode, product_code, facings, aisle, side, section_s, shelf_s, position_s,
-                     notes, is_plano, in_stock, flipped, username, now, username, now)
-                )
-                saved_product_id = int(getattr(cursor, "lastrowid", 0) or 0)
-            if saved_product_id:
-                verified_prior_fields = set(
-                    metadata_source.get("_verified_fields", [])
-                    if isinstance(metadata_source, dict) else []
-                )
-                for field, status_field in (
-                    ("description", "description_status"),
-                    ("image_url", "image_status"),
-                    ("source_url", "description_status"),
-                ):
-                    value = str(metadata.get(field, "") or "").strip()
-                    was_verified = field in verified_prior_fields or (
-                        isinstance(metadata_source, dict)
-                        and metadata_source.get(status_field) == "verified"
-                    )
-                    if value and was_verified and field in FIELD_NAMES:
-                        verified_prior_fields.add(field)
-                post_import_items.append({
-                    "id": saved_product_id,
-                    "barcode": barcode,
-                    "gtin_key": incoming_key,
-                    "modified_at": now,
-                    "identifier_payload": compact_planogram_identifier_payload(p),
-                    "verified_fields": sorted(
-                        field for field in verified_prior_fields
-                        if field in FIELD_NAMES
-                    ),
-                })
+                if value and was_verified and field in FIELD_NAMES:
+                    verified_prior_fields.add(field)
+            pending_post_import.append({
+                "slot": (section_s, shelf_s, position_s),
+                "barcode": barcode,
+                "gtin_key": incoming_key,
+                "modified_at": now,
+                "identifier_payload": compact_planogram_identifier_payload(p),
+                "verified_fields": sorted(
+                    field for field in verified_prior_fields
+                    if field in FIELD_NAMES
+                ),
+            })
             imported += 1
         except Exception as exc:
             db.rollback()
@@ -3800,6 +3939,30 @@ def bulk_import_products():
                     "Les anciennes tablettes ont été conservées sans aucun changement."
                 ),
             }), status
+
+    # One PostgreSQL round trip per product made large planograms visibly slow.
+    # executemany keeps the complete import in this same transaction while sending
+    # rows in bounded batches; final slot verification below remains unchanged.
+    insert_sql = """INSERT INTO products
+        (name, brand, description, image_url, source_url, usage_notes,
+         alternative_suggestions, barcode, gtin_key, product_code, facings,
+         aisle, side, section, shelf, position, search_terms, is_plano,
+         in_stock, flipped_label, created_by, created_at, modified_by, modified_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+    try:
+        for start in range(0, len(pending_insert_values), 500):
+            db.executemany(insert_sql, pending_insert_values[start:start + 500])
+    except Exception as exc:
+        db.rollback()
+        print(f"[Planogramme] Import annulé avant validation finale: {exc}")
+        status = 409 if isinstance(exc, DatabaseIntegrityError) else 500
+        return jsonify({
+            "success": False,
+            "error": (
+                "Importation annulée: un produit n'a pas pu être enregistré. "
+                "Les anciennes tablettes ont été conservées sans aucun changement."
+            ),
+        }), status
 
     skipped += overflow_products   # product rows on plano shelves past the physical plan
 
@@ -3840,6 +4003,15 @@ def bulk_import_products():
                 "Les anciennes tablettes ont été conservées sans aucun changement."
             ),
         }), 409
+
+    post_import_items = []
+    for pending in pending_post_import:
+        saved = final_by_slot.get(pending["slot"])
+        if not saved or saved.get("id") is None:
+            continue
+        post_import_items.append({
+            key: value for key, value in pending.items() if key != "slot"
+        } | {"id": int(saved["id"])})
 
     # Persist the plan with positions adjusted to the plano (tablette count is
     # unchanged — only the number of positions on a tablette changes).

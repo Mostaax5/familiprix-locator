@@ -66,6 +66,31 @@ class PerformanceContractTests(unittest.TestCase):
         self.assertNotIn("_record_import_identifiers(", import_body)
         self.assertNotIn("audit_product_data(", import_body)
         self.assertNotIn("rows_to_verified_products(", import_body)
+        self.assertIn("db.executemany(insert_sql", import_body)
+
+    def test_explicit_identifier_search_revalidates_the_phone_cache(self):
+        source = (ROOT / "static" / "search.js").read_text(encoding="utf-8")
+        start = source.index("async function doSearchValue")
+        end = source.index("if (looksLikeCompleteRetailBarcode", start)
+        field_branch = source[start:end]
+        self.assertIn("searchProductsByFieldFromCache", field_branch)
+        self.assertIn("await apiSearchProducts(q, field)", field_branch)
+        self.assertIn("mergeIndexedSearchResults", field_branch)
+        self.assertNotIn(
+            "cachedByField.length || allProductsCache.length", field_branch
+        )
+        self.assertIn("await apiSearchProducts(q, 'identifier')", source)
+
+    def test_planogram_reader_uses_fast_validated_path_and_quick_polling(self):
+        routes = (ROOT / "routes" / "import_export.py").read_text(encoding="utf-8")
+        layout_ui = (ROOT / "static" / "layout-ui.js").read_text(encoding="utf-8")
+        requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+        self.assertIn("pypdfium2==", requirements)
+        self.assertIn("def _fast_planogram_is_trustworthy", routes)
+        self.assertIn("_parse_planogram_pdf_compatibility", routes)
+        self.assertIn('return products, metadata, "pdfium-fast"', routes)
+        self.assertIn("let pollDelay = 150", layout_ui)
+        self.assertNotIn("setTimeout(r, 2500)", layout_ui)
 
     def test_product_media_is_cached_and_loaded_without_request_flooding(self):
         product_routes = (ROOT / "routes" / "products.py").read_text(encoding="utf-8")

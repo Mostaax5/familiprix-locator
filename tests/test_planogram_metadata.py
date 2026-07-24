@@ -646,6 +646,12 @@ class PlanogramMetadataTests(unittest.TestCase):
                     raise RuntimeError("simulated insert failure")
                 return self.connection.execute(query, tuple(params or ()))
 
+            def executemany(self, query, params):
+                normalized = " ".join(str(query).lower().split())
+                if normalized.startswith("insert into products"):
+                    raise RuntimeError("simulated insert failure")
+                return self.connection.executemany(query, params)
+
             def commit(self):
                 self.connection.commit()
 

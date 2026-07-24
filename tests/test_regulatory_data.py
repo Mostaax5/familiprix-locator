@@ -357,6 +357,47 @@ class RegulatoryDataTests(unittest.TestCase):
         )
         db.close()
 
+    def test_reference_candidate_is_searchable_before_product_copy_finishes(self):
+        db = self.make_db()
+        product_id = db.execute(
+            """INSERT INTO products
+               (name, barcode, aisle, side, section, shelf, position)
+               VALUES ('Advil 200 mg', '063848966068', '1', 'Gauche', '1', '1', '1')"""
+        ).lastrowid
+        upsert_reference_identifier(
+            db, "063848966068", "DIN", "01234567",
+            authority="Health Canada", source="Health Canada DPD",
+            source_record_id="42", match_method="health_canada_name_candidate",
+            confidence=0.61, verification_status="requires_review",
+        )
+
+        self.assertEqual(
+            db.execute(
+                "SELECT COUNT(*) FROM product_identifiers WHERE product_id=?",
+                (product_id,),
+            ).fetchone()[0],
+            0,
+        )
+        matches = _direct_identifier_products(
+            db, "01234567", "din", limit=5
+        )
+        self.assertEqual([match["id"] for match in matches], [product_id])
+        self.assertEqual(
+            [
+                match["id"] for match in _direct_identifier_products(
+                    db, "01234567", "identifier", limit=5
+                )
+            ],
+            [product_id],
+        )
+        self.assertEqual(
+            matches[0]["regulatory_identifiers"][0]["status"], "probable"
+        )
+        self.assertEqual(
+            matches[0]["regulatory_identifiers"][0]["label"], "À confirmer"
+        )
+        db.close()
+
     def test_npn_requires_exact_official_licence_and_matching_name(self):
         def fetch(url):
             if "productlicence" in url:

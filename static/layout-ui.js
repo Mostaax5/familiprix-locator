@@ -4369,9 +4369,8 @@ async function parsePlanogramPDF(input) {
   const form = new FormData();
   form.append('file', file);
   try {
-    // The server parses in the BACKGROUND and we poll for the result: a big
-    // plano takes minutes on the server's small CPU — parsing inside the
-    // upload request hit the HTTP timeout and looked like a dead button.
+    // Parsing stays in the background so a compatibility fallback cannot hit an
+    // HTTP timeout. Poll quickly because the normal PDFium path finishes fast.
     const res  = await secureFetch('/api/import/planogram-parse', {method:'POST', body: form});
     const up = await res.json();
     if (!res.ok || !up.success || !up.job) {
@@ -4381,8 +4380,9 @@ async function parsePlanogramPDF(input) {
     }
     const t0 = Date.now();
     let data = null;
+    let pollDelay = 150;
     while (Date.now() - t0 < 8 * 60 * 1000) {           // up to 8 min for a huge plano
-      await new Promise(r => setTimeout(r, 2500));
+      await new Promise(r => setTimeout(r, pollDelay));
       if (token !== _planoParseToken) return;           // user picked another PDF
       let sj = null;
       try {
@@ -4402,7 +4402,8 @@ async function parsePlanogramPDF(input) {
         return;
       }
       const s = Math.round((Date.now() - t0) / 1000);
-      msg.textContent = `Analyse en cours… ${s}s (un gros plano peut prendre 1 à 3 minutes — restez sur cette page)`;
+      msg.textContent = `Lecture du planogramme… ${s}s`;
+      pollDelay = (Date.now() - t0 < 10000) ? 300 : 1000;
     }
     if (!data) {
       msg.textContent = 'L analyse prend trop de temps. Réessayez dans une minute.';

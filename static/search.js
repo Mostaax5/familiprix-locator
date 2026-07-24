@@ -413,6 +413,26 @@ function searchProductsByFieldFromCache(query, field, limit=40) {
   return ranked.slice(0, limit).map(item => item.product);
 }
 
+function mergeIndexedSearchResults(indexed, cached, limit=40) {
+  const merged = new Map();
+  const keyFor = product => {
+    if (product?.id !== undefined && product?.id !== null) return `id:${product.id}`;
+    return [
+      String(product?.barcode || ''), String(product?.aisle || ''),
+      String(product?.side || ''), String(product?.section || ''),
+      String(product?.shelf || ''), String(product?.position || ''),
+      String(product?.name || ''),
+    ].join('|');
+  };
+  // Indexed rows contain the newest identifier links and review status. Cached
+  // rows still give the employee an immediate first paint while the request runs.
+  for (const product of [...(indexed || []), ...(cached || [])]) {
+    const key = keyFor(product);
+    if (!merged.has(key)) merged.set(key, product);
+  }
+  return [...merged.values()].slice(0, limit);
+}
+
 // Which field the search box targets. Empty means the broad employee search.
 function getSearchField() {
   return document.getElementById('searchField')?.value || '';
@@ -444,6 +464,7 @@ let _searchImagePollTimer = null;
 let _searchImagePollGeneration = 0;
 let _referenceImagePollTimer = null;
 let _referenceImagePollGeneration = 0;
+let _searchRequestGeneration = 0;
 
 function cancelSearchImagePolling() {
   _searchImagePollGeneration += 1;
@@ -567,6 +588,7 @@ function scheduleSearch() {
 }
 
 async function doSearchValue(q) {
+  const requestGeneration = ++_searchRequestGeneration;
   const div = document.getElementById('searchResults');
   if (!q) {
     cancelSearchImagePolling();
@@ -579,21 +601,24 @@ async function doSearchValue(q) {
   const field = getSearchField();
   if (field) {
     const cachedByField = searchProductsByFieldFromCache(q, field, 40);
-    if (cachedByField.length || allProductsCache.length) {
-      div.innerHTML = cachedByField.length
-        ? groupAndRenderSearchResults(cachedByField)
-        : '<div class="empty">Aucun produit placé. Recherche dans le catalogue…</div>';
-      appendReferenceMatches(q, div, cachedByField, field);
-      return;
-    }
+    div.innerHTML = cachedByField.length
+      ? groupAndRenderSearchResults(cachedByField)
+      : '<div class="empty">Recherche des identifiants du magasin…</div>';
     try {
-      const data = await apiSearchProducts(q, field);
+      const indexed = await apiSearchProducts(q, field);
+      if (requestGeneration !== _searchRequestGeneration) return;
+      const data = mergeIndexedSearchResults(indexed, cachedByField, 40);
       div.innerHTML = data.length
         ? groupAndRenderSearchResults(data)
         : '<div class="empty">Aucun produit placé. Recherche dans le catalogue…</div>';
       appendReferenceMatches(q, div, data, field);
     } catch (e) {
-      div.innerHTML = '<div class="msg error">Impossible de rechercher pour le moment.</div>';
+      if (requestGeneration !== _searchRequestGeneration) return;
+      if (cachedByField.length) {
+        appendReferenceMatches(q, div, cachedByField, field);
+      } else {
+        div.innerHTML = '<div class="msg error">Impossible de rechercher pour le moment.</div>';
+      }
     }
     return;
   }
@@ -619,6 +644,28 @@ async function doSearchValue(q) {
     }
   }
   const cached = searchProductsFromCache(q, 40);
+  const identifierLikeQuery = /^[\d\s.\-]+$/.test(q)
+    && normalizedDigits(q).length >= 7
+    && normalizedDigits(q).length <= 18;
+  if (identifierLikeQuery) {
+    div.innerHTML = cached.length
+      ? groupAndRenderSearchResults(cached)
+      : '<div class="empty">Recherche des identifiants du magasin…</div>';
+    try {
+      const indexed = await apiSearchProducts(q, 'identifier');
+      if (requestGeneration !== _searchRequestGeneration) return;
+      const data = mergeIndexedSearchResults(indexed, cached, 40);
+      div.innerHTML = data.length
+        ? groupAndRenderSearchResults(data)
+        : '<div class="empty">Aucun produit placé. Recherche dans le catalogue…</div>';
+      appendReferenceMatches(q, div, data);
+    } catch (e) {
+      if (requestGeneration !== _searchRequestGeneration) return;
+      if (cached.length) appendReferenceMatches(q, div, cached);
+      else div.innerHTML = '<div class="msg error">Impossible de rechercher pour le moment.</div>';
+    }
+    return;
+  }
   if (cached.length || allProductsCache.length) {
     // A short digit query (last digits of a UPC) is ambiguous — several products can
     // share the same ending. Show every match with its full code so the user can pick.
@@ -711,7 +758,7 @@ function productCardMultiLocation(entries, imagePriority=false) {
 
 window.AppSearch = {
   doSearch, doSearchValue, filterByHomeBrand, scheduleSearch, onSearchFieldChange,
-  searchProductsFromCache, searchProductsByFieldFromCache,
+  searchProductsFromCache, searchProductsByFieldFromCache, mergeIndexedSearchResults,
   productsByBarcodeFromCache, invalidateProductSearchIndexes,
   startSearchImagePolling, cancelSearchImagePolling,
   startReferenceImagePolling, cancelReferenceImagePolling,

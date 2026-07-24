@@ -80,6 +80,21 @@ assert.deepStrictEqual(
   [102],
   'Familiprix-code mode should remain strict and support alphanumeric codes'
 );
+const mergedIdentifierResults = context.window.AppSearch.mergeIndexedSearchResults(
+  [{
+    ...products[101],
+    regulatory_identifiers: [{
+      type: 'DIN', value: '01234567', status: 'probable', label: 'À confirmer',
+    }],
+  }],
+  [{...products[101], regulatory_identifiers: []}],
+  40
+);
+assert.strictEqual(
+  mergedIdentifierResults[0].regulatory_identifiers[0].label,
+  'À confirmer',
+  'the indexed probable identifier must replace stale cached metadata'
+);
 
 const exactMatches = context.window.AppSearch.productsByBarcodeFromCache('0063848904961');
 assert.deepStrictEqual(

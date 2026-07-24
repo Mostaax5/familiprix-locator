@@ -7,6 +7,7 @@ import uuid
 import secrets
 import tempfile
 import threading
+import unicodedata
 from flask import Blueprint, request, jsonify, Response, g
 from database import get_db
 from auth import require_editor, utc_now_iso
@@ -35,13 +36,11 @@ import_export_bp = Blueprint("import_export", __name__)
 _PDF_PARSE_LOCK = threading.Lock()
 
 # ── Async parse jobs ─────────────────────────────────────────────────────────────
-# A big planogram takes MINUTES to parse on Render's small CPU — far past any HTTP
-# timeout, so a synchronous upload died with "Erreur réseau" even though the app
-# was healthy. The upload now just STORES the PDF and returns a job id; a background
-# thread parses it (memory-safe: streaming + one at a time) and the phone polls the
-# status endpoint. Jobs live as files in the temp dir so they survive a gunicorn
-# worker recycle; if the worker died mid-parse (pid changed), the poll relaunches
-# the parse from the stored PDF — self-healing, never stuck.
+# Parsing remains asynchronous because an unfamiliar PDF may need the slower
+# compatibility reader. The upload stores the file and returns a job id while a
+# background thread parses it, and the phone polls the status endpoint. Jobs live
+# as files in the temp dir so a gunicorn worker recycle can relaunch an interrupted
+# parse from the stored PDF instead of leaving it stuck.
 _JOBS_DIR = os.path.join(tempfile.gettempdir(), "plano-parse-jobs")
 _JOB_MAX_AGE_S = 6 * 3600
 
@@ -111,48 +110,21 @@ def _launch_parse_thread(job_id):
         job_meta = _read_job(job_id) or {}
         owner = str(job_meta.get("owner") or "")
         try:
-            import pdfplumber
-            plano_meta = {"name": "", "number": "", "version": ""}
-            parser = _PlanogramParser()
-            # Pause image/catalogue maintenance while pdfplumber owns the memory
-            # budget. Open the file directly so the full PDF is not duplicated in
-            # a bytes object before pdfminer reads it.
+            # The coordinate-aware PDFium path normally finishes in well under a
+            # second. It validates its row coverage and automatically falls back
+            # to pdfplumber for any unfamiliar document instead of risking a
+            # silently incomplete import.
             with memory_intensive_task("planogram_pdf", priority=True):
-                with _PDF_PARSE_LOCK, pdfplumber.open(pdf_path) as pdf:
-                    if len(pdf.pages) > _MAX_PDF_PAGES:
-                        raise ValueError("PDF page limit exceeded")
-                    try:
-                        head = pdf.pages[0].extract_text() or ""
-                        m = re.search(r"PLANOGRAMME\s*:\s*([^\n]+)", head, re.IGNORECASE)
-                        if m: plano_meta["name"] = m.group(1).strip()[:120]
-                        m = re.search(r"Plano\s*#\s*([0-9]+)", head, re.IGNORECASE)
-                        if m: plano_meta["number"] = m.group(1).strip()
-                        m = re.search(r"Version\s*#\s*([A-Za-z0-9]+)", head, re.IGNORECASE)
-                        if m: plano_meta["version"] = m.group(1).strip()
-                    except Exception:
-                        pass
-                    # Stream: parse then FREE each page so the whole PDF is never
-                    # held in memory (this is what OOM'd the 512 MB instance).
-                    for page in pdf.pages:
-                        tables = page.extract_tables() or []
-                        for table in tables:
-                            parser.feed_table(table)
-                            if len(parser.products) > _MAX_CATALOG_PRODUCTS:
-                                raise ValueError("PDF product limit exceeded")
-                        del tables
-                        try:
-                            page.close()
-                        except Exception:
-                            pass
-                        gc.collect()
-            products = parser.result()
+                with _PDF_PARSE_LOCK:
+                    products, plano_meta, parse_method = _parse_planogram_file(pdf_path)
             tablettes = {}
             for p in products:
                 t = str(p["tablette"])
                 tablettes[t] = tablettes.get(t, 0) + 1
             _write_job(job_id, {"status": "done", "success": True, "owner": owner,
                                 "products": products, "count": len(products),
-                                "tablettes": tablettes, "plano": plano_meta})
+                                "tablettes": tablettes, "plano": plano_meta,
+                                "parse_method": parse_method})
             try:
                 os.remove(pdf_path)   # done — the stored PDF is no longer needed
             except OSError:
@@ -467,18 +439,376 @@ def parse_planogram_tables(tables):
     return parser.result()
 
 
+_FAST_PLANO_COLUMNS = {
+    "t": 0, "p": 1, "f": 2, "u": 3, "c": 4,
+    "d": 5, "a": 6, "s": 7, "e": 8, "comments": 9,
+}
+
+
+def _planogram_metadata_from_text(text):
+    metadata = {"name": "", "number": "", "version": ""}
+    value = str(text or "")
+    match = re.search(r"PLANOGRAMME\s*:\s*([^\r\n]+)", value, re.IGNORECASE)
+    if match:
+        metadata["name"] = match.group(1).strip()[:120]
+    match = re.search(r"Plano\s*#\s*([0-9]+)", value, re.IGNORECASE)
+    if match:
+        metadata["number"] = match.group(1).strip()
+    match = re.search(r"Version\s*#\s*([A-Za-z0-9]+)", value, re.IGNORECASE)
+    if match:
+        metadata["version"] = match.group(1).strip()
+    return metadata
+
+
+def _pdf_label(value):
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch)).lower()
+
+
+def _pdfium_page_words(text_page):
+    text = text_page.get_text_range() or ""
+    words = []
+    for order, match in enumerate(re.finditer(r"\S+", text)):
+        boxes = []
+        for index in {match.start(), match.end() - 1}:
+            try:
+                boxes.append(text_page.get_charbox(index))
+            except Exception:
+                pass
+        if not boxes:
+            continue
+        left = min(box[0] for box in boxes)
+        bottom = min(box[1] for box in boxes)
+        right = max(box[2] for box in boxes)
+        top = max(box[3] for box in boxes)
+        words.append({
+            "text": match.group(0),
+            "x": (left + right) / 2,
+            "y": (bottom + top) / 2,
+            "order": order,
+        })
+    return text, words
+
+
+def _cluster_pdf_words(words, axis, tolerance=2.4):
+    groups = []
+    for word in sorted(words, key=lambda item: (item[axis], item["order"])):
+        coordinate = float(word[axis])
+        if not groups or abs(coordinate - groups[-1]["coordinate"]) > tolerance:
+            groups.append({"coordinate": coordinate, "words": [word]})
+            continue
+        group = groups[-1]
+        group["words"].append(word)
+        count = len(group["words"])
+        group["coordinate"] += (coordinate - group["coordinate"]) / count
+    groups.sort(key=lambda group: min(word["order"] for word in group["words"]))
+    return groups
+
+
+def _pdf_header_centers(words, column_axis):
+    by_key = {}
+    stock_coordinates = []
+    for word in words:
+        label = re.sub(r"[^a-z0-9]+", "", _pdf_label(word["text"]))
+        key = ""
+        if label == "tablette":
+            key = "t"
+        elif label == "position":
+            key = "p"
+        elif label.startswith("facade"):
+            key = "f"
+        elif label == "upc":
+            key = "u"
+        elif label == "code":
+            key = "c"
+        elif label.startswith("description"):
+            key = "d"
+        elif label == "ajout":
+            key = "a"
+        elif label == "statut":
+            key = "s"
+        elif label == "stock":
+            key = "e"
+            stock_coordinates.append(float(word[column_axis]))
+        elif label.startswith("commentaire"):
+            key = "comments"
+        if key:
+            by_key.setdefault(key, []).append(float(word[column_axis]))
+    if not {"t", "p", "u", "d"}.issubset(by_key):
+        return None
+    centers = {
+        key: sum(values) / len(values) for key, values in by_key.items()
+    }
+    # "En stock" is split into two words. Center the column on both words so
+    # values below it are assigned consistently on portrait and rotated pages.
+    en_words = [
+        float(word[column_axis]) for word in words
+        if re.sub(r"[^a-z0-9]+", "", _pdf_label(word["text"])) == "en"
+    ]
+    if stock_coordinates and en_words:
+        centers["e"] = (
+            sum(stock_coordinates) + sum(en_words)
+        ) / (len(stock_coordinates) + len(en_words))
+    return centers
+
+
+def _pdf_page_groups(words, prior_row_axis=None):
+    choices = []
+    for row_axis, column_axis in (("x", "y"), ("y", "x")):
+        groups = _cluster_pdf_words(words, row_axis)
+        headers = [
+            _pdf_header_centers(group["words"], column_axis) for group in groups
+        ]
+        score = max((len(header or {}) for header in headers), default=0)
+        count = sum(1 for header in headers if header)
+        choices.append((score, count, row_axis == prior_row_axis,
+                        row_axis, column_axis, groups))
+    best = max(choices, key=lambda choice: choice[:3])
+    if best[0] < 4 and prior_row_axis:
+        return (
+            prior_row_axis,
+            "y" if prior_row_axis == "x" else "x",
+            _cluster_pdf_words(words, prior_row_axis),
+        )
+    return best[3], best[4], best[5]
+
+
+def _pdf_cells_from_group(words, schema, column_axis):
+    cells = [[] for _ in range(len(_FAST_PLANO_COLUMNS))]
+    for word in words:
+        key = min(
+            schema,
+            key=lambda column: abs(float(word[column_axis]) - schema[column]),
+        )
+        index = _FAST_PLANO_COLUMNS.get(key)
+        if index is not None:
+            cells[index].append(word)
+    values = []
+    for cell in cells:
+        ordered = sorted(cell, key=lambda word: (word[column_axis], word["order"]))
+        values.append(" ".join(word["text"] for word in ordered).strip())
+
+    # The description starts close to the narrow code column, so nearest-center
+    # assignment may put its first word beside the numeric Familiprix code.
+    # Preserve the first numeric token as the code and move the rest back.
+    code_parts = values[_FAST_PLANO_COLUMNS["c"]].split()
+    if code_parts:
+        if re.fullmatch(r"\d{3,12}", code_parts[0]):
+            spill = " ".join(code_parts[1:])
+            values[_FAST_PLANO_COLUMNS["c"]] = code_parts[0]
+        else:
+            spill = " ".join(code_parts)
+            values[_FAST_PLANO_COLUMNS["c"]] = ""
+        if spill:
+            values[_FAST_PLANO_COLUMNS["d"]] = (
+                f"{spill} {values[_FAST_PLANO_COLUMNS['d']]}".strip()
+            )
+    ajout_index = _FAST_PLANO_COLUMNS["a"]
+    ajout_parts = values[ajout_index].split()
+    ajout_value = (
+        ajout_parts[-1].lower()
+        if ajout_parts and ajout_parts[-1].lower() in {"oui", "non"}
+        else ""
+    )
+    ajout_spill = " ".join(ajout_parts[:-1] if ajout_value else ajout_parts)
+    if ajout_spill:
+        values[_FAST_PLANO_COLUMNS["d"]] = (
+            f"{values[_FAST_PLANO_COLUMNS['d']]} {ajout_spill}".strip()
+        )
+    values[ajout_index] = ajout_value
+    return values
+
+
+def _parse_planogram_pdf_fast(pdf_path):
+    import pypdfium2 as pdfium
+
+    parser = _PlanogramParser()
+    parser.current_col = dict(_FAST_PLANO_COLUMNS)
+    metadata = {"name": "", "number": "", "version": ""}
+    stats = {
+        "headers": 0, "candidate_upc_rows": 0,
+        "candidate_slots": set(), "document_upc_tokens": 0, "pages": 0,
+    }
+    row_axis = None
+    document = pdfium.PdfDocument(pdf_path)
+    try:
+        if len(document) > _MAX_PDF_PAGES:
+            raise ValueError("PDF page limit exceeded")
+        stats["pages"] = len(document)
+        for page_number in range(len(document)):
+            page = document[page_number]
+            text_page = page.get_textpage()
+            try:
+                text, words = _pdfium_page_words(text_page)
+                if page_number == 0:
+                    metadata = _planogram_metadata_from_text(text)
+                page_row_axis, column_axis, groups = _pdf_page_groups(
+                    words, prior_row_axis=row_axis
+                )
+                page_headers = [
+                    _pdf_header_centers(group["words"], column_axis)
+                    for group in groups
+                ]
+                has_header = any(page_headers)
+                schema = None
+                if row_axis == page_row_axis:
+                    schema = getattr(parser, "_fast_schema", None)
+                # Some pages begin with rows continued from the previous table,
+                # then print the next header lower on the page.
+                seen_header = not has_header or schema is not None
+                row_axis = page_row_axis
+                page_candidate_start = stats["candidate_upc_rows"]
+                last_product_coordinate = None
+                for group, header in zip(groups, page_headers):
+                    if header:
+                        schema = header
+                        parser._fast_schema = header
+                        stats["headers"] += 1
+                        seen_header = True
+                        continue
+                    if not seen_header or not schema:
+                        continue
+                    values = _pdf_cells_from_group(
+                        group["words"], schema, column_axis
+                    )
+                    upc = re.sub(r"\D", "", values[_FAST_PLANO_COLUMNS["u"]])
+                    if not upc:
+                        continue
+                    nonempty_columns = {
+                        index for index, value in enumerate(values) if value
+                    }
+                    if (
+                        nonempty_columns == {_FAST_PLANO_COLUMNS["u"]}
+                        and parser.products
+                        and last_product_coordinate is not None
+                        and abs(group["coordinate"] - last_product_coordinate) <= 12
+                        and len(upc) <= 2
+                        and len(parser.products[-1]["barcode"]) < 14
+                    ):
+                        # A 14-digit GTIN can wrap its final digit onto a second
+                        # visual line. pdfplumber joins that cell with a newline;
+                        # PDFium exposes it as a one-word continuation row.
+                        parser.products[-1]["barcode"] += upc
+                        continue
+                    stats["candidate_upc_rows"] += 1
+                    tab = values[_FAST_PLANO_COLUMNS["t"]] or parser.last_tab
+                    pos = values[_FAST_PLANO_COLUMNS["p"]] or parser.last_pos
+                    if _cell_is_int(tab) and _cell_is_int(pos):
+                        stats["candidate_slots"].add((int(tab), int(pos)))
+                    parser._feed_row(values)
+                    last_product_coordinate = group["coordinate"]
+                    if len(parser.products) > _MAX_CATALOG_PRODUCTS:
+                        raise ValueError("PDF product limit exceeded")
+                if (
+                    has_header
+                    or stats["candidate_upc_rows"] > page_candidate_start
+                ):
+                    stats["document_upc_tokens"] += len(
+                        re.findall(r"(?<!\d)\d{8,14}(?!\d)", text)
+                    )
+            finally:
+                try:
+                    text_page.close()
+                except Exception:
+                    pass
+                try:
+                    page.close()
+                except Exception:
+                    pass
+    finally:
+        try:
+            document.close()
+        except Exception:
+            pass
+    return parser.result(), metadata, stats
+
+
+def _fast_planogram_is_trustworthy(products, stats):
+    if not products or int(stats.get("headers", 0)) < 1:
+        return False
+    candidate_slots = len(stats.get("candidate_slots") or ())
+    candidate_rows = int(stats.get("candidate_upc_rows", 0))
+    document_upcs = int(stats.get("document_upc_tokens", 0))
+    if not candidate_slots or candidate_rows < candidate_slots:
+        return False
+    if document_upcs and candidate_rows < (document_upcs * 0.97):
+        return False
+    if len(products) < (candidate_slots * 0.97):
+        return False
+    valid_codes = 0
+    for product in products:
+        if not re.fullmatch(r"\d{1,18}", str(product.get("barcode", ""))):
+            return False
+        if not str(product.get("name", "") or "").strip():
+            return False
+        if re.fullmatch(r"\d{3,12}", str(product.get("code_familiprix", ""))):
+            valid_codes += 1
+    return valid_codes >= max(1, int(len(products) * 0.95))
+
+
+def _parse_planogram_pdf_compatibility(pdf_path):
+    import pdfplumber
+
+    metadata = {"name": "", "number": "", "version": ""}
+    parser = _PlanogramParser()
+    with pdfplumber.open(pdf_path) as pdf:
+        if len(pdf.pages) > _MAX_PDF_PAGES:
+            raise ValueError("PDF page limit exceeded")
+        try:
+            metadata = _planogram_metadata_from_text(
+                pdf.pages[0].extract_text() or ""
+            )
+        except Exception:
+            pass
+        for page in pdf.pages:
+            tables = page.extract_tables() or []
+            for table in tables:
+                parser.feed_table(table)
+                if len(parser.products) > _MAX_CATALOG_PRODUCTS:
+                    raise ValueError("PDF product limit exceeded")
+            del tables
+            try:
+                page.close()
+            except Exception:
+                pass
+            gc.collect()
+    return parser.result(), metadata
+
+
+def _parse_planogram_file(pdf_path):
+    try:
+        products, metadata, stats = _parse_planogram_pdf_fast(pdf_path)
+        if _fast_planogram_is_trustworthy(products, stats):
+            return products, metadata, "pdfium-fast"
+        print(
+            "[PLANOGRAM] Fast parse validation requested compatibility fallback: "
+            f"{len(products)} products, {len(stats.get('candidate_slots') or ())} slots."
+        )
+    except Exception as exc:
+        print(
+            "[PLANOGRAM] Fast parse unavailable; using compatibility fallback: "
+            f"{type(exc).__name__}."
+        )
+    products, metadata = _parse_planogram_pdf_compatibility(pdf_path)
+    return products, metadata, "pdfplumber-fallback"
+
+
 @import_export_bp.route("/api/import/planogram-parse", methods=["POST"])
 def parse_planogram_pdf():
     """Accept the PDF, store it, launch the background parse, return a job id
-    IMMEDIATELY. A big plano takes minutes on this CPU — parsing inside the
-    request timed out at every layer while looking like a dead button."""
+    immediately. The normal reader is fast; the background job also protects the
+    request from a slower compatibility fallback."""
     username, error = require_editor()
     if error:
         return error
     try:
-        import pdfplumber  # noqa: F401 — fail fast if the parser isn't available
+        import pypdfium2  # noqa: F401 - primary fast parser
+        import pdfplumber  # noqa: F401 - validated compatibility fallback
     except ImportError:
-        return jsonify({"success": False, "error": "pdfplumber n’est pas installe sur ce serveur."}), 503
+        return jsonify({
+            "success": False,
+            "error": "Le lecteur de planogrammes n'est pas installe sur ce serveur.",
+        }), 503
 
     if "file" not in request.files:
         return jsonify({"success": False, "error": "Aucun fichier fourni."}), 400
