@@ -275,6 +275,28 @@ assert.strictEqual(context.__quoteTest.productMatchesClientConcepts(
   {name: 'TYLENOL RH/SIN JR NT CA20', brand: 'Tylenol', description: ''},
   headacheGroups, headacheExclusions,
 ), false);
+assert.strictEqual(context.__quoteTest.productMatchesClientConcepts(
+  {name: 'TYLENOL RH/TX/GR CA24', brand: 'Tylenol', description: ''},
+  headacheGroups, headacheExclusions,
+), false);
+assert.strictEqual(context.__quoteTest.productMatchesClientConcepts(
+  {name: 'MOTRIN NOURRISSON S/COLOR 30ML', brand: 'Motrin', description: ''},
+  headacheGroups, headacheExclusions,
+), false);
+assert.strictEqual(context.__quoteTest.productMatchesClientConcepts(
+  {name: 'LAKOTA EF ANALGESIQUE 57ML', brand: 'Lakota', description: ''},
+  headacheGroups, headacheExclusions,
+), false);
+const topicalHeadacheGroups = context.__quoteTest.clientRequiredConceptGroups(
+  'Jai mal a la tete et je cherche un analgesique topique'
+);
+const topicalHeadacheExclusions = context.__quoteTest.clientExcludedConceptTerms(
+  'Jai mal a la tete et je cherche un analgesique topique'
+);
+assert.strictEqual(context.__quoteTest.productMatchesClientConcepts(
+  {name: 'LAKOTA EF ANALGESIQUE 57ML', brand: 'Lakota', description: ''},
+  topicalHeadacheGroups, topicalHeadacheExclusions,
+), true);
 
 const cottonGroups = context.__quoteTest.clientRequiredConceptGroups(
   'je cherche de la watte des petites boules de coton'

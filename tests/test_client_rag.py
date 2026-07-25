@@ -26,6 +26,7 @@ from routes.products import (
     find_existing_image_for_barcode,
     hybrid_client_candidates,
     normalize_search_text,
+    product_matches_client_request,
     row_matches_client_concepts,
     tokenize_search_query,
 )
@@ -132,6 +133,26 @@ class ClientRagTests(unittest.TestCase):
                 "id": 11, "name": "ADVIL GRIPPE CA18",
                 "brand": "Advil", "barcode": "111",
             },
+            {
+                "id": 12, "name": "MOTRIN NOURRISSON S/COLOR 30ML",
+                "brand": "Motrin", "barcode": "112",
+            },
+            {
+                "id": 13, "name": "TYLENOL RH/TX/GR CA24",
+                "brand": "Tylenol", "barcode": "113",
+            },
+            {
+                "id": 14, "name": "ALEVE AID/SOMM NT CA20",
+                "brand": "Aleve", "barcode": "114",
+            },
+            {
+                "id": 15, "name": "LAKOTA EF ANALGESIQUE 57ML",
+                "brand": "Lakota", "barcode": "115",
+            },
+            {
+                "id": 16, "name": "ASPIRIN 81MG CROQ ACTION CO100",
+                "brand": "Aspirin", "barcode": "116",
+            },
         ]
         corpus = [
             (
@@ -158,6 +179,10 @@ class ClientRagTests(unittest.TestCase):
                 "TYLENOL 500MG X/F FAC CO100",
             },
         )
+        self.assertTrue(product_matches_client_request(
+            products[14],
+            "Jai mal a la tete et je cherche un analgesique topique",
+        ))
 
     def test_headache_filter_does_not_restore_unrelated_candidates(self):
         candidates = [

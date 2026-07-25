@@ -1123,18 +1123,40 @@ function clientExcludedConceptTerms(question) {
     ].some(token => tokens.has(token));
     const nightRequested = ['nuit', 'night', 'pm', 'sommeil', 'dormir']
       .some(token => tokens.has(token));
+    const topicalRequested = ['creme', 'topique', 'patch', 'timbre', 'externe']
+      .some(token => tokens.has(token));
+    const otherPainRequested = [
+      'dos', 'muscle', 'muscles', 'musculaire', 'arthrite',
+      'arthrose', 'courbature', 'courbatures',
+    ].some(token => tokens.has(token));
     if (!coldRequested) {
-      groups.push(['rhume', 'rh sin', 'sinus', 'grippe', 'cold', 'flu', 'decong', 'compl']);
+      groups.push([
+        'rhume', 'rh', 'rh sin', 'tx', 'gr', 'sin', 'sinus', 'grippe',
+        'cold', 'flu', 'decong', 'compl', 'pression doul sin',
+      ]);
     }
     if (!childRequested) {
       groups.push([
         'enf', 'enfant', 'jr', 'junior', 'bebe', 'infant',
-        'children', 'kids', 'pediat',
+        'children', 'kids', 'pediat', 'nourr', 'nourrisson',
+        'gtts', 'susp oral',
       ]);
     }
-    if (!nightRequested) groups.push(['nuit', 'night', 'pm', 'sommeil']);
+    if (!nightRequested) {
+      groups.push(['nuit', 'night', 'pm', 'sommeil', 'somm', 'aid somm', 'nt']);
+    }
+    if (!topicalRequested) {
+      groups.push(['lot analg', 'creme analg', 'cr analg', 'plat', 'patch', 'timbre', 'topique']);
+      groups.push(/(?:^| )(?:analgesique|analg)[a-z0-9 ]{0,28}[0-9]+(?:ml|g)(?= |$)/);
+    }
+    if (!otherPainRequested) {
+      groups.push(['doul arth', 'arth', 'doul musc', 'musc crps', 'courb', 'mal dos']);
+    }
+    groups.push(['aspirin 81mg']);
   }
-  return groups.map(compileClientConceptGroup);
+  return groups.map(group => (
+    group && typeof group.test === 'function' ? group : compileClientConceptGroup(group)
+  ));
 }
 
 function compileClientConceptGroup(terms) {

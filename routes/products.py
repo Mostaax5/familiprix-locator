@@ -1202,19 +1202,43 @@ def client_excluded_concept_terms(query):
         night_requested = bool(tokens.intersection({
             "nuit", "night", "pm", "sommeil", "dormir",
         }))
+        topical_requested = bool(tokens.intersection({
+            "creme", "topique", "patch", "timbre", "externe",
+        }))
+        other_pain_requested = bool(tokens.intersection({
+            "dos", "muscle", "muscles", "musculaire", "arthrite",
+            "arthrose", "courbature", "courbatures",
+        }))
         if not cold_requested:
             groups.append(_compile_client_concept_group((
-                "rhume", "rh sin", "sinus", "grippe", "cold", "flu", "decong", "compl",
+                "rhume", "rh", "rh sin", "tx", "gr", "sin", "sinus", "grippe",
+                "cold", "flu", "decong", "compl", "pression doul sin",
             )))
         if not child_requested:
             groups.append(_compile_client_concept_group((
                 "enf", "enfant", "jr", "junior", "bebe", "infant",
-                "children", "kids", "pediat",
+                "children", "kids", "pediat", "nourr", "nourrisson",
+                "gtts", "susp oral",
             )))
         if not night_requested:
             groups.append(_compile_client_concept_group((
-                "nuit", "night", "pm", "sommeil",
+                "nuit", "night", "pm", "sommeil", "somm", "aid somm", "nt",
             )))
+        if not topical_requested:
+            groups.append(_compile_client_concept_group((
+                "lot analg", "creme analg", "cr analg", "plat", "patch",
+                "timbre", "topique",
+            )))
+            groups.append(re.compile(
+                r"(?<![a-z0-9])(?:analgesique|analg)"
+                r"[a-z0-9 ]{0,28}[0-9]+(?:ml|g)(?![a-z0-9])"
+            ))
+        if not other_pain_requested:
+            groups.append(_compile_client_concept_group((
+                "doul arth", "arth", "doul musc", "musc crps", "courb",
+                "mal dos",
+            )))
+        groups.append(_compile_client_concept_group(("aspirin 81mg",)))
     return tuple(groups)
 
 
