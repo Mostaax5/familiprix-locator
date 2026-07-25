@@ -16,6 +16,7 @@ from routes.ai import (
     normalize_documented_client_answer,
     normalize_verified_client_answer,
     normalize_url,
+    retrieve_client_documentation,
     select_client_answer_candidates,
     _unconfirmed_identifier_notice,
 )
@@ -80,6 +81,96 @@ class ClientRagTests(unittest.TestCase):
             matches = hybrid_client_candidates("Jai besoin dadvile", plan, limit=10)
 
         self.assertEqual([item["name"] for item in matches], ["Advil Extra Fort"])
+
+    def test_headache_retrieval_uses_the_full_intent_not_the_word_tete(self):
+        question = "Jai male a la tete que prendre"
+        products = [
+            {
+                "id": 1, "name": "BIOMEDIC SOUL M/TETE ULT CO120",
+                "brand": "Biomedic", "barcode": "101",
+                "description": "Contient de l'acétaminophène.",
+            },
+            {
+                "id": 2, "name": "ADVIL 200MG CO100",
+                "brand": "Advil", "barcode": "102",
+                "description": "Comprimés d'ibuprofène.",
+            },
+            {
+                "id": 3, "name": "TYLENOL 500MG X/F FAC CO100",
+                "brand": "Tylenol", "barcode": "103",
+                "description": "Comprimés d'acétaminophène.",
+            },
+            {
+                "id": 4, "name": "ORAL-B IO TETE BR/DENTS BLC 4",
+                "brand": "Oral-B", "barcode": "104",
+            },
+            {
+                "id": 5, "name": "JJ NET BB TETE O PIEDS 400ML",
+                "brand": "Johnson's", "barcode": "105",
+            },
+            {
+                "id": 6, "name": "LOTUS AROMA H/ESS A/B MX/TETE1",
+                "brand": "Lotus", "barcode": "106",
+            },
+            {
+                "id": 7, "name": "AVENE FL/MIN TEINTE 50 + 40ML",
+                "brand": "Avene", "barcode": "107",
+            },
+            {
+                "id": 8, "name": "ADVIL ENF 100MG RAISIN 100ML",
+                "brand": "Advil", "barcode": "108",
+            },
+            {
+                "id": 9, "name": "TYLENOL RH/SIN JR NT CA20",
+                "brand": "Tylenol", "barcode": "109",
+            },
+            {
+                "id": 10, "name": "TYLENOL NUIT X/F CO40",
+                "brand": "Tylenol", "barcode": "110",
+            },
+            {
+                "id": 11, "name": "ADVIL GRIPPE CA18",
+                "brand": "Advil", "barcode": "111",
+            },
+        ]
+        corpus = [
+            (
+                product,
+                search_row(
+                    product["name"], product.get("brand", ""),
+                    product.get("description", ""), product["barcode"],
+                ),
+            )
+            for product in products
+        ]
+        plan = build_client_query_plan(question, "documented")
+
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            matches = hybrid_client_candidates(question, plan, limit=100)
+
+        self.assertEqual(plan["intent"], "headache_relief")
+        self.assertEqual(
+            {product["name"] for product in matches},
+            {
+                "BIOMEDIC SOUL M/TETE ULT CO120",
+                "ADVIL 200MG CO100",
+                "TYLENOL 500MG X/F FAC CO100",
+            },
+        )
+
+    def test_headache_filter_does_not_restore_unrelated_candidates(self):
+        candidates = [
+            {"id": 1, "name": "ADVIL 200MG CO100", "brand": "Advil"},
+            {"id": 2, "name": "ORAL-B IO TETE BR/DENTS BLC 4", "brand": "Oral-B"},
+            {"id": 3, "name": "TYLENOL RH/SIN JR NT CA20", "brand": "Tylenol"},
+        ]
+
+        filtered = filter_client_answer_category(
+            "Jai mal à la tête que prendre", candidates,
+        )
+
+        self.assertEqual([product["id"] for product in filtered], [1])
 
     def test_duplicate_plan_positions_are_one_product_with_all_locations(self):
         first = {
@@ -430,6 +521,42 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(result["comparisons"][0]["source_ids"], ["catalog:1"])
         self.assertLessEqual(len(result["comparisons"][0]["difference"]), 420)
         self.assertTrue(result["pharmacist_referral"])
+
+    def test_documented_headache_fallback_remains_useful_when_ai_times_out(self):
+        products = [{
+            "id": 1, "client_id": "product:1",
+            "name": "BIOMEDIC SOUL M/TETE ULT CO120", "brand": "Biomedic",
+            "description": "Contient de l'acétaminophène.",
+            "aisle": "Labo", "side": "A", "section": "2", "shelf": "3", "position": "4",
+        }, {
+            "id": 2, "client_id": "product:2",
+            "name": "ADVIL 200MG CO100", "brand": "Advil",
+            "description": "Comprimés d'ibuprofène.",
+            "aisle": "Labo", "side": "A", "section": "2", "shelf": "4", "position": "1",
+        }]
+        query_plan = build_client_query_plan(
+            "Jai male a la tete que prendre", "documented",
+        )
+        documents = retrieve_client_documentation(products, query_plan)
+
+        with patch("routes.ai._provider_structured_request", return_value=None):
+            result = generate_documented_client_answer(
+                query_plan["corrected_query"], query_plan, products, documents,
+            )
+
+        self.assertTrue(result["degraded"])
+        self.assertIn("mal de tête", result["answer"])
+        self.assertIn("acétaminophène", result["answer"])
+        self.assertEqual(
+            [point["heading"] for point in result["key_points"]],
+            ["Avant de choisir", "Ingrédients repérés", "Éviter les doublons", "Besoin d'un avis"],
+        )
+        self.assertEqual(len(result["follow_up_questions"]), 3)
+        self.assertTrue(result["pharmacist_referral"])
+        self.assertIn(
+            "health-canada:acetaminophen-safe-use",
+            result["source_ids"],
+        )
 
     def test_documented_toothbrush_fallback_compares_power_types(self):
         products = [{

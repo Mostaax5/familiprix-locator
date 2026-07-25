@@ -116,7 +116,8 @@ SEARCH_STOPWORDS = {
 # NOTE: keep this in sync with INTENT_LEXICON in static/search.js (same shape).
 INTENT_LEXICON = [
     {"label": "Douleur / fièvre",
-     "triggers": ["mal de tete", "maux de tete", "tete", "migraine", "cephalee", "fievre",
+     "triggers": ["mal de tete", "mal a la tete", "male a la tete", "mal tete",
+                  "maux de tete", "maux tete", "headache", "migraine", "cephalee", "fievre",
                   "douleur", "douleurs", "courbature", "courbatures", "mal de dos", "arthrite",
                   "menstruel", "menstruelle", "regles", "crampes menstruelles"],
      "expand": ["acetaminophene", "tylenol", "advil", "motrin", "ibuprofene", "aspirine",
@@ -1100,6 +1101,31 @@ def intent_expansion_terms(query):
     return terms
 
 
+_HEADACHE_RELIEF_TERMS = (
+    "acetaminophene", "paracetamol", "acet", "tylenol", "tempra", "atasol",
+    "ibuprofene", "ibup", "advil", "motrin", "naproxene", "naprox", "aleve",
+    "aspirine", "aspirin", "aas", "asa", "analgesique", "antidouleur",
+    "pain reliever", "pain relief", "soul douleur", "soul m tete", "migraine",
+)
+
+
+def _is_headache_request(query):
+    """Recognize a headache as a phrase, never from the body-part word alone."""
+    norm = normalize_search_text(query)
+    if not norm:
+        return False
+    tokens = set(norm.split())
+    if tokens.intersection({"headache", "migraine", "cephalee"}):
+        return True
+    return "tete" in tokens and bool(tokens.intersection({"mal", "male", "maux"}))
+
+
+def client_request_intent(query):
+    if _is_headache_request(query):
+        return "headache_relief"
+    return ""
+
+
 def _is_electric_toothbrush_request(query):
     norm = normalize_search_text(query)
     tokens = set(norm.split())
@@ -1141,6 +1167,8 @@ def client_required_concept_groups(query):
             ("transparent", "transparente", "transp", "opsite", "tegaderm"),
             ("pansement", "pans", "diach", "bandage", "band aid", "opsite", "tegaderm"),
         ])
+    if _is_headache_request(norm):
+        groups.append(_HEADACHE_RELIEF_TERMS)
     if _is_electric_toothbrush_request(norm):
         groups.extend([
             ("brosse dent", "brosse dents", "br dent", "br dents", "toothbrush",
@@ -1152,11 +1180,42 @@ def client_required_concept_groups(query):
 
 
 def client_excluded_concept_terms(query):
-    if not _is_electric_toothbrush_request(query):
-        return ()
-    return (_compile_client_concept_group(
-        ("irr", "irrigateur", "hydropulseur", "airfloss", "water flosser", "s fil")
-    ),)
+    norm = normalize_search_text(query)
+    tokens = set(norm.split())
+    groups = []
+    if _is_electric_toothbrush_request(norm):
+        groups.append(_compile_client_concept_group(
+            ("irr", "irrigateur", "hydropulseur", "airfloss", "water flosser", "s fil")
+        ))
+    if _is_headache_request(norm):
+        groups.append(_compile_client_concept_group((
+            "brosse dent", "br dent", "tete br dent", "tete o pied", "head to toe",
+            "huile essentiel", "h ess", "fl min teinte",
+        )))
+        cold_requested = bool(tokens.intersection({
+            "rhume", "sinus", "grippe", "cold", "flu", "congestion",
+        }))
+        child_requested = bool(tokens.intersection({
+            "enf", "enfant", "enfants", "jr", "junior", "bebe", "infant",
+            "children", "kids", "pediatrique",
+        }))
+        night_requested = bool(tokens.intersection({
+            "nuit", "night", "pm", "sommeil", "dormir",
+        }))
+        if not cold_requested:
+            groups.append(_compile_client_concept_group((
+                "rhume", "rh sin", "sinus", "grippe", "cold", "flu", "decong", "compl",
+            )))
+        if not child_requested:
+            groups.append(_compile_client_concept_group((
+                "enf", "enfant", "jr", "junior", "bebe", "infant",
+                "children", "kids", "pediat",
+            )))
+        if not night_requested:
+            groups.append(_compile_client_concept_group((
+                "nuit", "night", "pm", "sommeil",
+            )))
+    return tuple(groups)
 
 
 def _compile_client_concept_group(terms):
@@ -1206,6 +1265,27 @@ def row_matches_client_concepts(row, groups, excluded_name_terms=()):
     ):
         return False
     return True
+
+
+def product_matches_client_request(product, query):
+    """Apply the same high-precision concept rules to an already loaded product."""
+    return row_matches_client_concepts(
+        _product_search_row(product),
+        client_required_concept_groups(query),
+        client_excluded_concept_terms(query),
+    )
+
+
+def filter_client_request_products(products, query):
+    """Filter loaded products with one compiled set of request constraints."""
+    required = client_required_concept_groups(query)
+    excluded = client_excluded_concept_terms(query)
+    if not required and not excluded:
+        return list(products)
+    return [
+        product for product in products
+        if row_matches_client_concepts(_product_search_row(product), required, excluded)
+    ]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

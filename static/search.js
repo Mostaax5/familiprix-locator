@@ -41,7 +41,7 @@ function querySearchVariants(query) {
 // words that appear in the store data, so a symptom query reaches the right products
 // with no AI. Keep in sync with the server copy.
 const INTENT_LEXICON = [
-  {triggers:['mal de tete','maux de tete','tete','migraine','cephalee','fievre','douleur','douleurs','courbature','courbatures','mal de dos','arthrite','menstruel','menstruelle','regles'],
+  {triggers:['mal de tete','mal a la tete','male a la tete','mal tete','maux de tete','maux tete','headache','migraine','cephalee','fievre','douleur','douleurs','courbature','courbatures','mal de dos','arthrite','menstruel','menstruelle','regles'],
    expand:['acetaminophene','tylenol','advil','motrin','ibuprofene','aspirine','analgesique','antidouleur','naproxene','aleve','atasol','tempra']},
   {triggers:['rhume','congestion','nez bouche','sinus','grippe','decongestionnant','mouchoir'],
    expand:['decongestionnant','rhume','sinus','sudafed','otrivin','tylenol rhume','advil rhume','dristan','vicks','sirop']},

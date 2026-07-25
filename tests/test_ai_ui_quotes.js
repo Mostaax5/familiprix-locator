@@ -249,6 +249,32 @@ const storedFallback = context.__quoteTest.clientResultForStorage({
 });
 assert.strictEqual(storedFallback.degraded, true);
 assert.ok(storedFallback.warning.includes("réponse détaillée"));
+const storedLegacyFallback = context.__quoteTest.clientResultForStorage({
+  ...documentedResult,
+  degraded: true,
+  warning: "DeepSeek n'a pas répondu à temps; les produits et sources du magasin restent disponibles.",
+});
+assert.ok(!storedLegacyFallback.warning.includes("DeepSeek"));
+assert.ok(storedLegacyFallback.warning.includes("réponse détaillée"));
+
+const headacheGroups = context.__quoteTest.clientRequiredConceptGroups(
+  'Jai male a la tete que prendre'
+);
+const headacheExclusions = context.__quoteTest.clientExcludedConceptTerms(
+  'Jai male a la tete que prendre'
+);
+assert.strictEqual(context.__quoteTest.productMatchesClientConcepts(
+  {name: 'ADVIL 200MG CO100', brand: 'Advil', description: ''},
+  headacheGroups, headacheExclusions,
+), true);
+assert.strictEqual(context.__quoteTest.productMatchesClientConcepts(
+  {name: 'ORAL-B IO TETE BR/DENTS BLC 4', brand: 'Oral-B', description: ''},
+  headacheGroups, headacheExclusions,
+), false);
+assert.strictEqual(context.__quoteTest.productMatchesClientConcepts(
+  {name: 'TYLENOL RH/SIN JR NT CA20', brand: 'Tylenol', description: ''},
+  headacheGroups, headacheExclusions,
+), false);
 
 const cottonGroups = context.__quoteTest.clientRequiredConceptGroups(
   'je cherche de la watte des petites boules de coton'

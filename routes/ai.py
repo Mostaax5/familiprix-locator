@@ -1629,16 +1629,22 @@ def classify_client_request(question, follow_up=False, focus_product_id="", sele
 
 def build_client_query_plan(question, mode="lookup"):
     """Fast deterministic plan used by retrieval; AI no longer blocks search."""
-    from routes.products import intent_expansion_terms, normalize_search_text, tokenize_search_query
+    from routes.products import (
+        client_request_intent, intent_expansion_terms, normalize_search_text,
+        tokenize_search_query,
+    )
 
     normalized = normalize_search_text(question)
     tokens = tokenize_search_query(question)
     padded = f" {normalized} "
+    specific_intent = client_request_intent(question)
     comparison_markers = ("difference", "compare", "comparaison", "versus", " vs ", " ou ")
     wants_all = any(word in normalized.split() for word in ("all", "tout", "tous", "toute", "toutes"))
     english_words = sum(word in normalized.split() for word in ("what", "which", "show", "find", "all", "tell"))
     return {
-        "intent": "product_lookup" if mode == "lookup" else "advice_or_comparison",
+        "intent": specific_intent or (
+            "product_lookup" if mode == "lookup" else "advice_or_comparison"
+        ),
         "corrected_query": question,
         "search_queries": [question],
         "keywords": tokens[:20],
@@ -1926,7 +1932,7 @@ def normalize_verified_client_answer(parsed, valid_ids):
     }
 
 
-def select_client_answer_candidates(candidates, limit=16):
+def select_client_answer_candidates(candidates, limit=16, diversify_brands=False):
     """Keep the AI context small while retaining different product forms."""
     from routes.products import normalize_search_text
 
@@ -1954,8 +1960,25 @@ def select_client_answer_candidates(candidates, limit=16):
         return tuple(tokens[:3])
 
     selected = []
+    if diversify_brands:
+        seen_brands = set()
+        for product in candidates:
+            brand = normalize_search_text(product.get("brand", ""))
+            if not brand:
+                brand = normalize_search_text(product.get("name", "")).split(" ", 1)[0]
+            if not brand or brand in seen_brands:
+                continue
+            seen_brands.add(brand)
+            selected.append(product)
+            if len(selected) >= limit:
+                return selected
+
     seen = set()
+    for product in selected:
+        seen.add(signature(product))
     for product in candidates:
+        if product in selected:
+            continue
         key = signature(product)
         if key in seen:
             continue
@@ -1978,7 +2001,11 @@ def filter_client_answer_category(question, candidates):
     different category. For example, Dr Teal's bath products mention melatonin
     but must not appear in a supplement comparison unless bath use was requested.
     """
-    from routes.products import normalize_search_text
+    from routes.products import filter_client_request_products, normalize_search_text
+
+    constrained = filter_client_request_products(candidates, question)
+    if len(constrained) != len(candidates):
+        candidates = constrained
 
     normalized_question = normalize_search_text(question)
     if "melaton" not in normalized_question:
@@ -2085,6 +2112,13 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "un ingrédient, un dosage, une indication, une contre-indication, un âge, une interaction "
     "ou une propriété à un produit précis. Les fiches Santé Canada ont priorité sur les fiches "
     "de catalogue; les noms de planogramme et descriptions peuvent être abrégés ou incomplets. "
+    "Évalue chaque candidat selon le sens de la phrase complète, jamais selon un mot isolé. "
+    "Un mot désignant une partie du corps ne suffit pas: pour « mal de tête », garde seulement "
+    "les produits réellement liés au soulagement de la douleur et rejette notamment les têtes "
+    "de brosse à dents, les nettoyants tête-aux-pieds et les produits sans indication pertinente. "
+    "N'inclus pas automatiquement les variantes rhume/sinus, nuit ou enfants lorsque ce contexte "
+    "n'est pas demandé. Si les candidats ne répondent pas au besoin complet, sélectionne-en moins "
+    "ou aucun au lieu de remplir la réponse avec des produits voisins. "
     "Tu peux expliquer une différence générale entre des formes ou catégories, mais indique "
     "clairement qu'elle est générale lorsqu'aucun document ne la confirme pour le produit. "
     "N'invente jamais de dose, de durée, d'ingrédient, de bénéfice ou de source. "
@@ -2465,7 +2499,38 @@ def health_canada_nhp_documents(products, limit=4):
     return documents
 
 
-def retrieve_client_documentation(products):
+def _client_intent_documents(query_plan):
+    if str((query_plan or {}).get("intent", "") or "") != "headache_relief":
+        return []
+    return [{
+        "source_id": "health-canada:acetaminophen-safe-use",
+        "title": "Santé Canada - Utilisation sécuritaire de l'acétaminophène",
+        "publisher": "Santé Canada",
+        "url": "https://www.canada.ca/fr/sante-canada/services/medicaments-et-appareils-medicaux/acetaminophene.html",
+        "evidence": (
+            "Santé Canada recommande de lire l'étiquette, de respecter la dose indiquée et "
+            "d'éviter de prendre simultanément plus d'un produit contenant de l'acétaminophène, "
+            "car un excès peut causer des dommages graves au foie."
+        ),
+        "candidate_ids": [],
+    }, {
+        "source_id": "quebec:info-sante-811",
+        "title": "Gouvernement du Québec - Conseils pour un problème de santé non urgent",
+        "publisher": "Gouvernement du Québec",
+        "url": (
+            "https://www.quebec.ca/sante/systeme-et-services-de-sante/"
+            "organisation-des-services/services-de-sante-et-services-sociaux-de-premiere-ligne/"
+            "comment-obtenir-conseils-concernant-probleme-sante-non-urgent"
+        ),
+        "evidence": (
+            "Pour un problème de santé non urgent ou un doute sur la nécessité de consulter, "
+            "Info-Santé 811 permet d'obtenir les conseils d'une infirmière."
+        ),
+        "candidate_ids": [],
+    }]
+
+
+def retrieve_client_documentation(products, query_plan=None):
     product_names = [str(product.get("name", "") or "").strip() for product in products]
     documents = [{
         "source_id": "store-plan",
@@ -2481,6 +2546,7 @@ def retrieve_client_documentation(products):
             if product.get("client_id")
         ],
     }]
+    documents.extend(_client_intent_documents(query_plan))
     try:
         documents.extend(health_canada_documents(products))
     except Exception:
@@ -2630,6 +2696,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         str(query_plan.get("corrected_query", "") or "")
     )
     question_words = set(normalized_question.split())
+    is_headache_query = str(query_plan.get("intent", "") or "") == "headache_relief"
     is_toothbrush_query = bool(
         question_words.intersection({"brosse", "brosses", "brush", "toothbrush"})
         and (
@@ -2662,6 +2729,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
     doses = []
     flavors = []
     features = []
+    ingredient_families = []
     product_traits = {}
     toothbrush_groups = defaultdict(int)
     for product in selected:
@@ -2672,6 +2740,22 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         normalized_name = normalize_search_text(name)
         normalized_details = normalize_search_text(f"{name} {description} {usage_notes}")
         traits = []
+        if is_headache_query:
+            ingredient_markers = (
+                ("acétaminophène", ("acetaminophene", "paracetamol")),
+                ("ibuprofène", ("ibuprofene",)),
+                ("naproxène", ("naproxene",)),
+                (
+                    "acide acétylsalicylique",
+                    ("acide acetylsalicylique", "acetylsalicylique", "aspirine"),
+                ),
+            )
+            for label, markers in ingredient_markers:
+                if any(marker in normalized_details for marker in markers):
+                    if label not in ingredient_families:
+                        ingredient_families.append(label)
+                    traits.append(f"mention de {label}")
+                    break
         if is_toothbrush_query:
             if "tete" in normalized_name:
                 role = "tête de remplacement"
@@ -2768,6 +2852,23 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             "comme têtes sont des pièces de remplacement, pas des brosses complètes. Vérifiez la "
             "compatibilité exacte de la tête et le type d'alimentation sur l'emballage."
         )
+    elif names and is_headache_query:
+        ingredient_note = (
+            " Les fiches disponibles mentionnent "
+            + ", ".join(ingredient_families)
+            + "; confirmez toujours l'ingrédient actif sur l'emballage."
+            if ingredient_families else
+            " L'ingrédient actif doit être confirmé sur chaque emballage."
+        )
+        answer = (
+            f"Pour un mal de tête, j'ai trouvé {len(names)} produit"
+            f"{'s' if len(names) > 1 else ''} analgésique"
+            f"{'s' if len(names) > 1 else ''} pertinent"
+            f"{'s' if len(names) > 1 else ''} dans le plan actuel."
+            + ingredient_note
+            + " Le choix dépend notamment de l'âge, des autres médicaments, des allergies "
+              "et des conditions de santé; faites valider le produit par le pharmacien en cas de doute."
+        )
     elif names:
         summary_parts = []
         if forms:
@@ -2824,7 +2925,50 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
 
     key_points = []
     store_source = ["store-plan"] if "store-plan" in valid_source_ids else []
-    if is_toothbrush_query:
+    acetaminophen_source = (
+        ["health-canada:acetaminophen-safe-use"]
+        if "health-canada:acetaminophen-safe-use" in valid_source_ids else []
+    )
+    info_sante_source = (
+        ["quebec:info-sante-811"]
+        if "quebec:info-sante-811" in valid_source_ids else []
+    )
+    if is_headache_query:
+        key_points.append({
+            "heading": "Avant de choisir",
+            "detail": (
+                "Demander l'âge, les médicaments déjà pris, les allergies, la grossesse ou "
+                "l'allaitement et les conditions de santé pertinentes."
+            ),
+            "source_ids": [],
+        })
+        if ingredient_families:
+            key_points.append({
+                "heading": "Ingrédients repérés",
+                "detail": (
+                    ", ".join(ingredient_families).capitalize()
+                    + ". Ces mentions viennent des fiches disponibles et doivent être "
+                      "confirmées sur l'emballage."
+                ),
+                "source_ids": store_source,
+            })
+        key_points.append({
+            "heading": "Éviter les doublons",
+            "detail": (
+                "Lire l'ingrédient actif de tous les médicaments déjà utilisés. Ne pas prendre "
+                "deux produits contenant de l'acétaminophène en même temps."
+            ),
+            "source_ids": acetaminophen_source,
+        })
+        key_points.append({
+            "heading": "Besoin d'un avis",
+            "detail": (
+                "Le pharmacien peut confirmer le produit approprié; Info-Santé 811 peut conseiller "
+                "la personne pour un problème non urgent."
+            ),
+            "source_ids": info_sante_source,
+        })
+    elif is_toothbrush_query:
         if toothbrush_groups.get("brosse à pile"):
             key_points.append({
                 "heading": "Modèles à pile",
@@ -2858,13 +3002,13 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             "detail": ", ".join(forms).capitalize(),
             "source_ids": store_source,
         })
-    if doses:
+    if doses and not is_headache_query:
         key_points.append({
             "heading": "Concentrations repérées",
             "detail": ", ".join(doses),
             "source_ids": store_source,
         })
-    if not is_toothbrush_query and (flavors or asks_flavors):
+    if not is_toothbrush_query and not is_headache_query and (flavors or asks_flavors):
         key_points.append({
             "heading": "Saveurs",
             "detail": (
@@ -2873,7 +3017,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             ),
             "source_ids": store_source,
         })
-    if not is_toothbrush_query and features:
+    if not is_toothbrush_query and not is_headache_query and features:
         key_points.append({
             "heading": "Mentions particulières",
             "detail": ", ".join(features).capitalize(),
@@ -2890,17 +3034,33 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         generic_dimensions.append("la saveur")
     generic_dimensions.extend(("le format", "le nombre d'unités"))
     generic_guidance = "Comparer " + ", ".join(generic_dimensions) + " sur l'emballage."
+    headache_follow_ups = [
+        "Quel âge a la personne et pour qui est le produit?",
+        "A-t-elle déjà pris un médicament aujourd'hui, et lequel?",
+        "Y a-t-il grossesse, allaitement, allergies ou conditions de santé à signaler?",
+    ]
     return {
         "answer": answer,
         "selected_product_ids": selected_ids,
-        "follow_up_questions": [],
+        "follow_up_questions": headache_follow_ups if is_headache_query else [],
         "safety_flags": ([
-            "Vérifier sur l'étiquette la concentration, la forme, les ingrédients, l'âge et les avertissements."
+            (
+                "Vérifier l'ingrédient actif, la concentration, l'âge indiqué et les avertissements "
+                "sur chaque emballage avant de proposer un produit."
+                if is_headache_query else
+                "Vérifier sur l'étiquette la concentration, la forme, les ingrédients, l'âge et les avertissements."
+            )
         ] if medical else []),
         "pharmacist_referral": medical,
         "pharmacist_reason": (
-            "Consulter le pharmacien pour les interactions, la grossesse, l'allaitement, "
-            "un enfant ou une situation médicale particulière."
+            (
+                "Faire confirmer le choix par le pharmacien en présence d'autres médicaments, "
+                "d'allergies, de grossesse, d'allaitement, pour un enfant, ou si le mal de tête "
+                "est important, inhabituel ou persistant."
+                if is_headache_query else
+                "Consulter le pharmacien pour les interactions, la grossesse, l'allaitement, "
+                "un enfant ou une situation médicale particulière."
+            )
         ) if medical else "",
         "key_points": key_points,
         "comparisons": comparisons,
@@ -2909,16 +3069,25 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                 "Comparer le type d'alimentation, le contenu de l'emballage et la compatibilité "
                 "des têtes avant de proposer un modèle."
                 if is_toothbrush_query else
-                generic_guidance
+                (
+                    "Comparer d'abord l'ingrédient actif et la concentration, puis la forme et le "
+                    "format. Vérifier les médicaments déjà pris pour éviter un ingrédient en double."
+                    if is_headache_query else generic_guidance
+                )
             ),
-            "source_ids": [],
+            "source_ids": acetaminophen_source if is_headache_query else [],
         }],
         "important_checks": [{
             "text": (
                 "Ne pas confondre une tête de remplacement avec une brosse complète; confirmer "
                 "la compatibilité sur l'emballage."
                 if is_toothbrush_query else
-                "Ne pas attribuer à un produit un usage qui n'apparaît pas sur sa fiche ou son étiquette."
+                (
+                    "Ne pas choisir uniquement selon la marque: confirmer l'ingrédient actif, la "
+                    "dose indiquée, les contre-indications et les avertissements sur l'emballage."
+                    if is_headache_query else
+                    "Ne pas attribuer à un produit un usage qui n'apparaît pas sur sa fiche ou son étiquette."
+                )
             ),
             "source_ids": [],
         }],
@@ -2936,15 +3105,15 @@ def generate_documented_client_answer(question, query_plan, candidates, document
                                       history=None, selected_text="", focus_product_id=""):
     contexts = [product_context_for_client_rag(product) for product in candidates]
     for context in contexts:
-        context["notes"] = str(context.get("notes", "") or "")[:500]
-        context["description"] = str(context.get("description", "") or "")[:700]
-        context["search_terms"] = str(context.get("search_terms", "") or "")[:400]
-        context["usage_notes"] = str(context.get("usage_notes", "") or "")[:700]
+        context["notes"] = str(context.get("notes", "") or "")[:300]
+        context["description"] = str(context.get("description", "") or "")[:500]
+        context["search_terms"] = str(context.get("search_terms", "") or "")[:240]
+        context["usage_notes"] = str(context.get("usage_notes", "") or "")[:400]
     document_contexts = [{
         **document,
-        "evidence": str(document.get("evidence", "") or "")[:900],
+        "evidence": str(document.get("evidence", "") or "")[:650],
         "candidate_ids": (document.get("candidate_ids", []) or [])[:16],
-    } for document in documents[:12]]
+    } for document in documents[:8]]
     parsed = _provider_structured_request(
         _CLIENT_DOCUMENTED_INSTRUCTIONS,
         {
@@ -2957,7 +3126,7 @@ def generate_documented_client_answer(question, query_plan, candidates, document
             "documents": document_contexts,
             "required_schema": _CLIENT_DOCUMENTED_SCHEMA,
         },
-        max_tokens=1000,
+        max_tokens=900,
         schema_name="client_documented_answer",
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,
@@ -4003,10 +4172,18 @@ def client_help():
             key=lambda product: 0 if str(product.get("client_id", "")) == focus_product_id else 1
         )
     # A smaller grounded context improves response time and keeps comparisons readable.
-    answer_candidates = select_client_answer_candidates(answer_candidates, limit=16)
+    answer_limit = (
+        8 if query_plan.get("intent") == "headache_relief"
+        else (12 if response_mode == "documented" else 16)
+    )
+    answer_candidates = select_client_answer_candidates(
+        answer_candidates,
+        limit=answer_limit,
+        diversify_brands=query_plan.get("intent") == "headache_relief",
+    )
     documents = []
     if response_mode == "documented":
-        documents = retrieve_client_documentation(answer_candidates)
+        documents = retrieve_client_documentation(answer_candidates, query_plan)
         if use_local_documented_summary:
             verified = grounded_documented_fallback(
                 query_plan, answer_candidates, documents, degraded=False,

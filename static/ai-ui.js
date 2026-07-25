@@ -117,6 +117,14 @@ function clientDocumentationForStorage(documentation) {
   };
 }
 
+function neutralClientWarning(value) {
+  const warning = String(value || '').slice(0, 500);
+  if (/deepseek n['’]a pas r[ée]pondu [àa] temps/i.test(warning)) {
+    return "La réponse détaillée n'a pas été disponible à temps; les produits et sources du magasin restent accessibles.";
+  }
+  return warning.replace(/\b(?:DeepSeek|Gemini|OpenAI)\b/gi, 'Le service de réponse');
+}
+
 function clientResultForStorage(result) {
   if (!result || typeof result !== 'object') return null;
   const advice = result.advice || {};
@@ -125,7 +133,7 @@ function clientResultForStorage(result) {
     response_mode: normalizeClientResponseMode(result.response_mode),
     answer: String(result.answer || advice.summary || '').slice(0, 6000),
     degraded: Boolean(result.degraded),
-    warning: String(result.warning || '').slice(0, 500),
+    warning: neutralClientWarning(result.warning),
     elapsed_ms: Number(result.elapsed_ms) || 0,
     highlighted_product_ids: Array.isArray(result.highlighted_product_ids)
       ? result.highlighted_product_ids.slice(0, 16).map(String)
@@ -1034,6 +1042,15 @@ async function pollClientProductImages(attempt=0) {
   }
 }
 
+function isHeadacheClientRequest(question) {
+  const normalized = typeof normalizeSearchText === 'function'
+    ? normalizeSearchText(question) : String(question || '').toLowerCase();
+  const tokens = new Set(normalized.split(/\s+/).filter(Boolean));
+  return ['headache', 'migraine', 'cephalee'].some(token => tokens.has(token)) || (
+    tokens.has('tete') && ['mal', 'male', 'maux'].some(token => tokens.has(token))
+  );
+}
+
 function clientRequiredConceptGroups(question) {
   const normalized = typeof normalizeSearchText === 'function'
     ? normalizeSearchText(question)
@@ -1055,6 +1072,14 @@ function clientRequiredConceptGroups(question) {
   if (transparentDressing) {
     groups.push(['transparent', 'transparente', 'transp', 'opsite', 'tegaderm']);
     groups.push(['pansement', 'pans', 'diach', 'bandage', 'band aid', 'opsite', 'tegaderm']);
+  }
+  if (isHeadacheClientRequest(normalized)) {
+    groups.push([
+      'acetaminophene', 'paracetamol', 'acet', 'tylenol', 'tempra', 'atasol',
+      'ibuprofene', 'ibup', 'advil', 'motrin', 'naproxene', 'naprox', 'aleve',
+      'aspirine', 'aspirin', 'aas', 'asa', 'analgesique', 'antidouleur',
+      'pain reliever', 'pain relief', 'soul douleur', 'soul m tete', 'migraine',
+    ]);
   }
   const electric = [...tokens].some(token => token.startsWith('elect') || token === 'elec');
   const compound = tokens.has('toothbrush') || tokens.has('toothbrushes');
@@ -1081,9 +1106,35 @@ function clientExcludedConceptTerms(question) {
   const compound = tokens.has('toothbrush') || tokens.has('toothbrushes');
   const brush = compound || [...tokens].some(token => token.startsWith('bross') || token === 'brush');
   const tooth = compound || [...tokens].some(token => token.startsWith('dent') || token.startsWith('tooth'));
-  const terms = electric && brush && tooth
-    ? ['irr', 'irrigateur', 'hydropulseur', 'airfloss', 'water flosser', 's fil'] : [];
-  return terms.length ? [compileClientConceptGroup(terms)] : [];
+  const groups = [];
+  if (electric && brush && tooth) {
+    groups.push(['irr', 'irrigateur', 'hydropulseur', 'airfloss', 'water flosser', 's fil']);
+  }
+  if (isHeadacheClientRequest(normalized)) {
+    groups.push([
+      'brosse dent', 'br dent', 'tete br dent', 'tete o pied', 'head to toe',
+      'huile essentiel', 'h ess', 'fl min teinte',
+    ]);
+    const coldRequested = ['rhume', 'sinus', 'grippe', 'cold', 'flu', 'congestion']
+      .some(token => tokens.has(token));
+    const childRequested = [
+      'enf', 'enfant', 'enfants', 'jr', 'junior', 'bebe', 'infant',
+      'children', 'kids', 'pediatrique',
+    ].some(token => tokens.has(token));
+    const nightRequested = ['nuit', 'night', 'pm', 'sommeil', 'dormir']
+      .some(token => tokens.has(token));
+    if (!coldRequested) {
+      groups.push(['rhume', 'rh sin', 'sinus', 'grippe', 'cold', 'flu', 'decong', 'compl']);
+    }
+    if (!childRequested) {
+      groups.push([
+        'enf', 'enfant', 'jr', 'junior', 'bebe', 'infant',
+        'children', 'kids', 'pediat',
+      ]);
+    }
+    if (!nightRequested) groups.push(['nuit', 'night', 'pm', 'sommeil']);
+  }
+  return groups.map(compileClientConceptGroup);
 }
 
 function compileClientConceptGroup(terms) {
@@ -1235,6 +1286,7 @@ function prepareClientResult(result) {
     success: true,
     response_mode: normalizeClientResponseMode(prepared.response_mode),
     answer,
+    warning: neutralClientWarning(prepared.warning),
     products,
     highlighted_product_ids: highlightedIds,
     advice: {
