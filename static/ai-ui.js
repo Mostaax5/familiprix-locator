@@ -1133,6 +1133,7 @@ function clientExcludedConceptTerms(question) {
       groups.push([
         'rhume', 'rh', 'rh sin', 'tx', 'gr', 'sin', 'sinus', 'grippe',
         'cold', 'flu', 'decong', 'compl', 'pression doul sin',
+        'mucus', 'toux', 'sirop', 'expect', 'expectorant',
       ]);
     }
     if (!childRequested) {

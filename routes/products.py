@@ -1213,6 +1213,7 @@ def client_excluded_concept_terms(query):
             groups.append(_compile_client_concept_group((
                 "rhume", "rh", "rh sin", "tx", "gr", "sin", "sinus", "grippe",
                 "cold", "flu", "decong", "compl", "pression doul sin",
+                "mucus", "toux", "sirop", "expect", "expectorant",
             )))
         if not child_requested:
             groups.append(_compile_client_concept_group((

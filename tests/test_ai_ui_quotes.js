@@ -284,6 +284,10 @@ assert.strictEqual(context.__quoteTest.productMatchesClientConcepts(
   headacheGroups, headacheExclusions,
 ), false);
 assert.strictEqual(context.__quoteTest.productMatchesClientConcepts(
+  {name: 'TYLENOL X/F A/MUCUS 170ML', brand: 'Tylenol', description: ''},
+  headacheGroups, headacheExclusions,
+), false);
+assert.strictEqual(context.__quoteTest.productMatchesClientConcepts(
   {name: 'LAKOTA EF ANALGESIQUE 57ML', brand: 'Lakota', description: ''},
   headacheGroups, headacheExclusions,
 ), false);

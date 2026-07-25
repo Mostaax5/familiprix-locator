@@ -153,6 +153,10 @@ class ClientRagTests(unittest.TestCase):
                 "id": 16, "name": "ASPIRIN 81MG CROQ ACTION CO100",
                 "brand": "Aspirin", "barcode": "116",
             },
+            {
+                "id": 17, "name": "TYLENOL X/F A/MUCUS 170ML",
+                "brand": "Tylenol", "barcode": "117",
+            },
         ]
         corpus = [
             (
@@ -992,7 +996,7 @@ class ClientRagTests(unittest.TestCase):
         }]
         with patch("routes.products.hybrid_client_candidates", return_value=candidates), \
              patch("routes.products.hydrate_candidate_images"), \
-             patch("routes.ai.retrieve_client_documentation", return_value=documents), \
+             patch("routes.ai.retrieve_client_documentation", return_value=documents) as retriever, \
              patch("routes.ai.generate_documented_client_answer") as generator, \
              patch("routes.ai.configured_ai_provider") as provider, \
              patch("routes.ai._check_ai_rate_limit") as rate_limit, \
@@ -1011,6 +1015,11 @@ class ClientRagTests(unittest.TestCase):
         generator.assert_not_called()
         provider.assert_not_called()
         rate_limit.assert_not_called()
+        retriever.assert_called_once_with(
+            unittest.mock.ANY,
+            unittest.mock.ANY,
+            include_live_regulatory=False,
+        )
 
     def test_documented_toothbrush_power_comparison_skips_ai_delay(self):
         candidates = [{
@@ -1029,7 +1038,7 @@ class ClientRagTests(unittest.TestCase):
         }]
         with patch("routes.products.hybrid_client_candidates", return_value=candidates), \
              patch("routes.products.hydrate_candidate_images"), \
-             patch("routes.ai.retrieve_client_documentation", return_value=documents), \
+             patch("routes.ai.retrieve_client_documentation", return_value=documents) as retriever, \
              patch("routes.ai.generate_documented_client_answer") as generator, \
              patch("routes.ai.configured_ai_provider") as provider, \
              patch("routes.ai._check_ai_rate_limit") as rate_limit, \
@@ -1051,6 +1060,11 @@ class ClientRagTests(unittest.TestCase):
         generator.assert_not_called()
         provider.assert_not_called()
         rate_limit.assert_not_called()
+        retriever.assert_called_once_with(
+            unittest.mock.ANY,
+            unittest.mock.ANY,
+            include_live_regulatory=False,
+        )
 
     def test_documented_headache_question_uses_immediate_grounded_summary(self):
         candidates = [{
@@ -1079,7 +1093,7 @@ class ClientRagTests(unittest.TestCase):
         }]
         with patch("routes.products.hybrid_client_candidates", return_value=candidates), \
              patch("routes.products.hydrate_candidate_images"), \
-             patch("routes.ai.retrieve_client_documentation", return_value=documents), \
+             patch("routes.ai.retrieve_client_documentation", return_value=documents) as retriever, \
              patch("routes.ai.generate_documented_client_answer") as generator, \
              patch("routes.ai.configured_ai_provider") as provider, \
              patch("routes.ai._check_ai_rate_limit") as rate_limit, \
@@ -1103,6 +1117,11 @@ class ClientRagTests(unittest.TestCase):
         generator.assert_not_called()
         provider.assert_not_called()
         rate_limit.assert_not_called()
+        retriever.assert_called_once_with(
+            unittest.mock.ANY,
+            unittest.mock.ANY,
+            include_live_regulatory=False,
+        )
 
 
 if __name__ == "__main__":

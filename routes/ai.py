@@ -2530,7 +2530,7 @@ def _client_intent_documents(query_plan):
     }]
 
 
-def retrieve_client_documentation(products, query_plan=None):
+def retrieve_client_documentation(products, query_plan=None, include_live_regulatory=True):
     product_names = [str(product.get("name", "") or "").strip() for product in products]
     documents = [{
         "source_id": "store-plan",
@@ -2547,14 +2547,15 @@ def retrieve_client_documentation(products, query_plan=None):
         ],
     }]
     documents.extend(_client_intent_documents(query_plan))
-    try:
-        documents.extend(health_canada_documents(products))
-    except Exception:
-        pass
-    try:
-        documents.extend(health_canada_nhp_documents(products))
-    except Exception:
-        pass
+    if include_live_regulatory:
+        try:
+            documents.extend(health_canada_documents(products))
+        except Exception:
+            pass
+        try:
+            documents.extend(health_canada_nhp_documents(products))
+        except Exception:
+            pass
 
     field_labels = {
         "brand": "Marque", "description": "Description",
@@ -4189,7 +4190,11 @@ def client_help():
     )
     documents = []
     if response_mode == "documented":
-        documents = retrieve_client_documentation(answer_candidates, query_plan)
+        documents = retrieve_client_documentation(
+            answer_candidates,
+            query_plan,
+            include_live_regulatory=not use_local_documented_summary,
+        )
         if use_local_documented_summary:
             verified = grounded_documented_fallback(
                 query_plan, answer_candidates, documents, degraded=False,
