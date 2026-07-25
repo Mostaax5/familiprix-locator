@@ -674,10 +674,6 @@ async function refreshLayoutsCache(force=false) {
 }
 
 // ── Cursor (used by the Plan-tab "point de départ" editor) ────────────────────
-function aiProviderLabel() {
-  return backendInfo.ai_provider_label || 'IA';
-}
-
 function cursorLabel() {
   return `Allée ${cursor.aisle} - ${sideDisplayLabel(cursor.side)} - Section ${cursor.section} - Tablette ${cursor.shelf} - Pos. ${cursor.position}`;
 }
@@ -783,7 +779,7 @@ function updateBackendStatusInfo() {
     msgs.push('Base locale active: SQLite. Pour une vraie synchronisation entre appareils, connectez Render Postgres et reglez DATABASE_URL.');
   }
   msgs.push(backendInfo.ai_enabled
-    ? `Aide client IA active via ${aiProviderLabel()}.`
+    ? 'Aide client IA active.'
     : 'Aide client IA inactive tant qu’une clé IA n’est pas configurée.');
   if (Number(backendInfo.duplicate_slots || 0) > 0) msgs.push(`Attention: ${backendInfo.duplicate_slots} position(s) contiennent déjà plusieurs produits.`);
   if (Number(backendInfo.duplicate_barcodes || 0) > 0) msgs.push(`Attention: ${backendInfo.duplicate_barcodes} code(s)-barres sont dupliques dans la base.`);

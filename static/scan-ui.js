@@ -289,7 +289,7 @@ function renderLookupAssistPreview() {
   if (!pendingLookupAssist) {
     preview.innerHTML = '';
     status.textContent = backendInfo.ai_enabled
-      ? `Optionnel: genere des mots-clés clients, une explication simple et des alternatives via ${aiProviderLabel()}.`
+      ? 'Optionnel: genere des mots-clés clients, une explication simple et des alternatives.'
       : 'IA non configurée sur le serveur. Ajoutez une clé IA sur Render.';
     return;
   }
