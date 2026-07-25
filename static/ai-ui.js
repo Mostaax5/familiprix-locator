@@ -264,9 +264,9 @@ function setClientSearchMode(mode, shouldPersist=true) {
     const status = document.getElementById('clientHelpStatus');
     if (status) {
       status.textContent = _clientSearchMode === 'documented'
-        ? `${aiProviderLabel()} approfondira la réponse avec les fiches produit et les sources disponibles.`
+        ? 'Réponse détaillée à partir des fiches produit et des sources disponibles.'
         : (_clientSearchMode === 'ai'
-          ? `${aiProviderLabel()} répondra et vérifiera les produits du plan.`
+          ? 'Analyse de la demande et vérification des produits du plan.'
           : 'Recherche rapide : noms, images et emplacements du plan.');
     }
   }
@@ -921,9 +921,9 @@ function setClientWorking(active, mode=_clientSearchMode) {
   const update = () => {
     const elapsed = Math.max(0, Math.floor((Date.now() - _clientWorkingStartedAt) / 1000));
     if (label) label.textContent = mode === 'documented'
-      ? `${aiProviderLabel()} consulte les fiches et prépare la réponse documentée · ${elapsed} s`
+      ? `Consultation des fiches et préparation de la réponse documentée · ${elapsed} s`
       : (mode === 'ai'
-        ? `${aiProviderLabel()} analyse et vérifie les produits du plan · ${elapsed} s`
+        ? `Analyse de la demande et vérification des produits · ${elapsed} s`
         : 'Recherche dans le plan actuel du magasin…');
   };
   update();
@@ -1362,8 +1362,8 @@ async function runClientRequest(question, options={}) {
   }
 
   if (status) status.textContent = mode === 'documented'
-    ? `${aiProviderLabel()} consulte les fiches produit et les sources disponibles.`
-    : `${aiProviderLabel()} analyse la demande et vérifiera chaque produit proposé.`;
+    ? 'Consultation des fiches produit et des sources disponibles.'
+    : 'Analyse de la demande et vérification des produits proposés.';
   const result = await apiGenerateClientHelp({
     question,
     history,

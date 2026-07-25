@@ -245,10 +245,10 @@ assert.strictEqual(storedDocumented.advice.documentation.sources.length, 1);
 const storedFallback = context.__quoteTest.clientResultForStorage({
   ...documentedResult,
   degraded: true,
-  warning: "DeepSeek n'a pas répondu à temps.",
+  warning: "La réponse détaillée n'a pas été disponible à temps.",
 });
 assert.strictEqual(storedFallback.degraded, true);
-assert.ok(storedFallback.warning.includes("DeepSeek"));
+assert.ok(storedFallback.warning.includes("réponse détaillée"));
 
 const cottonGroups = context.__quoteTest.clientRequiredConceptGroups(
   'je cherche de la watte des petites boules de coton'

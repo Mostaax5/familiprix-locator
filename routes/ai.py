@@ -1236,13 +1236,13 @@ def generate_client_help_payload_gemini(question, products):
         body = ""
         try: body = exc.read().decode("utf-8", "replace")[:250]
         except Exception: pass
-        _set_ai_error(f"Gemini a refusé la requête (HTTP {exc.code}, modèle {GEMINI_MODEL}). {body}")
+        _set_ai_error(f"Le service de réponse est temporairement indisponible (HTTP {exc.code}).")
         return None
     except (URLError, TimeoutError) as exc:
-        _set_ai_error(f"Gemini injoignable (réseau ou délai dépassé) : {exc}")
+        _set_ai_error("Le service de réponse est injoignable (réseau ou délai dépassé).")
         return None
     except json.JSONDecodeError:
-        _set_ai_error("Gemini a renvoyé une réponse illisible.")
+        _set_ai_error("Le service a renvoyé une réponse illisible.")
         return None
     usage = raw_response.get("usageMetadata", {})
     _log_ai_usage("gemini", usage.get("promptTokenCount", 0), usage.get("candidatesTokenCount", 0), question)
@@ -1251,13 +1251,13 @@ def generate_client_help_payload_gemini(question, products):
         cands = raw_response.get("candidates", [])
         reason = cands[0].get("finishReason", "?") if cands else "?"
         blocked = raw_response.get("promptFeedback", {}).get("blockReason", "")
-        _set_ai_error(f"Gemini a renvoyé une réponse vide (finishReason={reason}"
+        _set_ai_error(f"Le service a renvoyé une réponse vide (raison={reason}"
                       + (f", bloqué={blocked}" if blocked else "") + ").")
         return None
     try:
         parsed = json.loads(raw_text)
     except json.JSONDecodeError:
-        _set_ai_error("Gemini n'a pas renvoyé un JSON valide.")
+        _set_ai_error("Le service a renvoyé une réponse invalide.")
         return None
     return normalize_client_help_payload(parsed)
 
@@ -1299,24 +1299,24 @@ def generate_client_help_payload_openai(question, products):
         body = ""
         try: body = exc.read().decode("utf-8", "replace")[:250]
         except Exception: pass
-        _set_ai_error(f"OpenAI a refusé la requête (HTTP {exc.code}, modèle {OPENAI_MODEL}). {body}")
+        _set_ai_error(f"Le service de réponse est temporairement indisponible (HTTP {exc.code}).")
         return None
     except (URLError, TimeoutError) as exc:
-        _set_ai_error(f"OpenAI injoignable (réseau ou délai dépassé) : {exc}")
+        _set_ai_error("Le service de réponse est injoignable (réseau ou délai dépassé).")
         return None
     except json.JSONDecodeError:
-        _set_ai_error("OpenAI a renvoyé une réponse illisible.")
+        _set_ai_error("Le service a renvoyé une réponse illisible.")
         return None
     usage = raw_response.get("usage", {})
     _log_ai_usage("openai", usage.get("input_tokens", 0), usage.get("output_tokens", 0), question)
     raw_text = extract_openai_output_text(raw_response)
     if not raw_text:
-        _set_ai_error("OpenAI a renvoyé une réponse vide.")
+        _set_ai_error("Le service a renvoyé une réponse vide.")
         return None
     try:
         parsed = json.loads(raw_text)
     except json.JSONDecodeError:
-        _set_ai_error("OpenAI n'a pas renvoyé un JSON valide.")
+        _set_ai_error("Le service a renvoyé une réponse invalide.")
         return None
     return normalize_client_help_payload(parsed)
 
@@ -1362,7 +1362,7 @@ def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mo
                 messages, max_tokens=min(max_tokens, 2400),
                 question_preview=question_preview, quality_mode=False,
             )
-        _set_ai_error(f"DeepSeek a refusé la requête (HTTP {exc.code}, modèle {model}). {body}")
+        _set_ai_error(f"Le service de réponse est temporairement indisponible (HTTP {exc.code}).")
         return None
     except (URLError, TimeoutError) as exc:
         if quality_mode and DEEPSEEK_MODEL != model:
@@ -1371,7 +1371,7 @@ def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mo
                 messages, max_tokens=min(max_tokens, 2400),
                 question_preview=question_preview, quality_mode=False,
             )
-        _set_ai_error(f"DeepSeek injoignable (réseau ou délai dépassé) : {exc}")
+        _set_ai_error("Le service de réponse est injoignable (réseau ou délai dépassé).")
         return None
     except json.JSONDecodeError:
         if quality_mode and DEEPSEEK_MODEL != model:
@@ -1379,7 +1379,7 @@ def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mo
                 messages, max_tokens=min(max_tokens, 2400),
                 question_preview=question_preview, quality_mode=False,
             )
-        _set_ai_error("DeepSeek a renvoyé une réponse illisible.")
+        _set_ai_error("Le service a renvoyé une réponse illisible.")
         return None
 
     usage = raw_response.get("usage", {})
@@ -1394,7 +1394,7 @@ def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mo
                 messages, max_tokens=min(max_tokens, 2400),
                 question_preview=question_preview, quality_mode=False,
             )
-        _set_ai_error("DeepSeek a renvoyé une réponse vide.")
+        _set_ai_error("Le service a renvoyé une réponse vide.")
         return None
     try:
         return json.loads(raw_text)
@@ -1404,7 +1404,7 @@ def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mo
                 messages, max_tokens=min(max_tokens, 2400),
                 question_preview=question_preview, quality_mode=False,
             )
-        _set_ai_error("DeepSeek n'a pas renvoyé un JSON valide.")
+        _set_ai_error("Le service a renvoyé une réponse invalide.")
         return None
 
 
@@ -1429,10 +1429,10 @@ def _gemini_structured_request(system_prompt, user_payload, max_tokens, question
         with _safe_urlopen(request_obj, timeout=_AI_REQUEST_TIMEOUT_SECONDS) as response:
             raw_response = json.loads(_read_limited_response(response).decode("utf-8"))
     except HTTPError as exc:
-        _set_ai_error(f"Gemini a refusé la requête structurée (HTTP {exc.code}).")
+        _set_ai_error(f"Le service de réponse est temporairement indisponible (HTTP {exc.code}).")
         return None
     except (URLError, TimeoutError, json.JSONDecodeError) as exc:
-        _set_ai_error(f"Gemini n'a pas pu produire la réponse structurée : {exc}")
+        _set_ai_error("Le service n'a pas pu produire la réponse demandée.")
         return None
     usage = raw_response.get("usageMetadata", {})
     _log_ai_usage("gemini", usage.get("promptTokenCount", 0),
@@ -1441,7 +1441,7 @@ def _gemini_structured_request(system_prompt, user_payload, max_tokens, question
     try:
         return json.loads(raw_text) if raw_text else None
     except json.JSONDecodeError:
-        _set_ai_error("Gemini n'a pas renvoyé un JSON valide.")
+        _set_ai_error("Le service a renvoyé une réponse invalide.")
         return None
 
 
@@ -1469,10 +1469,10 @@ def _openai_structured_request(system_prompt, user_payload, max_tokens,
         with _safe_urlopen(request_obj, timeout=_AI_REQUEST_TIMEOUT_SECONDS) as response:
             raw_response = json.loads(_read_limited_response(response).decode("utf-8"))
     except HTTPError as exc:
-        _set_ai_error(f"OpenAI a refusé la requête structurée (HTTP {exc.code}).")
+        _set_ai_error(f"Le service de réponse est temporairement indisponible (HTTP {exc.code}).")
         return None
     except (URLError, TimeoutError, json.JSONDecodeError) as exc:
-        _set_ai_error(f"OpenAI n'a pas pu produire la réponse structurée : {exc}")
+        _set_ai_error("Le service n'a pas pu produire la réponse demandée.")
         return None
     usage = raw_response.get("usage", {})
     _log_ai_usage("openai", usage.get("input_tokens", 0),
@@ -1481,7 +1481,7 @@ def _openai_structured_request(system_prompt, user_payload, max_tokens,
     try:
         return json.loads(raw_text) if raw_text else None
     except json.JSONDecodeError:
-        _set_ai_error("OpenAI n'a pas renvoyé un JSON valide.")
+        _set_ai_error("Le service a renvoyé une réponse invalide.")
         return None
 
 
@@ -2926,7 +2926,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         "degraded": bool(degraded),
         "local_summary": not degraded,
         "warning": (
-            "DeepSeek n'a pas répondu à temps; les produits et sources du magasin restent disponibles."
+            "La réponse détaillée n'a pas été disponible à temps; les produits et sources du magasin restent accessibles."
             if degraded else ""
         ),
     }
