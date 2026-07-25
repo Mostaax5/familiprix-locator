@@ -35,7 +35,7 @@ regulatory_bp = Blueprint("regulatory", __name__)
 
 _SYNC_SOURCE = "health_canada_regulatory"
 _DPD_CHECK_SOURCE = "health_canada_dpd_marketed"
-_ONLINE_CHECK_SOURCE = "regulatory_candidates_v3_html_labels"
+_ONLINE_CHECK_SOURCE = "regulatory_candidates_v2"
 _SYNC_LOCK = threading.Lock()
 _STOP_EVENT = threading.Event()
 _STATE = {
