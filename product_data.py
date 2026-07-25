@@ -537,13 +537,11 @@ def reference_identifiers_for_barcode(db, barcode, statuses=("verified",)):
 
 
 def sync_reference_identifiers_to_product(db, product, *, imported_at=""):
-    """Copy useful identifiers and clearly flagged candidates to a product.
+    """Copy every retained exact-GTIN identifier candidate to a product.
 
-    Official matches remain ``verified``.  An explicitly labelled DIN/NPN/
-    DIN-HM found on a page for the exact UPC is also copied as
-    ``requires_review``. A real Health Canada name candidate may also be copied
-    at lower confidence. Employees can search both immediately, while the UI
-    and AI continue to distinguish candidates from confirmed regulatory facts.
+    Confidence controls the warning shown to employees; it must not make a
+    stored candidate disappear. The AI still treats only ``verified`` values
+    as facts.
     """
     item = dict(product or {})
     product_id = item.get("id")
@@ -556,23 +554,6 @@ def sync_reference_identifiers_to_product(db, product, *, imported_at=""):
     ):
         status = str(reference.get("verification_status", "") or "")
         identifier_type = str(reference.get("identifier_type", "") or "")
-        match_method = str(reference.get("match_method", "") or "")
-        if status == "requires_review":
-            confidence = float(reference.get("confidence", 0) or 0)
-            allowed_candidate = (
-                identifier_type in {"DIN", "NPN", "DIN_HM"}
-                and (
-                    (match_method in {
-                        "exact_gtin_labeled_source", "imported_typed_identifier",
-                    } and confidence >= 0.7)
-                    or (
-                        match_method == "health_canada_name_candidate"
-                        and confidence >= 0.25
-                    )
-                )
-            )
-            if not allowed_candidate:
-                continue
         if upsert_product_identifier(
             db, product_id, identifier_type,
             reference.get("identifier_value", ""),

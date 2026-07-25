@@ -398,6 +398,113 @@ class RegulatoryDataTests(unittest.TestCase):
         )
         db.close()
 
+    def test_all_identifier_candidates_survive_a_replaced_planogram_row(self):
+        db = self.make_db()
+        old_product_id = db.execute(
+            """INSERT INTO products
+               (name, barcode, aisle, side, section, shelf, position)
+               VALUES ('Example medication', '063848966068', '1', 'Gauche', '1', '1', '1')"""
+        ).lastrowid
+        candidates = (
+            ("01234567", 0.62, "requires_review"),
+            ("02345678", 0.18, "requires_review"),
+            ("03456789", 0.05, "rejected"),
+        )
+        for index, (value, confidence, status) in enumerate(candidates):
+            upsert_reference_identifier(
+                db, "063848966068", "DIN", value,
+                authority="Health Canada", source="Health Canada DPD",
+                source_record_id=str(index),
+                match_method="health_canada_name_candidate",
+                confidence=confidence, verification_status=status,
+            )
+        product = dict(db.execute(
+            "SELECT * FROM products WHERE id=?", (old_product_id,)
+        ).fetchone())
+        self.assertEqual(sync_reference_identifiers_to_product(db, product), 2)
+
+        # Replace mode archives the old placement and creates a new row. The
+        # copied rows disappear, while the GTIN-linked candidates must remain.
+        db.execute(
+            "DELETE FROM product_identifiers WHERE product_id=?",
+            (old_product_id,),
+        )
+        db.execute("DELETE FROM products WHERE id=?", (old_product_id,))
+        new_product_id = db.execute(
+            """INSERT INTO products
+               (name, barcode, aisle, side, section, shelf, position)
+               VALUES ('Example medication', '063848966068', '1', 'Gauche', '1', '1', '1')"""
+        ).lastrowid
+        self.assertEqual(
+            db.execute(
+                "SELECT COUNT(*) FROM product_identifiers WHERE product_id=?",
+                (new_product_id,),
+            ).fetchone()[0],
+            0,
+        )
+
+        _PROD_CACHE.update(key=None, rows=[], built_at=0.0)
+        item, _row = _products_corpus(db)[0]
+        self.assertEqual(
+            {
+                identifier["value"]
+                for identifier in item["regulatory_identifiers"]
+            },
+            {value for value, _confidence, _status in candidates},
+        )
+        self.assertTrue(all(
+            identifier["status"] == "probable"
+            for identifier in item["regulatory_identifiers"]
+        ))
+        for value, _confidence, _status in candidates:
+            self.assertEqual(
+                [
+                    match["id"] for match in _direct_identifier_products(
+                        db, value, "din", limit=5
+                    )
+                ],
+                [new_product_id],
+            )
+        self.assertEqual(
+            product_context_for_client_rag(item)["verified_identifiers"], []
+        )
+        db.close()
+
+    def test_low_confidence_review_candidate_is_copied_and_searchable(self):
+        db = self.make_db()
+        product_id = db.execute(
+            """INSERT INTO products
+               (name, barcode, aisle, side, section, shelf, position)
+               VALUES ('Example natural product', '063848966068', '1', 'Gauche', '1', '1', '1')"""
+        ).lastrowid
+        upsert_reference_identifier(
+            db, "063848966068", "NPN", "80123456",
+            authority="Health Canada", source="External candidate",
+            source_record_id="low-confidence",
+            match_method="health_canada_name_candidate",
+            confidence=0.05, verification_status="requires_review",
+        )
+        product = dict(db.execute(
+            "SELECT * FROM products WHERE id=?", (product_id,)
+        ).fetchone())
+        self.assertEqual(sync_reference_identifiers_to_product(db, product), 1)
+
+        _PROD_CACHE.update(key=None, rows=[], built_at=0.0)
+        item, _row = _products_corpus(db)[0]
+        self.assertEqual(
+            [identifier["value"] for identifier in item["regulatory_identifiers"]],
+            ["80123456"],
+        )
+        self.assertEqual(
+            [
+                match["id"] for match in _direct_identifier_products(
+                    db, "80123456", "npn", limit=5
+                )
+            ],
+            [product_id],
+        )
+        db.close()
+
     def test_npn_requires_exact_official_licence_and_matching_name(self):
         def fetch(url):
             if "productlicence" in url:

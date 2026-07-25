@@ -445,11 +445,11 @@ def _store_verified_candidate(db, item, candidate, result, now):
     return int(bool(saved)), affected_ids
 
 
-def _reject_candidate(db, row):
-    """Remove a definite official mismatch from employee-facing search."""
+def _mark_candidate_unconfirmed(db, row):
+    """Keep an inconclusive candidate searchable, with lower confidence."""
     db.execute(
         """UPDATE product_reference_identifiers
-           SET verification_status='rejected'
+           SET confidence=CASE WHEN confidence>0.15 THEN 0.15 ELSE confidence END
            WHERE id=? AND verification_status='requires_review'""",
         (row["id"],),
     )
@@ -457,7 +457,8 @@ def _reject_candidate(db, row):
         db, row.get("gtin_key"), row.get("barcode", "")
     ):
         db.execute(
-            """UPDATE product_identifiers SET verification_status='rejected'
+            """UPDATE product_identifiers
+               SET confidence=CASE WHEN confidence>0.15 THEN 0.15 ELSE confidence END
                WHERE product_id=? AND identifier_type=? AND identifier_value=?
                  AND verification_status='requires_review'""",
             (
@@ -527,7 +528,7 @@ def _verify_candidates(db, items, now):
                     affected_ids.add(int(product["id"]))
             else:
                 review += 1
-                _reject_candidate(db, row)
+                _mark_candidate_unconfirmed(db, row)
                 for product in _product_rows_for_key(
                     db, row.get("gtin_key"), row.get("barcode", "")
                 ):
@@ -634,7 +635,7 @@ def _discover_online(db, batch, now, remaining_after_batch=0):
                             ),
                         ).fetchall()
                         for rejected_row in rejected_rows:
-                            _reject_candidate(
+                            _mark_candidate_unconfirmed(
                                 db, dict(rejected_row)
                             )
                 details = {
@@ -895,9 +896,8 @@ def regulatory_status():
                  SUM(CASE WHEN verification_status='verified'
                            AND identifier_type IN ('DIN','NPN','DIN_HM')
                           THEN 1 ELSE 0 END) AS confirmed,
-                 SUM(CASE WHEN verification_status='requires_review'
+                 SUM(CASE WHEN verification_status IN ('requires_review','rejected')
                            AND identifier_type IN ('DIN','NPN','DIN_HM')
-                           AND confidence>=0.25
                           THEN 1 ELSE 0 END) AS probable
                FROM product_identifiers"""
         ).fetchone()
