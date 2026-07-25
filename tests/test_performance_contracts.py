@@ -104,6 +104,7 @@ class PerformanceContractTests(unittest.TestCase):
         self.assertIn("@_serialized_product_corpus", product_routes)
         self.assertIn("stream_with_context(generate())", product_routes)
         self.assertIn("bootstrap_product_payload(item)", product_routes)
+        self.assertIn("_PRODUCT_STREAM_CHUNK_BYTES = 256 * 1024", product_routes)
         self.assertIn('rel="preconnect" href="https://magasiner.familiprix.com"', template)
         self.assertIn("scheduleRenderedProductImageHydration();", layout_ui)
         self.assertIn('loading="${imagePriority ? \'eager\' : \'lazy\'}"', layout_ui)

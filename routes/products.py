@@ -499,6 +499,7 @@ _PROD_CACHE = {"key": None, "rows": [], "built_at": 0.0}
 _PROD_LOCK = threading.RLock()
 _PROD_IDENTIFIER_DRIFT_TTL_S = 120.0
 _PRODUCTS_PAYLOAD_VERSION = "compact-stream-v3"
+_PRODUCT_STREAM_CHUNK_BYTES = 256 * 1024
 
 
 def _serialized_product_corpus(function):
@@ -3256,17 +3257,25 @@ def get_products():
 
     def generate():
         first = True
+        chunks = ["["]
+        chunk_size = 1
         try:
-            yield "["
             for item, _search_row in products:
                 encoded = json.dumps(
                     bootstrap_product_payload(item),
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )
-                yield encoded if first else f",{encoded}"
+                piece = encoded if first else f",{encoded}"
                 first = False
-            yield "]"
+                chunks.append(piece)
+                chunk_size += len(piece)
+                if chunk_size >= _PRODUCT_STREAM_CHUNK_BYTES:
+                    yield "".join(chunks)
+                    chunks = []
+                    chunk_size = 0
+            chunks.append("]")
+            yield "".join(chunks)
         finally:
             products.clear()
             release_unused_memory()
