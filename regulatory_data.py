@@ -89,6 +89,10 @@ _NAME_NOISE = {
 def extract_regulatory_identifiers(*values):
     """Return only explicitly labelled eight-digit Canadian identifiers."""
     text = html.unescape(" ".join(str(value or "") for value in values))
+    # Retailer pages commonly put the label and value in separate elements,
+    # for example <dt>#DIN</dt><dd>00559407</dd>.
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
     found = []
     seen = set()
     for identifier_type, pattern in _REGULATORY_PATTERNS:
@@ -394,6 +398,11 @@ def _api_records(payload):
 
 
 def _name_tokens(value):
+    value = re.sub(
+        r"(?i)\bx\s*[/.-]\s*f\b",
+        " extra ",
+        str(value or ""),
+    )
     return {
         token for token in normalize_text(value).split()
         if len(token) >= 3 and token not in _NAME_NOISE and not token.isdigit()

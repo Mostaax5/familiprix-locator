@@ -65,6 +65,12 @@ class RegulatoryDataTests(unittest.TestCase):
             },
         )
 
+    def test_labeled_identifier_extraction_handles_retailer_html(self):
+        found = extract_regulatory_identifiers(
+            "<dl><dt>#DIN</dt><dd><span>00559407</span></dd></dl>"
+        )
+        self.assertEqual(found, [{"type": "DIN", "value": "00559407"}])
+
     def test_dpd_extract_joins_din_only_through_exact_upc(self):
         package_path = self.make_zip([
             ["42", "063848966068", "EA", "Bottle", "50", "50 tablets", "", ""],
@@ -196,6 +202,35 @@ class RegulatoryDataTests(unittest.TestCase):
             ),
             [],
         )
+
+    def test_french_extra_strength_abbreviation_ranks_the_correct_din(self):
+        records = [
+            {
+                "drug_code": 1,
+                "drug_identification_number": "00559393",
+                "brand_name": "TYLENOL REGULAR STRENGTH",
+            },
+            {
+                "drug_code": 2,
+                "drug_identification_number": "00559407",
+                "brand_name": "TYLENOL EXTRA STRENGTH",
+            },
+            {
+                "drug_code": 3,
+                "drug_identification_number": "02046040",
+                "brand_name": "CHILDREN'S TYLENOL",
+            },
+            {
+                "drug_code": 4,
+                "drug_identification_number": "02046059",
+                "brand_name": "INFANTS' TYLENOL",
+            },
+        ]
+        candidates = find_dpd_name_candidates(
+            "TYLENOL 500MG X/F FAC CO100",
+            fetch_json=lambda _url: records,
+        )
+        self.assertEqual(candidates[0]["value"], "00559407")
 
     def test_existing_exact_upc_description_seeds_identifier_candidate(self):
         db = self.make_db()
