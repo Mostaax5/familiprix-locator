@@ -794,6 +794,149 @@ class PlanogramMetadataTests(unittest.TestCase):
         )
         self.assertEqual((overflow_a, overflow_b), (0, 0))
 
+    def test_planogram_section_direction_can_be_overridden_on_either_side(self):
+        def config():
+            return {
+                "sides": {
+                    "Gauche": {"sections": [{"shelves": [3]} for _ in range(9)]},
+                    "Droite": {"sections": [{"shelves": [3]} for _ in range(9)]},
+                },
+                "facade_a": {"shelves": [], "labels": []},
+                "facade_b": {"shelves": [], "labels": []},
+                "presentoirs": [],
+            }
+
+        lines = [
+            {"tablette": 1, "position": 1, "p": {"name": "SHELF 1 P1"}},
+            {"tablette": 1, "position": 2, "p": {"name": "SHELF 1 P2"}},
+            {"tablette": 2, "position": 1, "p": {"name": "SHELF 2 P1"}},
+            {"tablette": 2, "position": 2, "p": {"name": "SHELF 2 P2"}},
+        ]
+
+        cote_a_as_b, overflow_a = plan_planogram_flow(
+            config(), "Gauche", start_section=8, start_tablette=1, lines=lines,
+            section_direction="ascending",
+        )
+        cote_b_as_a, overflow_b = plan_planogram_flow(
+            config(), "Droite", start_section=9, start_tablette=1, lines=lines,
+            section_direction="descending",
+        )
+
+        self.assertEqual(
+            [
+                (section, shelf, position)
+                for section, shelf, position, _line in cote_a_as_b
+            ],
+            [(8, 1, 1), (8, 1, 2), (9, 1, 1), (9, 1, 2)],
+        )
+        self.assertEqual(
+            [
+                (section, shelf, position)
+                for section, shelf, position, _line in cote_b_as_a
+            ],
+            [(9, 1, 1), (9, 1, 2), (8, 1, 1), (8, 1, 2)],
+        )
+        self.assertEqual((overflow_a, overflow_b), (0, 0))
+
+    def test_bulk_import_honors_explicit_section_direction(self):
+        db = self.make_db()
+        config = build_default_layout_config(3, 1, 2)
+        db.execute(
+            """INSERT INTO aisle_layouts
+               (aisle, max_section, max_shelf, max_position, config_json, enabled)
+               VALUES ('1', '3', '1', '2', ?, 1)""",
+            (json.dumps(config),),
+        )
+        db.commit()
+        app = self.make_test_app()
+        payload = {
+            "aisle": "1",
+            "side": "Gauche",
+            "start_section": 1,
+            "start_tablette": 1,
+            "tablette_start": 1,
+            "tablette_end": 2,
+            "section_direction": "ascending",
+            "replace_existing": True,
+            "products": [
+                {
+                    "tablette": 1,
+                    "position": 1,
+                    "barcode": "111111111111",
+                    "name": "SECTION ONE",
+                },
+                {
+                    "tablette": 2,
+                    "position": 1,
+                    "barcode": "222222222222",
+                    "name": "SECTION TWO",
+                },
+            ],
+        }
+
+        with patch("routes.products.get_db", return_value=db), \
+             patch("auth.get_db", return_value=db), \
+             patch("routes.products.schedule_image_fill"), \
+             patch("routes.gist._schedule_gist_backup"):
+            with app.test_client() as client:
+                response = client.post("/api/products/bulk-import", json=payload)
+
+        result = response.get_json()
+        placed = [
+            tuple(row)
+            for row in db.execute(
+                "SELECT name, section, shelf, position FROM products "
+                "ORDER BY CAST(section AS INTEGER)"
+            ).fetchall()
+        ]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(result["section_direction"], "ascending")
+        self.assertEqual(result["effective_section_direction"], "ascending")
+        self.assertEqual(
+            placed,
+            [
+                ("SECTION ONE", "1", "1", "1"),
+                ("SECTION TWO", "2", "1", "1"),
+            ],
+        )
+        db.close()
+
+    def test_bulk_import_rejects_unknown_section_direction_without_changes(self):
+        db = self.make_plan_db()
+        app = self.make_test_app()
+        payload = {
+            "aisle": "1",
+            "side": "Gauche",
+            "start_section": 1,
+            "start_tablette": 1,
+            "tablette_start": 1,
+            "tablette_end": 1,
+            "section_direction": "sideways",
+            "replace_existing": True,
+            "products": [
+                {
+                    "tablette": 1,
+                    "position": 1,
+                    "barcode": "111111111111",
+                    "name": "MUST NOT IMPORT",
+                },
+            ],
+        }
+
+        with patch("routes.products.get_db", return_value=db), \
+             patch("auth.get_db", return_value=db):
+            with app.test_client() as client:
+                response = client.post("/api/products/bulk-import", json=payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "Sens des sections invalide.")
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM products").fetchone()[0], 0)
+        self.assertEqual(
+            db.execute("SELECT COUNT(*) FROM planogram_imports").fetchone()[0], 0
+        )
+        db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

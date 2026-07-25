@@ -4417,6 +4417,8 @@ async function parsePlanogramPDF(input) {
     const tabs = Object.keys(data.tablettes).map(Number).sort((a,b)=>a-b);
     document.getElementById('planoTabStart').value = tabs[0] || 1;
     document.getElementById('planoTabEnd').value   = tabs[tabs.length-1] || 8;
+    const directionSelect = document.getElementById('planoSectionDirection');
+    if (directionSelect) directionSelect.value = 'auto';
     const aisleSelect = document.getElementById('planoAisle');
     aisleSelect.innerHTML = mapLayouts.map(l=>`<option value="${esc(l.aisle)}">${esc(l.aisle)}</option>`).join('');
     const sum = Object.entries(data.tablettes).map(([t,n])=>`T${esc(t)}:${esc(n)}`).join(' | ');
@@ -4471,10 +4473,37 @@ function planoSectionCount(aisle, side) {
 // the Façade B end (its highest section) toward Façade A, so it starts at the last
 // section; Côté B (Droite) starts at section 1 (Façade A end). A one-sided wall
 // (no opposite côté — Labo, Caisse…) reads plainly left→right: start at section 1.
-function planoDefaultStartSection(aisle, side) {
-  if (side !== 'Gauche') return 1;
-  if (!planoSectionCount(aisle, 'Droite')) return 1;   // mur à un seul côté
-  return Math.max(1, planoSectionCount(aisle, side));
+function planoEffectiveSectionDirection(config, side, requested='auto') {
+  if (requested === 'ascending' || requested === 'descending') return requested;
+  if (side !== 'Gauche' && side !== 'Droite') return 'ascending';
+  const other = side === 'Gauche' ? 'Droite' : 'Gauche';
+  const singleSided = !((((config || {}).sides || {})[other]?.sections || []).length);
+  return side === 'Gauche' && !singleSided ? 'descending' : 'ascending';
+}
+
+function planoDefaultStartSection(aisle, side, requestedDirection='auto') {
+  const layout = (typeof mapLayouts !== 'undefined' ? mapLayouts : [])
+    .find(l => String(l.aisle) === String(aisle));
+  const direction = planoEffectiveSectionDirection(
+    layout?.config || null, side, requestedDirection
+  );
+  return direction === 'descending'
+    ? Math.max(1, planoSectionCount(aisle, side))
+    : 1;
+}
+
+function onPlanoDirectionChange() {
+  const aisle = document.getElementById('planoAisle')?.value;
+  const side = document.getElementById('planoSide')?.value;
+  const direction = document.getElementById('planoSectionDirection')?.value || 'auto';
+  const isFixture = side !== 'Gauche' && side !== 'Droite';
+  const secEl = document.getElementById('planoSection');
+  if (secEl) {
+    secEl.value = isFixture
+      ? '1'
+      : String(planoDefaultStartSection(aisle, side, direction));
+  }
+  updatePlanoPreview();
 }
 
 // Côté or allée changed: refresh the côté/façade list for the aisle, reset the
@@ -4484,11 +4513,18 @@ function onPlanoSideChange() {
   const aisle = document.getElementById('planoAisle')?.value;
   populatePlanoSides(aisle);
   const side = document.getElementById('planoSide')?.value;
+  const direction = document.getElementById('planoSectionDirection')?.value || 'auto';
   const isFixture = side !== 'Gauche' && side !== 'Droite';
   const secEl = document.getElementById('planoSection');
-  if (secEl) secEl.value = isFixture ? '1' : String(planoDefaultStartSection(aisle, side));
+  if (secEl) {
+    secEl.value = isFixture
+      ? '1'
+      : String(planoDefaultStartSection(aisle, side, direction));
+  }
   const secField = document.getElementById('planoSectionField');
   if (secField) secField.style.display = isFixture ? 'none' : '';
+  const directionField = document.getElementById('planoDirectionField');
+  if (directionField) directionField.style.display = isFixture ? 'none' : '';
   updatePlanoPreview();
 }
 
@@ -4497,16 +4533,19 @@ function onPlanoSideChange() {
 // (startSection, startTablette), rolling into the next section when one is full.
 // Tablette COUNT per section is the plan's and never changes here. Returns a map
 // from product index → {section, shelf, position}, plus the set of overflow rows.
-function computePlanoFlow(config, side, startSection, startTablette, tabStart, tabEnd, skipNS) {
+function computePlanoFlow(
+  config, side, startSection, startTablette, tabStart, tabEnd, skipNS,
+  sectionDirection='auto'
+) {
   const out = {
     byIdx: {}, overflow: new Set(), placed: 0, planoShelves: 0,
     availableShelves: 0, availableSections: 0, startSectionShelves: 0,
-    overflowShelves: 0, isFixture: false, filteredNonStock: 0
+    overflowShelves: 0, isFixture: false, filteredNonStock: 0,
+    sectionDirection: planoEffectiveSectionDirection(config, side, sectionDirection)
   };
   const slots = [];   // [section_no, shelf_index] in fill order
   const fixture = _planoFixtureForSide(config, side);
   out.isFixture = Boolean(fixture);
-  let singleSided = false;
   if (fixture) {
     // Fixture sides (Façade A/B, présentoir façades) are one flat run of
     // tablettes with no sections — fill from the start tablette downward.
@@ -4514,19 +4553,15 @@ function computePlanoFlow(config, side, startSection, startTablette, tabStart, t
     for (let ti = Math.max(0, startTablette - 1); ti < shelves.length; ti++) slots.push([1, ti]);
   } else {
     const sections = ((config && config.sides && config.sides[side]) ? config.sides[side].sections : []) || [];
-    // A one-sided "aisle" (Labo, Caisse, mur…) has no opposite côté and thus no
-    // real Façade A/B ends: read PLAINLY left→right, nothing inverted.
-    const other = side === 'Gauche' ? 'Droite' : 'Gauche';
-    singleSided = !(((config && config.sides && config.sides[other]) || {}).sections || []).length;
-    // Direction mirrors the server: Côté A travels from Façade B toward Façade A,
-    // so only its section numbers decrease. Tablettes keep their normal order.
+    // Automatic mode mirrors the server's side rule; an explicit override can
+    // make either side increase or decrease. Tablettes keep their normal order.
     const startIdx = Math.min(Math.max(0, startSection - 1), Math.max(0, sections.length - 1));
     const pushSection = si => {
       const shelfCount = ((sections[si] || {}).shelves || []).length;
       const firstT = (si === startIdx) ? (startTablette - 1) : 0;
       for (let ti = Math.max(0, firstT); ti < shelfCount; ti++) slots.push([si + 1, ti]);
     };
-    if (side === 'Gauche' && !singleSided) { for (let si = startIdx; si >= 0; si--) pushSection(si); }
+    if (out.sectionDirection === 'descending') { for (let si = startIdx; si >= 0; si--) pushSection(si); }
     else { for (let si = startIdx; si < sections.length; si++) pushSection(si); }
   }
   const byTab = new Map();
@@ -4616,11 +4651,15 @@ function updatePlanoPreview() {
   const tabStart     = parseInt(document.getElementById('planoTabStart').value) || 1;
   const tabEnd       = parseInt(document.getElementById('planoTabEnd').value)   || 99;
   const skipNS       = document.getElementById('planoSkipNonStock').checked;
+  const sectionDirection = document.getElementById('planoSectionDirection')?.value || 'auto';
   const preview      = document.getElementById('planoPreview');
 
   const layout = (typeof mapLayouts !== 'undefined' ? mapLayouts : []).find(l => String(l.aisle) === String(aisle));
   const config = layout ? layout.config : null;
-  const flow = computePlanoFlow(config, side, startSection, startTab, tabStart, tabEnd, skipNS);
+  const flow = computePlanoFlow(
+    config, side, startSection, startTab, tabStart, tabEnd, skipNS,
+    sectionDirection
+  );
 
   // Editable rows — each maps to its real index in planoData.products.
   const rows = planoData.products.map((p, idx) => {
@@ -4662,6 +4701,12 @@ function updatePlanoPreview() {
   const overNote = overCount
     ? `<span style="font-size:11px;color:#c8102e;font-weight:700">${overCount} produit(s) hors plan</span>`
     : '';
+  const directionLabel = flow.sectionDirection === 'descending'
+    ? 'Inversé comme côté A (sections décroissantes)'
+    : 'Normal comme côté B (sections croissantes)';
+  const directionModeLabel = sectionDirection === 'auto'
+    ? `Automatique · ${directionLabel}`
+    : directionLabel;
 
   preview.innerHTML = `
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:7px 4px;border-bottom:1px solid #e2e8f0;font-size:12px;font-weight:700;color:#334155">
@@ -4669,19 +4714,20 @@ function updatePlanoPreview() {
       ${flow.isFixture
         ? `<span>${esc(sideDisplayLabel(side))} : ${flow.availableShelves} tablette${flow.availableShelves !== 1 ? 's' : ''} disponible${flow.availableShelves !== 1 ? 's' : ''}</span>`
         : `<span>Section ${startSection} : ${flow.startSectionShelves} tablette${flow.startSectionShelves !== 1 ? 's' : ''}</span>
-           <span>Parcours d'import : ${flow.availableShelves} tablette${flow.availableShelves !== 1 ? 's' : ''} répartie${flow.availableShelves !== 1 ? 's' : ''} sur ${flow.availableSections} section${flow.availableSections !== 1 ? 's' : ''}</span>`}
+           <span>Parcours d'import : ${flow.availableShelves} tablette${flow.availableShelves !== 1 ? 's' : ''} répartie${flow.availableShelves !== 1 ? 's' : ''} sur ${flow.availableSections} section${flow.availableSections !== 1 ? 's' : ''}</span>
+           <span>Sens : ${esc(directionModeLabel)}</span>`}
       ${flow.overflowShelves ? `<span style="color:#c8102e">${flow.overflowShelves} tablette${flow.overflowShelves !== 1 ? 's' : ''} du PDF sans emplacement physique</span>` : '<span style="color:#15803d">Structure compatible</span>'}
     </div>
     ${flow.filteredNonStock ? `<div style="padding:8px 10px;background:#fffbeb;border-bottom:1px solid #fde68a;color:#92400e;font-size:12px">
       <strong>${flow.filteredNonStock} produit(s) « En stock: non » seront exclus.</strong> Leurs positions resteront sans produit importé.
     </div>` : ''}
-    <div style="font-size:11px;color:#64748b;padding:4px 4px 6px">${((side === 'Gauche' || side === 'Droite') && !planoSectionCount(aisle, side === 'Gauche' ? 'Droite' : 'Gauche'))
-      ? 'Allée à un seul côté (mur/comptoir) : <b>lecture simple de gauche à droite</b> — sections croissantes, positions telles quelles, rien d\'inversé.'
-      : side === 'Gauche'
-      ? 'Côté A : le plano va de la <b>Façade B vers la Façade A</b>. Seules les sections sont inversées : elles diminuent à partir de la section de départ (ex. S9 → S8). Les tablettes et les positions des produits restent telles quelles.'
-      : side === 'Droite'
-      ? 'Côté B : le plano continue normalement à partir de la section de départ, avec des <b>sections croissantes</b>. Les tablettes et les positions des produits restent telles quelles.'
-      : `${esc(side)} : le plano remplit les tablettes de la façade à partir de la tablette de départ, vers le bas.`} Le plan physique du magasin reste prioritaire; seules les positions de ses tablettes sont ajustées.</div>
+    <div style="font-size:11px;color:#64748b;padding:4px 4px 6px">${flow.isFixture
+      ? `${esc(side)} : le plano remplit les tablettes de la façade à partir de la tablette de départ, vers le bas.`
+      : `${flow.sectionDirection === 'descending'
+          ? 'Les sections diminuent à partir de la section de départ (ex. S9 → S8).'
+          : 'Les sections augmentent à partir de la section de départ (ex. S1 → S2).'}
+         Les tablettes et les positions des produits restent exactement dans l’ordre du PDF.`}
+      Le plan physique du magasin reste prioritaire; seules les positions de ses tablettes sont ajustées.</div>
     ${rows || '<div style="padding:10px;font-size:12px;color:#64748b">Aucun produit dans cette sélection.</div>'}
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 4px;border-top:1px solid #e2e8f0;margin-top:4px;flex-wrap:wrap">
       <button class="btn btn-outline btn-inline" style="font-size:12px;width:auto;margin:0" onclick="planoAddLine()">➕ Ajouter une ligne</button>
@@ -4709,6 +4755,7 @@ async function importPlanogram() {
   const tabEnd     = parseInt(document.getElementById('planoTabEnd').value)         || 99;
   const replace    = document.getElementById('planoReplace').checked;
   const skipNS     = document.getElementById('planoSkipNonStock').checked;
+  const sectionDirection = document.getElementById('planoSectionDirection')?.value || 'auto';
 
   const filteredNonStock = skipNS
     ? (planoData.products || []).filter(p =>
@@ -4765,6 +4812,7 @@ async function importPlanogram() {
         start_tablette: startTab,
         tablette_start: tabStart,
         tablette_end:   tabEnd,
+        section_direction: sectionDirection,
         replace_existing: replace,
         expected_layout_modified_at: layout.modified_at || '',
         skip_non_stock:   skipNS,
@@ -4784,10 +4832,13 @@ async function importPlanogram() {
       const replacedRemoved = Number(data.replaced_removed ?? data.pruned ?? 0);
       const replacedTxt = replacedRemoved > 0 ? `, ${replacedRemoved} ancien(s) remplacé(s)` : '';
       const overTxt = overflowShelves > 0 ? ` ⚠ ${overflowProducts} produit(s), sur ${overflowShelves} tablette(s) du PDF, n'ont pas d'emplacement physique dans le plan magasin.` : '';
+      const directionTxt = (side === 'Gauche' || side === 'Droite')
+        ? ` Sens utilisé : sections ${data.effective_section_direction === 'descending' ? 'décroissantes' : 'croissantes'}.`
+        : '';
       const recoveryAction = nonStockSkipped > 0
         ? ` <button type="button" class="btn btn-outline btn-inline" style="width:auto;margin:5px 0 0;font-size:12px" onclick="reimportIncludingNonStock()">Importer aussi les ${nonStockSkipped} hors stock</button>`
         : '';
-      msg.innerHTML = `✅ <strong>${data.imported}</strong> importé(s)${nonStockTxt}${skippedTxt}${replacedTxt}${errTxt}.${overTxt} Les photos manquantes sont récupérées automatiquement.${recoveryAction}`;
+      msg.innerHTML = `✅ <strong>${data.imported}</strong> importé(s)${nonStockTxt}${skippedTxt}${replacedTxt}${errTxt}.${overTxt}${directionTxt} Les photos manquantes sont récupérées automatiquement.${recoveryAction}`;
       msg.style.color = nonStockSkipped > 0 ? '#92400e' : '#16a34a';
       // The import response already carries the committed aisle and affected
       // products. Paint it now; full-list revalidation can happen off-screen.

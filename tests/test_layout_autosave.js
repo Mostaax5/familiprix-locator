@@ -19,6 +19,7 @@ const deleteButton = {
   setAttribute(name, value) { this.attributes[name] = value; },
   removeAttribute(name) { delete this.attributes[name]; },
 };
+const layoutUiSource = fs.readFileSync('static/layout-ui.js', 'utf8');
 const context = {
   console,
   esc(value) { return String(value ?? ''); },
@@ -89,7 +90,11 @@ const context = {
 };
 
 vm.createContext(context);
-vm.runInContext(fs.readFileSync('static/layout-ui.js', 'utf8'), context);
+vm.runInContext(layoutUiSource, context);
+assert(
+  layoutUiSource.includes('section_direction: sectionDirection'),
+  'the import request must send the selected section direction to the server'
+);
 
 const missingDinMarkup = vm.runInContext(
   "regulatoryIdentifiersMarkup({regulatory_identifiers: []})", context
@@ -271,6 +276,44 @@ async function run() {
     ],
     [9, 1, 9, 2, 8, 1, 8, 2],
     'Cote A should descend S9 to S8 without reversing positions inside a shelf'
+  );
+
+  const coteAAsBFlow = vm.runInContext(`
+    computePlanoFlow({
+      sides: {
+        Gauche: {sections: Array.from({length: 9}, () => ({shelves: [3]}))},
+        Droite: {sections: Array.from({length: 9}, () => ({shelves: [3]}))}
+      }
+    }, 'Gauche', 8, 1, 1, 99, false, 'ascending')
+  `, context);
+  assert.deepStrictEqual(
+    [
+      coteAAsBFlow.byIdx[0].section, coteAAsBFlow.byIdx[0].position,
+      coteAAsBFlow.byIdx[1].section, coteAAsBFlow.byIdx[1].position,
+      coteAAsBFlow.byIdx[2].section, coteAAsBFlow.byIdx[2].position,
+      coteAAsBFlow.byIdx[3].section, coteAAsBFlow.byIdx[3].position,
+    ],
+    [8, 1, 8, 2, 9, 1, 9, 2],
+    'Cote A should support the normal Cote B section progression'
+  );
+
+  const coteBAsAFlow = vm.runInContext(`
+    computePlanoFlow({
+      sides: {
+        Gauche: {sections: Array.from({length: 9}, () => ({shelves: [3]}))},
+        Droite: {sections: Array.from({length: 9}, () => ({shelves: [3]}))}
+      }
+    }, 'Droite', 9, 1, 1, 99, false, 'descending')
+  `, context);
+  assert.deepStrictEqual(
+    [
+      coteBAsAFlow.byIdx[0].section, coteBAsAFlow.byIdx[0].position,
+      coteBAsAFlow.byIdx[1].section, coteBAsAFlow.byIdx[1].position,
+      coteBAsAFlow.byIdx[2].section, coteBAsAFlow.byIdx[2].position,
+      coteBAsAFlow.byIdx[3].section, coteBAsAFlow.byIdx[3].position,
+    ],
+    [9, 1, 9, 2, 8, 1, 8, 2],
+    'Cote B should support the reversed Cote A section progression'
   );
 
   context.allProductsCache = [

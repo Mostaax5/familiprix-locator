@@ -329,9 +329,18 @@
           </select>
         </div>
         <div class="field" id="planoSectionField">
-          <label class="label" title="Section du plan où commence le plano. Côté A remplit vers la Façade A ; Côté B vers la Façade B.">Section de départ</label>
+          <label class="label" title="Section du plan où commence l’import dans le sens choisi.">Section de départ</label>
           <input type="number" id="planoSection" value="1" min="1" style="width:64px" oninput="schedulePlanoPreview()"/>
         </div>
+      </div>
+
+      <div class="field" id="planoDirectionField" style="margin-top:6px;max-width:420px">
+        <label class="label" title="Choisit si les numéros de section augmentent ou diminuent pendant cet import.">Sens des sections</label>
+        <select id="planoSectionDirection" onchange="onPlanoDirectionChange()">
+          <option value="auto">Automatique selon le côté</option>
+          <option value="ascending">Normal comme côté B (sections croissantes)</option>
+          <option value="descending">Inversé comme côté A (sections décroissantes)</option>
+        </select>
       </div>
 
       <div class="row3" style="margin-top:6px">

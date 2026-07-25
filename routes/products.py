@@ -3645,7 +3645,28 @@ def fixture_for_side(config, side):
     return None
 
 
-def plan_planogram_flow(config, side, start_section, start_tablette, lines, shrink=False):
+PLANOGRAM_SECTION_DIRECTIONS = {"auto", "ascending", "descending"}
+
+
+def resolve_planogram_section_direction(config, side, requested="auto"):
+    """Resolve an import direction independently from its destination side."""
+    direction = str(requested or "auto").strip().lower()
+    if direction not in PLANOGRAM_SECTION_DIRECTIONS:
+        raise ValueError("Invalid planogram section direction")
+    if direction != "auto":
+        return direction
+    if side not in ("Gauche", "Droite"):
+        return "ascending"
+    sides_cfg = (config.get("sides", {}) or {})
+    other = "Droite" if side == "Gauche" else "Gauche"
+    single_sided = not ((sides_cfg.get(other, {}) or {}).get("sections", []))
+    return "descending" if side == "Gauche" and not single_sided else "ascending"
+
+
+def plan_planogram_flow(
+    config, side, start_section, start_tablette, lines, shrink=False,
+    section_direction="auto",
+):
     """Flow plano lines across the côté's EXISTING sections, starting at
     (start_section, start_tablette). The number of tablettes per section is the
     plan's and is never changed; only the number of positions on a tablette is
@@ -3669,22 +3690,18 @@ def plan_planogram_flow(config, side, start_section, start_tablette, lines, shri
         # products always store section '1'.
         for ti in range(max(0, start_tablette - 1), len(fixture.get("shelves", []))):
             slots.append((fixture, 1, ti))
-    single_sided = False
     if fixture is None:
         sides_cfg = (config.get("sides", {}) or {})
         sections = (sides_cfg.get(side, {}) or {}).get("sections", [])
-        other = "Droite" if side == "Gauche" else "Gauche"
-        # A one-sided "aisle" (Labo, Caisse, a wall/counter…) has no opposite côté,
-        # so it has no real Façade A/B ends: it is read PLAINLY left→right —
-        # ascending sections and positions exactly as the planogram numbers them.
-        # The Façade-anchored direction rule only applies to real two-sided aisles.
-        single_sided = not ((sides_cfg.get(other, {}) or {}).get("sections", []))
-        # Côté A is traversed from Façade B toward Façade A, opposite the section
-        # numbering. It therefore continues through decreasing section numbers
-        # (for example S9, then S8). Côté B and one-sided aisles continue through
-        # increasing sections. Tablettes always keep their normal top-to-bottom order.
+        # In automatic mode, Côté A decreases through sections, while Côté B and
+        # one-sided aisles increase. Exceptional PDFs can explicitly use either
+        # progression on either destination side.
+        # Tablettes always keep their normal top-to-bottom order.
         start_idx = min(max(0, start_section - 1), max(0, len(sections) - 1))
-        descending = (side == "Gauche" and not single_sided)
+        effective_direction = resolve_planogram_section_direction(
+            config, side, section_direction
+        )
+        descending = effective_direction == "descending"
         section_indices = range(start_idx, -1, -1) if descending else range(start_idx, len(sections))
         for si in section_indices:
             shelf_count = len(sections[si].get("shelves", []))
@@ -3735,10 +3752,18 @@ def bulk_import_products():
         return jsonify({"success": False, "error": "Bornes du planogramme invalides."}), 400
     replace        = bool(data.get("replace_existing", False))
     skip_ns        = bool(data.get("skip_non_stock", False))
+    section_direction = str(
+        data.get("section_direction", "auto") or "auto"
+    ).strip().lower()
     products       = data.get("products", [])
 
     if not aisle:
         return jsonify({"success": False, "error": "Allée requise."}), 400
+    if section_direction not in PLANOGRAM_SECTION_DIRECTIONS:
+        return jsonify({
+            "success": False,
+            "error": "Sens des sections invalide.",
+        }), 400
     if tablette_start < 1 or tablette_end < tablette_start:
         return jsonify({"success": False, "error": "Début ou fin de tablette invalide."}), 400
     if not isinstance(products, list):
@@ -3834,7 +3859,13 @@ def bulk_import_products():
             "errors": errors,
         }), 400
 
-    placements, overflow = plan_planogram_flow(config, side, start_section, start_tablette, lines, shrink=replace)
+    effective_section_direction = resolve_planogram_section_direction(
+        config, side, section_direction
+    )
+    placements, overflow = plan_planogram_flow(
+        config, side, start_section, start_tablette, lines, shrink=replace,
+        section_direction=section_direction,
+    )
     overflow_products = max(0, len(lines) - len(placements))
     destination_slots = [
         (str(section), str(shelf), str(position))
@@ -4189,6 +4220,8 @@ def bulk_import_products():
     return jsonify({"success": True, "imported": imported, "skipped": skipped,
                     "errors": errors, "overflow": overflow,
                     "overflow_shelves": overflow, "overflow_products": overflow_products,
+                    "section_direction": section_direction,
+                    "effective_section_direction": effective_section_direction,
                     "selected_products": selected_products,
                     "filtered_non_stock": filtered_non_stock,
                     "pruned": pruned, "replaced_removed": replaced_removed,
