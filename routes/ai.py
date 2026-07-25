@@ -1854,6 +1854,58 @@ def product_context_for_client_rag(product):
     return context
 
 
+def _unconfirmed_identifier_notice(question, answer, products):
+    """Return a mandatory warning when an uncertain regulatory ID is in use."""
+    def digit_runs(text):
+        return {
+            re.sub(r"\D", "", match)
+            for match in re.findall(r"\d[\d\s-]{5,18}\d", str(text or ""))
+            if 6 <= len(re.sub(r"\D", "", match)) <= 18
+        }
+
+    question_text = str(question or "")
+    answer_text = str(answer or "")
+    referenced_values = digit_runs(question_text) | digit_runs(answer_text)
+    identifier_type_requested = bool(re.search(
+        r"\b(?:DIN(?:[\s-]?HM)?|NPN)\b",
+        question_text,
+        flags=re.IGNORECASE,
+    ))
+    candidates = []
+    seen = set()
+    for product in products or []:
+        _verified, unconfirmed = _client_rag_identifier_groups(product)
+        for identifier in unconfirmed:
+            key = (identifier["type"], identifier["value"])
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(identifier)
+
+    if not candidates:
+        return ""
+    referenced = [
+        identifier for identifier in candidates
+        if re.sub(r"\D", "", identifier["value"]) in referenced_values
+    ]
+    if referenced:
+        labels = ", ".join(
+            f"{identifier['type'].replace('_', '-')} {identifier['value']}"
+            for identifier in referenced[:3]
+        )
+        return (
+            f"{labels}: association de catalogue non confirmée qui peut être "
+            "incorrecte; confirmer le numéro sur l'emballage."
+        )
+    if identifier_type_requested:
+        return (
+            "Les DIN, NPN ou DIN-HM marqués « À confirmer » sont des associations "
+            "de catalogue possibles et peuvent être incorrects; vérifier chaque "
+            "numéro sur l'emballage avant de le communiquer."
+        )
+    return ""
+
+
 def normalize_verified_client_answer(parsed, valid_ids):
     parsed = parsed if isinstance(parsed, dict) else {}
     valid_ids = set(valid_ids)
@@ -3983,6 +4035,19 @@ def client_help():
     answer = verified["answer"] or (
         "Aucun produit suffisamment lié à cette demande n'a été trouvé dans la base."
     )
+    identifier_notice = _unconfirmed_identifier_notice(
+        question, answer, highlighted_products
+    )
+    if identifier_notice and not re.search(
+        r"\bconfirm", answer, flags=re.IGNORECASE
+    ):
+        answer = f"{answer.rstrip()} {identifier_notice}".strip()
+    safety_flags = list(verified.get("safety_flags") or [])
+    if identifier_notice:
+        safety_flags = [
+            identifier_notice,
+            *[flag for flag in safety_flags if flag != identifier_notice],
+        ][:5]
     recommended_products = [{
         "candidate_id": product.get("client_id", ""),
         "name": str(product.get("name", "")).strip(),
@@ -3996,7 +4061,7 @@ def client_help():
         "recommended_product_names": [product["name"] for product in recommended_products],
         "recommended_products": recommended_products,
         "follow_up_questions": verified["follow_up_questions"],
-        "safety_flags": verified["safety_flags"],
+        "safety_flags": safety_flags,
         "pharmacist_referral": verified["pharmacist_referral"],
         "pharmacist_reason": verified["pharmacist_reason"],
     }

@@ -17,6 +17,7 @@ from routes.ai import (
     normalize_verified_client_answer,
     normalize_url,
     select_client_answer_candidates,
+    _unconfirmed_identifier_notice,
 )
 from routes.products import (
     client_excluded_concept_terms,
@@ -507,6 +508,46 @@ class ClientRagTests(unittest.TestCase):
         drug_lookup.assert_not_called()
         nhp_lookup.assert_not_called()
 
+    def test_unconfirmed_identifier_notice_is_mandatory_only_when_relevant(self):
+        uncertain_product = {
+            "name": "Possible regulated product",
+            "_identifiers": [{
+                "type": "DIN", "value": "01234567",
+                "verification_status": "requires_review",
+            }],
+        }
+        notice = _unconfirmed_identifier_notice(
+            "Je cherche le DIN 01234567",
+            "Voici le produit possible.",
+            [uncertain_product],
+        )
+        self.assertIn("DIN 01234567", notice)
+        self.assertIn("non confirmée", notice)
+        self.assertIn("peut être incorrecte", notice)
+        self.assertIn("emballage", notice)
+        self.assertEqual(
+            _unconfirmed_identifier_notice(
+                "Montre-moi ce produit",
+                "Voici le produit possible.",
+                [uncertain_product],
+            ),
+            "",
+        )
+        self.assertEqual(
+            _unconfirmed_identifier_notice(
+                "Je cherche le DIN 01234567",
+                "Voici le produit.",
+                [{
+                    "name": "Verified product",
+                    "_identifiers": [{
+                        "type": "DIN", "value": "01234567",
+                        "verification_status": "verified",
+                    }],
+                }],
+            ),
+            "",
+        )
+
     def test_documented_deepseek_timeout_retries_fast_model_without_thinking(self):
         response_payload = {
             "usage": {"prompt_tokens": 12, "completion_tokens": 6},
@@ -677,6 +718,42 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(payload["response_mode"], "detailed")
         self.assertEqual([item["client_id"] for item in payload["products"]], ["product:1"])
         verifier.assert_called_once()
+
+    def test_client_endpoint_forces_uncertain_identifier_warning(self):
+        candidate = {
+            "id": 1, "client_id": "product:1", "name": "Possible product",
+            "barcode": "111", "aisle": "2", "side": "Gauche", "section": "1",
+            "shelf": "3", "position": "2", "in_stock": 1,
+            "_identifiers": [{
+                "type": "DIN", "value": "01234567",
+                "verification_status": "requires_review",
+            }],
+        }
+        verified = {
+            "answer": "Voici le produit possiblement associé.",
+            "selected_product_ids": ["product:1"],
+            "follow_up_questions": [], "safety_flags": [],
+            "pharmacist_referral": False, "pharmacist_reason": "",
+        }
+        with patch("routes.products.hybrid_client_candidates", return_value=[candidate]), \
+             patch("routes.products.hydrate_candidate_images"), \
+             patch("routes.ai.configured_ai_provider", return_value={"name": "deepseek"}), \
+             patch("routes.ai._check_ai_rate_limit", return_value=True), \
+             patch("routes.ai.generate_verified_client_answer", return_value=verified), \
+             patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": "Je cherche le DIN 01234567", "mode": "ai",
+                })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertIn("DIN 01234567", payload["answer"])
+        self.assertIn("confirmer le numéro", payload["answer"])
+        self.assertIn(
+            "DIN 01234567",
+            payload["advice"]["safety_flags"][0],
+        )
 
     def test_explicit_fast_mode_never_calls_ai_for_detailed_question(self):
         candidate = {
