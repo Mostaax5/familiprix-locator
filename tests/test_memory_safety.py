@@ -5,10 +5,80 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from memory_guard import memory_intensive_task, memory_snapshot
-from routes import ai
+from routes import ai, products
 
 
 class MemorySafetyTests(unittest.TestCase):
+    def test_bootstrap_payload_keeps_media_but_removes_duplicate_identifiers(self):
+        payload = products.bootstrap_product_payload({
+            "id": 42,
+            "name": "TYLENOL 500MG X/F FAC CO100",
+            "description": "Acetaminophen 500 mg.",
+            "image_url": "https://img.test/tylenol.jpg",
+            "barcode": "062600142320",
+            "product_code": "664375",
+            "aisle": "Labo",
+            "side": "Gauche",
+            "section": "2",
+            "shelf": "6",
+            "position": "1",
+            "facings": 2,
+            "is_plano": 1,
+            "in_stock": 1,
+            "linked_position": "",
+            "flipped_label": 0,
+            "created_at": "server-only",
+            "identifiers": [
+                {"type": "GTIN", "value": "062600142320", "status": "confirmed"},
+                {"type": "FAMILIPRIX_CODE", "value": "664375", "status": "confirmed"},
+                {"type": "DIN", "value": "00559407", "status": "confirmed"},
+                {"type": "HEALTH_CANADA_ID", "value": "5255", "status": "confirmed"},
+            ],
+            "regulatory_identifiers": [{
+                "type": "DIN",
+                "value": "00559407",
+                "status": "confirmed",
+                "source": "server-only provenance",
+                "match_method": "manual_entry",
+                "confidence": 1.0,
+            }],
+        })
+
+        self.assertEqual(payload["description"], "Acetaminophen 500 mg.")
+        self.assertEqual(payload["image_url"], "https://img.test/tylenol.jpg")
+        self.assertNotIn("created_at", payload)
+        self.assertEqual(
+            payload["identifiers"],
+            [{
+                "type": "HEALTH_CANADA_ID",
+                "value": "5255",
+                "status": "confirmed",
+                "label": "Confirmé",
+            }],
+        )
+        self.assertEqual(payload["regulatory_identifiers"][0]["value"], "00559407")
+        self.assertNotIn("source", payload["regulatory_identifiers"][0])
+
+    def test_product_corpus_builds_are_process_serialized(self):
+        active = 0
+        peak = 0
+        state_lock = threading.Lock()
+
+        @products._serialized_product_corpus
+        def simulated_build():
+            nonlocal active, peak
+            with state_lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.02)
+            with state_lock:
+                active -= 1
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(lambda _index: simulated_build(), range(8)))
+
+        self.assertEqual(peak, 1)
+
     def test_image_lookup_does_not_stop_on_a_text_only_result(self):
         text_only = {
             "name": "Detailed razor product", "brand": "Example",

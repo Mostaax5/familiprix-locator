@@ -9,12 +9,17 @@ import threading
 import unicodedata
 from collections import Counter, deque
 from difflib import SequenceMatcher
+from functools import wraps
 from urllib.parse import urlsplit
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, Response, jsonify, request, stream_with_context
 from database import get_db, DatabaseIntegrityError
 from auth import require_editor, utc_now_iso, side_display_label
 from routes.layout import validate_layout_slot, aisle_sort_key
-from memory_guard import memory_intensive_task, release_unused_memory
+from memory_guard import (
+    memory_intensive_task,
+    memory_snapshot,
+    release_unused_memory,
+)
 from product_data import (
     FIELD_NAMES,
     IDENTIFIER_TYPES,
@@ -491,8 +496,18 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
 # The cache key (count, max id, max modified_at) changes on any insert/update/delete
 # (every write path stamps modified_at), so no explicit invalidation hooks are needed.
 _PROD_CACHE = {"key": None, "rows": [], "built_at": 0.0}
+_PROD_LOCK = threading.RLock()
 _PROD_IDENTIFIER_DRIFT_TTL_S = 120.0
-_PRODUCTS_PAYLOAD_VERSION = "media-regulatory-v2"
+_PRODUCTS_PAYLOAD_VERSION = "compact-stream-v3"
+
+
+def _serialized_product_corpus(function):
+    """Prevent concurrent cold requests from building duplicate full corpora."""
+    @wraps(function)
+    def locked(*args, **kwargs):
+        with _PROD_LOCK:
+            return function(*args, **kwargs)
+    return locked
 
 
 def _searchable_identifier_status_sql(alias=""):
@@ -801,6 +816,7 @@ def reference_identifier_state_key(db):
     return tuple(row.values()) if isinstance(row, dict) else tuple(row)
 
 
+@_serialized_product_corpus
 def _products_corpus(db, allow_identifier_stale=False):
     """All placed products with their pre-normalized search fields: [(item, row)]."""
     try:
@@ -960,6 +976,12 @@ def _products_corpus(db, allow_identifier_stale=False):
         item["regulatory_identifiers"] = _public_regulatory_identifiers(identifiers)
         rows.append((item, _product_search_row(item, aliases, identifiers)))
     _PROD_CACHE.update(key=key, rows=rows, built_at=time.time())
+    del (
+        product_rows, gtin_keys, aliases_by_product, verified_by_product,
+        verified_values_by_product, field_sources_by_product,
+        identifiers_by_product, reference_identifiers_by_gtin,
+    )
+    release_unused_memory()
     return rows
 
 
@@ -969,6 +991,85 @@ def public_product_payload(item):
         key: value for key, value in dict(item or {}).items()
         if not str(key).startswith("_")
     }
+
+
+_BOOTSTRAP_REQUIRED_FIELDS = (
+    "id", "name", "barcode", "product_code", "aisle", "side", "section",
+    "shelf", "position", "facings", "is_plano", "in_stock",
+    "linked_position", "flipped_label",
+)
+_BOOTSTRAP_OPTIONAL_FIELDS = (
+    "brand", "description", "image_url", "source_url", "search_terms",
+    "usage_notes", "alternative_suggestions", "underneath_label",
+    "last_change_by", "last_change_at",
+)
+
+
+def _bootstrap_identifier(identifier):
+    raw = dict(identifier or {})
+    identifier_type = str(raw.get("type", "") or "").upper().replace("-", "_")
+    value = str(raw.get("value", "") or "").strip()
+    if not identifier_type or not value:
+        return {}
+    confirmed = str(raw.get("status", "") or "") == "confirmed"
+    compact = {
+        "type": identifier_type,
+        "value": value,
+        "status": "confirmed" if confirmed else "probable",
+        "label": "Confirmé" if confirmed else "À confirmer",
+    }
+    for field in ("authority", "match_method"):
+        field_value = str(raw.get(field, "") or "").strip()
+        if field_value:
+            compact[field] = field_value
+    confidence = float(raw.get("confidence", 0) or 0)
+    if confidence:
+        compact["confidence"] = round(confidence, 3)
+    return compact
+
+
+def bootstrap_product_payload(item):
+    """Small phone-cache record; detailed search responses remain unchanged."""
+    product = dict(item or {})
+    payload = {
+        field: product.get(field)
+        for field in _BOOTSTRAP_REQUIRED_FIELDS
+    }
+    for field in _BOOTSTRAP_OPTIONAL_FIELDS:
+        value = product.get(field)
+        if value not in (None, "", [], {}):
+            payload[field] = value
+
+    regulatory = [
+        compact for compact in (
+            _bootstrap_identifier(identifier)
+            for identifier in product.get("regulatory_identifiers", [])
+        )
+        if compact
+    ]
+    if regulatory:
+        payload["regulatory_identifiers"] = regulatory
+
+    barcode = normalized_digits(product.get("barcode", ""))
+    product_code = str(product.get("product_code", "") or "").strip()
+    other_identifiers = []
+    for raw in product.get("identifiers", []):
+        identifier = _bootstrap_identifier(raw)
+        identifier_type = identifier.get("type", "")
+        value = identifier.get("value", "")
+        if not identifier or identifier_type in {"DIN", "NPN", "DIN_HM"}:
+            continue
+        if (
+            identifier_type in {"UPC", "GTIN"}
+            and normalized_digits(value) == barcode
+        ):
+            continue
+        if identifier_type == "FAMILIPRIX_CODE" and value == product_code:
+            continue
+        other_identifiers.append(identifier)
+    if other_identifiers:
+        payload["identifiers"] = other_identifiers
+    return payload
 
 
 def intent_expansion_terms(query):
@@ -3149,10 +3250,31 @@ def get_products():
     if client_etag_matches(etag):
         return "", 304
     products = sorted(
-        (public_product_payload(item) for item, _ in _products_corpus(db)),
-        key=location_sort_key,
+        _products_corpus(db),
+        key=lambda entry: location_sort_key(entry[0]),
     )
-    response = jsonify(products)
+
+    def generate():
+        first = True
+        try:
+            yield "["
+            for item, _search_row in products:
+                encoded = json.dumps(
+                    bootstrap_product_payload(item),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                yield encoded if first else f",{encoded}"
+                first = False
+            yield "]"
+        finally:
+            products.clear()
+            release_unused_memory()
+
+    response = Response(
+        stream_with_context(generate()),
+        mimetype="application/json",
+    )
     response.set_etag(etag, weak=True)
     return response
 
@@ -4300,6 +4422,20 @@ def product_quality_summary():
             for row in field_rows
         },
         "audit": job,
+    })
+
+
+@products_bp.route("/api/product-quality/memory", methods=["GET"])
+def product_memory_status():
+    _username, error = require_editor()
+    if error:
+        return error
+    return jsonify({
+        "success": True,
+        **memory_snapshot(),
+        "product_cache_rows": len(_PROD_CACHE.get("rows") or []),
+        "reference_cache_rows": len(_REF_CACHE.get("rows") or []),
+        "payload_version": _PRODUCTS_PAYLOAD_VERSION,
     })
 
 

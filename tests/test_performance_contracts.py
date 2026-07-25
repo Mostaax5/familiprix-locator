@@ -98,9 +98,12 @@ class PerformanceContractTests(unittest.TestCase):
         search_ui = (ROOT / "static" / "search.js").read_text(encoding="utf-8")
         template = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
 
-        self.assertIn('_PRODUCTS_PAYLOAD_VERSION = "media-regulatory-v2"', product_routes)
+        self.assertIn('_PRODUCTS_PAYLOAD_VERSION = "compact-stream-v3"', product_routes)
         etag_start = product_routes.index("etag = hashlib.sha256")
         self.assertIn("_PRODUCTS_PAYLOAD_VERSION", product_routes[etag_start:etag_start + 300])
+        self.assertIn("@_serialized_product_corpus", product_routes)
+        self.assertIn("stream_with_context(generate())", product_routes)
+        self.assertIn("bootstrap_product_payload(item)", product_routes)
         self.assertIn('rel="preconnect" href="https://magasiner.familiprix.com"', template)
         self.assertIn("scheduleRenderedProductImageHydration();", layout_ui)
         self.assertIn('loading="${imagePriority ? \'eager\' : \'lazy\'}"', layout_ui)

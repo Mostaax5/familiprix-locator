@@ -97,6 +97,7 @@ class SecurityBoundaryTests(unittest.TestCase):
             "/api/planograms/history",
             "/api/gist/status",
             "/api/ai/logs/count",
+            "/api/product-quality/memory",
             "/api/not-a-real-route",
         ):
             with self.subTest(path=path):
