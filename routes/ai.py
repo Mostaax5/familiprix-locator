@@ -1688,6 +1688,14 @@ _CLIENT_VERIFICATION_INSTRUCTIONS = (
     "connaissances. Si data_status n'est pas complete_verified, "
     "indique brièvement ce que l'employé doit confirmer sur l'emballage lorsque cette "
     "information est nécessaire. "
+    "verified_identifiers contient uniquement des identifiants confirmés. "
+    "unconfirmed_identifier_candidates contient des DIN, NPN ou DIN-HM candidats qui peuvent "
+    "être erronés: utilise-les seulement comme indices de recherche pour comprendre pourquoi un "
+    "produit correspond. Si tu cites un de ces numéros, écris explicitement qu'il est à confirmer "
+    "sur l'emballage. Ne le présente jamais comme l'identifiant certain du produit et ne l'utilise "
+    "jamais pour déduire un ingrédient, un dosage, une autorisation, une indication, une "
+    "équivalence ou toute autre propriété. Un identifiant candidat ne suffit pas non plus à "
+    "rattacher automatiquement une fiche réglementaire au produit. "
     "Ne déclare jamais deux produits thérapeutiquement équivalents, interchangeables ou sûrs "
     "comme substituts; une relation de famille ou de format ne prouve pas cela. "
     "Si selected_text_from_previous_answer est fourni, réponds précisément à la question en reliant "
@@ -1716,19 +1724,96 @@ _CLIENT_VERIFICATION_INSTRUCTIONS = (
 )
 
 
+def _client_rag_identifier_groups(product):
+    """Separate authoritative identifiers from useful, explicitly unsafe clues."""
+    identifiers = list(product.get("_identifiers") or [])
+    if not identifiers:
+        identifiers = list(
+            product.get("identifiers")
+            or product.get("regulatory_identifiers")
+            or []
+        )
+
+    normalized = []
+    verified_keys = set()
+    for raw in identifiers:
+        if not isinstance(raw, dict):
+            continue
+        identifier_type = str(raw.get("type", "") or "").upper().replace("-", "_")
+        value = str(raw.get("value", "") or "").strip()
+        if not identifier_type or not value:
+            continue
+        verification_status = str(
+            raw.get("verification_status", "") or ""
+        ).strip().lower()
+        public_status = str(raw.get("status", "") or "").strip().lower()
+        confirmed = verification_status == "verified" or public_status == "confirmed"
+        record = {
+            "type": identifier_type,
+            "value": value,
+            "authority": str(raw.get("authority", "") or "").strip(),
+            "source": str(raw.get("source", "") or "").strip(),
+            "match_method": str(raw.get("match_method", "") or "").strip(),
+            "confidence": raw.get("confidence", 0),
+            "confirmed": confirmed,
+        }
+        normalized.append(record)
+        if confirmed:
+            verified_keys.add((identifier_type, value))
+
+    verified_identifiers = []
+    unconfirmed_candidates = []
+    seen_verified = set()
+    seen_candidates = set()
+    for identifier in normalized:
+        key = (identifier["type"], identifier["value"])
+        if identifier["confirmed"]:
+            if key in seen_verified:
+                continue
+            seen_verified.add(key)
+            verified_identifiers.append({
+                "type": identifier["type"],
+                "value": identifier["value"],
+                "authority": identifier["authority"],
+            })
+            continue
+        if (
+            identifier["type"] not in {"DIN", "NPN", "DIN_HM"}
+            or key in verified_keys
+            or key in seen_candidates
+        ):
+            continue
+        seen_candidates.add(key)
+        try:
+            confidence = round(float(identifier["confidence"] or 0), 3)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        unconfirmed_candidates.append({
+            "type": identifier["type"],
+            "value": identifier["value"],
+            "authority": identifier["authority"],
+            "source": identifier["source"],
+            "match_method": identifier["match_method"],
+            "confidence": confidence,
+            "status": "unconfirmed",
+            "usage": "retrieval_clue_only",
+            "may_be_wrong": True,
+            "must_confirm_on_package": True,
+            "warning": (
+                "Association possible mais non confirmée; vérifier le numéro "
+                "sur l'emballage avant de le présenter comme exact."
+            ),
+        })
+    return verified_identifiers, unconfirmed_candidates
+
+
 def product_context_for_client_rag(product):
     context = product_context_for_client_help(product)
     verified_fields = set(product.get("_verified_fields") or [])
     description = str(product.get("description", "") or "").strip()
-    verified_identifiers = [
-        {
-            "type": identifier.get("type", ""),
-            "value": identifier.get("value", ""),
-            "authority": identifier.get("authority", ""),
-        }
-        for identifier in (product.get("_identifiers") or [])
-        if identifier.get("verification_status") == "verified"
-    ]
+    verified_identifiers, unconfirmed_identifier_candidates = (
+        _client_rag_identifier_groups(product)
+    )
 
     def verified_value(field, status_field=""):
         value = str(product.get(field, "") or "").strip()
@@ -1764,6 +1849,7 @@ def product_context_for_client_rag(product):
         "field_sources": product.get("_field_sources") or {},
         "verified_fields": sorted(verified_fields),
         "verified_identifiers": verified_identifiers,
+        "unconfirmed_identifier_candidates": unconfirmed_identifier_candidates,
     })
     return context
 
@@ -1963,6 +2049,12 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "jusqu'à 16, et aucun autre. Copie les noms de produits exactement lorsqu'ils apparaissent "
     "dans le texte. Les attributs absents ou signalés non vérifiés dans les candidats ne sont "
     "pas des faits et ne doivent jamais être déduits. Réponds dans answer_language, sans Markdown. "
+    "verified_identifiers contient uniquement les numéros confirmés. "
+    "unconfirmed_identifier_candidates contient des DIN, NPN ou DIN-HM utilisables seulement "
+    "comme indices de recherche et qui peuvent être erronés. Si tu en cites un, indique toujours "
+    "« à confirmer sur l'emballage ». Ne l'utilise jamais comme preuve pour attribuer au produit "
+    "les faits d'un document Santé Canada; seule une association vérifiée peut relier "
+    "automatiquement ce document au produit. "
     "Ne déclare jamais deux produits thérapeutiquement équivalents, interchangeables ou sûrs "
     "comme substituts. "
     "Pour une demande médicale, "

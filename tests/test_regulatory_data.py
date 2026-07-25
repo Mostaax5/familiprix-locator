@@ -295,8 +295,19 @@ class RegulatoryDataTests(unittest.TestCase):
         self.assertEqual(
             item["regulatory_identifiers"][0]["status"], "probable"
         )
+        ai_context = product_context_for_client_rag(item)
+        self.assertEqual(ai_context["verified_identifiers"], [])
         self.assertEqual(
-            product_context_for_client_rag(item)["verified_identifiers"], []
+            [
+                identifier["value"]
+                for identifier in ai_context["unconfirmed_identifier_candidates"]
+            ],
+            ["80123456"],
+        )
+        self.assertTrue(
+            ai_context["unconfirmed_identifier_candidates"][0][
+                "must_confirm_on_package"
+            ]
         )
 
         upsert_reference_identifier(
@@ -352,8 +363,14 @@ class RegulatoryDataTests(unittest.TestCase):
             item["regulatory_identifiers"][0]["match_method"],
             "health_canada_name_candidate",
         )
+        ai_context = product_context_for_client_rag(item)
+        self.assertEqual(ai_context["verified_identifiers"], [])
         self.assertEqual(
-            product_context_for_client_rag(item)["verified_identifiers"], []
+            ai_context["unconfirmed_identifier_candidates"][0]["usage"],
+            "retrieval_clue_only",
+        )
+        self.assertTrue(
+            ai_context["unconfirmed_identifier_candidates"][0]["may_be_wrong"]
         )
         db.close()
 
@@ -465,10 +482,67 @@ class RegulatoryDataTests(unittest.TestCase):
                 ],
                 [new_product_id],
             )
+        ai_context = product_context_for_client_rag(item)
+        self.assertEqual(ai_context["verified_identifiers"], [])
         self.assertEqual(
-            product_context_for_client_rag(item)["verified_identifiers"], []
+            {
+                identifier["value"]
+                for identifier in ai_context["unconfirmed_identifier_candidates"]
+            },
+            {value for value, _confidence, _status in candidates},
         )
         db.close()
+
+    def test_ai_context_never_promotes_or_duplicates_uncertain_identifiers(self):
+        context = product_context_for_client_rag({
+            "name": "Example product",
+            "barcode": "063848966068",
+            "_identifiers": [
+                {
+                    "type": "DIN", "value": "01234567",
+                    "authority": "Health Canada",
+                    "verification_status": "verified",
+                },
+                {
+                    "type": "DIN", "value": "01234567",
+                    "authority": "Health Canada",
+                    "verification_status": "requires_review",
+                    "confidence": 0.4,
+                },
+                {
+                    "type": "NPN", "value": "80123456",
+                    "authority": "Health Canada",
+                    "verification_status": "requires_review",
+                    "confidence": 0.7,
+                },
+                {
+                    "type": "DIN-HM", "value": "80012345",
+                    "authority": "Health Canada",
+                    "verification_status": "rejected",
+                    "confidence": 0.05,
+                },
+            ],
+        })
+        self.assertEqual(
+            context["verified_identifiers"],
+            [{
+                "type": "DIN", "value": "01234567",
+                "authority": "Health Canada",
+            }],
+        )
+        self.assertEqual(
+            {
+                (identifier["type"], identifier["value"])
+                for identifier in context["unconfirmed_identifier_candidates"]
+            },
+            {("NPN", "80123456"), ("DIN_HM", "80012345")},
+        )
+        self.assertTrue(all(
+            identifier["status"] == "unconfirmed"
+            and identifier["must_confirm_on_package"]
+            and identifier["may_be_wrong"]
+            for identifier in context["unconfirmed_identifier_candidates"]
+        ))
 
     def test_low_confidence_review_candidate_is_copied_and_searchable(self):
         db = self.make_db()

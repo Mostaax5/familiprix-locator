@@ -12,6 +12,7 @@ from routes.ai import (
     filter_client_answer_category,
     generate_documented_client_answer,
     health_canada_documents,
+    health_canada_nhp_documents,
     normalize_documented_client_answer,
     normalize_verified_client_answer,
     normalize_url,
@@ -482,6 +483,29 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertEqual(documents, [])
         lookup.assert_not_called()
+
+    def test_unconfirmed_identifiers_never_attach_regulatory_documents(self):
+        products = [{
+            "client_id": "product:1",
+            "name": "Possible regulated product",
+            "_identifiers": [
+                {
+                    "type": "DIN", "value": "01234567",
+                    "verification_status": "requires_review",
+                },
+                {
+                    "type": "NPN", "value": "80123456",
+                    "verification_status": "requires_review",
+                },
+            ],
+        }]
+        with patch("routes.ai._health_canada_json") as drug_lookup, \
+             patch("routes.ai._health_canada_nhp_json") as nhp_lookup:
+            self.assertEqual(health_canada_documents(products), [])
+            self.assertEqual(health_canada_nhp_documents(products), [])
+
+        drug_lookup.assert_not_called()
+        nhp_lookup.assert_not_called()
 
     def test_documented_deepseek_timeout_retries_fast_model_without_thinking(self):
         response_payload = {
