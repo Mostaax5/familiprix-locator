@@ -4157,6 +4157,12 @@ def client_help():
         and (
             (query_plan.get("wants_all") and "melaton" in normalized_question)
             or is_toothbrush_power_comparison
+            or (
+                query_plan.get("intent") == "headache_relief"
+                and not follow_up
+                and not selected_text
+                and not focus_product_id
+            )
         )
     )
     if not use_local_documented_summary:

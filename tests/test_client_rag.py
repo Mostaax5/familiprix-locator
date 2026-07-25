@@ -1052,6 +1052,58 @@ class ClientRagTests(unittest.TestCase):
         provider.assert_not_called()
         rate_limit.assert_not_called()
 
+    def test_documented_headache_question_uses_immediate_grounded_summary(self):
+        candidates = [{
+            "id": 1, "client_id": "product:1",
+            "name": "BIOMEDIC SOUL M/TETE ULT CO120", "brand": "Biomedic",
+            "description": "Contient de l'acétaminophène.",
+            "barcode": "1001", "aisle": "Labo", "side": "A",
+            "section": "2", "shelf": "3", "position": "4",
+        }, {
+            "id": 2, "client_id": "product:2",
+            "name": "ADVIL 200MG CO100", "brand": "Advil",
+            "description": "Comprimés d'ibuprofène.",
+            "barcode": "1002", "aisle": "Labo", "side": "A",
+            "section": "2", "shelf": "4", "position": "1",
+        }]
+        documents = [{
+            "source_id": "store-plan", "title": "Plan actuel",
+            "publisher": "Familiprix Locator", "url": "", "evidence": "",
+            "candidate_ids": [product["client_id"] for product in candidates],
+        }, {
+            "source_id": "health-canada:acetaminophen-safe-use",
+            "title": "Acétaminophène", "publisher": "Santé Canada",
+            "url": "https://www.canada.ca/",
+            "evidence": "Lire l'étiquette et éviter les doublons.",
+            "candidate_ids": [],
+        }]
+        with patch("routes.products.hybrid_client_candidates", return_value=candidates), \
+             patch("routes.products.hydrate_candidate_images"), \
+             patch("routes.ai.retrieve_client_documentation", return_value=documents), \
+             patch("routes.ai.generate_documented_client_answer") as generator, \
+             patch("routes.ai.configured_ai_provider") as provider, \
+             patch("routes.ai._check_ai_rate_limit") as rate_limit, \
+             patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": "Jai male a la tete que prendre",
+                    "mode": "documented",
+                })
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(payload["degraded"])
+        self.assertEqual(payload["warning"], "")
+        self.assertIn("mal de tête", payload["answer"])
+        self.assertIn("acétaminophène", payload["answer"])
+        self.assertEqual(
+            [point["heading"] for point in payload["advice"]["documentation"]["key_points"]],
+            ["Avant de choisir", "Ingrédients repérés", "Éviter les doublons", "Besoin d'un avis"],
+        )
+        generator.assert_not_called()
+        provider.assert_not_called()
+        rate_limit.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
