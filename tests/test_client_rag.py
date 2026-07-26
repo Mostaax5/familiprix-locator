@@ -164,6 +164,16 @@ class ClientRagTests(unittest.TestCase):
                 "id": 17, "name": "TYLENOL X/F A/MUCUS 170ML",
                 "brand": "Tylenol", "barcode": "117",
             },
+            {
+                "id": 18, "name": "AIRWICK E/MIST LAV FL AMD 20ML",
+                "brand": "Airwick", "barcode": "118",
+                "description": "Contient de l'acétaminophène.",
+            },
+            {
+                "id": 19, "name": "BENYLIN T/E/U S/APAIS 250ML",
+                "brand": "Benylin", "barcode": "119",
+                "description": "Soulage la douleur et contient un analgésique.",
+            },
         ]
         corpus = [
             (
@@ -200,6 +210,14 @@ class ClientRagTests(unittest.TestCase):
             {"id": 1, "name": "ADVIL 200MG CO100", "brand": "Advil"},
             {"id": 2, "name": "ORAL-B IO TETE BR/DENTS BLC 4", "brand": "Oral-B"},
             {"id": 3, "name": "TYLENOL RH/SIN JR NT CA20", "brand": "Tylenol"},
+            {
+                "id": 4, "name": "AIRWICK E/MIST LAV FL AMD 20ML",
+                "brand": "Airwick", "description": "Contient de l'acétaminophène.",
+            },
+            {
+                "id": 5, "name": "BENYLIN T/E/U S/APAIS 250ML",
+                "brand": "Benylin", "description": "Soulage la douleur.",
+            },
         ]
 
         filtered = filter_client_answer_category(

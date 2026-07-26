@@ -1208,6 +1208,20 @@ def _is_headache_request(query):
     return "tete" in tokens and bool(tokens.intersection({"mal", "male", "maux"}))
 
 
+def _headache_relief_named_product(value):
+    """Require the sellable product's name to identify a pain-relief family.
+
+    Descriptions are useful for ranking, but imported enrichment can be stale or
+    wrong. A contaminated description must never turn an unrelated room
+    fragrance, cough product, or toothbrush into a headache recommendation.
+    """
+    padded = f" {normalize_search_text(value)} "
+    return any(
+        f" {normalize_search_text(term)} " in padded
+        for term in _HEADACHE_RELIEF_TERMS
+    )
+
+
 def client_request_intent(query):
     if _is_headache_request(query):
         return "headache_relief"
@@ -1395,10 +1409,21 @@ def filter_client_request_products(products, query):
     excluded = client_excluded_concept_terms(query)
     if not required and not excluded:
         return list(products)
-    return [
+    filtered = [
         product for product in products
         if row_matches_client_concepts(_product_search_row(product), required, excluded)
     ]
+    if _is_headache_request(query):
+        named = [
+            product for product in filtered
+            if _headache_relief_named_product(" ".join((
+                str(product.get("name", "") or ""),
+                str(product.get("brand", "") or ""),
+            )))
+        ]
+        if named:
+            return named
+    return filtered
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -3423,6 +3448,7 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
     corpus = _employee_product_corpus(db)
     required_concepts = client_required_concept_groups(question)
     excluded_concepts = client_excluded_concept_terms(question)
+    headache_name_required = _is_headache_request(question)
 
     def clean_list(value, max_items=20):
         if not isinstance(value, list):
@@ -3515,6 +3541,10 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
                 existing["in_stock"] = 1
             continue
         seen_documents.add(key)
+        if headache_name_required and not _headache_relief_named_product(
+            f"{row.get('_name', '')} {row.get('_brand', '')}"
+        ):
+            continue
         if not row_matches_client_concepts(row, required_concepts, excluded_concepts):
             continue
         lexical = 0
