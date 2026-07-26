@@ -658,6 +658,52 @@ class ClientRagTests(unittest.TestCase):
             result["source_ids"],
         )
 
+    def test_documented_wound_dressing_fallback_answers_the_comparison(self):
+        products = [{
+            "id": 1, "client_id": "product:1",
+            "name": "PARAMEDIC PANS HYDRO 10X10CM 1",
+            "description": (
+                "Pansement hydrocolloïde qui absorbe l'exsudat et maintient "
+                "un milieu humide."
+            ),
+            "aisle": "2", "side": "B", "section": "6",
+            "shelf": "7", "position": "3",
+        }, {
+            "id": 2, "client_id": "product:2",
+            "name": "PARAMEDIC PANS TRANSP 5CMX1M 1",
+            "description": (
+                "Film transparent imperméable qui permet de voir la plaie."
+            ),
+            "aisle": "2", "side": "B", "section": "6",
+            "shelf": "6", "position": "4",
+        }]
+        query_plan = build_client_query_plan(
+            (
+                "Quelle est la différence entre un pansement hydrocolloïde "
+                "et un pansement transparent?"
+            ),
+            "documented",
+        )
+        documents = retrieve_client_documentation(
+            products, query_plan, include_live_regulatory=False,
+        )
+
+        with patch("routes.ai._provider_structured_request", return_value=None):
+            result = generate_documented_client_answer(
+                query_plan["corrected_query"], query_plan, products, documents,
+            )
+
+        self.assertIn("forme un gel", result["answer"])
+        self.assertIn("zone visible", result["answer"])
+        self.assertEqual(
+            [point["heading"] for point in result["key_points"]],
+            ["Hydrocolloïde", "Film transparent", "Choix rapide", "Avant d'appliquer"],
+        )
+        self.assertIn("nhs:wound-hydrocolloid", result["source_ids"])
+        self.assertIn("nhs:wound-transparent-film", result["source_ids"])
+        self.assertEqual(len(result["follow_up_questions"]), 3)
+        self.assertTrue(result["pharmacist_referral"])
+
     def test_documented_toothbrush_fallback_compares_power_types(self):
         products = [{
             "client_id": "product:1", "name": "ORAL-B BR/DENTS A PILE 1",
@@ -855,6 +901,29 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertIn(20, [item["id"] for item in selected])
         self.assertIn(21, [item["id"] for item in selected])
+
+    def test_comparison_context_covers_each_requested_product_type(self):
+        candidates = [{
+            "id": index,
+            "name": f"Pansement transparent {index}",
+            "description": "Film transparent imperméable.",
+        } for index in range(1, 10)] + [{
+            "id": 20,
+            "name": "Pansement hydrocolloïde",
+            "description": "Coussinet hydrocolloïde absorbant.",
+        }]
+
+        selected = select_client_answer_candidates(
+            candidates,
+            limit=4,
+            question=(
+                "Quelle est la différence entre un pansement hydrocolloïde "
+                "et un pansement transparent?"
+            ),
+        )
+
+        self.assertIn(20, [item["id"] for item in selected])
+        self.assertTrue(any("transparent" in item["name"].lower() for item in selected))
 
     def test_request_router_separates_fast_lookup_from_detailed_advice(self):
         self.assertEqual(classify_client_request("Advil"), "lookup")
@@ -1188,6 +1257,44 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertLess(payload["elapsed_ms"], 1000)
         self.assertIn("façon de les prendre", payload["answer"])
+        generator.assert_not_called()
+        provider.assert_not_called()
+        rate_limit.assert_not_called()
+
+    def test_documented_wound_comparison_skips_ai_delay(self):
+        candidates = [{
+            "id": 1, "client_id": "product:1",
+            "name": "PARAMEDIC PANS HYDRO 10X10CM 1",
+            "description": "Pansement hydrocolloïde absorbant.",
+            "barcode": "1001", "aisle": "2", "side": "B",
+            "section": "6", "shelf": "7", "position": "3",
+        }, {
+            "id": 2, "client_id": "product:2",
+            "name": "PARAMEDIC PANS TRANSP 5CMX1M 1",
+            "description": "Film transparent imperméable.",
+            "barcode": "1002", "aisle": "2", "side": "B",
+            "section": "6", "shelf": "6", "position": "4",
+        }]
+        with patch("routes.products.hybrid_client_candidates", return_value=candidates), \
+             patch("routes.products.hydrate_candidate_images"), \
+             patch("routes.ai.generate_documented_client_answer") as generator, \
+             patch("routes.ai.configured_ai_provider") as provider, \
+             patch("routes.ai._check_ai_rate_limit") as rate_limit, \
+             patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": (
+                        "Quelle est la différence entre un pansement hydrocolloïde "
+                        "et un pansement transparent?"
+                    ),
+                    "mode": "documented",
+                })
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertLess(payload["elapsed_ms"], 1000)
+        self.assertFalse(payload["degraded"])
+        self.assertIn("forme un gel", payload["answer"])
         generator.assert_not_called()
         provider.assert_not_called()
         rate_limit.assert_not_called()

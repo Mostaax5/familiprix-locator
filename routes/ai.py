@@ -1905,9 +1905,10 @@ def normalize_verified_client_answer(parsed, valid_ids):
     }
 
 
-def select_client_answer_candidates(candidates, limit=16, diversify_brands=False):
+def select_client_answer_candidates(candidates, limit=16, diversify_brands=False,
+                                    question=""):
     """Keep the AI context small while retaining different product forms."""
-    from routes.products import normalize_search_text
+    from routes.products import normalize_search_text, tokenize_search_query
 
     family_markers = (
         ("children", ("enf", "enfant", "pediat", "kids")),
@@ -1933,6 +1934,42 @@ def select_client_answer_candidates(candidates, limit=16, diversify_brands=False
         return tuple(tokens[:3])
 
     selected = []
+    if question and candidates:
+        searchable = [(
+            product,
+            f" {normalize_search_text(' '.join([
+                str(product.get('name', '') or ''),
+                str(product.get('brand', '') or ''),
+                str(product.get('description', '') or ''),
+                str(product.get('usage_notes', '') or ''),
+                str(product.get('category', '') or ''),
+                str(product.get('purpose', '') or ''),
+            ]))} ",
+        ) for product in candidates]
+        comparison_terms = []
+        for token in tokenize_search_query(question):
+            stem = token[:-1] if len(token) >= 6 and token.endswith("s") else token
+            pattern = re.compile(
+                rf"(?<![a-z0-9]){re.escape(stem)}[a-z0-9]*(?![a-z0-9])"
+            )
+            matches = [
+                product for product, text in searchable if pattern.search(text)
+            ]
+            if matches and len(matches) < len(candidates):
+                comparison_terms.append((len(matches), pattern, matches))
+        # Rare requested concepts are covered first. This prevents a comparison
+        # such as "hydrocolloïde ou transparent" from sending eight transparent
+        # products to the answerer and omitting the other side entirely.
+        comparison_terms.sort(key=lambda item: item[0])
+        for _count, _pattern, matches in comparison_terms:
+            product = next(
+                (item for item in matches if item not in selected), None
+            )
+            if product is not None:
+                selected.append(product)
+            if len(selected) >= limit:
+                return selected
+
     if diversify_brands:
         seen_brands = set()
         for product in candidates:
@@ -2523,6 +2560,44 @@ def _client_intent_documents(query_plan):
             ),
             "candidate_ids": [],
         }]
+    is_wound_dressing_comparison = bool(
+        (query_plan or {}).get("needs_comparison")
+        and any(term in normalized_question for term in (
+            "pansement", "pansements", "bandage", "dressing",
+        ))
+        and "hydrocollo" in normalized_question
+        and "transp" in normalized_question
+    )
+    if is_wound_dressing_comparison:
+        guideline_url = (
+            "https://www.elft.nhs.uk/sites/default/files/2023-08/"
+            "Wound%20Management%20Guidelines%20Vs%207.1%20March%202023.pdf"
+        )
+        return [{
+            "source_id": "nhs:wound-hydrocolloid",
+            "title": "NHS - Pansements hydrocolloïdes",
+            "publisher": "East London NHS Foundation Trust",
+            "url": guideline_url,
+            "evidence": (
+                "Les hydrocolloïdes sont des pansements occlusifs. Au contact de l'exsudat, "
+                "leur matrice forme un gel humide qui maintient l'humidité et favorise la "
+                "granulation. Le guide précise qu'ils ne conviennent pas aux plaies fortement "
+                "exsudatives."
+            ),
+            "candidate_ids": [],
+        }, {
+            "source_id": "nhs:wound-transparent-film",
+            "title": "NHS - Films adhésifs transparents semi-perméables",
+            "publisher": "East London NHS Foundation Trust",
+            "url": guideline_url,
+            "evidence": (
+                "Les films adhésifs semi-perméables sont de minces feuilles transparentes de "
+                "polyuréthane. Ils permettent d'observer la plaie, retiennent l'humidité et "
+                "forment une barrière contre l'eau et les bactéries; ils conviennent surtout "
+                "aux plaies non ou peu exsudatives."
+            ),
+            "candidate_ids": [],
+        }]
     if str((query_plan or {}).get("intent", "") or "") != "headache_relief":
         return []
     return [{
@@ -2751,6 +2826,56 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         question_words.intersection({"saveur", "saveurs", "gout", "gouts", "flavor", "flavors"})
     )
     is_melatonin_query = "melaton" in normalized_question
+    is_wound_dressing_comparison = bool(
+        query_plan.get("needs_comparison")
+        and question_words.intersection({
+            "pansement", "pansements", "bandage", "bandages", "dressing",
+        })
+        and any(word.startswith("hydrocollo") for word in question_words)
+        and any(word.startswith("transp") for word in question_words)
+    )
+
+    evidence_stopwords = {
+        "avoir", "avec", "comment", "contexte", "dans", "difference",
+        "differentes", "differents", "dire", "entre", "est", "faire",
+        "lequel", "laquelle", "magasin", "meilleur", "prendre", "produit",
+        "produits", "quel", "quelle", "quelles", "quels", "tout", "tous",
+        "toute", "toutes", "utiliser",
+    }
+    evidence_query_words = {
+        word for word in question_words
+        if len(word) >= 4 and word not in evidence_stopwords
+    }
+
+    def product_evidence_excerpt(product, limit=240):
+        raw = " ".join(str(product.get(field, "") or "").strip() for field in (
+            "description", "usage_notes", "purpose", "compatibility",
+        )).strip()
+        raw = re.sub(r"\s+", " ", raw)
+        if not raw:
+            return ""
+        segments = [
+            segment.strip(" -•")
+            for segment in re.split(r"(?<=[.!?])\s+|[;\r\n•]+", raw)
+            if segment.strip(" -•")
+        ]
+        if not segments:
+            return raw[:limit].rstrip()
+
+        def evidence_score(segment):
+            normalized = normalize_search_text(segment)
+            return (
+                sum(4 for word in evidence_query_words if word in normalized)
+                + sum(1 for marker in (
+                    "absor", "compatible", "convient", "ideal", "indique",
+                    "protege", "soulage", "utilisation", "usage",
+                ) if marker in normalized)
+            )
+
+        excerpt = max(segments, key=evidence_score)
+        if len(excerpt) > limit:
+            excerpt = excerpt[:limit].rsplit(" ", 1)[0].rstrip(" ,;:")
+        return excerpt
 
     def detected_product_form(name, details):
         padded_name = f" {name} "
@@ -2852,6 +2977,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
     ingredient_families = []
     product_traits = {}
     toothbrush_groups = defaultdict(int)
+    wound_dressing_groups = defaultdict(list)
     ingredient_markers = (
         ("acétaminophène", ("acetaminophene", "paracetamol")),
         ("ibuprofène", ("ibuprofene",)),
@@ -2869,6 +2995,21 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         normalized_name = normalize_search_text(name)
         normalized_details = normalize_search_text(f"{name} {description} {usage_notes}")
         traits = []
+        if is_wound_dressing_comparison:
+            if "hydrocollo" in normalized_details:
+                dressing_type = "pansement hydrocolloïde"
+            elif (
+                "transp" in normalized_details
+                and any(marker in normalized_details for marker in (
+                    "pansement", "bandage", "film", "diachylon",
+                ))
+            ):
+                dressing_type = "film ou pansement transparent"
+            else:
+                dressing_type = ""
+            if dressing_type:
+                traits.append(dressing_type)
+                wound_dressing_groups[dressing_type].append(candidate_id)
         for label, markers in ingredient_markers:
             if any(marker in normalized_details for marker in markers):
                 if label not in ingredient_families:
@@ -3031,6 +3172,39 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             "prolongée. "
             + flavor_text
         )
+    elif names and is_wound_dressing_comparison:
+        hydro_count = len(wound_dressing_groups.get("pansement hydrocolloïde", []))
+        film_count = len(
+            wound_dressing_groups.get("film ou pansement transparent", [])
+        )
+        availability = []
+        if hydro_count:
+            availability.append(
+                f"{hydro_count} hydrocolloïde{'s' if hydro_count > 1 else ''}"
+            )
+        if film_count:
+            availability.append(
+                f"{film_count} transparent{'s' if film_count > 1 else ''}"
+            )
+        availability_text = (
+            " Parmi les produits comparés, le plan contient "
+            + " et ".join(availability) + "."
+            if availability else ""
+        )
+        answer = (
+            "Un pansement hydrocolloïde absorbe une quantité légère à modérée de liquide "
+            "et forme un gel qui maintient un milieu humide protégé; il est surtout utile "
+            "pour une plaie superficielle ou une ampoule qui suinte un peu. Un film "
+            "transparent est beaucoup plus mince et sert surtout de barrière contre l'eau "
+            "et les saletés tout en laissant la zone visible; sans coussinet absorbant, il "
+            "convient plutôt à une plaie sèche ou très peu exsudative. "
+            "Donc: choisir l'hydrocolloïde lorsqu'il faut absorber et protéger la "
+            "cicatrisation, et le transparent lorsqu'il faut surtout voir et imperméabiliser "
+            "la zone."
+            + availability_text
+            + " Vérifier la taille, la présence d'un coussinet, le niveau d'exsudat et les "
+            "contre-indications du produit exact."
+        )
     elif names and is_form_comparison_query:
         practical_differences = [
             f"Les {form} : {form_guidance[form]}."
@@ -3070,12 +3244,39 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             summary_parts.append(
                 "les différences confirmées sont présentées produit par produit ci-dessous"
             )
-        answer = (
-            "Les options du magasin se distinguent surtout ainsi : "
-            + "; ".join(summary_parts) + ". "
-            "Pour répondre au client, partez du besoin précis puis comparez ces différences; "
-            "confirmez sur l'emballage toute caractéristique absente de la fiche."
-        )
+        evidence_items = []
+        for product in selected:
+            excerpt = product_evidence_excerpt(product)
+            name = str(product.get("name", "") or "").strip()
+            if name and excerpt:
+                evidence_items.append((name, excerpt))
+            if len(evidence_items) >= (3 if query_plan.get("needs_comparison") else 1):
+                break
+        if query_plan.get("needs_comparison") and len(evidence_items) >= 2:
+            answer = (
+                "D'après les fiches actuelles du magasin, voici la différence la plus utile : "
+                + " ".join(
+                    f"{name} — {excerpt}."
+                    for name, excerpt in evidence_items
+                )
+                + " Comparez ensuite l'usage précis, le format et les avertissements sur "
+                "l'emballage; une fiche marquée non vérifiée doit être confirmée."
+            )
+        elif evidence_items:
+            name, excerpt = evidence_items[0]
+            answer = (
+                f"Le résultat le plus directement lié est {name}. "
+                f"Sa fiche actuelle indique : {excerpt}. "
+                "Les cartes ci-dessous montrent les autres options du plan et leur "
+                "emplacement; confirmez sur l'emballage toute fiche marquée non vérifiée."
+            )
+        else:
+            answer = (
+                "Les options du magasin se distinguent surtout ainsi : "
+                + "; ".join(summary_parts) + ". "
+                "Pour répondre au client, partez du besoin précis puis comparez ces différences; "
+                "confirmez sur l'emballage toute caractéristique absente de la fiche."
+            )
     else:
         answer = (
             "Je n'ai trouvé aucun produit correspondant dans le plan actuel du magasin. "
@@ -3085,15 +3286,11 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
     comparisons = []
     for product in selected[:8]:
         candidate_id = str(product.get("client_id", "") or "")
-        description = str(product.get("description", "") or "").strip()
-        usage_notes = str(product.get("usage_notes", "") or "").strip()
         traits = product_traits.get(candidate_id, [])
         details = [", ".join(traits).capitalize()] if traits else []
-        evidence = description or usage_notes
+        evidence = product_evidence_excerpt(product, limit=260)
         if evidence:
-            first_sentence = re.split(r"(?<=[.!?])\s+", evidence, maxsplit=1)[0].strip()
-            if first_sentence:
-                details.append(first_sentence[:260])
+            details.append(evidence)
         source_ids = source_ids_by_product.get(candidate_id, [])
         specific_sources = [source_id for source_id in source_ids if source_id != "store-plan"]
         comparisons.append({
@@ -3130,6 +3327,14 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
     melatonin_pediatric_source = (
         ["health-canada:melatonin-pediatric"]
         if "health-canada:melatonin-pediatric" in valid_source_ids else []
+    )
+    wound_hydrocolloid_source = (
+        ["nhs:wound-hydrocolloid"]
+        if "nhs:wound-hydrocolloid" in valid_source_ids else []
+    )
+    wound_transparent_source = (
+        ["nhs:wound-transparent-film"]
+        if "nhs:wound-transparent-film" in valid_source_ids else []
     )
     if is_headache_query:
         key_points.append({
@@ -3227,6 +3432,43 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                 ),
                 "source_ids": store_source,
             })
+    elif is_wound_dressing_comparison:
+        key_points.extend([{
+            "heading": "Hydrocolloïde",
+            "detail": (
+                "Absorbe l'exsudat léger à modéré, forme un gel et maintient un milieu humide. "
+                "Utile notamment pour certaines plaies superficielles et ampoules; ne convient "
+                "pas à une plaie fortement exsudative."
+            ),
+            "source_ids": wound_hydrocolloid_source,
+        }, {
+            "heading": "Film transparent",
+            "detail": (
+                "Barrière mince et transparente qui permet de voir la zone. Sans coussinet "
+                "absorbant, elle vise surtout une plaie sèche ou très peu exsudative."
+            ),
+            "source_ids": wound_transparent_source,
+        }, {
+            "heading": "Choix rapide",
+            "detail": (
+                "Hydrocolloïde si l'objectif est d'absorber un peu et de protéger la "
+                "cicatrisation; film transparent si l'objectif principal est de surveiller "
+                "visuellement et d'imperméabiliser."
+            ),
+            "source_ids": (
+                wound_hydrocolloid_source + wound_transparent_source
+            )[:4],
+        }, {
+            "heading": "Avant d'appliquer",
+            "detail": (
+                "Confirmer la taille et la profondeur de la plaie, la quantité de liquide, "
+                "l'état de la peau autour, les signes d'infection et la présence d'un "
+                "coussinet absorbant dans le produit exact."
+            ),
+            "source_ids": (
+                wound_hydrocolloid_source + wound_transparent_source
+            )[:4],
+        }])
     elif is_form_comparison_query:
         for form in forms[:4]:
             if form not in form_guidance:
@@ -3277,6 +3519,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             or doses
             or ingredient_families
             or is_melatonin_query
+            or is_wound_dressing_comparison
         )
     )
     generic_dimensions = []
@@ -3302,6 +3545,11 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         "La personne peut-elle avaler une forme solide facilement?",
         "Quel âge a la personne et quel symptôme précis veut-elle soulager?",
         "A-t-elle déjà pris un produit contenant le même ingrédient aujourd'hui?",
+    ]
+    wound_follow_ups = [
+        "La plaie est-elle sèche, légèrement humide ou très exsudative?",
+        "Y a-t-il rougeur qui s'étend, chaleur, douleur croissante, pus ou fièvre?",
+        "Faut-il surtout absorber, protéger de l'eau ou pouvoir observer la plaie?",
     ]
     if is_toothbrush_query:
         practical_guidance = (
@@ -3332,6 +3580,17 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             "Ne pas déduire qu'un produit agit plus vite ou plus longtemps à partir "
             "du seul nom abrégé; confirmer la libération et l'usage sur l'étiquette."
         )
+    elif is_wound_dressing_comparison:
+        practical_guidance = (
+            "Évaluer d'abord la quantité de liquide: hydrocolloïde pour absorber un peu "
+            "et maintenir un milieu humide; film transparent pour une protection mince "
+            "et visible lorsque l'absorption nécessaire est faible."
+        )
+        important_check = (
+            "Ne pas choisir uniquement selon le mot « transparent »: certains produits "
+            "ont un coussinet absorbant et d'autres sont seulement un film. Vérifier "
+            "l'indication, la taille, la durée de port et les contre-indications."
+        )
     elif is_form_comparison_query:
         practical_guidance = (
             "Choisir la forme selon la façon de la prendre, puis comparer séparément "
@@ -3353,6 +3612,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         "follow_up_questions": (
             headache_follow_ups if is_headache_query
             else melatonin_follow_ups if is_melatonin_query
+            else wound_follow_ups if is_wound_dressing_comparison
             else form_follow_ups if is_form_comparison_query and medical
             else []
         ),
@@ -3365,7 +3625,13 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                     "Confirmer que la personne a 18 ans ou plus et vérifier la concentration, "
                     "l'usage, les médicaments, les contre-indications et les avertissements."
                     if is_melatonin_query else
-                    "Vérifier sur l'étiquette la concentration, la forme, les ingrédients, l'âge et les avertissements."
+                    (
+                        "Ne pas couvrir sans évaluation une plaie profonde, très exsudative "
+                        "ou présentant des signes d'infection; vérifier l'étiquette du "
+                        "pansement exact."
+                        if is_wound_dressing_comparison else
+                        "Vérifier sur l'étiquette la concentration, la forme, les ingrédients, l'âge et les avertissements."
+                    )
                 )
             )
         ] if medical else []),
@@ -3381,8 +3647,13 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                     "interactions, la grossesse, l'allaitement, une maladie pertinente ou "
                     "une insomnie persistante."
                     if is_melatonin_query else
-                    "Consulter le pharmacien pour les interactions, la grossesse, l'allaitement, "
-                    "un enfant ou une situation médicale particulière."
+                    (
+                        "Demander une évaluation professionnelle si la plaie est profonde, "
+                        "très exsudative, ne s'améliore pas ou présente des signes d'infection."
+                        if is_wound_dressing_comparison else
+                        "Consulter le pharmacien pour les interactions, la grossesse, l'allaitement, "
+                        "un enfant ou une situation médicale particulière."
+                    )
                 )
             )
         ) if medical else "",
@@ -3393,12 +3664,21 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             "source_ids": (
                 acetaminophen_source if is_headache_query
                 else melatonin_uses_source if is_melatonin_query
+                else (
+                    wound_hydrocolloid_source + wound_transparent_source
+                )[:4] if is_wound_dressing_comparison
                 else []
             ),
         }],
         "important_checks": [{
             "text": important_check,
-            "source_ids": melatonin_uses_source if is_melatonin_query else [],
+            "source_ids": (
+                melatonin_uses_source if is_melatonin_query
+                else (
+                    wound_hydrocolloid_source + wound_transparent_source
+                )[:4] if is_wound_dressing_comparison
+                else []
+            ),
         }],
         "source_ids": valid_source_ids[:16],
         "degraded": bool(degraded),
@@ -4653,6 +4933,14 @@ def client_help():
             "gomme", "gommes", "sirop", "caplet", "caplets",
         })
     )
+    is_wound_dressing_comparison = bool(
+        query_plan.get("needs_comparison")
+        and question_words.intersection({
+            "pansement", "pansements", "bandage", "bandages", "dressing",
+        })
+        and any(word.startswith("hydrocollo") for word in question_words)
+        and any(word.startswith("transp") for word in question_words)
+    )
     is_immediate_documented_question = bool(
         not follow_up
         and not selected_text
@@ -4662,6 +4950,7 @@ def client_help():
             or query_plan.get("intent") == "headache_relief"
             or "melaton" in normalized_question
             or is_form_comparison
+            or is_wound_dressing_comparison
         )
     )
     use_local_documented_summary = bool(
@@ -4693,6 +4982,7 @@ def client_help():
         answer_candidates,
         limit=answer_limit,
         diversify_brands=query_plan.get("intent") == "headache_relief",
+        question=question,
     )
     documents = []
     if response_mode == "documented":
