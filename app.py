@@ -279,9 +279,7 @@ def add_security_headers(response):
 
 @app.route("/api/system/info", methods=["GET"])
 def get_system_info():
-    maybe_resume_enrichment()   # keep-alive pings land here — a dead enrichment
-    maybe_resume_regulatory_enrichment()
-    ai_provider = configured_ai_provider()   # run recovers with no page open
+    ai_provider = configured_ai_provider()
     try:
         db = get_db()
         db.execute("SELECT 1").fetchone()
@@ -293,6 +291,16 @@ def get_system_info():
             "ai_provider": ai_provider["name"],
             "ai_provider_label": ai_provider["label"],
         }), 503
+    try:
+        ensure_product_data_ready(db)
+    except Exception:
+        # Diagnostics stay reachable while a first-time migration runs.
+        pass
+    schema_status = product_data_schema_status()
+    if schema_status["ready"] and not DB_BOOT_PENDING:
+        # Never resume background enrichment on top of startup migrations.
+        maybe_resume_enrichment()
+        maybe_resume_regulatory_enrichment()
     duplicate_slots = db.execute(
         """
         SELECT COUNT(*) AS count
@@ -324,7 +332,9 @@ def get_system_info():
         "reference_count": reference_count(),
         "version": os.environ.get("RENDER_GIT_COMMIT", "")[:7],
         "self_keepalive": _SELF_KEEPALIVE_ACTIVE,
-        "catalogue_schema": product_data_schema_status(),
+        "catalogue_schema": schema_status,
+        "database_boot_pending": bool(DB_BOOT_PENDING),
+        "database_boot_error": bool(DB_BOOT_ERROR),
     })
 
 

@@ -419,6 +419,32 @@ class ProductDataAccuracyTests(unittest.TestCase):
         finally:
             database_module._POSTGRES_PRODUCT_SCHEMA_READY = original_ready
 
+    def test_existing_postgres_schema_does_not_wait_for_startup_lock(self):
+        class FakePostgres:
+            backend = "postgres"
+
+        class BusyStartupLock:
+            def acquire(self, timeout=0):
+                raise AssertionError("the startup lock should not be consulted")
+
+        original_ready = database_module._POSTGRES_PRODUCT_SCHEMA_READY
+        original_error = database_module._POSTGRES_PRODUCT_SCHEMA_ERROR
+        database_module._POSTGRES_PRODUCT_SCHEMA_READY = False
+        database_module._POSTGRES_PRODUCT_SCHEMA_ERROR = "migration_in_progress"
+        try:
+            with patch.object(
+                database_module, "_postgres_product_data_schema_complete",
+                return_value=True,
+            ), patch.object(
+                database_module, "_PRODUCT_SCHEMA_LOCK", BusyStartupLock(),
+            ):
+                self.assertTrue(ensure_product_data_ready(FakePostgres()))
+            self.assertTrue(database_module._POSTGRES_PRODUCT_SCHEMA_READY)
+            self.assertEqual(database_module._POSTGRES_PRODUCT_SCHEMA_ERROR, "")
+        finally:
+            database_module._POSTGRES_PRODUCT_SCHEMA_READY = original_ready
+            database_module._POSTGRES_PRODUCT_SCHEMA_ERROR = original_error
+
     def test_quality_summary_reports_identifier_and_field_coverage(self):
         db = self.make_db()
         product_id = self.insert_product(db, name="Verified package")

@@ -685,6 +685,15 @@ def ensure_product_data_ready(db):
     global _POSTGRES_PRODUCT_SCHEMA_READY, _POSTGRES_PRODUCT_SCHEMA_ERROR
     if db.backend != "postgres" or _POSTGRES_PRODUCT_SCHEMA_READY:
         return True
+
+    # A new Render worker starts with an empty process-local readiness flag even
+    # when the shared database was fully migrated by the previous deployment.
+    # Check the committed schema before waiting on this worker's startup thread.
+    if _postgres_product_data_schema_complete(db):
+        _POSTGRES_PRODUCT_SCHEMA_READY = True
+        _POSTGRES_PRODUCT_SCHEMA_ERROR = ""
+        return True
+
     acquired = _PRODUCT_SCHEMA_LOCK.acquire(timeout=0.25)
     if not acquired:
         _POSTGRES_PRODUCT_SCHEMA_ERROR = "migration_in_progress"
