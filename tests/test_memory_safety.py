@@ -101,6 +101,49 @@ class MemorySafetyTests(unittest.TestCase):
 
         self.assertEqual(peak, 1)
 
+    def test_search_cache_keeps_one_identifier_copy_and_restores_public_fields(self):
+        compact = products._compact_search_cache_product({
+            "id": 42,
+            "name": "TYLENOL 500MG CO100",
+            "barcode": "062600142320",
+            "aisle": "Labo",
+            "side": "A",
+            "section": "2",
+            "shelf": "6",
+            "position": "1",
+            "modified_at": "audit-only",
+            "primary_source": "audit-only",
+            "_identifiers": [{
+                "type": "DIN",
+                "value": "00559407",
+                "authority": "Health Canada",
+                "verification_status": "requires_review",
+                "match_method": "health_canada_name_candidate",
+                "confidence": 0.61,
+            }],
+            "identifiers": [{"duplicate": True}],
+            "regulatory_identifiers": [{"duplicate": True}],
+        })
+
+        self.assertNotIn("modified_at", compact)
+        self.assertNotIn("primary_source", compact)
+        self.assertNotIn("identifiers", compact)
+        self.assertNotIn("regulatory_identifiers", compact)
+        self.assertEqual(len(compact["_identifiers"]), 1)
+        public = products.public_product_payload(compact)
+        self.assertEqual(
+            public["regulatory_identifiers"][0]["value"], "00559407"
+        )
+        self.assertEqual(
+            public["regulatory_identifiers"][0]["status"], "probable"
+        )
+
+    def test_bm25_token_counter_does_not_match_substrings(self):
+        haystack = "advil confort advil ibuprofene"
+        self.assertEqual(products._normalized_token_count(haystack, "advil"), 2)
+        self.assertEqual(products._normalized_token_count(haystack, "fort"), 0)
+        self.assertEqual(products._normalized_token_count(haystack, "ibuprofene"), 1)
+
     def test_client_search_materializes_only_ranked_products_and_all_locations(self):
         first = {
             "id": 1, "name": "TYLENOL 500MG CO100", "brand": "Tylenol",

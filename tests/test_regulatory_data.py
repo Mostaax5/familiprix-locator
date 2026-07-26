@@ -28,6 +28,7 @@ from routes.products import (
     _products_corpus,
     normalize_search_text,
     normalized_digits,
+    public_product_payload,
     rank_products_by_field,
     tokenize_search_query,
 )
@@ -321,6 +322,7 @@ class RegulatoryDataTests(unittest.TestCase):
 
         _PROD_CACHE.update(key=None, rows=[])
         item, row = _products_corpus(db)[0]
+        public_item = public_product_payload(item)
         query = "80123456"
         score = _fast_reference_score(
             row, normalize_search_text(query), normalized_digits(query),
@@ -328,7 +330,7 @@ class RegulatoryDataTests(unittest.TestCase):
         )
         self.assertGreaterEqual(score, 100)
         self.assertEqual(
-            item["regulatory_identifiers"][0]["status"], "probable"
+            public_item["regulatory_identifiers"][0]["status"], "probable"
         )
         ai_context = product_context_for_client_rag(item)
         self.assertEqual(ai_context["verified_identifiers"], [])
@@ -381,6 +383,7 @@ class RegulatoryDataTests(unittest.TestCase):
         self.assertEqual(sync_reference_identifiers_to_product(db, product), 1)
         _PROD_CACHE.update(key=None, rows=[])
         item, _row = _products_corpus(db)[0]
+        public_item = public_product_payload(item)
         self.assertEqual(
             [match["id"] for match in rank_products_by_field(
                 [item], "01234567", "din"
@@ -393,9 +396,11 @@ class RegulatoryDataTests(unittest.TestCase):
             )],
             [product_id],
         )
-        self.assertEqual(item["regulatory_identifiers"][0]["status"], "probable")
         self.assertEqual(
-            item["regulatory_identifiers"][0]["match_method"],
+            public_item["regulatory_identifiers"][0]["status"], "probable"
+        )
+        self.assertEqual(
+            public_item["regulatory_identifiers"][0]["match_method"],
             "health_canada_name_candidate",
         )
         ai_context = product_context_for_client_rag(item)
@@ -497,16 +502,17 @@ class RegulatoryDataTests(unittest.TestCase):
 
         _PROD_CACHE.update(key=None, rows=[], built_at=0.0)
         item, _row = _products_corpus(db)[0]
+        public_item = public_product_payload(item)
         self.assertEqual(
             {
                 identifier["value"]
-                for identifier in item["regulatory_identifiers"]
+                for identifier in public_item["regulatory_identifiers"]
             },
             {value for value, _confidence, _status in candidates},
         )
         self.assertTrue(all(
             identifier["status"] == "probable"
-            for identifier in item["regulatory_identifiers"]
+            for identifier in public_item["regulatory_identifiers"]
         ))
         for value, _confidence, _status in candidates:
             self.assertEqual(
@@ -600,8 +606,12 @@ class RegulatoryDataTests(unittest.TestCase):
 
         _PROD_CACHE.update(key=None, rows=[], built_at=0.0)
         item, _row = _products_corpus(db)[0]
+        public_item = public_product_payload(item)
         self.assertEqual(
-            [identifier["value"] for identifier in item["regulatory_identifiers"]],
+            [
+                identifier["value"]
+                for identifier in public_item["regulatory_identifiers"]
+            ],
             ["80123456"],
         )
         self.assertEqual(

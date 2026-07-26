@@ -169,10 +169,10 @@ except (TypeError, ValueError):
     _AI_REQUEST_TIMEOUT_SECONDS = 12
 try:
     _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = min(
-        24, max(6, int(os.environ.get("AI_DOCUMENTED_REQUEST_TIMEOUT", "8")))
+        6, max(4, int(os.environ.get("AI_DOCUMENTED_REQUEST_TIMEOUT", "5")))
     )
 except (TypeError, ValueError):
-    _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = 8
+    _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = 5
 _DEEPSEEK_DOCUMENTED_THINKING = (
     os.environ.get("DEEPSEEK_DOCUMENTED_THINKING", "").strip().lower()
     in {"1", "true", "yes", "on"}
@@ -1356,29 +1356,12 @@ def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mo
             body = exc.read().decode("utf-8", "replace")[:250]
         except Exception:
             pass
-        if quality_mode and DEEPSEEK_MODEL != model and (exc.code == 429 or exc.code >= 500):
-            print(f"[AI] DeepSeek documented model returned HTTP {exc.code}; retrying with {DEEPSEEK_MODEL}")
-            return _deepseek_json_request(
-                messages, max_tokens=min(max_tokens, 2400),
-                question_preview=question_preview, quality_mode=False,
-            )
         _set_ai_error(f"Le service de réponse est temporairement indisponible (HTTP {exc.code}).")
         return None
     except (URLError, TimeoutError) as exc:
-        if quality_mode and DEEPSEEK_MODEL != model:
-            print(f"[AI] DeepSeek documented model timed out; retrying with {DEEPSEEK_MODEL}: {exc}")
-            return _deepseek_json_request(
-                messages, max_tokens=min(max_tokens, 2400),
-                question_preview=question_preview, quality_mode=False,
-            )
         _set_ai_error("Le service de réponse est injoignable (réseau ou délai dépassé).")
         return None
     except json.JSONDecodeError:
-        if quality_mode and DEEPSEEK_MODEL != model:
-            return _deepseek_json_request(
-                messages, max_tokens=min(max_tokens, 2400),
-                question_preview=question_preview, quality_mode=False,
-            )
         _set_ai_error("Le service a renvoyé une réponse illisible.")
         return None
 
@@ -1389,21 +1372,11 @@ def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mo
     choices = raw_response.get("choices", [])
     raw_text = str(((choices[0] if choices else {}).get("message") or {}).get("content", "")).strip()
     if not raw_text:
-        if quality_mode and DEEPSEEK_MODEL != model:
-            return _deepseek_json_request(
-                messages, max_tokens=min(max_tokens, 2400),
-                question_preview=question_preview, quality_mode=False,
-            )
         _set_ai_error("Le service a renvoyé une réponse vide.")
         return None
     try:
         return json.loads(raw_text)
     except json.JSONDecodeError:
-        if quality_mode and DEEPSEEK_MODEL != model:
-            return _deepseek_json_request(
-                messages, max_tokens=min(max_tokens, 2400),
-                question_preview=question_preview, quality_mode=False,
-            )
         _set_ai_error("Le service a renvoyé une réponse invalide.")
         return None
 
@@ -2138,7 +2111,10 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "Pour une demande médicale, "
     "ne pose pas de diagnostic, ne remplace pas l'étiquette et oriente vers le pharmacien en "
     "cas de grossesse, bébé, interaction, allergie, symptômes graves ou persistants, difficulté "
-    "respiratoire, ou incertitude clinique. Retourne uniquement le JSON demandé."
+    "respiratoire, ou incertitude clinique. Retourne uniquement un objet JSON avec exactement "
+    "ces clés: answer, key_points, selected_product_ids, follow_up_questions, safety_flags, "
+    "pharmacist_referral, pharmacist_reason et source_ids. Chaque key_point contient exactement "
+    "heading, detail et source_ids."
 )
 
 _HEALTH_CANADA_DPD_API = "https://health-products.canada.ca/api/drug"
@@ -2146,7 +2122,7 @@ _HEALTH_CANADA_DPD_INFO = "https://health-products.canada.ca/dpd-bdpp/info"
 _HEALTH_CANADA_LNHPD_API = "https://health-products.canada.ca/api/natural-licences"
 _HEALTH_CANADA_LNHPD_INFO = "https://health-products.canada.ca/lnhpd-bdpsnh/"
 _HEALTH_CANADA_CACHE = {}
-_HEALTH_CANADA_CACHE_MAX = 64
+_HEALTH_CANADA_CACHE_MAX = 24
 _DOCUMENTATION_SEARCH_STOPWORDS = {
     "ca", "co", "caps", "gel", "liq", "mini", "mg", "ml", "un", "une",
     "de", "des", "du", "le", "la", "les", "et", "pour", "format", "produit",
@@ -2776,13 +2752,89 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
     )
     is_melatonin_query = "melaton" in normalized_question
 
-    form_markers = (
-        ("gommes", ("gum", "gomme", "gummies")),
-        ("liquide", ("liq", "liquide")),
-        ("vaporisateur", ("vapo", "spray")),
-        ("capsules", ("ca", "caps", "capsule")),
-        ("comprimés", ("co", "comprime", "tablet")),
-    )
+    def detected_product_form(name, details):
+        padded_name = f" {name} "
+        tokens = set(name.split())
+
+        def coded(*prefixes):
+            return any(
+                any(re.fullmatch(rf"{re.escape(prefix)}\d+[a-z]*", token) for prefix in prefixes)
+                for token in tokens
+            )
+
+        if ("mini" in tokens and "gel" in tokens) or "mini gel" in name:
+            return "mini-gels"
+        if (
+            "liqui gel" in details
+            or "liq gel" in details
+            or ("liq" in tokens and "gel" in tokens)
+        ):
+            return "liqui-gels"
+        if tokens.intersection({
+            "susp", "suspension", "sir", "sirop", "liquide", "liquid",
+        }) or coded("liq", "sir") or "solution orale" in details:
+            return "liquide ou suspension"
+        if tokens.intersection({"gum", "gomme", "gommes", "gummies"}) or coded("gum"):
+            return "gommes"
+        if tokens.intersection({"vapo", "spray", "vaporisateur"}) or coded("vapo"):
+            return "vaporisateur"
+        if (
+            tokens.intersection({"caps", "capsule", "capsules"})
+            or re.search(r"\bca\d+\b", padded_name)
+        ):
+            return "capsules"
+        if (
+            tokens.intersection({
+                "co", "comprime", "comprimes", "tablet", "tablets",
+                "caplet", "caplets",
+            })
+            or re.search(r"\bco\d+\b", padded_name)
+        ):
+            return "comprimés ou caplets"
+        if tokens.intersection({"creme", "cream", "onguent", "ointment"}):
+            return "crème ou onguent"
+        if "gel" in tokens:
+            return "gel topique"
+        return ""
+
+    form_guidance = {
+        "liquide ou suspension": (
+            "se mesure avec le dispositif fourni et peut convenir lorsqu'une forme solide "
+            "est difficile à avaler; confirmer l'âge et la dose sur l'étiquette"
+        ),
+        "comprimés ou caplets": (
+            "forme solide à avaler; comparer surtout l'ingrédient, la concentration et le "
+            "nombre d'unités"
+        ),
+        "capsules": (
+            "forme solide à avaler entière; ne pas supposer qu'elle agit plus vite sans "
+            "indication confirmée"
+        ),
+        "liqui-gels": (
+            "capsules contenant une préparation liquide, à avaler entières; le nom seul ne "
+            "prouve pas une action plus rapide"
+        ),
+        "mini-gels": (
+            "le nom indique un format de capsule plus petit; confirmer la taille et la "
+            "concentration sur l'emballage"
+        ),
+        "gommes": (
+            "forme à mâcher; la saveur et la facilité de prise changent, mais l'usage, "
+            "l'âge et la concentration doivent être vérifiés"
+        ),
+        "vaporisateur": (
+            "forme à pulvériser; confirmer la quantité par pulvérisation et le mode "
+            "d'emploi sur l'étiquette"
+        ),
+        "crème ou onguent": (
+            "forme appliquée sur la peau; l'usage et la zone d'application doivent être "
+            "confirmés sur l'étiquette"
+        ),
+        "gel topique": (
+            "forme appliquée sur la peau; ne pas la confondre avec une capsule de type "
+            "liqui-gel"
+        ),
+    }
     flavor_markers = (
         ("fraise", ("fraise", "strawberry")),
         ("cerise", ("cerise", "cherry")),
@@ -2800,6 +2852,15 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
     ingredient_families = []
     product_traits = {}
     toothbrush_groups = defaultdict(int)
+    ingredient_markers = (
+        ("acétaminophène", ("acetaminophene", "paracetamol")),
+        ("ibuprofène", ("ibuprofene",)),
+        ("naproxène", ("naproxene",)),
+        (
+            "acide acétylsalicylique",
+            ("acide acetylsalicylique", "acetylsalicylique", "aspirine"),
+        ),
+    )
     for product in selected:
         candidate_id = str(product.get("client_id", "") or "")
         name = str(product.get("name", "") or "").strip()
@@ -2808,22 +2869,12 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         normalized_name = normalize_search_text(name)
         normalized_details = normalize_search_text(f"{name} {description} {usage_notes}")
         traits = []
-        if is_headache_query:
-            ingredient_markers = (
-                ("acétaminophène", ("acetaminophene", "paracetamol")),
-                ("ibuprofène", ("ibuprofene",)),
-                ("naproxène", ("naproxene",)),
-                (
-                    "acide acétylsalicylique",
-                    ("acide acetylsalicylique", "acetylsalicylique", "aspirine"),
-                ),
-            )
-            for label, markers in ingredient_markers:
-                if any(marker in normalized_details for marker in markers):
-                    if label not in ingredient_families:
-                        ingredient_families.append(label)
-                    traits.append(f"mention de {label}")
-                    break
+        for label, markers in ingredient_markers:
+            if any(marker in normalized_details for marker in markers):
+                if label not in ingredient_families:
+                    ingredient_families.append(label)
+                traits.append(f"mention de {label}")
+                break
         if is_toothbrush_query:
             if "tete" in normalized_name:
                 role = "tête de remplacement"
@@ -2838,15 +2889,11 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             traits.append(role)
             toothbrush_groups[role] += 1
         else:
-            for label, markers in form_markers:
-                if any(
-                    re.search(rf"\b{re.escape(marker)}\d*\b", normalized_name)
-                    for marker in markers
-                ):
-                    if label not in forms:
-                        forms.append(label)
-                    traits.append(label)
-                    break
+            form = detected_product_form(normalized_name, normalized_details)
+            if form:
+                if form not in forms:
+                    forms.append(form)
+                traits.append(form)
         if not is_toothbrush_query:
             dose_match = re.search(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*mg\b", name, re.IGNORECASE)
             if dose_match:
@@ -2875,8 +2922,22 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                         features.append(label)
                     if label not in traits:
                         traits.append(label)
+            if re.search(r"\b(?:enf|enfant|jr|junior|children|kids)\b", normalized_name):
+                traits.append("format enfant indiqué; âge à confirmer")
+            if re.search(r"\b(?:rh|rhume|sin|sinus|cold|flu)\b", normalized_name):
+                traits.append("formule rhume ou sinus; ingrédients à confirmer")
         product_traits[candidate_id] = traits
     doses.sort(key=lambda value: float(value.removesuffix(" mg")))
+    form_comparison_terms = {
+        "forme", "formes", "liquide", "suspension", "comprime", "comprimes",
+        "capsule", "capsules", "gel", "gels", "gomme", "gommes", "sirop",
+        "caplet", "caplets",
+    }
+    is_form_comparison_query = bool(
+        query_plan.get("needs_comparison")
+        and question_words.intersection(form_comparison_terms)
+        and len(forms) >= 2
+    )
 
     source_ids_by_product = defaultdict(list)
     valid_source_ids = []
@@ -2969,6 +3030,27 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             "action » doit être confirmée sur l'étiquette avant de conclure à une libération "
             "prolongée. "
             + flavor_text
+        )
+    elif names and is_form_comparison_query:
+        practical_differences = [
+            f"Les {form} : {form_guidance[form]}."
+            for form in forms[:4]
+            if form in form_guidance
+        ]
+        strength_text = (
+            f" Les concentrations repérées ({', '.join(doses)}) doivent être comparées "
+            "séparément de la forme."
+            if doses else ""
+        )
+        answer = (
+            "La différence principale entre ces formes est la façon de les prendre; "
+            "une forme différente ne signifie pas automatiquement qu'elle est plus forte "
+            "ou plus rapide. "
+            + " ".join(practical_differences)
+            + strength_text
+            + " Choisissez d'abord selon la capacité à avaler ou à mesurer le produit, "
+            "puis confirmez l'ingrédient, la concentration, l'âge et les avertissements "
+            "du produit exact."
         )
     elif names:
         summary_parts = []
@@ -3145,6 +3227,15 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                 ),
                 "source_ids": store_source,
             })
+    elif is_form_comparison_query:
+        for form in forms[:4]:
+            if form not in form_guidance:
+                continue
+            key_points.append({
+                "heading": form.capitalize(),
+                "detail": form_guidance[form].capitalize() + ".",
+                "source_ids": store_source,
+            })
     elif forms:
         key_points.append({
             "heading": "Formes disponibles",
@@ -3181,7 +3272,12 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
 
     medical = bool(
         not is_toothbrush_query
-        and (query_plan.get("medical", False) or doses or is_melatonin_query)
+        and (
+            query_plan.get("medical", False)
+            or doses
+            or ingredient_families
+            or is_melatonin_query
+        )
     )
     generic_dimensions = []
     if forms:
@@ -3202,12 +3298,62 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         "Le besoin principal est-il l'endormissement, un horaire décalé ou le décalage horaire?",
         "La personne prend-elle d'autres médicaments ou produits qui causent de la somnolence?",
     ]
+    form_follow_ups = [
+        "La personne peut-elle avaler une forme solide facilement?",
+        "Quel âge a la personne et quel symptôme précis veut-elle soulager?",
+        "A-t-elle déjà pris un produit contenant le même ingrédient aujourd'hui?",
+    ]
+    if is_toothbrush_query:
+        practical_guidance = (
+            "Comparer le type d'alimentation, le contenu de l'emballage et la "
+            "compatibilité des têtes avant de proposer un modèle."
+        )
+        important_check = (
+            "Ne pas confondre une tête de remplacement avec une brosse complète; "
+            "confirmer la compatibilité sur l'emballage."
+        )
+    elif is_headache_query:
+        practical_guidance = (
+            "Comparer d'abord l'ingrédient actif et la concentration, puis la forme "
+            "et le format. Vérifier les médicaments déjà pris pour éviter un "
+            "ingrédient en double."
+        )
+        important_check = (
+            "Ne pas choisir uniquement selon la marque: confirmer l'ingrédient actif, "
+            "la dose indiquée, les contre-indications et les avertissements sur l'emballage."
+        )
+    elif is_melatonin_query:
+        practical_guidance = (
+            "Choisir selon le contexte de sommeil, puis comparer la forme et la "
+            "concentration. La saveur est un critère de préférence, pas une preuve "
+            "d'un usage différent."
+        )
+        important_check = (
+            "Ne pas déduire qu'un produit agit plus vite ou plus longtemps à partir "
+            "du seul nom abrégé; confirmer la libération et l'usage sur l'étiquette."
+        )
+    elif is_form_comparison_query:
+        practical_guidance = (
+            "Choisir la forme selon la façon de la prendre, puis comparer séparément "
+            "l'ingrédient, la concentration, l'âge indiqué et le format."
+        )
+        important_check = (
+            "Ne pas supposer qu'un liqui-gel agit plus vite ni qu'une concentration "
+            "plus élevée convient mieux; confirmer ces éléments sur l'étiquette."
+        )
+    else:
+        practical_guidance = generic_guidance
+        important_check = (
+            "Ne pas attribuer à un produit un usage qui n'apparaît pas sur sa fiche "
+            "ou son étiquette."
+        )
     return {
         "answer": answer,
         "selected_product_ids": selected_ids,
         "follow_up_questions": (
             headache_follow_ups if is_headache_query
             else melatonin_follow_ups if is_melatonin_query
+            else form_follow_ups if is_form_comparison_query and medical
             else []
         ),
         "safety_flags": ([
@@ -3240,25 +3386,10 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                 )
             )
         ) if medical else "",
-        "key_points": key_points,
+        "key_points": key_points[:4],
         "comparisons": comparisons,
         "useful_guidance": [{
-            "text": (
-                "Comparer le type d'alimentation, le contenu de l'emballage et la compatibilité "
-                "des têtes avant de proposer un modèle."
-                if is_toothbrush_query else
-                (
-                    "Comparer d'abord l'ingrédient actif et la concentration, puis la forme et le "
-                    "format. Vérifier les médicaments déjà pris pour éviter un ingrédient en double."
-                    if is_headache_query else
-                    (
-                        "Choisir selon le contexte de sommeil, puis comparer la forme et la "
-                        "concentration. La saveur est un critère de préférence, pas une preuve "
-                        "d'un usage différent."
-                        if is_melatonin_query else generic_guidance
-                    )
-                )
-            ),
+            "text": practical_guidance,
             "source_ids": (
                 acetaminophen_source if is_headache_query
                 else melatonin_uses_source if is_melatonin_query
@@ -3266,22 +3397,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             ),
         }],
         "important_checks": [{
-            "text": (
-                "Ne pas confondre une tête de remplacement avec une brosse complète; confirmer "
-                "la compatibilité sur l'emballage."
-                if is_toothbrush_query else
-                (
-                    "Ne pas choisir uniquement selon la marque: confirmer l'ingrédient actif, la "
-                    "dose indiquée, les contre-indications et les avertissements sur l'emballage."
-                    if is_headache_query else
-                    (
-                        "Ne pas déduire qu'un produit agit plus vite ou plus longtemps à partir "
-                        "du seul nom abrégé; confirmer la libération et l'usage sur l'étiquette."
-                        if is_melatonin_query else
-                        "Ne pas attribuer à un produit un usage qui n'apparaît pas sur sa fiche ou son étiquette."
-                    )
-                )
-            ),
+            "text": important_check,
             "source_ids": melatonin_uses_source if is_melatonin_query else [],
         }],
         "source_ids": valid_source_ids[:16],
@@ -3294,32 +3410,150 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
     }
 
 
+_DOCUMENTED_COMPACT_FACT_FIELDS = (
+    "category", "package_size", "package_unit", "variant", "flavour",
+    "colour", "strength", "dosage_form", "manufacturer", "ingredients",
+    "compatibility", "purpose", "route_of_administration",
+)
+
+
+def _compact_documented_product_context(product, include_identifiers=False):
+    """Keep only facts the answer model can use.
+
+    Locations, images, provenance maps and duplicate public identifier objects
+    are added by the server after generation. Sending them to the model made a
+    small comparison request several times larger without improving its answer.
+    """
+    context = product_context_for_client_rag(product)
+    facts = {
+        field: str(context.get(field, "") or "").strip()
+        for field in _DOCUMENTED_COMPACT_FACT_FIELDS
+        if str(context.get(field, "") or "").strip()
+    }
+    compact = {
+        "candidate_id": str(context.get("candidate_id", "") or ""),
+        "name": str(context.get("name", "") or "")[:300],
+        "brand": str(context.get("brand", "") or "")[:160],
+        "description": str(context.get("description", "") or "")[:280],
+        "description_verified": bool(context.get("description_verified")),
+        "data_status": str(context.get("data_status", "") or "")[:60],
+        "verified_facts": facts,
+    }
+    if include_identifiers:
+        compact["verified_identifiers"] = (
+            context.get("verified_identifiers", []) or []
+        )[:4]
+        compact["unconfirmed_identifier_candidates"] = [{
+            "type": str(identifier.get("type", "") or ""),
+            "value": str(identifier.get("value", "") or ""),
+            "status": "unconfirmed",
+        } for identifier in (
+            context.get("unconfirmed_identifier_candidates", []) or []
+        )[:4]]
+    return compact
+
+
+def _compact_documented_history(history):
+    return [{
+        "role": item["role"],
+        "content": item["content"][:600],
+    } for item in normalize_client_history(history, max_messages=4)]
+
+
+def _documented_answer_covers_request(result, query_plan, candidates):
+    """Reject catalogue summaries that do not answer the requested dimensions."""
+    from routes.products import normalize_search_text
+
+    answer = str(result.get("answer", "") or "").strip()
+    if len(answer) < 45:
+        return False
+    if candidates and not result.get("selected_product_ids"):
+        return False
+    combined = " ".join([
+        answer,
+        *[
+            f"{point.get('heading', '')} {point.get('detail', '')}"
+            for point in result.get("key_points", [])
+            if isinstance(point, dict)
+        ],
+    ])
+    normalized_answer = normalize_search_text(combined)
+    normalized_question = normalize_search_text(
+        str(query_plan.get("corrected_query", "") or "")
+    )
+    if normalized_answer.startswith((
+        "j ai trouve",
+        "nous avons trouve",
+        "produits correspondant",
+    )):
+        return False
+    requested_dimensions = (
+        (
+            {"saveur", "saveurs", "gout", "gouts", "flavor", "flavors"},
+            {"saveur", "gout", "flavor"},
+        ),
+        (
+            {"contexte", "contextes", "situation", "situations", "utiliser"},
+            {"contexte", "situation", "usage", "utilis", "besoin"},
+        ),
+    )
+    question_words = set(normalized_question.split())
+    answer_words = set(normalized_answer.split())
+    for question_terms, answer_terms in requested_dimensions:
+        if question_words.intersection(question_terms) and not any(
+            term in normalized_answer for term in answer_terms
+        ):
+            return False
+    if query_plan.get("needs_comparison") and not (
+        answer_words.intersection({
+            "difference", "choisir", "plutot", "tandis", "forme",
+            "concentration", "format", "ingredient", "usage",
+        })
+        or "par rapport" in normalized_answer
+    ):
+        return False
+    return True
+
+
 def generate_documented_client_answer(question, query_plan, candidates, documents,
                                       history=None, selected_text="", focus_product_id=""):
-    contexts = [product_context_for_client_rag(product) for product in candidates]
-    for context in contexts:
-        context["notes"] = str(context.get("notes", "") or "")[:220]
-        context["description"] = str(context.get("description", "") or "")[:360]
-        context["search_terms"] = str(context.get("search_terms", "") or "")[:180]
-        context["usage_notes"] = str(context.get("usage_notes", "") or "")[:260]
+    include_identifiers = bool(re.search(
+        r"\b(?:DIN(?:[\s-]?HM)?|NPN|UPC|GTIN)\b",
+        str(question or ""),
+        flags=re.IGNORECASE,
+    ))
+    contexts = [
+        _compact_documented_product_context(
+            product, include_identifiers=include_identifiers,
+        )
+        for product in candidates
+    ]
     document_contexts = [{
-        **document,
-        "evidence": str(document.get("evidence", "") or "")[:520],
-        "candidate_ids": (document.get("candidate_ids", []) or [])[:12],
-    } for document in documents[:6]]
+        "source_id": str(document.get("source_id", "") or ""),
+        "title": str(document.get("title", "") or "")[:180],
+        "publisher": str(document.get("publisher", "") or "")[:100],
+        "evidence": str(document.get("evidence", "") or "")[:420],
+        "candidate_ids": (document.get("candidate_ids", []) or [])[:8],
+    } for document in documents[:7]]
+    compact_plan = {
+        key: query_plan.get(key)
+        for key in (
+            "intent", "corrected_query", "wants_all", "needs_comparison",
+            "answer_language", "medical",
+        )
+    }
     parsed = _provider_structured_request(
         _CLIENT_DOCUMENTED_INSTRUCTIONS,
         {
-            "conversation": normalize_client_history(history),
+            "conversation": _compact_documented_history(history),
             "question": question,
-            "selected_text_from_previous_answer": selected_text,
+            "selected_text_from_previous_answer": selected_text[:500],
             "focused_product_id": focus_product_id,
-            "query_plan": query_plan,
+            "query_plan": compact_plan,
             "candidates": contexts,
             "documents": document_contexts,
-            "required_schema": _CLIENT_DOCUMENTED_SCHEMA,
         },
-        max_tokens=560,
+        max_tokens=480,
         schema_name="client_documented_answer",
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,
@@ -3330,6 +3564,10 @@ def generate_documented_client_answer(question, query_plan, candidates, document
     result = normalize_documented_client_answer(
         parsed, [product.get("client_id", "") for product in candidates], documents
     )
+    if not _documented_answer_covers_request(result, query_plan, candidates):
+        return grounded_documented_fallback(
+            query_plan, candidates, documents, degraded=False,
+        )
     grounded = grounded_documented_fallback(
         query_plan, candidates, documents, degraded=False
     )
@@ -4354,7 +4592,7 @@ def client_help():
     # can become cards. A direct reply stays inside the products from that thread.
     from routes.products import (
         client_products_by_ids, hybrid_client_candidates, hydrate_candidate_images,
-        normalize_search_text,
+        normalize_search_text, public_product_payload,
     )
     candidate_limit = 100 if query_plan.get("wants_all") else 60
     context_products = client_products_by_ids(context_product_ids, limit=80)
@@ -4407,17 +4645,28 @@ def client_help():
         and question_words.intersection({"pile", "piles"})
         and any(word.startswith("recharg") for word in question_words)
     )
-    use_local_documented_summary = bool(
-        response_mode == "documented"
+    is_form_comparison = bool(
+        query_plan.get("needs_comparison")
+        and question_words.intersection({
+            "forme", "formes", "liquide", "suspension", "comprime",
+            "comprimes", "capsule", "capsules", "gel", "gels",
+            "gomme", "gommes", "sirop", "caplet", "caplets",
+        })
+    )
+    is_immediate_documented_question = bool(
+        not follow_up
+        and not selected_text
+        and not focus_product_id
         and (
             is_toothbrush_power_comparison
-            or (
-                query_plan.get("intent") == "headache_relief"
-                and not follow_up
-                and not selected_text
-                and not focus_product_id
-            )
+            or query_plan.get("intent") == "headache_relief"
+            or "melaton" in normalized_question
+            or is_form_comparison
         )
+    )
+    use_local_documented_summary = bool(
+        response_mode == "documented"
+        and is_immediate_documented_question
     )
     if not use_local_documented_summary:
         if not configured_ai_provider()["name"]:
@@ -4434,7 +4683,11 @@ def client_help():
     # A smaller grounded context improves response time and keeps comparisons readable.
     answer_limit = (
         8 if query_plan.get("intent") == "headache_relief"
-        else (12 if response_mode == "documented" else 16)
+        else (
+            12 if use_local_documented_summary
+            else 8 if response_mode == "documented"
+            else 16
+        )
     )
     answer_candidates = select_client_answer_candidates(
         answer_candidates,
@@ -4558,10 +4811,9 @@ def client_help():
         advice,
     )
     elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-    public_highlighted_products = [{
-        key: value for key, value in product.items()
-        if not str(key).startswith("_")
-    } for product in highlighted_products]
+    public_highlighted_products = [
+        public_product_payload(product) for product in highlighted_products
+    ]
     return jsonify({"success": True, "response_mode": response_mode,
                     "answer": answer, "products": public_highlighted_products,
                     "highlighted_product_ids": verified["selected_product_ids"],

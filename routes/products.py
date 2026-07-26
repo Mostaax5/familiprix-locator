@@ -400,8 +400,6 @@ def _reference_corpus(db):
                     d.get("product_code", "") if store_identity else ""
                 ),
                 "store_presence_status": d.get("store_presence_status", ""),
-                "identifiers": _public_product_identifiers(identifiers),
-                "regulatory_identifiers": _public_regulatory_identifiers(identifiers),
                 "_identifiers": identifiers,
                 "_bc": normalized_digits(d.get("barcode", "")),
                 "_name": name, "_brand": brand,
@@ -409,7 +407,8 @@ def _reference_corpus(db):
                     name, brand, desc,
                     " ".join(normalize_search_text(item.get("value", "")) for item in identifiers),
                 ]),
-                "_tokens": name.split(),
+                "_tokens": tuple(name.split()),
+                "_brand_tokens": tuple(brand.split()),
             })
         _REF_CACHE.update(key=key, rows=rows, built_at=time.time())
     return rows
@@ -498,6 +497,8 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
 _PROD_CACHE = {
     "key": None, "rows": [], "built_at": 0.0,
     "generation": -1, "state_checked_at": 0.0,
+    "document_frequency": {}, "document_count": 0,
+    "average_document_length": 1.0, "statistics_rows_id": 0,
 }
 _PROD_LOCK = threading.RLock()
 _PROD_IDENTIFIER_DRIFT_TTL_S = 120.0
@@ -775,8 +776,14 @@ def _product_search_row(item, aliases=(), identifiers=()):
             for identifier in identifiers
         ),
     ])
-    return {"_bc": normalized_digits(item.get("barcode", "")),
-            "_name": name, "_brand": brand, "_hay": hay, "_tokens": name.split()}
+    return {
+        "_bc": normalized_digits(item.get("barcode", "")),
+        "_name": name,
+        "_brand": brand,
+        "_hay": hay,
+        "_tokens": tuple(name.split()),
+        "_brand_tokens": tuple(brand.split()),
+    }
 
 
 def client_etag_matches(etag):
@@ -965,6 +972,9 @@ def _products_corpus(db, allow_identifier_stale=False):
         db, gtin_keys
     )
     rows = []
+    document_frequency = Counter()
+    search_document_keys = set()
+    total_document_length = 0
     for product_row in db.execute("SELECT * FROM products"):
         raw_item = dict(product_row)
         product_id = int(raw_item.get("id") or 0)
@@ -994,17 +1004,39 @@ def _products_corpus(db, allow_identifier_stale=False):
         )
         item["_search_aliases"] = aliases
         item["_identifiers"] = identifiers
-        item["identifiers"] = _public_product_identifiers(identifiers)
-        item["regulatory_identifiers"] = _public_regulatory_identifiers(identifiers)
-        rows.append((item, _product_search_row(item, aliases, identifiers)))
+        item = _compact_search_cache_product(item)
+        search_row = _product_search_row(item, aliases, identifiers)
+        rows.append((item, search_row))
+        document_key = (
+            ("barcode", search_row["_bc"])
+            if search_row["_bc"]
+            else ("name", search_row["_name"], search_row["_brand"])
+        )
+        if document_key not in search_document_keys:
+            search_document_keys.add(document_key)
+            tokens = search_row["_hay"].split()
+            total_document_length += max(1, len(tokens))
+            document_frequency.update({
+                token for token in tokens
+                if any(character.isalpha() for character in token)
+            })
+    document_count = max(1, len(search_document_keys))
     _PROD_CACHE.update(
         key=key, rows=rows, built_at=time.time(),
         generation=generation, state_checked_at=checked_at,
+        document_frequency=dict(document_frequency),
+        document_count=document_count,
+        average_document_length=(
+            total_document_length / document_count
+            if total_document_length else 1.0
+        ),
+        statistics_rows_id=id(rows),
     )
     del (
         gtin_keys, aliases_by_product, verified_by_product,
         verified_values_by_product, field_sources_by_product,
         identifiers_by_product, reference_identifiers_by_gtin,
+        document_frequency, search_document_keys,
     )
     release_unused_memory()
     return rows
@@ -1026,10 +1058,20 @@ def _employee_product_corpus(db):
 
 def public_product_payload(item):
     """Keep provenance server-side unless a dedicated manager endpoint asks for it."""
-    return {
-        key: value for key, value in dict(item or {}).items()
+    product = dict(item or {})
+    payload = {
+        key: value for key, value in product.items()
         if not str(key).startswith("_")
     }
+    raw_identifiers = product.get("_identifiers") or []
+    if raw_identifiers:
+        public_identifiers = _public_product_identifiers(raw_identifiers)
+        regulatory_identifiers = _public_regulatory_identifiers(raw_identifiers)
+        if public_identifiers:
+            payload["identifiers"] = public_identifiers
+        if regulatory_identifiers:
+            payload["regulatory_identifiers"] = regulatory_identifiers
+    return payload
 
 
 _BOOTSTRAP_REQUIRED_FIELDS = (
@@ -1079,10 +1121,15 @@ def bootstrap_product_payload(item):
         if value not in (None, "", [], {}):
             payload[field] = value
 
+    raw_identifiers = product.get("_identifiers") or []
+    regulatory_source = (
+        product.get("regulatory_identifiers")
+        or _public_regulatory_identifiers(raw_identifiers)
+    )
     regulatory = [
         compact for compact in (
             _bootstrap_identifier(identifier)
-            for identifier in product.get("regulatory_identifiers", [])
+            for identifier in regulatory_source
         )
         if compact
     ]
@@ -1092,7 +1139,11 @@ def bootstrap_product_payload(item):
     barcode = normalized_digits(product.get("barcode", ""))
     product_code = str(product.get("product_code", "") or "").strip()
     other_identifiers = []
-    for raw in product.get("identifiers", []):
+    identifier_source = (
+        product.get("identifiers")
+        or _public_product_identifiers(raw_identifiers)
+    )
+    for raw in identifier_source:
         identifier = _bootstrap_identifier(raw)
         identifier_type = identifier.get("type", "")
         value = identifier.get("value", "")
@@ -1441,6 +1492,39 @@ def row_to_product(product):
     item["last_change_by"] = item.get("modified_by") or item.get("created_by") or ""
     item["last_change_at"] = item.get("modified_at") or item.get("created_at") or ""
     return item
+
+
+_SEARCH_CACHE_PRODUCT_FIELDS = frozenset({
+    "id", "name", "brand", "description", "image_url", "source_url",
+    "search_terms", "usage_notes", "alternative_suggestions",
+    "underneath_label", "barcode", "product_code", "aisle", "side",
+    "section", "shelf", "position", "facings", "is_plano", "in_stock",
+    "linked_position", "flipped_label", "last_change_by", "last_change_at",
+    "data_status", "identity_status", "description_status", "image_status",
+    "image_available_unverified", "description_available_unverified",
+}) | frozenset(FIELD_NAMES)
+
+
+def _compact_search_cache_product(item):
+    """Retain card/search facts, not the full auditable database row.
+
+    Provenance and quality records remain in PostgreSQL and are loaded by the
+    manager detail endpoint. Keeping those same strings on every cached shelf
+    placement consumed memory without changing employee search results.
+    """
+    product = dict(item or {})
+    compact = {
+        field: product.get(field)
+        for field in _SEARCH_CACHE_PRODUCT_FIELDS
+        if field in product
+    }
+    for field in (
+        "_verified_fields", "_field_sources", "_search_aliases", "_identifiers",
+    ):
+        value = product.get(field)
+        if value:
+            compact[field] = value
+    return compact
 
 
 def rows_to_verified_products(db, products):
@@ -3174,8 +3258,12 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None, field=""):
             or ""
         ).strip(),
         "product_code": row["product_code"],
-        "identifiers": row.get("identifiers", []),
-        "regulatory_identifiers": row.get("regulatory_identifiers", []),
+        "identifiers": _public_product_identifiers(
+            row.get("_identifiers", [])
+        ),
+        "regulatory_identifiers": _public_regulatory_identifiers(
+            row.get("_identifiers", [])
+        ),
         "catalog_only": True,
         "in_stock": 1,
     } for row in rows]
@@ -3184,7 +3272,10 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None, field=""):
 def _fuzzy_product_score(row, query_tokens):
     """Typo-aware name/brand score. Kept deliberately strict so a misspelling such
     as ``advile`` reaches ``Advil`` without turning short, generic words into noise."""
-    product_tokens = list(dict.fromkeys(row["_tokens"] + row["_brand"].split()))
+    brand_tokens = row.get("_brand_tokens")
+    if brand_tokens is None:
+        brand_tokens = tuple(str(row.get("_brand", "") or "").split())
+    product_tokens = tuple(row.get("_tokens", ())) + tuple(brand_tokens)
     best = 0
     for query_token in query_tokens:
         if len(query_token) < 4 or query_token in product_tokens:
@@ -3202,6 +3293,50 @@ def _fuzzy_product_score(row, query_tokens):
                 if ratio >= 0.78:
                     best = max(best, int(360 + (ratio * 160)))
     return best
+
+
+def _normalized_token_count(text, token):
+    """Count a normalized token without allocating ``text.split()``."""
+    if not text or not token:
+        return 0
+    count = 0
+    start = 0
+    token_length = len(token)
+    while True:
+        index = text.find(token, start)
+        if index < 0:
+            return count
+        end = index + token_length
+        if (
+            (index == 0 or text[index - 1] == " ")
+            and (end == len(text) or text[end] == " ")
+        ):
+            count += 1
+        start = index + 1
+
+
+def _search_corpus_statistics(corpus):
+    """Build BM25 document frequencies once for a non-cached test/fallback corpus."""
+    document_frequency = Counter()
+    seen_documents = set()
+    total_length = 0
+    for item, row in corpus:
+        key = _mapped_product_key(item, row)
+        if key in seen_documents:
+            continue
+        seen_documents.add(key)
+        tokens = row["_hay"].split()
+        total_length += max(1, len(tokens))
+        document_frequency.update({
+            token for token in tokens
+            if any(character.isalpha() for character in token)
+        })
+    document_count = max(1, len(seen_documents))
+    return (
+        document_frequency,
+        document_count,
+        (total_length / document_count) if total_length else 1.0,
+    )
 
 
 def _client_candidate_id(item, catalog_only=False):
@@ -3310,6 +3445,11 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
     phrases = list(dict.fromkeys(p for p in phrases if p))
 
     must_include = clean_list(query_plan.get("must_include"), 10)
+    normalized_must_include = [
+        value for value in (
+            normalize_search_text(item) for item in must_include
+        ) if value
+    ]
     exclude = [normalize_search_text(x) for x in clean_list(query_plan.get("exclude"), 10)]
     exclude = [x for x in exclude if x]
 
@@ -3328,29 +3468,36 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         retrieval_tokens.extend(tokenize_search_query(phrase))
     retrieval_tokens = list(dict.fromkeys(t for t in retrieval_tokens if len(t) >= 2))[:32]
 
-    # Query-specific BM25 statistics. Keep only aggregate counters: retaining a
-    # Counter and a copied product dict for every store item caused a large
-    # per-search memory spike on Render.
-    document_frequency = Counter()
-    total_length = 0
+    # Document frequencies are built with the corpus, not with each employee
+    # query. This removes a full-store tokenization pass from every search.
     retrieval_token_set = set(retrieval_tokens)
-    doc_count = 0
-    if retrieval_token_set:
-        seen_documents = set()
-        for item, row in corpus:
-            key = _mapped_product_key(item, row)
-            if key in seen_documents:
-                continue
-            seen_documents.add(key)
-            tokens = row["_hay"].split()
-            document_length = max(1, len(tokens))
-            total_length += document_length
-            doc_count += 1
-            for token in set(tokens).intersection(retrieval_token_set):
-                document_frequency[token] += 1
-        del seen_documents
-    doc_count = max(1, doc_count)
-    average_length = (total_length / doc_count) if total_length else 1.0
+    if (
+        _PROD_CACHE.get("statistics_rows_id") == id(corpus)
+        and _PROD_CACHE.get("document_frequency") is not None
+    ):
+        document_frequency = _PROD_CACHE.get("document_frequency") or {}
+        doc_count = max(1, int(_PROD_CACHE.get("document_count", 0) or 0))
+        average_length = float(
+            _PROD_CACHE.get("average_document_length", 1.0) or 1.0
+        )
+    else:
+        document_frequency, doc_count, average_length = (
+            _search_corpus_statistics(corpus)
+        )
+    # Fuzzy edit-distance work is needed only for words absent from the store
+    # vocabulary. Exact catalogue words already have stronger deterministic
+    # scores, so comparing them against every product wastes most search CPU.
+    has_semantic_expansion = any(
+        intent_terms for _nq, _dq, _qtokens, intent_terms, _abbrevs
+        in prepared_queries
+    )
+    fuzzy_tokens = [] if has_semantic_expansion else [
+        token for token in retrieval_tokens
+        if (
+            document_frequency.get(token, 0) == 0
+            and any(character.isalpha() for character in token)
+        )
+    ]
 
     upc_digits = set()
     for run in re.findall(r"\d[\d\s\-]{6,18}\d", question):
@@ -3376,16 +3523,16 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
                 row, nq, dq, qtokens, intent_terms, abbrevs
             ))
 
-        fuzzy = _fuzzy_product_score(row, retrieval_tokens)
+        fuzzy = _fuzzy_product_score(row, fuzzy_tokens)
+        hay = row["_hay"]
         bm25 = 0.0
         if retrieval_token_set:
-            tokens = row["_hay"].split()
-            doc_length = max(1, len(tokens))
-            counts = Counter(
-                token for token in tokens if token in retrieval_token_set
-            )
-            for token, frequency in counts.items():
-                df = document_frequency[token]
+            doc_length = max(1, hay.count(" ") + 1)
+            for token in retrieval_token_set:
+                frequency = _normalized_token_count(hay, token)
+                if not frequency:
+                    continue
+                df = document_frequency.get(token, 0)
                 inverse_frequency = math.log(
                     1 + ((doc_count - df + 0.5) / (df + 0.5))
                 )
@@ -3394,8 +3541,7 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
                 )
                 bm25 += inverse_frequency * ((frequency * 2.2) / denominator)
 
-        hay = row["_hay"]
-        must_hits = sum(1 for value in must_include if normalize_search_text(value) in hay)
+        must_hits = sum(1 for value in normalized_must_include if value in hay)
         exclusion_penalty = 260 if any(value in hay for value in exclude) else 0
         exact_upc = bool(upc_digits and row["_bc"] in upc_digits)
         score = max(lexical, fuzzy) + min(260, int(bm25 * 34)) + (must_hits * 35) - exclusion_penalty

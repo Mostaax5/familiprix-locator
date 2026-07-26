@@ -556,8 +556,12 @@ class ClientRagTests(unittest.TestCase):
             )
 
         call = provider.call_args
-        self.assertEqual(call.kwargs["max_tokens"], 560)
+        self.assertEqual(call.kwargs["max_tokens"], 480)
         self.assertNotIn("comparisons", call.kwargs["schema"]["properties"])
+        compact_payload = call.args[1]
+        self.assertNotIn("required_schema", compact_payload)
+        self.assertNotIn("locations", compact_payload["candidates"][0])
+        self.assertNotIn("field_sources", compact_payload["candidates"][0])
         self.assertEqual(result["selected_product_ids"], ["product:7"])
         self.assertEqual(result["comparisons"][0]["candidate_id"], "product:7")
 
@@ -679,6 +683,44 @@ class ClientRagTests(unittest.TestCase):
             ["Modèles à pile", "Modèles rechargeables", "Têtes de remplacement"],
         )
 
+    def test_documented_form_comparison_explains_how_to_choose(self):
+        products = [{
+            "client_id": "product:1", "name": "ADVIL 200MG CO100",
+            "description": "Comprimés d'ibuprofène 200 mg.",
+            "aisle": "Labo", "side": "A", "shelf": "4",
+        }, {
+            "client_id": "product:2", "name": "ADVIL 200MG LIQ/GEL CA115",
+            "description": "Capsules liqui-gels d'ibuprofène 200 mg.",
+            "aisle": "Labo", "side": "A", "shelf": "4",
+        }, {
+            "client_id": "product:3", "name": "ADVIL 200MG MINI GEL CA110",
+            "description": "Mini-gels d'ibuprofène 200 mg.",
+            "aisle": "Labo", "side": "A", "shelf": "4",
+        }, {
+            "client_id": "product:4", "name": "ADVIL ENF 100MG SUSP LIQ100ML",
+            "description": "Suspension liquide d'ibuprofène.",
+            "aisle": "Labo", "side": "A", "shelf": "4",
+        }]
+        plan = build_client_query_plan(
+            "Quelle est la différence entre les formes d'Advil et laquelle choisir?",
+            "documented",
+        )
+        with patch("routes.ai._provider_structured_request", return_value=None):
+            result = generate_documented_client_answer(
+                plan["corrected_query"], plan, products, [{
+                    "source_id": "store-plan",
+                    "candidate_ids": [product["client_id"] for product in products],
+                }],
+            )
+
+        self.assertIn("façon de les prendre", result["answer"])
+        self.assertIn("liqui-gels", result["answer"])
+        self.assertIn("ne prouve pas une action plus rapide", result["answer"])
+        self.assertIn("mesure avec le dispositif", result["answer"])
+        self.assertIn("100 mg, 200 mg", result["answer"])
+        self.assertEqual(len(result["follow_up_questions"]), 3)
+        self.assertTrue(result["pharmacist_referral"])
+
     def test_melatonin_documentation_skips_the_inapplicable_drug_database(self):
         products = [
             {"client_id": "product:1", "name": "A GAGNON MELATON 5MG GUM 120"},
@@ -765,40 +807,22 @@ class ClientRagTests(unittest.TestCase):
             "",
         )
 
-    def test_documented_deepseek_timeout_retries_fast_model_without_thinking(self):
-        response_payload = {
-            "usage": {"prompt_tokens": 12, "completion_tokens": 6},
-            "choices": [{"message": {"content": json.dumps({"answer": "ok"})}}],
-        }
-
-        class StubResponse:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, _type, _value, _traceback):
-                return False
-
-            def read(self, _size=-1):
-                return json.dumps(response_payload).encode("utf-8")
-
+    def test_documented_deepseek_timeout_falls_back_without_a_second_charge(self):
         with patch("routes.ai.DEEPSEEK_DOCUMENTED_MODEL", "deepseek-v4-pro"), \
              patch("routes.ai.DEEPSEEK_MODEL", "deepseek-v4-flash"), \
              patch("routes.ai._DEEPSEEK_DOCUMENTED_THINKING", False), \
-             patch("routes.ai._safe_urlopen", side_effect=[TimeoutError("slow"), StubResponse()]) as opener, \
+             patch("routes.ai._safe_urlopen", side_effect=TimeoutError("slow")) as opener, \
              patch("routes.ai._log_ai_usage"):
             result = _deepseek_json_request(
                 [{"role": "user", "content": "test"}],
                 max_tokens=3200, quality_mode=True,
             )
 
-        self.assertEqual(result, {"answer": "ok"})
-        self.assertEqual(opener.call_count, 2)
+        self.assertIsNone(result)
+        self.assertEqual(opener.call_count, 1)
         first_payload = json.loads(opener.call_args_list[0].args[0].data.decode("utf-8"))
-        second_payload = json.loads(opener.call_args_list[1].args[0].data.decode("utf-8"))
         self.assertEqual(first_payload["model"], "deepseek-v4-pro")
         self.assertEqual(first_payload["thinking"], {"type": "disabled"})
-        self.assertEqual(second_payload["model"], "deepseek-v4-flash")
-        self.assertEqual(second_payload["thinking"], {"type": "disabled"})
 
     def test_small_ai_context_keeps_different_product_forms(self):
         candidates = [
@@ -1036,7 +1060,7 @@ class ClientRagTests(unittest.TestCase):
         retriever.assert_called_once()
         generator.assert_called_once()
 
-    def test_documented_melatonin_assortment_uses_documented_answer_model(self):
+    def test_documented_melatonin_assortment_uses_immediate_grounded_answer(self):
         names = [
             "WEBBER MELATON 5MG CO120",
             "A GAGNON MELATON 10MG CA90",
@@ -1097,15 +1121,58 @@ class ClientRagTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(response.status_code, 200)
         self.assertFalse(payload["degraded"])
-        self.assertIn("endormissement occasionnel", payload["answer"])
-        generator.assert_called_once()
-        provider.assert_called_once()
-        rate_limit.assert_called_once()
+        self.assertIn("difficulté occasionnelle à s'endormir", payload["answer"])
+        self.assertIn("gommes", payload["answer"])
+        self.assertIn("liquide ou suspension", payload["answer"])
+        generator.assert_not_called()
+        provider.assert_not_called()
+        rate_limit.assert_not_called()
         retriever.assert_called_once_with(
             unittest.mock.ANY,
             unittest.mock.ANY,
             include_live_regulatory=False,
         )
+
+    def test_documented_form_comparison_skips_ai_delay(self):
+        candidates = [{
+            "id": 1, "client_id": "product:1",
+            "name": "ADVIL 200MG CO100", "description": "Comprimés 200 mg",
+            "barcode": "1001", "aisle": "Labo", "side": "A",
+            "section": "2", "shelf": "4", "position": "1",
+        }, {
+            "id": 2, "client_id": "product:2",
+            "name": "ADVIL 200MG LIQ/GEL CA115", "description": "Liqui-gels 200 mg",
+            "barcode": "1002", "aisle": "Labo", "side": "A",
+            "section": "2", "shelf": "4", "position": "2",
+        }]
+        documents = [{
+            "source_id": "store-plan", "title": "Plan actuel",
+            "publisher": "Familiprix Locator", "url": "", "evidence": "",
+            "candidate_ids": [product["client_id"] for product in candidates],
+        }]
+        with patch("routes.products.hybrid_client_candidates", return_value=candidates), \
+             patch("routes.products.hydrate_candidate_images"), \
+             patch("routes.ai.retrieve_client_documentation", return_value=documents), \
+             patch("routes.ai.generate_documented_client_answer") as generator, \
+             patch("routes.ai.configured_ai_provider") as provider, \
+             patch("routes.ai._check_ai_rate_limit") as rate_limit, \
+             patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": (
+                        "Quelle est la différence entre les comprimés et les "
+                        "liqui-gels Advil?"
+                    ),
+                    "mode": "documented",
+                })
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertLess(payload["elapsed_ms"], 1000)
+        self.assertIn("façon de les prendre", payload["answer"])
+        generator.assert_not_called()
+        provider.assert_not_called()
+        rate_limit.assert_not_called()
 
     def test_documented_toothbrush_power_comparison_skips_ai_delay(self):
         candidates = [{
