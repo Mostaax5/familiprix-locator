@@ -9,6 +9,28 @@ from routes import ai, products
 
 
 class MemorySafetyTests(unittest.TestCase):
+    def test_warm_product_corpus_never_waits_for_background_memory_task(self):
+        original_cache = dict(products._PROD_CACHE)
+        warm_rows = [({"id": 1, "name": "Advil"}, {"_name": "advil"})]
+        try:
+            products._PROD_CACHE.update(
+                rows=warm_rows,
+                generation=12,
+                state_checked_at=time.time(),
+            )
+            with patch.object(
+                products, "product_search_generation", return_value=12,
+            ), patch.object(
+                products, "memory_intensive_task",
+                side_effect=AssertionError("warm search must not wait"),
+            ):
+                self.assertIs(
+                    products._employee_product_corpus(object()), warm_rows
+                )
+        finally:
+            products._PROD_CACHE.clear()
+            products._PROD_CACHE.update(original_cache)
+
     def test_bootstrap_payload_keeps_media_but_removes_duplicate_identifiers(self):
         payload = products.bootstrap_product_payload({
             "id": 42,

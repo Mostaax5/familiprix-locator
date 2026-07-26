@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from app import app
+from routes import products as products_module
 from routes.ai import (
     _outbound_url_allowed,
     _deepseek_json_request,
@@ -52,6 +53,12 @@ def search_row(name, brand="", description="", barcode=""):
 
 
 class ClientRagTests(unittest.TestCase):
+    def setUp(self):
+        products_module._PROD_CACHE.update(
+            key=None, rows=[], built_at=0.0,
+            generation=-1, state_checked_at=0.0,
+        )
+
     def test_outbound_lookup_urls_cannot_reach_other_or_insecure_hosts(self):
         base = "https://example.com/catalog"
         self.assertEqual(
@@ -563,11 +570,13 @@ class ClientRagTests(unittest.TestCase):
             "usage_notes": "Lire l'étiquette avant utilisation.",
             "aisle": "4", "side": "A", "section": "2", "shelf": "3", "position": "5",
         }
-        documents = [{
-            "source_id": "store-plan",
-            "title": "Plan actuel du magasin",
-            "candidate_ids": ["product:7"],
-        }, {
+        query_plan = build_client_query_plan(
+            "Quelles saveurs de mélatonine avons-nous et dans quel contexte les utiliser?",
+            "documented",
+        )
+        documents = retrieve_client_documentation(
+            [product], query_plan, include_live_regulatory=False,
+        ) + [{
             "source_id": "catalog:1",
             "title": "Fiche produit",
             "candidate_ids": ["product:7"],
@@ -575,8 +584,7 @@ class ClientRagTests(unittest.TestCase):
 
         with patch("routes.ai._provider_structured_request", return_value=None):
             result = generate_documented_client_answer(
-                "Quelles saveurs de mélatonine avons-nous?",
-                {"medical": False}, [product], documents,
+                query_plan["corrected_query"], query_plan, [product], documents,
             )
 
         self.assertTrue(result["degraded"])
@@ -584,6 +592,9 @@ class ClientRagTests(unittest.TestCase):
         self.assertIn("comprimés", result["answer"])
         self.assertIn("5 mg", result["answer"])
         self.assertIn("fraise", result["answer"])
+        self.assertIn("horaire décalé", result["answer"])
+        self.assertNotIn("j'ai trouvé", result["answer"].lower())
+        self.assertEqual(result["key_points"][0]["heading"], "Choisir selon le besoin")
         self.assertEqual(result["comparisons"][0]["source_ids"], ["catalog:1"])
         self.assertLessEqual(len(result["comparisons"][0]["difference"]), 420)
         self.assertTrue(result["pharmacist_referral"])
@@ -678,6 +689,18 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertEqual(documents, [])
         lookup.assert_not_called()
+        query_plan = build_client_query_plan(
+            "Quels types de mélatonine et dans quel contexte?", "documented",
+        )
+        intent_documents = retrieve_client_documentation(
+            products, query_plan, include_live_regulatory=False,
+        )
+        source_ids = {
+            document["source_id"] for document in intent_documents
+        }
+        self.assertIn("health-canada:melatonin-uses", source_ids)
+        self.assertIn("health-canada:melatonin-safety", source_ids)
+        self.assertIn("health-canada:melatonin-pediatric", source_ids)
 
     def test_unconfirmed_identifiers_never_attach_regulatory_documents(self):
         products = [{
@@ -1013,7 +1036,7 @@ class ClientRagTests(unittest.TestCase):
         retriever.assert_called_once()
         generator.assert_called_once()
 
-    def test_documented_melatonin_assortment_uses_immediate_grounded_summary(self):
+    def test_documented_melatonin_assortment_uses_documented_answer_model(self):
         names = [
             "WEBBER MELATON 5MG CO120",
             "A GAGNON MELATON 10MG CA90",
@@ -1032,12 +1055,38 @@ class ClientRagTests(unittest.TestCase):
             "publisher": "Familiprix Locator", "url": "", "evidence": "",
             "candidate_ids": [product["client_id"] for product in candidates],
         }]
+        documented = {
+            "answer": (
+                "Pour choisir, distinguez l'endormissement occasionnel, l'horaire "
+                "décalé et le décalage horaire."
+            ),
+            "selected_product_ids": [
+                product["client_id"] for product in candidates
+            ],
+            "follow_up_questions": [],
+            "safety_flags": [],
+            "pharmacist_referral": True,
+            "pharmacist_reason": "Confirmer le choix avec le pharmacien.",
+            "key_points": [],
+            "comparisons": [],
+            "useful_guidance": [],
+            "important_checks": [],
+            "source_ids": ["store-plan"],
+            "degraded": False,
+            "warning": "",
+        }
         with patch("routes.products.hybrid_client_candidates", return_value=candidates), \
              patch("routes.products.hydrate_candidate_images"), \
              patch("routes.ai.retrieve_client_documentation", return_value=documents) as retriever, \
-             patch("routes.ai.generate_documented_client_answer") as generator, \
-             patch("routes.ai.configured_ai_provider") as provider, \
-             patch("routes.ai._check_ai_rate_limit") as rate_limit, \
+             patch(
+                 "routes.ai.generate_documented_client_answer",
+                 return_value=documented,
+             ) as generator, \
+             patch(
+                 "routes.ai.configured_ai_provider",
+                 return_value={"name": "deepseek"},
+             ) as provider, \
+             patch("routes.ai._check_ai_rate_limit", return_value=True) as rate_limit, \
              patch("routes.ai.log_ai_interaction"):
             with app.test_client() as client:
                 response = client.post("/api/client/help", json={
@@ -1048,11 +1097,10 @@ class ClientRagTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(response.status_code, 200)
         self.assertFalse(payload["degraded"])
-        self.assertIn("comprimés", payload["answer"])
-        self.assertIn("2.5 mg, 3 mg, 5 mg, 10 mg", payload["answer"])
-        generator.assert_not_called()
-        provider.assert_not_called()
-        rate_limit.assert_not_called()
+        self.assertIn("endormissement occasionnel", payload["answer"])
+        generator.assert_called_once()
+        provider.assert_called_once()
+        rate_limit.assert_called_once()
         retriever.assert_called_once_with(
             unittest.mock.ANY,
             unittest.mock.ANY,

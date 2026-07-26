@@ -11,7 +11,7 @@ from difflib import SequenceMatcher
 from functools import wraps
 from urllib.parse import urlsplit
 from flask import Blueprint, Response, jsonify, request, stream_with_context
-from database import get_db, DatabaseIntegrityError
+from database import get_db, DatabaseIntegrityError, product_search_generation
 from auth import require_editor, utc_now_iso, side_display_label
 from routes.layout import validate_layout_slot, aisle_sort_key
 from memory_guard import (
@@ -495,9 +495,13 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
 # small CPU, which also froze every other request behind it on the single worker.
 # The cache key (count, max id, max modified_at) changes on any insert/update/delete
 # (every write path stamps modified_at), so no explicit invalidation hooks are needed.
-_PROD_CACHE = {"key": None, "rows": [], "built_at": 0.0}
+_PROD_CACHE = {
+    "key": None, "rows": [], "built_at": 0.0,
+    "generation": -1, "state_checked_at": 0.0,
+}
 _PROD_LOCK = threading.RLock()
 _PROD_IDENTIFIER_DRIFT_TTL_S = 120.0
+_PROD_STATE_RECHECK_S = 120.0
 _PRODUCTS_PAYLOAD_VERSION = "compact-stream-v3"
 _PRODUCT_STREAM_CHUNK_BYTES = 256 * 1024
 
@@ -509,6 +513,15 @@ def _serialized_product_corpus(function):
         with _PROD_LOCK:
             return function(*args, **kwargs)
     return locked
+
+
+def _product_corpus_fast_ready():
+    return bool(
+        _PROD_CACHE["rows"]
+        and _PROD_CACHE.get("generation") == product_search_generation()
+        and time.time() - float(_PROD_CACHE.get("state_checked_at", 0) or 0)
+        < _PROD_STATE_RECHECK_S
+    )
 
 
 def _searchable_identifier_status_sql(alias=""):
@@ -820,6 +833,10 @@ def reference_identifier_state_key(db):
 @_serialized_product_corpus
 def _products_corpus(db, allow_identifier_stale=False):
     """All placed products with their pre-normalized search fields: [(item, row)]."""
+    if allow_identifier_stale and _product_corpus_fast_ready():
+        return _PROD_CACHE["rows"]
+    generation = product_search_generation()
+    checked_at = time.time()
     try:
         alias_state = db.execute(
             """SELECT COUNT(*) AS n, MAX(id) AS max_id,
@@ -854,6 +871,9 @@ def _products_corpus(db, allow_identifier_stale=False):
         reference_identifier_key,
     )
     if _PROD_CACHE["key"] == key:
+        _PROD_CACHE.update(
+            generation=generation, state_checked_at=checked_at,
+        )
         return _PROD_CACHE["rows"]
     # Regulatory enrichment can insert several candidate identifiers per minute.
     # Product names and locations have not changed, so employee searches may use
@@ -867,6 +887,9 @@ def _products_corpus(db, allow_identifier_stale=False):
         and time.time() - float(_PROD_CACHE.get("built_at", 0) or 0)
         < _PROD_IDENTIFIER_DRIFT_TTL_S
     ):
+        _PROD_CACHE.update(
+            generation=generation, state_checked_at=checked_at,
+        )
         return _PROD_CACHE["rows"]
     aliases_by_product = {}
     verified_by_product = {}
@@ -974,7 +997,10 @@ def _products_corpus(db, allow_identifier_stale=False):
         item["identifiers"] = _public_product_identifiers(identifiers)
         item["regulatory_identifiers"] = _public_regulatory_identifiers(identifiers)
         rows.append((item, _product_search_row(item, aliases, identifiers)))
-    _PROD_CACHE.update(key=key, rows=rows, built_at=time.time())
+    _PROD_CACHE.update(
+        key=key, rows=rows, built_at=time.time(),
+        generation=generation, state_checked_at=checked_at,
+    )
     del (
         gtin_keys, aliases_by_product, verified_by_product,
         verified_values_by_product, field_sources_by_product,
@@ -982,6 +1008,20 @@ def _products_corpus(db, allow_identifier_stale=False):
     )
     release_unused_memory()
     return rows
+
+
+def _employee_product_corpus(db):
+    """Return a warm corpus without waiting behind background web lookups.
+
+    Only a cold or invalidated rebuild needs the process-wide memory guard.
+    Normal searches allocate very little and must stay immediately available.
+    """
+    if _product_corpus_fast_ready():
+        with _PROD_LOCK:
+            if _product_corpus_fast_ready():
+                return _PROD_CACHE["rows"]
+    with memory_intensive_task("product_corpus", priority=True):
+        return _products_corpus(db, allow_identifier_stale=True)
 
 
 def public_product_payload(item):
@@ -3224,7 +3264,7 @@ def client_products_by_ids(candidate_ids, limit=60):
     wanted = {str(value or "").strip() for value in candidate_ids or []}
     if not wanted:
         return []
-    corpus = _products_corpus(get_db(), allow_identifier_stale=True)
+    corpus = _employee_product_corpus(get_db())
     ordered_keys = []
     for item, row in corpus:
         if _client_candidate_id(item) not in wanted:
@@ -3245,7 +3285,7 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
     enrich metadata/images, but can never become store inventory in Client search.
     """
     db = get_db()
-    corpus = _products_corpus(db, allow_identifier_stale=True)
+    corpus = _employee_product_corpus(db)
     required_concepts = client_required_concept_groups(question)
     excluded_concepts = client_excluded_concept_terms(question)
 
@@ -3377,14 +3417,7 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
 
 
 def hybrid_client_candidates(question, query_plan, limit=60):
-    # Employee searches take priority over online image/regulatory enrichment.
-    # The guard also prevents a first-time corpus build from overlapping a PDF
-    # parser or web scraper in the 512 MB Render process.
-    with memory_intensive_task("client_search", priority=True):
-        try:
-            return _hybrid_client_candidates(question, query_plan, limit=limit)
-        finally:
-            release_unused_memory()
+    return _hybrid_client_candidates(question, query_plan, limit=limit)
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -3533,10 +3566,9 @@ def search_products():
     if field and field != "name":
         items = _direct_identifier_products(db, query, field, limit=limit)
         return jsonify([public_product_payload(item) for item in items])
-    with memory_intensive_task("product_search", priority=True):
-        corpus = _products_corpus(
-            db, allow_identifier_stale=True
-        )  # enrichment writes cannot force a full rebuild per employee query
+    corpus = _employee_product_corpus(
+        db
+    )  # enrichment writes cannot force a full rebuild per employee query
     if field:
         items = rank_products_by_field(
             [item for item, _ in corpus], query, field, limit=limit

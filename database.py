@@ -30,6 +30,36 @@ _POSTGRES_AUTH_SCHEMA_READY = False
 _PRODUCT_SCHEMA_LOCK = threading.RLock()
 _POSTGRES_PRODUCT_SCHEMA_READY = False
 _POSTGRES_PRODUCT_SCHEMA_ERROR = ""
+_PRODUCT_SEARCH_GENERATION = 0
+_PRODUCT_SEARCH_GENERATION_LOCK = threading.Lock()
+
+
+_SEARCH_AFFECTING_PRODUCT_COLUMNS = (
+    "name", "barcode", "product_code", "gtin_key",
+    "aisle", "side", "section", "shelf", "position",
+    "in_stock", "is_plano", "linked_position", "facings",
+    "flipped_label", "underneath_label",
+)
+
+
+def product_search_generation():
+    return _PRODUCT_SEARCH_GENERATION
+
+
+def _bump_product_search_generation():
+    global _PRODUCT_SEARCH_GENERATION
+    with _PRODUCT_SEARCH_GENERATION_LOCK:
+        _PRODUCT_SEARCH_GENERATION += 1
+
+
+def _query_affects_product_search(query):
+    sql = " ".join(str(query or "").strip().lower().split())
+    if sql.startswith("insert into products ") or sql.startswith("delete from products"):
+        return True
+    if not sql.startswith("update products set "):
+        return False
+    assignments = sql.split(" where ", 1)[0]
+    return any(f"{column}=" in assignments for column in _SEARCH_AFFECTING_PRODUCT_COLUMNS)
 
 
 class DatabaseIntegrityError(Exception):
@@ -64,6 +94,7 @@ class DatabaseConnection:
         self.connection = connection
         self.backend = backend
         self.pool = pool
+        self._product_search_mutated = False
 
     def execute(self, query, params=()):
         params = tuple(params or ())
@@ -87,8 +118,11 @@ class DatabaseConnection:
                 lastrowid = getattr(cursor, "lastrowid", None)
         except INTEGRITY_ERRORS as exc:
             self.connection.rollback()
+            self._product_search_mutated = False
             raise DatabaseIntegrityError(str(exc)) from exc
 
+        if _query_affects_product_search(query):
+            self._product_search_mutated = True
         return CursorResult(cursor, self.backend, lastrowid=lastrowid)
 
     def executemany(self, query, param_sequences):
@@ -99,14 +133,21 @@ class DatabaseConnection:
             cursor.executemany(sql, params)
         except INTEGRITY_ERRORS as exc:
             self.connection.rollback()
+            self._product_search_mutated = False
             raise DatabaseIntegrityError(str(exc)) from exc
+        if _query_affects_product_search(query):
+            self._product_search_mutated = True
         return CursorResult(cursor, self.backend)
 
     def commit(self):
         self.connection.commit()
+        if self._product_search_mutated:
+            _bump_product_search_generation()
+            self._product_search_mutated = False
 
     def rollback(self):
         self.connection.rollback()
+        self._product_search_mutated = False
 
     def close(self):
         # Pooled connections go back to the pool (rolled back + reset by putconn)

@@ -445,6 +445,20 @@ class ProductDataAccuracyTests(unittest.TestCase):
             database_module._POSTGRES_PRODUCT_SCHEMA_READY = original_ready
             database_module._POSTGRES_PRODUCT_SCHEMA_ERROR = original_error
 
+    def test_search_generation_tracks_plan_changes_not_background_descriptions(self):
+        self.assertTrue(database_module._query_affects_product_search(
+            "INSERT INTO products (name, aisle) VALUES (?, ?)"
+        ))
+        self.assertTrue(database_module._query_affects_product_search(
+            "UPDATE products SET section=?, shelf=?, modified_at=? WHERE id=?"
+        ))
+        self.assertTrue(database_module._query_affects_product_search(
+            "DELETE FROM products WHERE id=?"
+        ))
+        self.assertFalse(database_module._query_affects_product_search(
+            "UPDATE products SET description=?, image_url=?, quality_checked_at=? WHERE id=?"
+        ))
+
     def test_quality_summary_reports_identifier_and_field_coverage(self):
         db = self.make_db()
         product_id = self.insert_product(db, name="Verified package")

@@ -2114,6 +2114,9 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "Reste concis: la réponse complète doit être lisible rapidement. answer est une réponse "
     "directe de 2 à 4 phrases que l'employé peut dire au client. Elle doit répondre à « quoi "
     "choisir et pourquoi » lorsque c'est la question, sans se contenter de nommer des produits. "
+    "Traite chaque dimension explicitement demandée: par exemple types, saveurs et contexte "
+    "d'utilisation doivent recevoir trois réponses distinctes, même si certaines données sont "
+    "absentes et doivent être signalées comme telles. "
     "Donne au maximum 4 key_points; chaque élément fait au plus deux phrases. key_points contient "
     "les faits décisifs et les différences pratiques, avec des titres très courts. Le serveur "
     "ajoutera lui-même les cartes, emplacements et comparaisons produit par produit: ne les "
@@ -2489,6 +2492,61 @@ def health_canada_nhp_documents(products, limit=4):
 
 
 def _client_intent_documents(query_plan):
+    from routes.products import normalize_search_text
+
+    normalized_question = normalize_search_text(
+        (query_plan or {}).get("corrected_query", "")
+    )
+    if "melaton" in normalized_question:
+        monograph_url = (
+            "https://webprod.hc-sc.gc.ca/nhpid-bdipsn/atReq"
+            "?atid=melatonin.oral2&lang=eng&wbdisable=true"
+        )
+        return [{
+            "source_id": "health-canada:melatonin-uses",
+            "title": "Santé Canada - Monographie de la mélatonine orale",
+            "publisher": "Santé Canada",
+            "url": monograph_url,
+            "evidence": (
+                "La monographie vise les adultes de 18 ans et plus et l'usage au besoin pour "
+                "l'insomnie occasionnelle. Les usages autorisables comprennent l'aide au sommeil, "
+                "la réduction du temps d'endormissement, l'augmentation du temps total de sommeil "
+                "lors d'un horaire perturbé, le décalage horaire et le réajustement du cycle "
+                "veille-sommeil. La forme et la concentration exactes doivent être confirmées sur "
+                "l'étiquette du produit homologué."
+            ),
+            "candidate_ids": [],
+        }, {
+            "source_id": "health-canada:melatonin-safety",
+            "title": "Santé Canada - Précautions pour la mélatonine",
+            "publisher": "Santé Canada",
+            "url": monograph_url,
+            "evidence": (
+                "La monographie demande d'éviter l'alcool et les produits qui causent de la "
+                "somnolence, et de ne pas conduire ni utiliser de machinerie pendant 5 heures. "
+                "Elle recommande de consulter pour plusieurs médicaments ou maladies, si "
+                "l'insomnie persiste plus de 4 semaines, et contre-indique l'usage pendant la "
+                "grossesse ou l'allaitement."
+            ),
+            "candidate_ids": [],
+        }, {
+            "source_id": "health-canada:melatonin-pediatric",
+            "title": "Santé Canada - Mélatonine et personnes de moins de 18 ans",
+            "publisher": "Santé Canada",
+            "url": (
+                "https://www.canada.ca/en/health-canada/services/drugs-health-products/"
+                "drug-products/prescription-drug-list/notices-changes/"
+                "qualifier-pediatric-melatonin-intent.html"
+            ),
+            "evidence": (
+                "Depuis le 2 juin 2026, la mélatonine vendue pour un usage lié au sommeil chez "
+                "les enfants et adolescents de moins de 18 ans relève des médicaments sur "
+                "ordonnance. Santé Canada indique qu'une supervision professionnelle est "
+                "nécessaire pour rechercher la cause du trouble, essayer l'hygiène du sommeil "
+                "et adapter la dose à la personne."
+            ),
+            "candidate_ids": [],
+        }]
     if str((query_plan or {}).get("intent", "") or "") != "headache_relief":
         return []
     return [{
@@ -2716,6 +2774,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
     asks_flavors = bool(
         question_words.intersection({"saveur", "saveurs", "gout", "gouts", "flavor", "flavors"})
     )
+    is_melatonin_query = "melaton" in normalized_question
 
     form_markers = (
         ("gommes", ("gum", "gomme", "gummies")),
@@ -2887,6 +2946,30 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             "Vérifiez ce qui a déjà été pris et ne combinez ni deux produits contenant de "
             "l'acétaminophène, ni deux AINS."
         )
+    elif names and is_melatonin_query:
+        assortment = []
+        if forms:
+            assortment.append(f"formes: {', '.join(forms)}")
+        if doses:
+            assortment.append(f"concentrations: {', '.join(doses)}")
+        if features:
+            assortment.append(f"mentions: {', '.join(features)}")
+        assortment_text = "; ".join(assortment)
+        flavor_text = (
+            f"Les saveurs explicitement indiquées sont {', '.join(flavors)}."
+            if flavors else
+            "Aucune saveur ne peut être confirmée avec les fiches actuelles; vérifiez l'emballage."
+        )
+        answer = (
+            "Pour choisir une mélatonine, partez d'abord du besoin: difficulté occasionnelle "
+            "à s'endormir, horaire décalé ou travail de nuit, ou décalage horaire. "
+            + (f"Dans le plan actuel, on distingue {assortment_text}. " if assortment_text else "")
+            + "Les gommes, comprimés et capsules changent surtout la façon de la prendre; une "
+            "mention « dissolution rapide » décrit la forme, tandis qu'une mention « double "
+            "action » doit être confirmée sur l'étiquette avant de conclure à une libération "
+            "prolongée. "
+            + flavor_text
+        )
     elif names:
         summary_parts = []
         if forms:
@@ -2906,11 +2989,10 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                 "les différences confirmées sont présentées produit par produit ci-dessous"
             )
         answer = (
-            f"J'ai trouvé {len(names)} produit{'s' if len(names) > 1 else ''} représentatif"
-            f"{'s' if len(names) > 1 else ''} dans le plan actuel : "
+            "Les options du magasin se distinguent surtout ainsi : "
             + "; ".join(summary_parts) + ". "
-            "Les cartes ci-dessous donnent les caractéristiques confirmées et l'emplacement de "
-            "chaque produit; toute caractéristique absente doit être vérifiée sur l'emballage."
+            "Pour répondre au client, partez du besoin précis puis comparez ces différences; "
+            "confirmez sur l'emballage toute caractéristique absente de la fiche."
         )
     else:
         answer = (
@@ -2955,6 +3037,18 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         ["quebec:info-sante-811"]
         if "quebec:info-sante-811" in valid_source_ids else []
     )
+    melatonin_uses_source = (
+        ["health-canada:melatonin-uses"]
+        if "health-canada:melatonin-uses" in valid_source_ids else []
+    )
+    melatonin_safety_source = (
+        ["health-canada:melatonin-safety"]
+        if "health-canada:melatonin-safety" in valid_source_ids else []
+    )
+    melatonin_pediatric_source = (
+        ["health-canada:melatonin-pediatric"]
+        if "health-canada:melatonin-pediatric" in valid_source_ids else []
+    )
     if is_headache_query:
         key_points.append({
             "heading": "Choix rapide",
@@ -2990,6 +3084,39 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             ),
             "source_ids": info_sante_source,
         })
+    elif is_melatonin_query:
+        key_points.extend([{
+            "heading": "Choisir selon le besoin",
+            "detail": (
+                "Distinguer l'endormissement occasionnel, un horaire perturbé ou le travail "
+                "de nuit, et le décalage horaire; ce contexte est plus utile que de choisir "
+                "automatiquement la concentration la plus élevée."
+            ),
+            "source_ids": melatonin_uses_source,
+        }, {
+            "heading": "Forme et concentration",
+            "detail": (
+                "La gomme, le comprimé, la capsule ou la dissolution rapide changent surtout "
+                "la prise. Confirmer sur l'étiquette l'usage autorisé, la libération et la "
+                "concentration du produit exact."
+            ),
+            "source_ids": melatonin_uses_source,
+        }, {
+            "heading": "Moins de 18 ans",
+            "detail": (
+                "Au Canada, l'usage lié au sommeil chez les moins de 18 ans relève des "
+                "médicaments sur ordonnance depuis le 2 juin 2026."
+            ),
+            "source_ids": melatonin_pediatric_source,
+        }, {
+            "heading": "Précautions",
+            "detail": (
+                "Éviter l'alcool et les autres produits causant de la somnolence; ne pas "
+                "conduire pendant 5 heures. Référer en cas de grossesse, allaitement, "
+                "médicaments, maladie pertinente ou insomnie persistante."
+            ),
+            "source_ids": melatonin_safety_source,
+        }])
     elif is_toothbrush_query:
         if toothbrush_groups.get("brosse à pile"):
             key_points.append({
@@ -3024,13 +3151,16 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             "detail": ", ".join(forms).capitalize(),
             "source_ids": store_source,
         })
-    if doses and not is_headache_query:
+    if doses and not is_headache_query and not is_melatonin_query:
         key_points.append({
             "heading": "Concentrations repérées",
             "detail": ", ".join(doses),
             "source_ids": store_source,
         })
-    if not is_toothbrush_query and not is_headache_query and (flavors or asks_flavors):
+    if (
+        not is_toothbrush_query and not is_headache_query
+        and not is_melatonin_query and (flavors or asks_flavors)
+    ):
         key_points.append({
             "heading": "Saveurs",
             "detail": (
@@ -3039,14 +3169,20 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             ),
             "source_ids": store_source,
         })
-    if not is_toothbrush_query and not is_headache_query and features:
+    if (
+        not is_toothbrush_query and not is_headache_query
+        and not is_melatonin_query and features
+    ):
         key_points.append({
             "heading": "Mentions particulières",
             "detail": ", ".join(features).capitalize(),
             "source_ids": store_source,
         })
 
-    medical = bool(not is_toothbrush_query and (query_plan.get("medical", False) or doses))
+    medical = bool(
+        not is_toothbrush_query
+        and (query_plan.get("medical", False) or doses or is_melatonin_query)
+    )
     generic_dimensions = []
     if forms:
         generic_dimensions.append("la forme")
@@ -3061,16 +3197,30 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         "A-t-elle déjà pris un médicament aujourd'hui, et lequel?",
         "Y a-t-il grossesse, allaitement, allergies ou conditions de santé à signaler?",
     ]
+    melatonin_follow_ups = [
+        "Est-ce pour un adulte de 18 ans ou plus?",
+        "Le besoin principal est-il l'endormissement, un horaire décalé ou le décalage horaire?",
+        "La personne prend-elle d'autres médicaments ou produits qui causent de la somnolence?",
+    ]
     return {
         "answer": answer,
         "selected_product_ids": selected_ids,
-        "follow_up_questions": headache_follow_ups if is_headache_query else [],
+        "follow_up_questions": (
+            headache_follow_ups if is_headache_query
+            else melatonin_follow_ups if is_melatonin_query
+            else []
+        ),
         "safety_flags": ([
             (
                 "Vérifier l'ingrédient actif, la concentration, l'âge indiqué et les avertissements "
                 "sur chaque emballage avant de proposer un produit."
                 if is_headache_query else
-                "Vérifier sur l'étiquette la concentration, la forme, les ingrédients, l'âge et les avertissements."
+                (
+                    "Confirmer que la personne a 18 ans ou plus et vérifier la concentration, "
+                    "l'usage, les médicaments, les contre-indications et les avertissements."
+                    if is_melatonin_query else
+                    "Vérifier sur l'étiquette la concentration, la forme, les ingrédients, l'âge et les avertissements."
+                )
             )
         ] if medical else []),
         "pharmacist_referral": medical,
@@ -3080,8 +3230,14 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                 "d'allergies, de grossesse, d'allaitement, pour un enfant, ou si le mal de tête "
                 "est important, inhabituel ou persistant."
                 if is_headache_query else
-                "Consulter le pharmacien pour les interactions, la grossesse, l'allaitement, "
-                "un enfant ou une situation médicale particulière."
+                (
+                    "Consulter le pharmacien pour une personne de moins de 18 ans, les "
+                    "interactions, la grossesse, l'allaitement, une maladie pertinente ou "
+                    "une insomnie persistante."
+                    if is_melatonin_query else
+                    "Consulter le pharmacien pour les interactions, la grossesse, l'allaitement, "
+                    "un enfant ou une situation médicale particulière."
+                )
             )
         ) if medical else "",
         "key_points": key_points,
@@ -3094,10 +3250,20 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                 (
                     "Comparer d'abord l'ingrédient actif et la concentration, puis la forme et le "
                     "format. Vérifier les médicaments déjà pris pour éviter un ingrédient en double."
-                    if is_headache_query else generic_guidance
+                    if is_headache_query else
+                    (
+                        "Choisir selon le contexte de sommeil, puis comparer la forme et la "
+                        "concentration. La saveur est un critère de préférence, pas une preuve "
+                        "d'un usage différent."
+                        if is_melatonin_query else generic_guidance
+                    )
                 )
             ),
-            "source_ids": acetaminophen_source if is_headache_query else [],
+            "source_ids": (
+                acetaminophen_source if is_headache_query
+                else melatonin_uses_source if is_melatonin_query
+                else []
+            ),
         }],
         "important_checks": [{
             "text": (
@@ -3108,10 +3274,15 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                     "Ne pas choisir uniquement selon la marque: confirmer l'ingrédient actif, la "
                     "dose indiquée, les contre-indications et les avertissements sur l'emballage."
                     if is_headache_query else
-                    "Ne pas attribuer à un produit un usage qui n'apparaît pas sur sa fiche ou son étiquette."
+                    (
+                        "Ne pas déduire qu'un produit agit plus vite ou plus longtemps à partir "
+                        "du seul nom abrégé; confirmer la libération et l'usage sur l'étiquette."
+                        if is_melatonin_query else
+                        "Ne pas attribuer à un produit un usage qui n'apparaît pas sur sa fiche ou son étiquette."
+                    )
                 )
             ),
-            "source_ids": [],
+            "source_ids": melatonin_uses_source if is_melatonin_query else [],
         }],
         "source_ids": valid_source_ids[:16],
         "degraded": bool(degraded),
@@ -4239,8 +4410,7 @@ def client_help():
     use_local_documented_summary = bool(
         response_mode == "documented"
         and (
-            (query_plan.get("wants_all") and "melaton" in normalized_question)
-            or is_toothbrush_power_comparison
+            is_toothbrush_power_comparison
             or (
                 query_plan.get("intent") == "headache_relief"
                 and not follow_up
