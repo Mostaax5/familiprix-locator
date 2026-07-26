@@ -1001,6 +1001,54 @@ class ClientRagTests(unittest.TestCase):
         self.assertIn(20, [item["id"] for item in selected])
         self.assertTrue(any("transparent" in item["name"].lower() for item in selected))
 
+    def test_comparison_context_prefers_distinct_sides_over_combined_product(self):
+        candidates = [{
+            "id": 1,
+            "name": "Sensodyne blanchissant",
+            "description": "Dentifrice blanchissant pour dents sensibles.",
+        }, {
+            "id": 2,
+            "name": "Sensodyne sensibilité",
+            "description": "Dentifrice pour dents sensibles.",
+        }, {
+            "id": 3,
+            "name": "Crest blanchissant",
+            "description": "Dentifrice blanchissant pour retirer les taches.",
+        }]
+
+        selected = select_client_answer_candidates(
+            candidates,
+            limit=2,
+            question=(
+                "Différence entre un dentifrice pour dents sensibles "
+                "et un dentifrice blanchissant"
+            ),
+        )
+
+        self.assertEqual({item["id"] for item in selected}, {2, 3})
+
+    def test_small_context_avoids_duplicate_visible_names(self):
+        candidates = [{
+            "id": 1, "name": "ADVIL 200MG CO100",
+            "description": "Comprimés.",
+        }, {
+            "id": 2, "name": "ADVIL 200MG CO100",
+            "description": "Comprimés avec autre description.",
+        }, {
+            "id": 3, "name": "TYLENOL 500MG CO100",
+            "description": "Comprimés d'acétaminophène.",
+        }, {
+            "id": 4, "name": "ALEVE 220MG CO24",
+            "description": "Comprimés de naproxène.",
+        }]
+
+        selected = select_client_answer_candidates(candidates, limit=3)
+
+        self.assertEqual(
+            [item["name"] for item in selected],
+            ["ADVIL 200MG CO100", "TYLENOL 500MG CO100", "ALEVE 220MG CO24"],
+        )
+
     def test_request_router_separates_fast_lookup_from_detailed_advice(self):
         self.assertEqual(classify_client_request("Advil"), "lookup")
         self.assertEqual(classify_client_request("Montre-moi les Advil"), "lookup")

@@ -1946,9 +1946,25 @@ def select_client_answer_candidates(candidates, limit=16, diversify_brands=False
                 str(product.get('purpose', '') or ''),
             ]))} ",
         ) for product in candidates]
+        search_text_by_identity = {
+            id(product): text for product, text in searchable
+        }
+        candidate_order = {
+            id(product): index for index, product in enumerate(candidates)
+        }
         comparison_terms = []
+        seen_comparison_stems = set()
+        comparison_object_terms = {
+            "bandage", "bandages", "brosse", "brosses", "dent", "dents",
+            "dentifrice", "dentifrices", "dressing", "forme", "formes",
+            "pansement", "pansements", "produit", "produits", "toothpaste",
+            "toothbrush",
+        }
         for token in tokenize_search_query(question):
             stem = token[:-1] if len(token) >= 6 and token.endswith("s") else token
+            if stem in seen_comparison_stems or stem in comparison_object_terms:
+                continue
+            seen_comparison_stems.add(stem)
             pattern = re.compile(
                 rf"(?<![a-z0-9]){re.escape(stem)}[a-z0-9]*(?![a-z0-9])"
             )
@@ -1961,9 +1977,20 @@ def select_client_answer_candidates(candidates, limit=16, diversify_brands=False
         # such as "hydrocolloïde ou transparent" from sending eight transparent
         # products to the answerer and omitting the other side entirely.
         comparison_terms.sort(key=lambda item: item[0])
-        for _count, _pattern, matches in comparison_terms:
-            product = next(
-                (item for item in matches if item not in selected), None
+        comparison_patterns = [item[1] for item in comparison_terms]
+        for _count, current_pattern, matches in comparison_terms:
+            available = [item for item in matches if item not in selected]
+            product = min(
+                available,
+                key=lambda item: (
+                    sum(
+                        1 for pattern in comparison_patterns
+                        if pattern is not current_pattern
+                        and pattern.search(search_text_by_identity[id(item)])
+                    ),
+                    candidate_order[id(item)],
+                ),
+                default=None,
             )
             if product is not None:
                 selected.append(product)
@@ -1986,13 +2013,34 @@ def select_client_answer_candidates(candidates, limit=16, diversify_brands=False
     seen = set()
     for product in selected:
         seen.add(signature(product))
+    seen_names = {
+        normalize_search_text(product.get("name", ""))
+        for product in selected
+        if normalize_search_text(product.get("name", ""))
+    }
     for product in candidates:
         if product in selected:
+            continue
+        name = normalize_search_text(product.get("name", ""))
+        if name and name in seen_names:
             continue
         key = signature(product)
         if key in seen:
             continue
         seen.add(key)
+        if name:
+            seen_names.add(name)
+        selected.append(product)
+        if len(selected) >= limit:
+            return selected
+    for product in candidates:
+        if product in selected:
+            continue
+        name = normalize_search_text(product.get("name", ""))
+        if name and name in seen_names:
+            continue
+        if name:
+            seen_names.add(name)
         selected.append(product)
         if len(selected) >= limit:
             return selected
