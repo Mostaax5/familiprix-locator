@@ -3,13 +3,14 @@ import gc
 import os
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from flask import Blueprint, jsonify, request
 
 from auth import require_editor, utc_now_iso
 from database import connect_db, ensure_product_data_ready, get_db
-from memory_guard import release_unused_memory
+from memory_guard import memory_intensive_task, release_unused_memory
 from product_data import (
     create_review_issue,
     exact_gtin_variants,
@@ -38,6 +39,10 @@ _DPD_CHECK_SOURCE = "health_canada_dpd_marketed"
 _ONLINE_CHECK_SOURCE = "regulatory_candidates_v2"
 _SYNC_LOCK = threading.Lock()
 _STOP_EVENT = threading.Event()
+_MODULE_STARTED_AT = time.monotonic()
+_LAST_RESUME_ATTEMPT = 0.0
+_DELAYED_START_LOCK = threading.Lock()
+_DELAYED_START_SCHEDULED = False
 _STATE = {
     "running": False,
     "status": "idle",
@@ -66,7 +71,16 @@ def _bounded_env_int(name, default, minimum, maximum):
 
 
 _ONLINE_BATCH_LIMIT = _bounded_env_int(
-    "REGULATORY_ONLINE_BATCH", 200, 10, 1000
+    "REGULATORY_ONLINE_BATCH", 40, 5, 250
+)
+_VERIFY_BATCH_LIMIT = _bounded_env_int(
+    "REGULATORY_VERIFY_BATCH", 200, 20, 500
+)
+_RESUME_MIN_SECONDS = _bounded_env_int(
+    "REGULATORY_RESUME_MIN_SECONDS", 300, 60, 3600
+)
+_BOOT_GRACE_SECONDS = _bounded_env_int(
+    "REGULATORY_BOOT_GRACE_SECONDS", 90, 15, 600
 )
 
 
@@ -122,18 +136,18 @@ def _catalogue_items(db):
     items = {}
     queries = (
         """SELECT barcode, name, brand,
-                  SUBSTR(COALESCE(description,''), 1, 800) AS description,
+                  SUBSTR(COALESCE(description,''), 1, 320) AS description,
                   source
            FROM product_reference
            WHERE TRIM(COALESCE(barcode,''))<>''""",
         """SELECT barcode, name, brand,
-                  SUBSTR(COALESCE(description,''), 1, 800) AS description,
+                  SUBSTR(COALESCE(description,''), 1, 320) AS description,
                   '' AS source
            FROM products
            WHERE TRIM(COALESCE(barcode,''))<>''""",
     )
     for query in queries:
-        for row in db.execute(query).fetchall():
+        for row in db.execute(query):
             item = dict(row)
             key = gtin_identity_key(item.get("barcode", ""))
             if not key:
@@ -191,7 +205,7 @@ def _seed_catalogue_label_candidates(db, now):
     seeded = 0
     seen = set()
     for query in queries:
-        for raw in db.execute(query).fetchall():
+        for raw in db.execute(query):
             row = dict(raw)
             barcode = str(row.get("barcode", "") or "").strip()
             gtin_key = gtin_identity_key(barcode)
@@ -474,7 +488,8 @@ def _verify_candidates(db, items, now):
            WHERE verification_status='requires_review'
              AND identifier_type IN ('DIN','NPN','DIN_HM')
              AND match_method='exact_gtin_labeled_source'
-           ORDER BY id LIMIT 1000"""
+           ORDER BY id LIMIT ?""",
+        (_VERIFY_BATCH_LIMIT,),
     ).fetchall()]
     if not rows:
         return {"verified": 0, "review": 0, "affected_ids": set()}
@@ -489,13 +504,15 @@ def _verify_candidates(db, items, now):
             "source": row.get("source", ""),
             "source_url": row.get("source_url", ""),
         }
-        return row, item, candidate, verify_regulatory_candidate(
-            candidate, catalog_name=item.get("name", "")
-        )
+        with memory_intensive_task("regulatory_verify"):
+            result = verify_regulatory_candidate(
+                candidate, catalog_name=item.get("name", "")
+            )
+        return row, item, candidate, result
 
     verified = review = 0
     affected_ids = set()
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(verify, row) for row in rows]
         for future in as_completed(futures):
             if _STOP_EVENT.is_set():
@@ -565,7 +582,10 @@ def _discover_online(db, batch, now, remaining_after_batch=0):
         online = None
         lookup_error = ""
         try:
-            online = lookup_regulatory_product_online(item["barcode"])
+            # Exact-UPC web pages can invoke several HTML/JSON parsers. Share
+            # the same process-wide memory gate as product images and PDFs.
+            with memory_intensive_task("regulatory_lookup"):
+                online = lookup_regulatory_product_online(item["barcode"])
         except Exception as exc:
             lookup_error = f"{type(exc).__name__}: {exc}"[:200]
         source_candidates = merge_regulatory_candidates(
@@ -581,7 +601,7 @@ def _discover_online(db, batch, now, remaining_after_batch=0):
     checked = verified = review = 0
     affected_ids = set()
     checks = []
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=1) as pool:
         futures = [pool.submit(lookup, item) for item in batch]
         for future in as_completed(futures):
             if _STOP_EVENT.is_set():
@@ -699,7 +719,8 @@ def _regulatory_worker(force=False):
     try:
         db = connect_db()
         ensure_product_data_ready(db)
-        items = _catalogue_items(db)
+        with memory_intensive_task("regulatory_catalog"):
+            items = _catalogue_items(db)
         now = utc_now_iso()
         _state_update(
             running=True, status="running", phase="prepare", started_at=now,
@@ -712,7 +733,8 @@ def _regulatory_worker(force=False):
         db.commit()
 
         _state_update(phase="read_existing_identifier_labels")
-        _seed_catalogue_label_candidates(db, now)
+        with memory_intensive_task("regulatory_labels"):
+            _seed_catalogue_label_candidates(db, now)
         db.commit()
 
         # Health Canada removed UPC values from its DPD packaging feed in May
@@ -842,9 +864,40 @@ def schedule_regulatory_enrichment(force=False):
     return True
 
 
+def schedule_regulatory_enrichment_after(delay_seconds=150):
+    """Start boot-time regulatory work after search caches have warmed.
+
+    Render has one 512 MB process. Starting catalogue sync, image lookup,
+    product audit and regulatory discovery together made healthy requests look
+    like memory leaks. Manual manager starts still remain immediate.
+    """
+    global _DELAYED_START_SCHEDULED
+    with _DELAYED_START_LOCK:
+        if _DELAYED_START_SCHEDULED:
+            return False
+        _DELAYED_START_SCHEDULED = True
+
+    def worker():
+        time.sleep(max(15, min(int(delay_seconds), 600)))
+        schedule_regulatory_enrichment(force=False)
+
+    threading.Thread(
+        target=worker, daemon=True, name="regulatory-delayed-start"
+    ).start()
+    return True
+
+
 def maybe_resume_regulatory_enrichment():
+    global _LAST_RESUME_ATTEMPT
     if _state_snapshot()["running"]:
         return False
+    now = time.monotonic()
+    if now - _MODULE_STARTED_AT < _BOOT_GRACE_SECONDS:
+        return False
+    with _SYNC_LOCK:
+        if now - _LAST_RESUME_ATTEMPT < _RESUME_MIN_SECONDS:
+            return False
+        _LAST_RESUME_ATTEMPT = now
     try:
         db = connect_db()
         ensure_product_data_ready(db)

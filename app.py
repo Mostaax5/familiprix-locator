@@ -24,7 +24,7 @@ from routes.gist import gist_bp, _restore_from_gist_if_empty
 from routes.import_export import import_export_bp
 from routes.regulatory import (
     maybe_resume_regulatory_enrichment, regulatory_bp,
-    schedule_regulatory_enrichment,
+    schedule_regulatory_enrichment_after,
 )
 
 
@@ -422,7 +422,7 @@ def _finish_persistence_boot():
         schedule_initial_product_quality_audit()
         schedule_backfill_missing()  # fetch missing product images in background
         if _ASYNC_RENDER_BOOT:
-            schedule_regulatory_enrichment()  # official identifiers, never blocks boot
+            schedule_regulatory_enrichment_after()
 
 
 if _ASYNC_RENDER_BOOT:

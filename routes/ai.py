@@ -32,7 +32,7 @@ ai_bp = Blueprint("ai", __name__)
 # requests were still running. Repeated imports could therefore leave hundreds
 # of source threads alive at once. One shared pool puts a hard process-wide cap
 # on those requests while preserving fast early results for interactive scans.
-_LOOKUP_SOURCE_WORKERS = 8
+_LOOKUP_SOURCE_WORKERS = 3
 _LOOKUP_SOURCE_EXECUTOR = ThreadPoolExecutor(
     max_workers=_LOOKUP_SOURCE_WORKERS, thread_name_prefix="product-source"
 )
@@ -2068,22 +2068,8 @@ _CLIENT_DOCUMENTED_SCHEMA = {
                 "additionalProperties": False,
             },
         },
-        "comparisons": {
-            "type": "array", "maxItems": 4,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "candidate_id": {"type": "string"},
-                    "difference": {"type": "string"},
-                    "practical_note": {"type": "string"},
-                    "source_ids": _DOCUMENTED_SOURCE_IDS_SCHEMA,
-                },
-                "required": ["candidate_id", "difference", "practical_note", "source_ids"],
-                "additionalProperties": False,
-            },
-        },
         "selected_product_ids": {
-            "type": "array", "items": {"type": "string"}, "maxItems": 16,
+            "type": "array", "items": {"type": "string"}, "maxItems": 12,
         },
         "follow_up_questions": {
             "type": "array", "items": {"type": "string"}, "maxItems": 4,
@@ -2094,11 +2080,11 @@ _CLIENT_DOCUMENTED_SCHEMA = {
         "pharmacist_referral": {"type": "boolean"},
         "pharmacist_reason": {"type": "string"},
         "source_ids": {
-            "type": "array", "items": {"type": "string"}, "maxItems": 16,
+            "type": "array", "items": {"type": "string"}, "maxItems": 8,
         },
     },
     "required": [
-        "answer", "key_points", "comparisons", "selected_product_ids", "follow_up_questions",
+        "answer", "key_points", "selected_product_ids", "follow_up_questions",
         "safety_flags", "pharmacist_referral", "pharmacist_reason", "source_ids",
     ],
     "additionalProperties": False,
@@ -2107,7 +2093,10 @@ _CLIENT_DOCUMENTED_SCHEMA = {
 _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "Tu produis une réponse documentée de très haute qualité pour un employé Familiprix. "
     "Le but est de répondre exactement à la demande, puis de rendre les faits importants "
-    "repérables en quelques secondes. Les produits candidats proviennent uniquement du plan "
+    "repérables en quelques secondes. La liste de produits est une preuve d'inventaire, pas "
+    "la réponse: ne commence jamais par « j'ai trouvé X produits ». Commence par la réponse "
+    "ou la décision utile que l'employé peut dire au client. Les produits candidats proviennent "
+    "uniquement du plan "
     "actuel du magasin. Les documents fournis sont la seule preuve autorisée pour attribuer "
     "un ingrédient, un dosage, une indication, une contre-indication, un âge, une interaction "
     "ou une propriété à un produit précis. Les fiches Santé Canada ont priorité sur les fiches "
@@ -2123,16 +2112,16 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "clairement qu'elle est générale lorsqu'aucun document ne la confirme pour le produit. "
     "N'invente jamais de dose, de durée, d'ingrédient, de bénéfice ou de source. "
     "Reste concis: la réponse complète doit être lisible rapidement. answer est une réponse "
-    "directe de 1 à 3 phrases que l'employé peut dire au client. Donne au maximum 4 key_points "
-    "et 4 comparisons; chaque élément fait au plus deux phrases. "
-    "key_points contient les faits décisifs, avec des titres très courts. comparisons explique "
-    "les différences réellement utiles entre les produits sélectionnés; utilise seulement des "
-    "candidate_id fournis. Place les conseils de choix dans key_points et les vérifications "
-    "médicales dans safety_flags. "
+    "directe de 2 à 4 phrases que l'employé peut dire au client. Elle doit répondre à « quoi "
+    "choisir et pourquoi » lorsque c'est la question, sans se contenter de nommer des produits. "
+    "Donne au maximum 4 key_points; chaque élément fait au plus deux phrases. key_points contient "
+    "les faits décisifs et les différences pratiques, avec des titres très courts. Le serveur "
+    "ajoutera lui-même les cartes, emplacements et comparaisons produit par produit: ne les "
+    "répète pas. Place les vérifications médicales dans safety_flags. "
     "Chaque affirmation fondée sur un document cite son source_id exact; une connaissance "
     "générale non documentée garde source_ids vide. source_ids contient toutes les sources "
-    "effectivement utilisées. selected_product_ids garde tous les produits réellement liés, "
-    "jusqu'à 16, et aucun autre. Copie les noms de produits exactement lorsqu'ils apparaissent "
+    "effectivement utilisées. selected_product_ids garde les produits réellement liés, "
+    "jusqu'à 12, et aucun autre. Copie les noms de produits exactement lorsqu'ils apparaissent "
     "dans le texte. Les attributs absents ou signalés non vérifiés dans les candidats ne sont "
     "pas des faits et ne doivent jamais être déduits. Réponds dans answer_language, sans Markdown. "
     "verified_identifiers contient uniquement les numéros confirmés. "
@@ -2508,9 +2497,28 @@ def _client_intent_documents(query_plan):
         "publisher": "Santé Canada",
         "url": "https://www.canada.ca/fr/sante-canada/services/medicaments-et-appareils-medicaux/acetaminophene.html",
         "evidence": (
-            "Santé Canada recommande de lire l'étiquette, de respecter la dose indiquée et "
-            "d'éviter de prendre simultanément plus d'un produit contenant de l'acétaminophène, "
-            "car un excès peut causer des dommages graves au foie."
+            "Santé Canada indique que l'acétaminophène procure un soulagement temporaire de "
+            "douleurs comme le mal de tête et réduit la fièvre. Il faut lire l'étiquette, "
+            "respecter la dose indiquée et éviter de prendre simultanément plus d'un produit "
+            "qui en contient, car un excès peut causer des dommages graves au foie."
+        ),
+        "candidate_ids": [],
+    }, {
+        "source_id": "health-canada:nsaid-guidance",
+        "title": "Santé Canada - Information sur les anti-inflammatoires non stéroïdiens",
+        "publisher": "Santé Canada",
+        "url": (
+            "https://www.canada.ca/en/health-canada/services/drugs-health-products/"
+            "drug-products/applications-submissions/guidance-documents/"
+            "nonsteroidal-anti-inflammatory-drugs-nsaids/"
+            "guidance-document-basic-product-monograph-information-"
+            "nonsteroidal-anti-inflammatory-drugs-nsaids.html"
+        ),
+        "evidence": (
+            "Les anti-inflammatoires non stéroïdiens (AINS) réduisent des substances qui "
+            "causent la douleur et l'enflure. Santé Canada déconseille d'utiliser en même "
+            "temps plusieurs AINS, notamment l'acide acétylsalicylique (AAS) et l'ibuprofène, "
+            "en raison du risque d'effets indésirables additifs."
         ),
         "candidate_ids": [],
     }, {
@@ -2854,21 +2862,30 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             "compatibilité exacte de la tête et le type d'alimentation sur l'emballage."
         )
     elif names and is_headache_query:
-        ingredient_note = (
-            " Les fiches disponibles mentionnent "
-            + ", ".join(ingredient_families)
-            + "; confirmez toujours l'ingrédient actif sur l'emballage."
-            if ingredient_families else
-            " L'ingrédient actif doit être confirmé sur chaque emballage."
-        )
+        has_acetaminophen = "acétaminophène" in ingredient_families
+        nsaid_families = [
+            ingredient for ingredient in ingredient_families
+            if ingredient in {
+                "ibuprofène", "naproxène", "acide acétylsalicylique"
+            }
+        ]
+        if has_acetaminophen and nsaid_families:
+            choice = (
+                "les deux choix courants repérés sont l'acétaminophène et un AINS comme "
+                f"{nsaid_families[0]}"
+            )
+        elif has_acetaminophen:
+            choice = "le choix clairement repéré est l'acétaminophène"
+        elif nsaid_families:
+            choice = f"le choix clairement repéré est un AINS comme {nsaid_families[0]}"
+        else:
+            choice = "choisissez un produit à un seul ingrédient actif après l'avoir confirmé"
         answer = (
-            f"Pour un mal de tête, j'ai trouvé {len(names)} produit"
-            f"{'s' if len(names) > 1 else ''} analgésique"
-            f"{'s' if len(names) > 1 else ''} pertinent"
-            f"{'s' if len(names) > 1 else ''} dans le plan actuel."
-            + ingredient_note
-            + " Le choix dépend notamment de l'âge, des autres médicaments, des allergies "
-              "et des conditions de santé; faites valider le produit par le pharmacien en cas de doute."
+            f"Pour un mal de tête occasionnel chez un adulte, {choice}. "
+            "L'acétaminophène soulage la douleur; les AINS agissent sur la douleur et "
+            "l'inflammation, mais nécessitent davantage de vérifications selon la personne. "
+            "Vérifiez ce qui a déjà été pris et ne combinez ni deux produits contenant de "
+            "l'acétaminophène, ni deux AINS."
         )
     elif names:
         summary_parts = []
@@ -2930,42 +2947,46 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         ["health-canada:acetaminophen-safe-use"]
         if "health-canada:acetaminophen-safe-use" in valid_source_ids else []
     )
+    nsaid_source = (
+        ["health-canada:nsaid-guidance"]
+        if "health-canada:nsaid-guidance" in valid_source_ids else []
+    )
     info_sante_source = (
         ["quebec:info-sante-811"]
         if "quebec:info-sante-811" in valid_source_ids else []
     )
     if is_headache_query:
         key_points.append({
-            "heading": "Avant de choisir",
+            "heading": "Choix rapide",
+            "detail": (
+                "L'acétaminophène vise la douleur et la fièvre. Les AINS comme l'ibuprofène "
+                "ou le naproxène visent la douleur et l'inflammation; confirmer qu'ils "
+                "conviennent à la personne avant de les proposer."
+            ),
+            "source_ids": (acetaminophen_source + nsaid_source)[:4],
+        })
+        key_points.append({
+            "heading": "Avant de proposer",
             "detail": (
                 "Demander l'âge, les médicaments déjà pris, les allergies, la grossesse ou "
                 "l'allaitement et les conditions de santé pertinentes."
             ),
             "source_ids": [],
         })
-        if ingredient_families:
-            key_points.append({
-                "heading": "Ingrédients repérés",
-                "detail": (
-                    ", ".join(ingredient_families).capitalize()
-                    + ". Ces mentions viennent des fiches disponibles et doivent être "
-                      "confirmées sur l'emballage."
-                ),
-                "source_ids": store_source,
-            })
         key_points.append({
-            "heading": "Éviter les doublons",
+            "heading": "Ne pas combiner",
             "detail": (
-                "Lire l'ingrédient actif de tous les médicaments déjà utilisés. Ne pas prendre "
-                "deux produits contenant de l'acétaminophène en même temps."
+                "Ne pas prendre deux produits contenant de l'acétaminophène. Ne pas associer "
+                "deux AINS, par exemple ibuprofène, naproxène ou AAS."
             ),
-            "source_ids": acetaminophen_source,
+            "source_ids": (acetaminophen_source + nsaid_source)[:4],
         })
         key_points.append({
-            "heading": "Besoin d'un avis",
+            "heading": "Quand référer",
             "detail": (
                 "Le pharmacien peut confirmer le produit approprié; Info-Santé 811 peut conseiller "
-                "la personne pour un problème non urgent."
+                "la personne si le mal de tête est inhabituel, important, persistant ou accompagné "
+                "d'autres symptômes."
             ),
             "source_ids": info_sante_source,
         })
@@ -3106,15 +3127,15 @@ def generate_documented_client_answer(question, query_plan, candidates, document
                                       history=None, selected_text="", focus_product_id=""):
     contexts = [product_context_for_client_rag(product) for product in candidates]
     for context in contexts:
-        context["notes"] = str(context.get("notes", "") or "")[:300]
-        context["description"] = str(context.get("description", "") or "")[:500]
-        context["search_terms"] = str(context.get("search_terms", "") or "")[:240]
-        context["usage_notes"] = str(context.get("usage_notes", "") or "")[:400]
+        context["notes"] = str(context.get("notes", "") or "")[:220]
+        context["description"] = str(context.get("description", "") or "")[:360]
+        context["search_terms"] = str(context.get("search_terms", "") or "")[:180]
+        context["usage_notes"] = str(context.get("usage_notes", "") or "")[:260]
     document_contexts = [{
         **document,
-        "evidence": str(document.get("evidence", "") or "")[:650],
-        "candidate_ids": (document.get("candidate_ids", []) or [])[:16],
-    } for document in documents[:8]]
+        "evidence": str(document.get("evidence", "") or "")[:520],
+        "candidate_ids": (document.get("candidate_ids", []) or [])[:12],
+    } for document in documents[:6]]
     parsed = _provider_structured_request(
         _CLIENT_DOCUMENTED_INSTRUCTIONS,
         {
@@ -3127,7 +3148,7 @@ def generate_documented_client_answer(question, query_plan, candidates, document
             "documents": document_contexts,
             "required_schema": _CLIENT_DOCUMENTED_SCHEMA,
         },
-        max_tokens=900,
+        max_tokens=560,
         schema_name="client_documented_answer",
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,
@@ -3138,6 +3159,27 @@ def generate_documented_client_answer(question, query_plan, candidates, document
     result = normalize_documented_client_answer(
         parsed, [product.get("client_id", "") for product in candidates], documents
     )
+    grounded = grounded_documented_fallback(
+        query_plan, candidates, documents, degraded=False
+    )
+    selected_ids = set(result.get("selected_product_ids") or [])
+    result["comparisons"] = [
+        comparison for comparison in grounded.get("comparisons", [])
+        if comparison.get("candidate_id") in selected_ids
+    ][:4]
+    if not result.get("useful_guidance"):
+        result["useful_guidance"] = grounded.get("useful_guidance", [])[:2]
+    if not result.get("important_checks"):
+        result["important_checks"] = grounded.get("important_checks", [])[:2]
+    for item in (
+        result.get("comparisons", [])
+        + result.get("useful_guidance", [])
+        + result.get("important_checks", [])
+    ):
+        for source_id in item.get("source_ids", []):
+            if source_id not in result["source_ids"]:
+                result["source_ids"].append(source_id)
+    result["source_ids"] = result["source_ids"][:16]
     result["degraded"] = False
     result["warning"] = ""
     return result
@@ -3760,22 +3802,58 @@ def _catalog_enrich_worker():
                 db = connect_db()
                 # Only products not yet tried (no description AND no enrich tag) so
                 # re-runs and reconnects resume exactly where the run stopped.
+                remaining_row = db.execute(
+                    "SELECT COUNT(*) AS n FROM product_reference "
+                    "WHERE TRIM(COALESCE(description,'')) = '' "
+                    "AND TRIM(COALESCE(enrich_status,'')) = '' "
+                    "AND TRIM(COALESCE(name,'')) <> '' "
+                    "AND TRIM(COALESCE(barcode,'')) <> ''"
+                ).fetchone()
+                remaining = int(
+                    remaining_row["n"] if isinstance(remaining_row, dict)
+                    else remaining_row[0]
+                )
                 rows = [dict(r) for r in db.execute(
                     "SELECT barcode, name, brand, image_url, product_code FROM product_reference "
                     "WHERE TRIM(COALESCE(description,'')) = '' AND TRIM(COALESCE(enrich_status,'')) = '' "
-                    "AND TRIM(COALESCE(name,'')) <> ''").fetchall()]
+                    "AND TRIM(COALESCE(name,'')) <> '' "
+                    "AND TRIM(COALESCE(barcode,'')) <> '' "
+                    "ORDER BY barcode LIMIT 100").fetchall()]
                 if not rows:
                     break                      # everything processed — real Terminé
                 placed_by_barcode = {}
+                batch_keys = list(dict.fromkeys(
+                    gtin_identity_key(row.get("barcode", "")) for row in rows
+                    if gtin_identity_key(row.get("barcode", ""))
+                ))
+                batch_barcodes = list(dict.fromkeys(
+                    str(row.get("barcode", "") or "").strip() for row in rows
+                    if str(row.get("barcode", "") or "").strip()
+                ))
+                placed_filters = []
+                placed_params = []
+                if batch_keys:
+                    placed_filters.append(
+                        "gtin_key IN (" + ",".join("?" for _ in batch_keys) + ")"
+                    )
+                    placed_params.extend(batch_keys)
+                if batch_barcodes:
+                    placed_filters.append(
+                        "barcode IN (" + ",".join("?" for _ in batch_barcodes) + ")"
+                    )
+                    placed_params.extend(batch_barcodes)
+                placed_query = (
+                    "SELECT id, barcode, brand, description, image_url, product_code "
+                    "FROM products WHERE " + " OR ".join(placed_filters)
+                )
                 for product_row in db.execute(
-                    """SELECT id, barcode, brand, description, image_url, product_code
-                       FROM products WHERE TRIM(COALESCE(barcode,'')) <> ''"""
-                ).fetchall():
+                    placed_query, tuple(placed_params)
+                ):
                     product = dict(product_row)
                     key = gtin_identity_key(product.get("barcode", ""))
                     if key:
                         placed_by_barcode.setdefault(key, {})[product["id"]] = product
-                _CATALOG_ENRICH["total"] = _CATALOG_ENRICH["done"] + len(rows)
+                _CATALOG_ENRICH["total"] = _CATALOG_ENRICH["done"] + remaining
                 _CATALOG_ENRICH.pop("error", None)
                 _write_enrich_marker()
                 with ThreadPoolExecutor(max_workers=_ENRICH_WORKERS) as pool:
@@ -3847,7 +3925,9 @@ def _catalog_enrich_worker():
                         # Free the batch's parsed online payloads NOW (some sources
                         # return hundreds of KB per product) — RSS creep OOM'd us once.
                         release_unused_memory()
-                break                          # full pass completed
+                # Continue with the next bounded database page. Keeping only
+                # 100 references and their matching shelf rows in memory avoids
+                # retaining a second full catalogue throughout enrichment.
             except Exception as exc:           # DB blip, pool trouble… reconnect & continue
                 _CATALOG_ENRICH["error"] = f"{type(exc).__name__}: {exc}"[:200]
                 if not made_progress:
@@ -4121,9 +4201,12 @@ def client_help():
         candidates = hybrid_client_candidates(retrieval_question, query_plan, limit=candidate_limit)
     if response_mode != "lookup":
         candidates = filter_client_answer_category(question, candidates)
-    hydrate_candidate_images(candidates)
+    # Reuse known exact-UPC images now. Unknown-image web lookups are queued
+    # only for cards that will actually be displayed.
+    hydrate_candidate_images(candidates, queue_missing=False)
 
     if response_mode == "lookup":
+        hydrate_candidate_images(candidates, queue_missing=True, queue_limit=24)
         elapsed_ms = int((time.perf_counter() - started_at) * 1000)
         return jsonify({
             "success": True,
@@ -4193,7 +4276,10 @@ def client_help():
         documents = retrieve_client_documentation(
             answer_candidates,
             query_plan,
-            include_live_regulatory=not use_local_documented_summary,
+            # Product regulatory facts are synchronized in the background and
+            # stored as evidence. Cold Health Canada calls on the employee's
+            # request path added several seconds and could outlive the AI timeout.
+            include_live_regulatory=False,
         )
         if use_local_documented_summary:
             verified = grounded_documented_fallback(
@@ -4220,6 +4306,9 @@ def client_help():
         by_id[candidate_id] for candidate_id in verified["selected_product_ids"]
         if candidate_id in by_id
     ]
+    hydrate_candidate_images(
+        highlighted_products, queue_missing=True, queue_limit=16
+    )
     answer = verified["answer"] or (
         "Aucun produit suffisamment lié à cette demande n'a été trouvé dans la base."
     )

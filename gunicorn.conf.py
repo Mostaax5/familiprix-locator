@@ -15,10 +15,10 @@ import os
 bind = f"0.0.0.0:{os.environ.get('PORT', '10000')}"
 
 workers = 1          # Render free tier: one small CPU — more workers just swap
-# 4 threads (was 8): still lets a slow AI call run without blocking other phones,
-# but halves how many requests can pile up their working memory at once on the
-# 512 MB instance. PDF parsing is additionally serialized (see import_export.py).
-threads = 4
+# Two threads keep fast requests available while one AI call waits on the
+# network, without allowing four catalogue searches to stack their temporary
+# working sets inside Render's 512 MB process.
+threads = 2
 timeout = 180
 keepalive = 5
 # Bound parser work before a request reaches Flask. These are comfortably above
@@ -28,12 +28,11 @@ limit_request_fields = 50
 limit_request_field_size = 8190
 # Any runtime files created by the worker are private to its operating-system user.
 umask = 0o077
-# Recycle the worker every ~2000 requests (± jitter): Python/pdfplumber don't
+# Recycle the worker every ~500 requests (± jitter): Python/pdfplumber don't
 # always return freed memory to the OS, so over a long uptime RSS creeps up.
-# 2000 (was 500): every recycle gives the NEXT visitor a slow "cold worker"
-# moment, and now that the real memory hogs are capped at the source (enrichment,
-# image fill, corpus rebuilds), aggressive recycling costs more than it protects.
+# Search caches warm themselves after a restart, while this bound prevents
+# allocator fragmentation from accumulating until Render kills the process.
 # (A recycle can kill a background plano parse — the status endpoint detects the
 # dead pid and relaunches it from the stored PDF, so jobs self-heal.)
-max_requests = 2000
-max_requests_jitter = 200
+max_requests = 500
+max_requests_jitter = 50

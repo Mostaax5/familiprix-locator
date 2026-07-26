@@ -52,6 +52,12 @@ class CursorResult:
     def fetchall(self):
         return self.cursor.fetchall()
 
+    def fetchmany(self, size=200):
+        return self.cursor.fetchmany(size)
+
+    def __iter__(self):
+        return iter(self.cursor)
+
 
 class DatabaseConnection:
     def __init__(self, connection, backend, pool=None):

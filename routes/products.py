@@ -4,7 +4,6 @@ import json
 import time
 import hashlib
 import math
-import tempfile
 import threading
 import unicodedata
 from collections import Counter, deque
@@ -337,7 +336,7 @@ def _reference_corpus(db):
             """SELECT gtin_key, field_name, field_value
                FROM product_reference_evidence
                WHERE active=1 AND verification_status='verified'"""
-        ).fetchall():
+        ):
             evidence = dict(evidence_row)
             verified_by_key.setdefault(evidence["gtin_key"], {})[
                 evidence["field_name"]
@@ -349,7 +348,7 @@ def _reference_corpus(db):
                WHERE {_searchable_identifier_status_sql()}
                ORDER BY CASE WHEN verification_status='verified' THEN 0 ELSE 1 END,
                         confidence DESC, id"""
-        ).fetchall():
+        ):
             identifier = dict(identifier_row)
             identifiers_by_key.setdefault(identifier["gtin_key"], []).append({
                 "type": identifier.get("identifier_type", ""),
@@ -365,7 +364,7 @@ def _reference_corpus(db):
             """SELECT barcode, name, brand, description, product_code,
                       store_presence_status, source, source_url
                FROM product_reference"""
-        ).fetchall():
+        ):
             d = dict(r)
             verified = verified_by_key.get(gtin_identity_key(d.get("barcode", "")), {})
             source_type, _priority = classify_source(
@@ -877,7 +876,7 @@ def _products_corpus(db, allow_identifier_stale=False):
     try:
         for alias_row in db.execute(
             "SELECT product_id, alias_value FROM product_aliases WHERE verification_status='verified'"
-        ).fetchall():
+        ):
             alias = dict(alias_row)
             aliases_by_product.setdefault(int(alias["product_id"]), []).append(
                 str(alias.get("alias_value", "") or "")
@@ -888,7 +887,7 @@ def _products_corpus(db, allow_identifier_stale=False):
                FROM product_field_evidence
                WHERE active=1 AND verification_status='verified'
                ORDER BY source_priority, confidence, id"""
-        ).fetchall():
+        ):
             evidence = dict(evidence_row)
             verified_by_product.setdefault(int(evidence["product_id"]), set()).add(
                 str(evidence.get("field_name", "") or "")
@@ -914,7 +913,7 @@ def _products_corpus(db, allow_identifier_stale=False):
                WHERE {_searchable_identifier_status_sql()}
                ORDER BY CASE WHEN verification_status='verified' THEN 0 ELSE 1 END,
                         confidence DESC, id"""
-        ).fetchall():
+        ):
             identifier = dict(identifier_row)
             identifiers_by_product.setdefault(
                 int(identifier["product_id"]), []
@@ -934,19 +933,17 @@ def _products_corpus(db, allow_identifier_stale=False):
         verified_values_by_product = {}
         field_sources_by_product = {}
         identifiers_by_product = {}
-    product_rows = [
-        dict(row) for row in db.execute("SELECT * FROM products").fetchall()
-    ]
     gtin_keys = {
-        str(item.get("gtin_key", "") or "").strip()
-        or gtin_identity_key(item.get("barcode", ""))
-        for item in product_rows
+        str(dict(row).get("gtin_key", "") or "").strip()
+        or gtin_identity_key(dict(row).get("barcode", ""))
+        for row in db.execute("SELECT gtin_key, barcode FROM products")
     }
     reference_identifiers_by_gtin = _reference_identifiers_by_gtin(
         db, gtin_keys
     )
     rows = []
-    for raw_item in product_rows:
+    for product_row in db.execute("SELECT * FROM products"):
+        raw_item = dict(product_row)
         product_id = int(raw_item.get("id") or 0)
         verified_values = verified_values_by_product.get(product_id, {})
         matching_verified_fields = {
@@ -979,7 +976,7 @@ def _products_corpus(db, allow_identifier_stale=False):
         rows.append((item, _product_search_row(item, aliases, identifiers)))
     _PROD_CACHE.update(key=key, rows=rows, built_at=time.time())
     del (
-        product_rows, gtin_keys, aliases_by_product, verified_by_product,
+        gtin_keys, aliases_by_product, verified_by_product,
         verified_values_by_product, field_sources_by_product,
         identifiers_by_product, reference_identifiers_by_gtin,
     )
@@ -2769,9 +2766,9 @@ def schedule_image_fill(barcodes, priority=True):
     threading.Thread(target=worker, daemon=True).start()
 
 
-def hydrate_candidate_images(products):
+def hydrate_candidate_images(products, queue_missing=True, queue_limit=24):
     """Attach any already-known UPC image to mapped Client results immediately,
-    then queue only truly missing images for background lookup."""
+    then optionally queue a small visible subset for background lookup."""
     db = get_db()
     missing = [
         product for product in products
@@ -2807,8 +2804,15 @@ def hydrate_candidate_images(products):
         image_url = image_by_barcode.get(gtin_identity_key(barcode), "")
         if image_url:
             product["image_url"] = image_url
-    # Persist reused images and resolve unknown ones off the request thread.
-    schedule_image_fill(barcodes)
+    # A detailed question can retrieve dozens of candidates but only a handful
+    # become visible cards. Do not start dozens of online scrapers before the AI
+    # has selected those cards; that was another per-search Render memory spike.
+    if queue_missing:
+        unresolved = [
+            product.get("barcode", "") for product in missing
+            if not str(product.get("image_url", "") or "").strip()
+        ][:max(0, min(int(queue_limit), 40))]
+        schedule_image_fill(unresolved)
     return products
 
 
@@ -3167,45 +3171,52 @@ def _client_candidate_id(item, catalog_only=False):
     return f"reference:{barcode}" if barcode else f"reference-name:{normalize_search_text(item.get('name', ''))}"
 
 
-def _mapped_client_products(db):
-    """Return one client-facing product per UPC/name with every plan location."""
-    products = []
+def _mapped_product_key(item, row):
+    return ("barcode", row["_bc"]) if row["_bc"] else (
+        "name", row["_name"], row["_brand"]
+    )
+
+
+def _client_location(item):
+    return {
+        "aisle": str(item.get("aisle", "")).strip(),
+        "side": str(item.get("side", "")).strip(),
+        "section": str(item.get("section", "1")).strip() or "1",
+        "shelf": str(item.get("shelf", "")).strip(),
+        "position": str(item.get("position", "")).strip(),
+    }
+
+
+def _materialize_mapped_products(corpus, ordered_keys, limit=100):
+    """Copy only the ranked products, then attach all of their plan locations.
+
+    The old request path copied every product in the store before it knew which
+    ones matched. With thousands of placed products that transient second
+    catalogue was large enough to push Render over its memory limit.
+    """
+    ordered = list(dict.fromkeys(ordered_keys))[:max(1, min(int(limit), 100))]
+    wanted = set(ordered)
     products_by_key = {}
-
-    def product_key(item, row):
-        return ("barcode", row["_bc"]) if row["_bc"] else (
-            "name", row["_name"], row["_brand"]
-        )
-
-    def location_for(item):
-        return {
-            "aisle": str(item.get("aisle", "")).strip(),
-            "side": str(item.get("side", "")).strip(),
-            "section": str(item.get("section", "1")).strip() or "1",
-            "shelf": str(item.get("shelf", "")).strip(),
-            "position": str(item.get("position", "")).strip(),
-        }
-
-    for item, row in _products_corpus(db, allow_identifier_stale=True):
-        key = product_key(item, row)
-        if key in products_by_key:
-            existing = products_by_key[key]["item"]
-            location = location_for(item)
-            if location not in existing["locations"]:
-                existing["locations"].append(location)
-            if not existing.get("image_url") and item.get("image_url"):
-                existing["image_url"] = item.get("image_url")
-            existing["in_stock"] = 1 if existing.get("in_stock") or item.get("in_stock") else 0
-            existing["is_plano"] = 1 if existing.get("is_plano") or item.get("is_plano") else 0
+    for item, row in corpus:
+        key = _mapped_product_key(item, row)
+        if key not in wanted:
             continue
-        product = dict(item)
-        product["client_id"] = _client_candidate_id(product)
-        product["catalog_only"] = False
-        product["locations"] = [location_for(product)]
-        document = {"item": product, "row": row, "source_rank": 0}
-        products.append(document)
-        products_by_key[key] = document
-    return products
+        product = products_by_key.get(key)
+        location = _client_location(item)
+        if product is None:
+            product = dict(item)
+            product["client_id"] = _client_candidate_id(product)
+            product["catalog_only"] = False
+            product["locations"] = [location]
+            products_by_key[key] = product
+            continue
+        if location not in product["locations"]:
+            product["locations"].append(location)
+        if not product.get("image_url") and item.get("image_url"):
+            product["image_url"] = item.get("image_url")
+        product["in_stock"] = 1 if product.get("in_stock") or item.get("in_stock") else 0
+        product["is_plano"] = 1 if product.get("is_plano") or item.get("is_plano") else 0
+    return [products_by_key[key] for key in ordered if key in products_by_key]
 
 
 def client_products_by_ids(candidate_ids, limit=60):
@@ -3213,17 +3224,18 @@ def client_products_by_ids(candidate_ids, limit=60):
     wanted = {str(value or "").strip() for value in candidate_ids or []}
     if not wanted:
         return []
-    products = []
-    for document in _mapped_client_products(get_db()):
-        product = document["item"]
-        if str(product.get("client_id", "")) in wanted:
-            products.append(product)
-        if len(products) >= max(1, min(int(limit), 100)):
-            break
-    return products
+    corpus = _products_corpus(get_db(), allow_identifier_stale=True)
+    ordered_keys = []
+    for item, row in corpus:
+        if _client_candidate_id(item) not in wanted:
+            continue
+        key = _mapped_product_key(item, row)
+        if key not in ordered_keys:
+            ordered_keys.append(key)
+    return _materialize_mapped_products(corpus, ordered_keys, limit=limit)
 
 
-def hybrid_client_candidates(question, query_plan, limit=60):
+def _hybrid_client_candidates(question, query_plan, limit=60):
     """Hybrid retrieval for the one-button Client search.
 
     A fast query plan supplies search phrases and constraints. This retriever
@@ -3233,7 +3245,7 @@ def hybrid_client_candidates(question, query_plan, limit=60):
     enrich metadata/images, but can never become store inventory in Client search.
     """
     db = get_db()
-    documents = _mapped_client_products(db)
+    corpus = _products_corpus(db, allow_identifier_stale=True)
     required_concepts = client_required_concept_groups(question)
     excluded_concepts = client_excluded_concept_terms(question)
 
@@ -3276,23 +3288,29 @@ def hybrid_client_candidates(question, query_plan, limit=60):
         retrieval_tokens.extend(tokenize_search_query(phrase))
     retrieval_tokens = list(dict.fromkeys(t for t in retrieval_tokens if len(t) >= 2))[:32]
 
-    # Query-specific BM25 statistics. Only terms from this request are counted,
-    # so this remains fast over the cached 9k catalogue on Render's small CPU.
-    tokenized_documents = []
+    # Query-specific BM25 statistics. Keep only aggregate counters: retaining a
+    # Counter and a copied product dict for every store item caused a large
+    # per-search memory spike on Render.
     document_frequency = Counter()
     total_length = 0
     retrieval_token_set = set(retrieval_tokens)
-    for document in documents:
-        tokens = document["row"]["_hay"].split()
-        counts = Counter(token for token in tokens if token in retrieval_token_set)
-        document_length = max(1, len(tokens))
-        tokenized_documents.append((counts, document_length))
-        total_length += document_length
-        for token in counts:
-            if counts[token]:
+    doc_count = 0
+    if retrieval_token_set:
+        seen_documents = set()
+        for item, row in corpus:
+            key = _mapped_product_key(item, row)
+            if key in seen_documents:
+                continue
+            seen_documents.add(key)
+            tokens = row["_hay"].split()
+            document_length = max(1, len(tokens))
+            total_length += document_length
+            doc_count += 1
+            for token in set(tokens).intersection(retrieval_token_set):
                 document_frequency[token] += 1
-    doc_count = max(1, len(documents))
-    average_length = total_length / doc_count
+        del seen_documents
+    doc_count = max(1, doc_count)
+    average_length = (total_length / doc_count) if total_length else 1.0
 
     upc_digits = set()
     for run in re.findall(r"\d[\d\s\-]{6,18}\d", question):
@@ -3300,10 +3318,16 @@ def hybrid_client_candidates(question, query_plan, limit=60):
         if 8 <= len(digits) <= 14:
             upc_digits.update(normalized_digits(c) for c in build_barcode_candidates(digits))
 
-    scored = []
-    for document, token_data in zip(documents, tokenized_documents):
-        counts, doc_length = token_data
-        row = document["row"]
+    scored = {}
+    seen_documents = set()
+    for item, row in corpus:
+        key = _mapped_product_key(item, row)
+        if key in seen_documents:
+            existing = scored.get(key)
+            if existing and item.get("in_stock"):
+                existing["in_stock"] = 1
+            continue
+        seen_documents.add(key)
         if not row_matches_client_concepts(row, required_concepts, excluded_concepts):
             continue
         lexical = 0
@@ -3314,14 +3338,21 @@ def hybrid_client_candidates(question, query_plan, limit=60):
 
         fuzzy = _fuzzy_product_score(row, retrieval_tokens)
         bm25 = 0.0
-        for token in retrieval_tokens:
-            frequency = counts.get(token, 0)
-            if not frequency:
-                continue
-            df = document_frequency[token]
-            inverse_frequency = math.log(1 + ((doc_count - df + 0.5) / (df + 0.5)))
-            denominator = frequency + 1.2 * (1 - 0.75 + 0.75 * doc_length / average_length)
-            bm25 += inverse_frequency * ((frequency * 2.2) / denominator)
+        if retrieval_token_set:
+            tokens = row["_hay"].split()
+            doc_length = max(1, len(tokens))
+            counts = Counter(
+                token for token in tokens if token in retrieval_token_set
+            )
+            for token, frequency in counts.items():
+                df = document_frequency[token]
+                inverse_frequency = math.log(
+                    1 + ((doc_count - df + 0.5) / (df + 0.5))
+                )
+                denominator = frequency + 1.2 * (
+                    1 - 0.75 + 0.75 * doc_length / average_length
+                )
+                bm25 += inverse_frequency * ((frequency * 2.2) / denominator)
 
         hay = row["_hay"]
         must_hits = sum(1 for value in must_include if normalize_search_text(value) in hay)
@@ -3331,13 +3362,29 @@ def hybrid_client_candidates(question, query_plan, limit=60):
         if exact_upc:
             score = max(score, 2000)
         if score >= 90:
-            scored.append((score, document["source_rank"], document["item"]))
+            scored[key] = {
+                "score": score,
+                "in_stock": 1 if item.get("in_stock") else 0,
+                "name": normalize_search_text(item.get("name", "")),
+            }
 
-    scored.sort(key=lambda entry: (
-        -entry[0], entry[1], 1 if entry[2].get("in_stock") == 0 else 0,
-        normalize_search_text(entry[2].get("name", "")),
+    ranked_keys = sorted(scored, key=lambda key: (
+        -scored[key]["score"],
+        1 if scored[key]["in_stock"] == 0 else 0,
+        scored[key]["name"],
     ))
-    return [item for _, _, item in scored[:max(1, min(int(limit), 100))]]
+    return _materialize_mapped_products(corpus, ranked_keys, limit=limit)
+
+
+def hybrid_client_candidates(question, query_plan, limit=60):
+    # Employee searches take priority over online image/regulatory enrichment.
+    # The guard also prevents a first-time corpus build from overlapping a PDF
+    # parser or web scraper in the 512 MB Render process.
+    with memory_intensive_task("client_search", priority=True):
+        try:
+            return _hybrid_client_candidates(question, query_plan, limit=limit)
+        finally:
+            release_unused_memory()
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -3355,10 +3402,11 @@ def get_products():
     )).encode()).hexdigest()
     if client_etag_matches(etag):
         return "", 304
-    products = sorted(
-        _products_corpus(db),
-        key=lambda entry: location_sort_key(entry[0]),
-    )
+    with memory_intensive_task("product_bootstrap", priority=True):
+        products = sorted(
+            _products_corpus(db),
+            key=lambda entry: location_sort_key(entry[0]),
+        )
 
     def generate():
         first = True
@@ -3485,9 +3533,10 @@ def search_products():
     if field and field != "name":
         items = _direct_identifier_products(db, query, field, limit=limit)
         return jsonify([public_product_payload(item) for item in items])
-    corpus = _products_corpus(
-        db, allow_identifier_stale=True
-    )  # enrichment writes cannot force a full rebuild per employee query
+    with memory_intensive_task("product_search", priority=True):
+        corpus = _products_corpus(
+            db, allow_identifier_stale=True
+        )  # enrichment writes cannot force a full rebuild per employee query
     if field:
         items = rank_products_by_field(
             [item for item, _ in corpus], query, field, limit=limit
@@ -3519,40 +3568,14 @@ def client_find():
     if not query:
         return jsonify([])
     limit = min(max(clamp_non_negative_int(request.args.get("limit", "30"), 30), 1), 100)
-    nq = normalize_search_text(query)
-    dq = normalized_digits(query)
-    qtokens = list(dict.fromkeys(tokenize_search_query(query)))
-    intent_terms = intent_expansion_terms(query)
-    abbrevs = abbreviation_terms(query)
-    required_concepts = client_required_concept_groups(query)
-    excluded_concepts = client_excluded_concept_terms(query)
-    if not nq and not dq and not intent_terms:
-        return jsonify([])
-    db = get_db()
-    scored = []
-    # Minimum meaningful score for the CLIENT tab: every real signal clears it
-    # (whole-word name token 470+, intent 200-300, brand 200, all-tokens-covered
-    # 120+, barcode 500+). What it drops is partial-coverage-only noise (25/token)
-    # — the "random products" that padded the list when little else matched.
-    MIN_SCORE = 100
-    # The pre-normalized in-memory corpus keeps this endpoint in milliseconds.
-    # Imported-but-unplaced catalogue rows are excluded so they cannot be shown
-    # to an employee as current store inventory.
-    for document in _mapped_client_products(db):
-        item = document["item"]
-        prow = document["row"]
-        if not row_matches_client_concepts(prow, required_concepts, excluded_concepts):
-            continue
-        s = max(
-            _fast_reference_score(prow, nq, dq, qtokens, intent_terms, abbrevs),
-            _fuzzy_product_score(prow, qtokens),
-        )
-        if s >= MIN_SCORE:
-            scored.append((s, 0, item))
-    scored.sort(key=lambda x: (-x[0], x[1], str(x[2].get("name", "")).lower()))
-    return jsonify([
-        public_product_payload(item) for _, _, item in scored[:limit]
-    ])
+    products = hybrid_client_candidates(query, {
+        "corrected_query": query,
+        "search_queries": [],
+        "keywords": [],
+        "must_include": [],
+        "exclude": [],
+    }, limit=limit)
+    return jsonify([public_product_payload(item) for item in products])
 
 
 @products_bp.route("/api/products/reference-search", methods=["GET"])
@@ -3567,9 +3590,11 @@ def reference_search():
     db = get_db()
     placed = {normalized_digits(r["barcode"]) for r in
               db.execute("SELECT barcode FROM products WHERE TRIM(COALESCE(barcode,'')) <> ''").fetchall()}
-    return jsonify(rank_reference_for_query(
-        query, limit=limit, exclude_barcodes=placed, field=field
-    ))
+    with memory_intensive_task("reference_search", priority=True):
+        results = rank_reference_for_query(
+            query, limit=limit, exclude_barcodes=placed, field=field
+        )
+    return jsonify(results)
 
 
 @products_bp.route("/api/products/barcode/<barcode>", methods=["GET"])
@@ -5022,12 +5047,13 @@ def schedule_reference_metadata_sync():
 
         # Let the web worker answer its first plan/products request before this
         # catalogue-wide maintenance scan competes for Postgres and CPU.
-        time.sleep(12)
+        time.sleep(20)
         for attempt in range(3):
             db = None
             try:
                 db = connect_db()
-                linked = sync_reference_metadata_to_products(db)
+                with memory_intensive_task("reference_sync"):
+                    linked = sync_reference_metadata_to_products(db)
                 db.commit()
                 if linked:
                     print(f"[Catalogue] {linked} produit(s) placé(s) relié(s) à leur description/image.")
@@ -5043,6 +5069,7 @@ def schedule_reference_metadata_sync():
                         db.close()
                     except Exception:
                         pass
+                release_unused_memory()
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -5060,7 +5087,7 @@ def schedule_initial_product_quality_audit():
 
     def worker():
         from database import connect_db
-        time.sleep(30)
+        time.sleep(120)
         db = None
         try:
             db = connect_db()
@@ -5080,19 +5107,20 @@ def schedule_initial_product_quality_audit():
                     "completed_at": "", "error": "",
                 })
             while True:
-                rows = db.execute(
-                    """SELECT id FROM products
-                       WHERE TRIM(COALESCE(quality_checked_at,''))=''
-                       ORDER BY id LIMIT 150"""
-                ).fetchall()
-                ids = [int(first_column(row)) for row in rows]
-                if not ids:
-                    break
-                result = audit_product_data(
-                    db, ids, trigger_type="initial_catalog_audit",
-                    employee="system",
-                )
-                db.commit()
+                with memory_intensive_task("quality_audit"):
+                    rows = db.execute(
+                        """SELECT id FROM products
+                           WHERE TRIM(COALESCE(quality_checked_at,''))=''
+                           ORDER BY id LIMIT 100"""
+                    ).fetchall()
+                    ids = [int(first_column(row)) for row in rows]
+                    if not ids:
+                        break
+                    result = audit_product_data(
+                        db, ids, trigger_type="initial_catalog_audit",
+                        employee="system",
+                    )
+                    db.commit()
                 with _QUALITY_AUDIT_LOCK:
                     _QUALITY_AUDIT_STATE["scanned"] += int(result.get("scanned", 0))
                     _QUALITY_AUDIT_STATE["issues"] += int(result.get("issues", 0))
@@ -5120,22 +5148,23 @@ def schedule_initial_product_quality_audit():
     threading.Thread(target=worker, daemon=True).start()
 
 
+_IMAGE_BACKFILL_BOOT_LOCK = threading.Lock()
+_IMAGE_BACKFILL_BOOT_STARTED = False
+
+
 def schedule_backfill_missing():
     """At startup, automatically fetch any still-missing product images in the
-    background — no button, no user action. Throttled to once per 12h via a
-    temp-file marker: the worker recycles every ~500 requests, and re-hitting
-    the image sources for the same unfindable products at every recycle was
-    pure waste."""
-    try:
-        marker = os.path.join(tempfile.gettempdir(), "familiprix-backfill.last")
-        if os.path.exists(marker) and time.time() - os.path.getmtime(marker) < 12 * 3600:
+    background. It runs once per worker process; after a controlled Gunicorn
+    recycle, the new worker resumes the durable database backlog instead of
+    inheriting a 12-hour temp-file pause from the dead worker."""
+    global _IMAGE_BACKFILL_BOOT_STARTED
+    with _IMAGE_BACKFILL_BOOT_LOCK:
+        if _IMAGE_BACKFILL_BOOT_STARTED:
             return
-        with open(marker, "w", encoding="utf-8") as fh:
-            fh.write(str(time.time()))
-    except OSError:
-        pass
+        _IMAGE_BACKFILL_BOOT_STARTED = True
+
     def worker():
-        time.sleep(15)
+        time.sleep(60)
         try:
             from database import connect_db
             db = connect_db()

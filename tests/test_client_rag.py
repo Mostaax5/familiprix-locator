@@ -517,6 +517,43 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(result["comparisons"], [])
         self.assertEqual(result["source_ids"], ["health-canada:12"])
 
+    def test_documented_model_only_generates_the_answer_layer(self):
+        product = {
+            "id": 7, "client_id": "product:7",
+            "name": "ADVIL 200MG CO100", "brand": "Advil",
+            "description": "Comprimés d'ibuprofène.",
+            "aisle": "Labo", "side": "A", "section": "2",
+            "shelf": "4", "position": "1",
+        }
+        documents = [{
+            "source_id": "store-plan", "title": "Plan actuel",
+            "candidate_ids": ["product:7"],
+        }]
+        parsed = {
+            "answer": "L'ibuprofène est une option contre la douleur.",
+            "key_points": [],
+            "selected_product_ids": ["product:7"],
+            "follow_up_questions": [],
+            "safety_flags": [],
+            "pharmacist_referral": False,
+            "pharmacist_reason": "",
+            "source_ids": ["store-plan"],
+        }
+
+        with patch(
+            "routes.ai._provider_structured_request", return_value=parsed
+        ) as provider:
+            result = generate_documented_client_answer(
+                "Que prendre pour un mal de tête?",
+                {"medical": True}, [product], documents,
+            )
+
+        call = provider.call_args
+        self.assertEqual(call.kwargs["max_tokens"], 560)
+        self.assertNotIn("comparisons", call.kwargs["schema"]["properties"])
+        self.assertEqual(result["selected_product_ids"], ["product:7"])
+        self.assertEqual(result["comparisons"][0]["candidate_id"], "product:7")
+
     def test_documented_answer_keeps_products_when_ai_is_unavailable(self):
         product = {
             "id": 7,
@@ -576,9 +613,10 @@ class ClientRagTests(unittest.TestCase):
         self.assertTrue(result["degraded"])
         self.assertIn("mal de tête", result["answer"])
         self.assertIn("acétaminophène", result["answer"])
+        self.assertNotIn("j'ai trouvé", result["answer"].lower())
         self.assertEqual(
             [point["heading"] for point in result["key_points"]],
-            ["Avant de choisir", "Ingrédients repérés", "Éviter les doublons", "Besoin d'un avis"],
+            ["Choix rapide", "Avant de proposer", "Ne pas combiner", "Quand référer"],
         )
         self.assertEqual(len(result["follow_up_questions"]), 3)
         self.assertTrue(result["pharmacist_referral"])
@@ -1112,7 +1150,7 @@ class ClientRagTests(unittest.TestCase):
         self.assertIn("acétaminophène", payload["answer"])
         self.assertEqual(
             [point["heading"] for point in payload["advice"]["documentation"]["key_points"]],
-            ["Avant de choisir", "Ingrédients repérés", "Éviter les doublons", "Besoin d'un avis"],
+            ["Choix rapide", "Avant de proposer", "Ne pas combiner", "Quand référer"],
         )
         generator.assert_not_called()
         provider.assert_not_called()

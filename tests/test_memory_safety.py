@@ -79,6 +79,43 @@ class MemorySafetyTests(unittest.TestCase):
 
         self.assertEqual(peak, 1)
 
+    def test_client_search_materializes_only_ranked_products_and_all_locations(self):
+        first = {
+            "id": 1, "name": "TYLENOL 500MG CO100", "brand": "Tylenol",
+            "barcode": "062600142320", "in_stock": 0, "is_plano": 1,
+            "aisle": "Labo", "side": "A", "section": "2",
+            "shelf": "6", "position": "1",
+        }
+        second_location = {
+            **first, "id": 2, "in_stock": 1, "section": "3", "position": "4",
+        }
+        unrelated = {
+            "id": 3, "name": "ORAL-B TETE BR DENTS", "brand": "Oral-B",
+            "barcode": "300", "in_stock": 1, "is_plano": 1,
+            "aisle": "3", "side": "A", "section": "1",
+            "shelf": "1", "position": "1",
+        }
+        corpus = [
+            (first, products._product_search_row(first)),
+            (second_location, products._product_search_row(second_location)),
+            (unrelated, products._product_search_row(unrelated)),
+        ]
+        plan = {
+            "corrected_query": "Tylenol", "search_queries": [],
+            "keywords": [], "must_include": [], "exclude": [],
+        }
+
+        with patch.object(products, "get_db", return_value=object()), \
+             patch.object(products, "_products_corpus", return_value=corpus):
+            matches = products.hybrid_client_candidates(
+                "Tylenol", plan, limit=10
+            )
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["name"], "TYLENOL 500MG CO100")
+        self.assertEqual(len(matches[0]["locations"]), 2)
+        self.assertEqual(matches[0]["in_stock"], 1)
+
     def test_image_lookup_does_not_stop_on_a_text_only_result(self):
         text_only = {
             "name": "Detailed razor product", "brand": "Example",
