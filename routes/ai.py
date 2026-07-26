@@ -2598,7 +2598,9 @@ def _client_intent_documents(query_plan):
             ),
             "candidate_ids": [],
         }]
-    if str((query_plan or {}).get("intent", "") or "") != "headache_relief":
+    if str((query_plan or {}).get("intent", "") or "") not in {
+        "headache_relief", "fever_relief",
+    }:
         return []
     return [{
         "source_id": "health-canada:acetaminophen-safe-use",
@@ -2814,7 +2816,9 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         str(query_plan.get("corrected_query", "") or "")
     )
     question_words = set(normalized_question.split())
-    is_headache_query = str(query_plan.get("intent", "") or "") == "headache_relief"
+    request_intent = str(query_plan.get("intent", "") or "")
+    is_headache_query = request_intent == "headache_relief"
+    is_fever_query = request_intent == "fever_relief"
     is_toothbrush_query = bool(
         question_words.intersection({"brosse", "brosses", "brush", "toothbrush"})
         and (
@@ -2875,7 +2879,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         excerpt = max(segments, key=evidence_score)
         if len(excerpt) > limit:
             excerpt = excerpt[:limit].rsplit(" ", 1)[0].rstrip(" ,;:")
-        return excerpt
+        return excerpt.rstrip(" .")
 
     def detected_product_form(name, details):
         padded_name = f" {name} "
@@ -3148,6 +3152,35 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             "Vérifiez ce qui a déjà été pris et ne combinez ni deux produits contenant de "
             "l'acétaminophène, ni deux AINS."
         )
+    elif names and is_fever_query:
+        has_acetaminophen = "acétaminophène" in ingredient_families
+        nsaid_families = [
+            ingredient for ingredient in ingredient_families
+            if ingredient in {
+                "ibuprofène", "naproxène", "acide acétylsalicylique"
+            }
+        ]
+        if has_acetaminophen and nsaid_families:
+            choices = (
+                "les choix repérés comprennent l'acétaminophène et un AINS comme "
+                f"{nsaid_families[0]}"
+            )
+        elif has_acetaminophen:
+            choices = "le choix clairement repéré est l'acétaminophène"
+        elif nsaid_families:
+            choices = f"le choix clairement repéré est un AINS comme {nsaid_families[0]}"
+        else:
+            choices = (
+                "confirmez d'abord l'ingrédient actif du produit avec le pharmacien"
+            )
+        answer = (
+            f"Pour soulager une fièvre, {choices}. L'âge, la cause possible, les autres "
+            "médicaments et les conditions de santé déterminent lequel peut convenir. "
+            "Vérifiez ce qui a déjà été pris et ne combinez ni deux produits contenant "
+            "de l'acétaminophène, ni deux AINS. Pour un enfant ou une fièvre importante, "
+            "persistante ou accompagnée d'autres symptômes, faites confirmer la conduite "
+            "à suivre par un professionnel."
+        )
     elif names and is_melatonin_query:
         assortment = []
         if forms:
@@ -3336,13 +3369,21 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         ["nhs:wound-transparent-film"]
         if "nhs:wound-transparent-film" in valid_source_ids else []
     )
-    if is_headache_query:
+    if is_headache_query or is_fever_query:
         key_points.append({
             "heading": "Choix rapide",
             "detail": (
-                "L'acétaminophène vise la douleur et la fièvre. Les AINS comme l'ibuprofène "
-                "ou le naproxène visent la douleur et l'inflammation; confirmer qu'ils "
-                "conviennent à la personne avant de les proposer."
+                (
+                    "L'acétaminophène et certains AINS comme l'ibuprofène peuvent réduire "
+                    "la fièvre; confirmer lequel convient selon l'âge, les médicaments et "
+                    "les conditions de santé."
+                )
+                if is_fever_query else
+                (
+                    "L'acétaminophène vise la douleur et la fièvre. Les AINS comme "
+                    "l'ibuprofène ou le naproxène visent la douleur et l'inflammation; "
+                    "confirmer qu'ils conviennent à la personne avant de les proposer."
+                )
             ),
             "source_ids": (acetaminophen_source + nsaid_source)[:4],
         })
@@ -3365,11 +3406,22 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         key_points.append({
             "heading": "Quand référer",
             "detail": (
-                "Le pharmacien peut confirmer le produit approprié; Info-Santé 811 peut conseiller "
-                "la personne si le mal de tête est inhabituel, important, persistant ou accompagné "
-                "d'autres symptômes."
+                (
+                    "Le pharmacien peut confirmer le produit approprié. Demander une "
+                    "évaluation pour un enfant ou si la fièvre est importante, persistante "
+                    "ou accompagnée de symptômes préoccupants."
+                )
+                if is_fever_query else
+                (
+                    "Le pharmacien peut confirmer le produit approprié; Info-Santé 811 "
+                    "peut conseiller la personne si le mal de tête est inhabituel, important, "
+                    "persistant ou accompagné d'autres symptômes."
+                )
             ),
-            "source_ids": info_sante_source,
+            "source_ids": (
+                (acetaminophen_source + nsaid_source)[:4]
+                if is_fever_query else info_sante_source
+            ),
         })
     elif is_melatonin_query:
         key_points.extend([{
@@ -3484,14 +3536,17 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             "detail": ", ".join(forms).capitalize(),
             "source_ids": store_source,
         })
-    if doses and not is_headache_query and not is_melatonin_query:
+    if (
+        doses and not is_headache_query and not is_fever_query
+        and not is_melatonin_query
+    ):
         key_points.append({
             "heading": "Concentrations repérées",
             "detail": ", ".join(doses),
             "source_ids": store_source,
         })
     if (
-        not is_toothbrush_query and not is_headache_query
+        not is_toothbrush_query and not is_headache_query and not is_fever_query
         and not is_melatonin_query and (flavors or asks_flavors)
     ):
         key_points.append({
@@ -3503,7 +3558,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             "source_ids": store_source,
         })
     if (
-        not is_toothbrush_query and not is_headache_query
+        not is_toothbrush_query and not is_headache_query and not is_fever_query
         and not is_melatonin_query and features
     ):
         key_points.append({
@@ -3536,6 +3591,11 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         "A-t-elle déjà pris un médicament aujourd'hui, et lequel?",
         "Y a-t-il grossesse, allaitement, allergies ou conditions de santé à signaler?",
     ]
+    fever_follow_ups = [
+        "Quel âge a la personne et quelle température a été mesurée?",
+        "Depuis combien de temps la fièvre dure-t-elle et quels autres symptômes sont présents?",
+        "A-t-elle déjà pris un médicament aujourd'hui, et lequel?",
+    ]
     melatonin_follow_ups = [
         "Est-ce pour un adulte de 18 ans ou plus?",
         "Le besoin principal est-il l'endormissement, un horaire décalé ou le décalage horaire?",
@@ -3560,7 +3620,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             "Ne pas confondre une tête de remplacement avec une brosse complète; "
             "confirmer la compatibilité sur l'emballage."
         )
-    elif is_headache_query:
+    elif is_headache_query or is_fever_query:
         practical_guidance = (
             "Comparer d'abord l'ingrédient actif et la concentration, puis la forme "
             "et le format. Vérifier les médicaments déjà pris pour éviter un "
@@ -3611,6 +3671,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         "selected_product_ids": selected_ids,
         "follow_up_questions": (
             headache_follow_ups if is_headache_query
+            else fever_follow_ups if is_fever_query
             else melatonin_follow_ups if is_melatonin_query
             else wound_follow_ups if is_wound_dressing_comparison
             else form_follow_ups if is_form_comparison_query and medical
@@ -3620,7 +3681,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             (
                 "Vérifier l'ingrédient actif, la concentration, l'âge indiqué et les avertissements "
                 "sur chaque emballage avant de proposer un produit."
-                if is_headache_query else
+                if is_headache_query or is_fever_query else
                 (
                     "Confirmer que la personne a 18 ans ou plus et vérifier la concentration, "
                     "l'usage, les médicaments, les contre-indications et les avertissements."
@@ -3638,10 +3699,16 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         "pharmacist_referral": medical,
         "pharmacist_reason": (
             (
-                "Faire confirmer le choix par le pharmacien en présence d'autres médicaments, "
-                "d'allergies, de grossesse, d'allaitement, pour un enfant, ou si le mal de tête "
-                "est important, inhabituel ou persistant."
-                if is_headache_query else
+                (
+                    "Faire confirmer le choix pour un enfant, en présence d'autres "
+                    "médicaments ou conditions de santé, ou si la fièvre est importante, "
+                    "persistante ou accompagnée d'autres symptômes."
+                    if is_fever_query else
+                    "Faire confirmer le choix par le pharmacien en présence d'autres médicaments, "
+                    "d'allergies, de grossesse, d'allaitement, pour un enfant, ou si le mal de tête "
+                    "est important, inhabituel ou persistant."
+                )
+                if is_headache_query or is_fever_query else
                 (
                     "Consulter le pharmacien pour une personne de moins de 18 ans, les "
                     "interactions, la grossesse, l'allaitement, une maladie pertinente ou "
@@ -3662,7 +3729,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         "useful_guidance": [{
             "text": practical_guidance,
             "source_ids": (
-                acetaminophen_source if is_headache_query
+                acetaminophen_source if is_headache_query or is_fever_query
                 else melatonin_uses_source if is_melatonin_query
                 else (
                     wound_hydrocolloid_source + wound_transparent_source
@@ -3673,7 +3740,9 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         "important_checks": [{
             "text": important_check,
             "source_ids": (
-                melatonin_uses_source if is_melatonin_query
+                (acetaminophen_source + nsaid_source)[:4]
+                if is_headache_query or is_fever_query
+                else melatonin_uses_source if is_melatonin_query
                 else (
                     wound_hydrocolloid_source + wound_transparent_source
                 )[:4] if is_wound_dressing_comparison
@@ -4941,16 +5010,27 @@ def client_help():
         and any(word.startswith("hydrocollo") for word in question_words)
         and any(word.startswith("transp") for word in question_words)
     )
+    catalogue_evidence_count = sum(
+        1 for product in candidates
+        if any(str(product.get(field, "") or "").strip() for field in (
+            "description", "usage_notes", "purpose", "compatibility",
+        ))
+    )
+    is_catalogue_supported_comparison = bool(
+        query_plan.get("needs_comparison")
+        and catalogue_evidence_count >= 2
+    )
     is_immediate_documented_question = bool(
         not follow_up
         and not selected_text
         and not focus_product_id
         and (
             is_toothbrush_power_comparison
-            or query_plan.get("intent") == "headache_relief"
+            or query_plan.get("intent") in {"headache_relief", "fever_relief"}
             or "melaton" in normalized_question
             or is_form_comparison
             or is_wound_dressing_comparison
+            or is_catalogue_supported_comparison
         )
     )
     use_local_documented_summary = bool(
@@ -4971,7 +5051,7 @@ def client_help():
         )
     # A smaller grounded context improves response time and keeps comparisons readable.
     answer_limit = (
-        8 if query_plan.get("intent") == "headache_relief"
+        8 if query_plan.get("intent") in {"headache_relief", "fever_relief"}
         else (
             12 if use_local_documented_summary
             else 8 if response_mode == "documented"
@@ -4981,7 +5061,9 @@ def client_help():
     answer_candidates = select_client_answer_candidates(
         answer_candidates,
         limit=answer_limit,
-        diversify_brands=query_plan.get("intent") == "headache_relief",
+        diversify_brands=(
+            query_plan.get("intent") in {"headache_relief", "fever_relief"}
+        ),
         question=question,
     )
     documents = []

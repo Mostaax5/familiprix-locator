@@ -226,6 +226,41 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertEqual([product["id"] for product in filtered], [1])
 
+    def test_fever_retrieval_keeps_only_named_fever_relief_products(self):
+        question = "Jai de la fievre que prendre"
+        products = [{
+            "id": 1, "name": "TYLENOL 500MG X/F CO100",
+            "brand": "Tylenol", "barcode": "101",
+            "description": "Contient de l'acétaminophène.",
+        }, {
+            "id": 2, "name": "ADVIL 200MG CO100",
+            "brand": "Advil", "barcode": "102",
+            "description": "Contient de l'ibuprofène.",
+        }, {
+            "id": 3, "name": "AIRWICK E/MIST LAV 20ML",
+            "brand": "Airwick", "barcode": "103",
+            "description": "Description erronée: contient de l'acétaminophène.",
+        }, {
+            "id": 4, "name": "BENYLIN T/E/U 250ML",
+            "brand": "Benylin", "barcode": "104",
+            "description": "Formule avec analgésique contre la fièvre.",
+        }]
+        corpus = [(
+            product,
+            search_row(
+                product["name"], product["brand"], product["description"],
+                barcode=product["barcode"],
+            ),
+        ) for product in products]
+        plan = build_client_query_plan(question, "documented")
+
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            matches = hybrid_client_candidates(question, plan, limit=20)
+
+        self.assertEqual(plan["intent"], "fever_relief")
+        self.assertEqual({product["id"] for product in matches}, {1, 2})
+
     def test_duplicate_plan_positions_are_one_product_with_all_locations(self):
         first = {
             "id": 1, "name": "Advil", "brand": "Advil", "barcode": "111",
@@ -320,6 +355,47 @@ class ClientRagTests(unittest.TestCase):
         self.assertNotIn("DENTA RINSE PRO .2% MENT 500ML", names)
         self.assertNotIn("SONICARE IRR S/FIL HX3826/23 1", names)
         self.assertNotIn("GUM PROXABRUSH RECH BROS LG 10", names)
+
+    def test_toothpaste_comparison_excludes_brushes_and_floss(self):
+        products = [{
+            "id": 1, "name": "SENSODYNE BLANCHISSANT 135ML",
+            "brand": "Sensodyne", "barcode": "101",
+            "description": "Dentifrice blanchissant pour dents sensibles.",
+        }, {
+            "id": 2, "name": "COLGATE TT BLANCHISSANT 120ML",
+            "brand": "Colgate", "barcode": "102",
+            "description": "Dentifrice qui aide à enlever les taches de surface.",
+        }, {
+            "id": 3, "name": "ORAL-B GLIDE SOIE DENT 40M",
+            "brand": "Oral-B", "barcode": "103",
+            "description": "Soie pour les espaces serrés et les dents sensibles.",
+        }, {
+            "id": 4, "name": "ORAL-B BR/DENTS BLANCHISSANT 1",
+            "brand": "Oral-B", "barcode": "104",
+            "description": "Brosse pour nettoyer les dents et aider au blanchiment.",
+        }]
+        corpus = [(
+            product,
+            search_row(
+                product["name"], product["brand"], product["description"],
+                barcode=product["barcode"],
+            ),
+        ) for product in products]
+        query = (
+            "différence entre un dentifrice pour dents sensibles "
+            "et un dentifrice blanchissant"
+        )
+
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            matches = hybrid_client_candidates(
+                query, build_client_query_plan(query, "documented"), limit=20,
+            )
+
+        self.assertEqual(
+            {product["id"] for product in matches},
+            {1, 2},
+        )
 
     def test_electric_toothbrush_concept_filter_is_precompiled_and_fast(self):
         query = "brosse a dent electric"
@@ -1261,6 +1337,44 @@ class ClientRagTests(unittest.TestCase):
         provider.assert_not_called()
         rate_limit.assert_not_called()
 
+    def test_catalogue_supported_comparison_skips_ai_delay(self):
+        candidates = [{
+            "id": 1, "client_id": "product:1",
+            "name": "SENSODYNE SENSIBILITE 100ML",
+            "description": "Dentifrice conçu pour les dents sensibles.",
+            "barcode": "1001", "aisle": "3", "side": "A",
+            "section": "4", "shelf": "2", "position": "1",
+        }, {
+            "id": 2, "client_id": "product:2",
+            "name": "COLGATE BLANCHISSANT 120ML",
+            "description": "Dentifrice qui aide à retirer les taches de surface.",
+            "barcode": "1002", "aisle": "3", "side": "A",
+            "section": "4", "shelf": "2", "position": "2",
+        }]
+        with patch("routes.products.hybrid_client_candidates", return_value=candidates), \
+             patch("routes.products.hydrate_candidate_images"), \
+             patch("routes.ai.generate_documented_client_answer") as generator, \
+             patch("routes.ai.configured_ai_provider") as provider, \
+             patch("routes.ai._check_ai_rate_limit") as rate_limit, \
+             patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": (
+                        "Quelle est la différence entre un dentifrice pour dents "
+                        "sensibles et un dentifrice blanchissant?"
+                    ),
+                    "mode": "documented",
+                })
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertLess(payload["elapsed_ms"], 1000)
+        self.assertFalse(payload["degraded"])
+        self.assertIn("D'après les fiches actuelles", payload["answer"])
+        generator.assert_not_called()
+        provider.assert_not_called()
+        rate_limit.assert_not_called()
+
     def test_documented_wound_comparison_skips_ai_delay(self):
         candidates = [{
             "id": 1, "client_id": "product:1",
@@ -1400,6 +1514,42 @@ class ClientRagTests(unittest.TestCase):
             unittest.mock.ANY,
             include_live_regulatory=False,
         )
+
+    def test_documented_fever_question_uses_immediate_grounded_summary(self):
+        candidates = [{
+            "id": 1, "client_id": "product:1",
+            "name": "TYLENOL 500MG X/F CO100", "brand": "Tylenol",
+            "description": "Contient de l'acétaminophène.",
+            "barcode": "1001", "aisle": "Labo", "side": "A",
+            "section": "2", "shelf": "3", "position": "4",
+        }, {
+            "id": 2, "client_id": "product:2",
+            "name": "ADVIL 200MG CO100", "brand": "Advil",
+            "description": "Comprimés d'ibuprofène.",
+            "barcode": "1002", "aisle": "Labo", "side": "A",
+            "section": "2", "shelf": "4", "position": "1",
+        }]
+        with patch("routes.products.hybrid_client_candidates", return_value=candidates), \
+             patch("routes.products.hydrate_candidate_images"), \
+             patch("routes.ai.generate_documented_client_answer") as generator, \
+             patch("routes.ai.configured_ai_provider") as provider, \
+             patch("routes.ai._check_ai_rate_limit") as rate_limit, \
+             patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": "Jai de la fievre que prendre",
+                    "mode": "documented",
+                })
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertLess(payload["elapsed_ms"], 1000)
+        self.assertFalse(payload["degraded"])
+        self.assertIn("Pour soulager une fièvre", payload["answer"])
+        self.assertIn("acétaminophène", payload["answer"])
+        generator.assert_not_called()
+        provider.assert_not_called()
+        rate_limit.assert_not_called()
 
 
 if __name__ == "__main__":

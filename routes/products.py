@@ -1208,6 +1208,11 @@ def _is_headache_request(query):
     return "tete" in tokens and bool(tokens.intersection({"mal", "male", "maux"}))
 
 
+def _is_fever_request(query):
+    norm = normalize_search_text(query)
+    return bool(set(norm.split()).intersection({"fievre", "fever", "febrile"}))
+
+
 def _headache_relief_named_product(value):
     """Require the sellable product's name to identify a pain-relief family.
 
@@ -1225,6 +1230,8 @@ def _headache_relief_named_product(value):
 def client_request_intent(query):
     if _is_headache_request(query):
         return "headache_relief"
+    if _is_fever_request(query):
+        return "fever_relief"
     return ""
 
 
@@ -1269,7 +1276,7 @@ def client_required_concept_groups(query):
             ("transparent", "transparente", "transp", "opsite", "tegaderm"),
             ("pansement", "pans", "diach", "bandage", "band aid", "opsite", "tegaderm"),
         ])
-    if _is_headache_request(norm):
+    if _is_headache_request(norm) or _is_fever_request(norm):
         groups.append(_HEADACHE_RELIEF_TERMS)
     if _is_electric_toothbrush_request(norm):
         groups.extend([
@@ -1278,6 +1285,16 @@ def client_required_concept_groups(query):
             ("electrique", "electric", "elec", "pile", "sonicare", "philips one",
              "tete br dent"),
         ])
+    toothpaste_request = bool(
+        tokens.intersection({"dentifrice", "dentifrices", "toothpaste"})
+        or "pate a dents" in norm
+        or "pate dent" in norm
+    )
+    if toothpaste_request:
+        groups.append((
+            "dentifrice", "dentifrices", "toothpaste", "pate dent",
+            "sensodyne", "pronamel", "parodontax",
+        ))
     return tuple(_compile_client_concept_group(group) for group in groups)
 
 
@@ -1289,7 +1306,19 @@ def client_excluded_concept_terms(query):
         groups.append(_compile_client_concept_group(
             ("irr", "irrigateur", "hydropulseur", "airfloss", "water flosser", "s fil")
         ))
-    if _is_headache_request(norm):
+    toothpaste_request = bool(
+        tokens.intersection({"dentifrice", "dentifrices", "toothpaste"})
+        or "pate a dents" in norm
+        or "pate dent" in norm
+    )
+    if toothpaste_request:
+        groups.append(_compile_client_concept_group((
+            "brosse dent", "br dent", "toothbrush", "brush",
+            "soie dent", "dental floss", "floss",
+            "tete br dent", "tete dent",
+            "rince bouche", "r bouche", "bain bouche", "mouthwash",
+        )))
+    if _is_headache_request(norm) or _is_fever_request(norm):
         groups.append(_compile_client_concept_group((
             "brosse dent", "br dent", "tete br dent", "tete o pied", "head to toe",
             "huile essentiel", "h ess", "fl min teinte",
@@ -1413,7 +1442,7 @@ def filter_client_request_products(products, query):
         product for product in products
         if row_matches_client_concepts(_product_search_row(product), required, excluded)
     ]
-    if _is_headache_request(query):
+    if _is_headache_request(query) or _is_fever_request(query):
         named = [
             product for product in filtered
             if _headache_relief_named_product(" ".join((
@@ -3448,7 +3477,9 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
     corpus = _employee_product_corpus(db)
     required_concepts = client_required_concept_groups(question)
     excluded_concepts = client_excluded_concept_terms(question)
-    headache_name_required = _is_headache_request(question)
+    analgesic_name_required = (
+        _is_headache_request(question) or _is_fever_request(question)
+    )
 
     def clean_list(value, max_items=20):
         if not isinstance(value, list):
@@ -3541,7 +3572,7 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
                 existing["in_stock"] = 1
             continue
         seen_documents.add(key)
-        if headache_name_required and not _headache_relief_named_product(
+        if analgesic_name_required and not _headache_relief_named_product(
             f"{row.get('_name', '')} {row.get('_brand', '')}"
         ):
             continue
