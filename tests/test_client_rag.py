@@ -1049,6 +1049,33 @@ class ClientRagTests(unittest.TestCase):
             ["ADVIL 200MG CO100", "TYLENOL 500MG CO100", "ALEVE 220MG CO24"],
         )
 
+    def test_brand_diversity_does_not_reselect_a_seeded_brand(self):
+        candidates = [{
+            "id": 1, "name": "ADVIL 200MG CO100", "brand": "Advil",
+            "description": "Réduit la fièvre.",
+        }, {
+            "id": 2, "name": "ADVIL 200MG MINI GEL", "brand": "Advil",
+            "description": "Réduit la fièvre.",
+        }, {
+            "id": 3, "name": "TYLENOL 500MG CO100", "brand": "Tylenol",
+            "description": "Réduit la fièvre.",
+        }, {
+            "id": 4, "name": "ALEVE 220MG CO24", "brand": "Aleve",
+            "description": "Réduit la fièvre.",
+        }]
+
+        selected = select_client_answer_candidates(
+            candidates,
+            limit=3,
+            diversify_brands=True,
+            question="Que prendre pour la fièvre?",
+        )
+
+        self.assertEqual(
+            [item["brand"] for item in selected],
+            ["Advil", "Tylenol", "Aleve"],
+        )
+
     def test_request_router_separates_fast_lookup_from_detailed_advice(self):
         self.assertEqual(classify_client_request("Advil"), "lookup")
         self.assertEqual(classify_client_request("Montre-moi les Advil"), "lookup")
@@ -1418,7 +1445,21 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertLess(payload["elapsed_ms"], 1000)
         self.assertFalse(payload["degraded"])
-        self.assertIn("D'après les fiches actuelles", payload["answer"])
+        self.assertIn("objectif principal", payload["answer"])
+        self.assertEqual(
+            [
+                point["heading"]
+                for point in payload["advice"]["documentation"]["key_points"]
+            ],
+            ["Dents sensibles", "Blanchissant", "Produit combiné", "Quand référer"],
+        )
+        self.assertIn(
+            "Association dentaire canadienne",
+            {
+                source["publisher"]
+                for source in payload["advice"]["documentation"]["sources"]
+            },
+        )
         generator.assert_not_called()
         provider.assert_not_called()
         rate_limit.assert_not_called()

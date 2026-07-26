@@ -1960,8 +1960,16 @@ def select_client_answer_candidates(candidates, limit=16, diversify_brands=False
             "pansement", "pansements", "produit", "produits", "toothpaste",
             "toothbrush",
         }
+        comparison_semantic_stems = {
+            "blanchissant": "blanch",
+            "blanchiment": "blanch",
+            "sensible": "sens",
+            "sensibilite": "sens",
+            "whitening": "whit",
+        }
         for token in tokenize_search_query(question):
             stem = token[:-1] if len(token) >= 6 and token.endswith("s") else token
+            stem = comparison_semantic_stems.get(stem, stem)
             if stem in seen_comparison_stems or stem in comparison_object_terms:
                 continue
             seen_comparison_stems.add(stem)
@@ -1999,6 +2007,12 @@ def select_client_answer_candidates(candidates, limit=16, diversify_brands=False
 
     if diversify_brands:
         seen_brands = set()
+        for product in selected:
+            brand = normalize_search_text(product.get("brand", ""))
+            if not brand:
+                brand = normalize_search_text(product.get("name", "")).split(" ", 1)[0]
+            if brand:
+                seen_brands.add(brand)
         for product in candidates:
             brand = normalize_search_text(product.get("brand", ""))
             if not brand:
@@ -2608,6 +2622,48 @@ def _client_intent_documents(query_plan):
             ),
             "candidate_ids": [],
         }]
+    is_toothpaste_comparison = bool(
+        (query_plan or {}).get("needs_comparison")
+        and any(term in normalized_question for term in (
+            "dentifrice", "toothpaste",
+        ))
+        and "sens" in normalized_question
+        and any(term in normalized_question for term in (
+            "blanch", "whiten",
+        ))
+    )
+    if is_toothpaste_comparison:
+        return [{
+            "source_id": "cda:sensitive-toothpaste",
+            "title": "ADC - Dentifrice pour dents sensibles",
+            "publisher": "Association dentaire canadienne",
+            "url": (
+                "https://www.cda-adc.ca/EN/oral_health/seal/products/"
+                "product_page.asp?product=235"
+            ),
+            "evidence": (
+                "Un dentifrice pour dents sensibles vise le soulagement et la protection "
+                "contre la sensibilité grâce à des ingrédients actifs précis. L'Association "
+                "dentaire canadienne indique de l'utiliser régulièrement selon l'étiquette "
+                "et de consulter un dentiste si la sensibilité ou la douleur persiste."
+            ),
+            "candidate_ids": [],
+        }, {
+            "source_id": "cda:whitening-toothpaste",
+            "title": "ADC - Dentifrices blanchissants",
+            "publisher": "Association dentaire canadienne",
+            "url": (
+                "https://www.cda-adc.ca/en/oral_health/faqs/"
+                "dental_care_faqs.asp"
+            ),
+            "evidence": (
+                "Les dentifrices blanchissants abrasifs agissent surtout sur les taches "
+                "de surface et ne sont pas équivalents à un traitement de blanchiment. "
+                "Certains contiennent aussi un agent blanchissant; un usage prolongé peut "
+                "accentuer la sensibilité ou l'abrasion."
+            ),
+            "candidate_ids": [],
+        }]
     is_wound_dressing_comparison = bool(
         (query_plan or {}).get("needs_comparison")
         and any(term in normalized_question for term in (
@@ -2885,6 +2941,17 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         })
         and any(word.startswith("hydrocollo") for word in question_words)
         and any(word.startswith("transp") for word in question_words)
+    )
+    is_toothpaste_comparison = bool(
+        query_plan.get("needs_comparison")
+        and question_words.intersection({
+            "dentifrice", "dentifrices", "toothpaste", "toothpastes",
+        })
+        and any(word.startswith("sens") for word in question_words)
+        and any(
+            word.startswith("blanch") or word.startswith("whit")
+            for word in question_words
+        )
     )
 
     evidence_stopwords = {
@@ -3286,6 +3353,19 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             + " Vérifier la taille, la présence d'un coussinet, le niveau d'exsudat et les "
             "contre-indications du produit exact."
         )
+    elif names and is_toothpaste_comparison:
+        answer = (
+            "Un dentifrice pour dents sensibles a comme objectif principal de réduire "
+            "la douleur déclenchée par le froid, le chaud ou le contact; il doit contenir "
+            "une indication et un ingrédient antisensibilité confirmés sur l'emballage et "
+            "s'utilise généralement de façon régulière. Un dentifrice blanchissant vise "
+            "surtout les taches de surface; il ne corrige pas toutes les causes de changement "
+            "de couleur et peut parfois augmenter la sensibilité. Pour choisir: priorité à "
+            "une formule antisensibilité si la personne a mal, et à une formule blanchissante "
+            "si le besoin est seulement cosmétique. Certains produits font les deux; dans ce "
+            "cas, confirmer les deux indications plutôt que de se fier au nom. Une sensibilité "
+            "persistante ou qui s'aggrave doit être évaluée par un dentiste."
+        )
     elif names and is_form_comparison_query:
         practical_differences = [
             f"Les {form} : {form_guidance[form]}."
@@ -3416,6 +3496,14 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
     wound_transparent_source = (
         ["nhs:wound-transparent-film"]
         if "nhs:wound-transparent-film" in valid_source_ids else []
+    )
+    sensitive_toothpaste_source = (
+        ["cda:sensitive-toothpaste"]
+        if "cda:sensitive-toothpaste" in valid_source_ids else []
+    )
+    whitening_toothpaste_source = (
+        ["cda:whitening-toothpaste"]
+        if "cda:whitening-toothpaste" in valid_source_ids else []
     )
     if is_headache_query or is_fever_query:
         key_points.append({
@@ -3569,6 +3657,38 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                 wound_hydrocolloid_source + wound_transparent_source
             )[:4],
         }])
+    elif is_toothpaste_comparison:
+        key_points.extend([{
+            "heading": "Dents sensibles",
+            "detail": (
+                "Chercher une indication antisensibilité et vérifier l'ingrédient actif. "
+                "L'effet dépend d'un usage régulier selon l'étiquette."
+            ),
+            "source_ids": sensitive_toothpaste_source,
+        }, {
+            "heading": "Blanchissant",
+            "detail": (
+                "Vise surtout à retirer les taches de surface; ce n'est pas l'équivalent "
+                "d'un traitement de blanchiment et cela peut accentuer la sensibilité."
+            ),
+            "source_ids": whitening_toothpaste_source,
+        }, {
+            "heading": "Produit combiné",
+            "detail": (
+                "Un même dentifrice peut être antisensibilité et blanchissant. Confirmer "
+                "les deux indications sur l'emballage du produit exact."
+            ),
+            "source_ids": (
+                sensitive_toothpaste_source + whitening_toothpaste_source
+            )[:4],
+        }, {
+            "heading": "Quand référer",
+            "detail": (
+                "Une douleur ou sensibilité persistante, qui s'aggrave ou touche une dent "
+                "précise peut signaler un problème à faire évaluer par un dentiste."
+            ),
+            "source_ids": sensitive_toothpaste_source,
+        }])
     elif is_form_comparison_query:
         for form in forms[:4]:
             if form not in form_guidance:
@@ -3623,6 +3743,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             or ingredient_families
             or is_melatonin_query
             or is_wound_dressing_comparison
+            or is_toothpaste_comparison
         )
     )
     generic_dimensions = []
@@ -3658,6 +3779,11 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         "La plaie est-elle sèche, légèrement humide ou très exsudative?",
         "Y a-t-il rougeur qui s'étend, chaleur, douleur croissante, pus ou fièvre?",
         "Faut-il surtout absorber, protéger de l'eau ou pouvoir observer la plaie?",
+    ]
+    toothpaste_follow_ups = [
+        "Le besoin principal est-il une douleur de sensibilité ou seulement des taches?",
+        "La sensibilité touche-t-elle plusieurs dents ou une dent précise?",
+        "Le produit doit-il combiner antisensibilité, fluor et retrait des taches?",
     ]
     if is_toothbrush_query:
         practical_guidance = (
@@ -3699,6 +3825,17 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             "ont un coussinet absorbant et d'autres sont seulement un film. Vérifier "
             "l'indication, la taille, la durée de port et les contre-indications."
         )
+    elif is_toothpaste_comparison:
+        practical_guidance = (
+            "Choisir selon le besoin principal: formule antisensibilité lorsqu'il y a "
+            "douleur au froid ou au chaud; formule blanchissante pour les taches de surface. "
+            "Vérifier les ingrédients actifs et les indications du produit exact."
+        )
+        important_check = (
+            "Un produit peut cumuler les deux fonctions. Ne pas déduire son effet à partir "
+            "de la marque seule, et orienter vers un dentiste si la sensibilité persiste "
+            "ou s'aggrave."
+        )
     elif is_form_comparison_query:
         practical_guidance = (
             "Choisir la forme selon la façon de la prendre, puis comparer séparément "
@@ -3722,6 +3859,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             else fever_follow_ups if is_fever_query
             else melatonin_follow_ups if is_melatonin_query
             else wound_follow_ups if is_wound_dressing_comparison
+            else toothpaste_follow_ups if is_toothpaste_comparison
             else form_follow_ups if is_form_comparison_query and medical
             else []
         ),
@@ -3739,7 +3877,12 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                         "ou présentant des signes d'infection; vérifier l'étiquette du "
                         "pansement exact."
                         if is_wound_dressing_comparison else
-                        "Vérifier sur l'étiquette la concentration, la forme, les ingrédients, l'âge et les avertissements."
+                        (
+                            "Vérifier l'indication antisensibilité ou blanchissante et les "
+                            "ingrédients actifs; cesser et consulter si la douleur s'aggrave."
+                            if is_toothpaste_comparison else
+                            "Vérifier sur l'étiquette la concentration, la forme, les ingrédients, l'âge et les avertissements."
+                        )
                     )
                 )
             )
@@ -3766,8 +3909,13 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                         "Demander une évaluation professionnelle si la plaie est profonde, "
                         "très exsudative, ne s'améliore pas ou présente des signes d'infection."
                         if is_wound_dressing_comparison else
-                        "Consulter le pharmacien pour les interactions, la grossesse, l'allaitement, "
-                        "un enfant ou une situation médicale particulière."
+                        (
+                            "Orienter vers un dentiste si la sensibilité ou la douleur "
+                            "persiste, s'aggrave ou touche une dent précise."
+                            if is_toothpaste_comparison else
+                            "Consulter le pharmacien pour les interactions, la grossesse, l'allaitement, "
+                            "un enfant ou une situation médicale particulière."
+                        )
                     )
                 )
             )
@@ -3782,6 +3930,9 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                 else (
                     wound_hydrocolloid_source + wound_transparent_source
                 )[:4] if is_wound_dressing_comparison
+                else (
+                    sensitive_toothpaste_source + whitening_toothpaste_source
+                )[:4] if is_toothpaste_comparison
                 else []
             ),
         }],
@@ -3794,6 +3945,9 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                 else (
                     wound_hydrocolloid_source + wound_transparent_source
                 )[:4] if is_wound_dressing_comparison
+                else (
+                    sensitive_toothpaste_source + whitening_toothpaste_source
+                )[:4] if is_toothpaste_comparison
                 else []
             ),
         }],
