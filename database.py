@@ -657,8 +657,10 @@ def ensure_product_data_schema(db):
     db.execute("CREATE INDEX IF NOT EXISTS idx_reference_identifiers_value ON product_reference_identifiers(identifier_type, normalized_value, authority)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_reference_identifiers_gtin ON product_reference_identifiers(gtin_key, verification_status)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_product_issues_open ON product_data_issues(status, issue_type, product_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_product_issues_product ON product_data_issues(product_id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_product_aliases_value ON product_aliases(normalized_value)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_product_relationships_source ON product_relationships(source_product_id, relationship_type)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_product_relationships_target ON product_relationships(target_product_id)")
 
 
 _PRODUCT_DATA_TABLES = (

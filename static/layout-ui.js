@@ -237,11 +237,7 @@ function compactPlanProduct(product) {
     id: product.id ?? null,
     name: String(product.name || ''),
     brand: String(product.brand || ''),
-    description: String(product.description || ''),
     image_url: String(product.image_url || ''),
-    search_terms: String(product.search_terms || ''),
-    usage_notes: String(product.usage_notes || ''),
-    alternative_suggestions: String(product.alternative_suggestions || ''),
     barcode: String(product.barcode || ''),
     product_code: String(product.product_code || ''),
     aisle: String(product.aisle || ''),
@@ -393,12 +389,8 @@ function savePlanSnapshot() {
     };
     let serialized = JSON.stringify(snapshot);
     if (serialized.length > 3800000) {
-      // Descriptions consume most of the phone's local quota. Keep image URLs and
-      // regulatory identifiers in the fast snapshot whenever they still fit.
-      snapshot.products = products.map(product => compactSnapshotText(product, true));
-      serialized = JSON.stringify(snapshot);
-    }
-    if (serialized.length > 3800000) {
+      // Product media is also cached asynchronously in IndexedDB. Keep the
+      // instant plan/location snapshot below small phone localStorage limits.
       snapshot.products = products.map(product => compactSnapshotText(product, false));
       serialized = JSON.stringify(snapshot);
     }
@@ -413,6 +405,31 @@ function savePlanSnapshot() {
         savedAt: Date.now(), layouts: mapLayouts, products
       }));
     } catch (_) {}
+  }
+}
+
+let _planSnapshotSaveHandle = null;
+let _planSnapshotSaveKind = '';
+
+function schedulePlanSnapshotSave() {
+  if (_planSnapshotSaveHandle !== null) {
+    if (_planSnapshotSaveKind === 'idle' && typeof window.cancelIdleCallback === 'function') {
+      window.cancelIdleCallback(_planSnapshotSaveHandle);
+    } else {
+      window.clearTimeout(_planSnapshotSaveHandle);
+    }
+  }
+  const run = () => {
+    _planSnapshotSaveHandle = null;
+    _planSnapshotSaveKind = '';
+    savePlanSnapshot();
+  };
+  if (typeof window.requestIdleCallback === 'function') {
+    _planSnapshotSaveKind = 'idle';
+    _planSnapshotSaveHandle = window.requestIdleCallback(run, {timeout: 1200});
+  } else {
+    _planSnapshotSaveKind = 'timer';
+    _planSnapshotSaveHandle = window.setTimeout(run, 180);
   }
 }
 
@@ -1515,25 +1532,30 @@ function _planSelectionWrapper(input) {
   return null;
 }
 
-function syncPlanSelectionUi() {
+function syncPlanSelectionUi(root=document) {
   const index = planScopeIndex();
   for (const id of [...planSelectedProductIds]) {
     if (!index.validIds.has(id)) planSelectedProductIds.delete(id);
   }
   if (!planSelectedProductIds.size) planMoveMode = false;
-  if (typeof document.querySelectorAll !== 'function') return;
-  document.querySelectorAll('.plan-select-checkbox').forEach(input => {
-    const ids = planScopeProductIds(input.dataset.selectKind, input);
-    const selectedCount = ids.reduce((count, id) => count + (planSelectedProductIds.has(id) ? 1 : 0), 0);
-    input.checked = ids.length > 0 && selectedCount === ids.length;
-    input.indeterminate = selectedCount > 0 && selectedCount < ids.length;
-    input.disabled = planBulkActionBusy || ids.length === 0;
-    const wrapper = _planSelectionWrapper(input);
-    if (wrapper?.classList) {
-      wrapper.classList.toggle('plan-scope-selected', input.checked);
-      wrapper.classList.toggle('plan-scope-partial', input.indeterminate);
-    }
-  });
+  if (typeof root?.querySelectorAll === 'function') {
+    root.querySelectorAll('.plan-select-checkbox').forEach(input => {
+      const ids = planScopeProductIds(input.dataset.selectKind, input);
+      const selectedCount = ids.reduce((count, id) => count + (planSelectedProductIds.has(id) ? 1 : 0), 0);
+      input.checked = ids.length > 0 && selectedCount === ids.length;
+      input.indeterminate = selectedCount > 0 && selectedCount < ids.length;
+      input.disabled = planBulkActionBusy || ids.length === 0;
+      const wrapper = _planSelectionWrapper(input);
+      if (wrapper?.classList) {
+        wrapper.classList.toggle('plan-scope-selected', input.checked);
+        wrapper.classList.toggle('plan-scope-partial', input.indeterminate);
+      }
+    });
+  }
+  syncPlanBulkToolbarUi();
+}
+
+function syncPlanBulkToolbarUi() {
   const count = planSelectedProductIds.size;
   const toolbar = document.getElementById('planBulkToolbar');
   if (toolbar) {
@@ -1668,9 +1690,23 @@ function _applyBulkProductUpdates(products) {
   savePlanSnapshot();
 }
 
-function setPlanBulkBusy(busy) {
+function setPlanBulkBusy(busy, triggerElement=null) {
   planBulkActionBusy = Boolean(busy);
-  syncPlanSelectionUi();
+  const map = document.getElementById('mapContent');
+  map?.classList?.toggle('plan-bulk-operation', planBulkActionBusy);
+  if (triggerElement) {
+    if (planBulkActionBusy) {
+      triggerElement.dataset.planIdleLabel = triggerElement.textContent || '';
+      triggerElement.textContent = 'Suppression...';
+      triggerElement.setAttribute?.('aria-busy', 'true');
+    } else {
+      triggerElement.textContent = triggerElement.dataset.planIdleLabel || triggerElement.textContent;
+      delete triggerElement.dataset.planIdleLabel;
+      triggerElement.removeAttribute?.('aria-busy');
+    }
+    triggerElement.disabled = planBulkActionBusy;
+  }
+  syncPlanBulkToolbarUi();
 }
 
 async function movePlanSelection(target) {
@@ -1718,25 +1754,83 @@ function renderPlanScopeDeleteButton(kind, aisle, side='', section='1', shelf=''
 
 function deletePlanScopeProductsFromElement(element, event) {
   if (event) { event.preventDefault(); event.stopPropagation(); }
-  const ids = planScopeProductIds(element.dataset.selectKind, element);
-  deletePlanProducts(ids, 'cette zone');
+  const scope = {
+    kind: String(element.dataset.selectKind || ''),
+    aisle: String(element.dataset.selectAisle || ''),
+    side: String(element.dataset.selectSide || ''),
+    section: String(element.dataset.selectSection || '1'),
+    shelf: String(element.dataset.selectShelf || ''),
+  };
+  const ids = planScopeProductIds(scope.kind, element);
+  const labels = {
+    shelf: 'cette tablette',
+    section: 'cette section',
+    side: 'ce cote',
+    aisle: 'cette allee',
+  };
+  return deletePlanProducts(ids, labels[scope.kind] || 'cette zone', scope, element);
 }
 
 function deleteSelectedPlanProducts() {
   deletePlanProducts([...planSelectedProductIds], 'la selection');
 }
 
-async function deletePlanProducts(productIds, scopeLabel='cette zone') {
+function _planShelfPositionCount(scope) {
+  const layout = mapLayouts.find(item => String(item.aisle) === String(scope?.aisle || ''));
+  if (!layout?.config) return null;
+  const shelfIndex = Number(scope.shelf) - 1;
+  if (shelfIndex < 0) return null;
+  if (scope.side === 'Gauche' || scope.side === 'Droite') {
+    const sectionIndex = Number(scope.section) - 1;
+    return layout.config.sides?.[scope.side]?.sections?.[sectionIndex]?.shelves?.[shelfIndex] ?? null;
+  }
+  return _planoFixtureForSide(layout.config, scope.side)?.shelves?.[shelfIndex] ?? null;
+}
+
+function patchClearedPlanShelf(scope, triggerElement) {
+  if (scope?.kind !== 'shelf' || typeof triggerElement?.closest !== 'function') return false;
+  const card = triggerElement.closest('.plan-shelf-card');
+  const productList = card?.querySelector?.('.plan-product-list');
+  const positions = _planShelfPositionCount(scope);
+  if (!card || !productList || positions === null) return false;
+  productList.outerHTML = renderShelfProductList(
+    scope.aisle, scope.side, scope.section, scope.shelf, positions
+  );
+  card.querySelectorAll?.('[data-plan-shelf-count]').forEach(element => {
+    const format = element.dataset.planShelfCount;
+    element.textContent = format === 'libre'
+      ? 'LIBRE · 0 prod.'
+      : (format === 'positions' ? 'pos · 0 prod.' : '0 prod.');
+  });
+  card.querySelector?.('.plan-products-only-delete')?.remove();
+  syncPlanSelectionUi(card);
+  return true;
+}
+
+function refreshPlanScopeAfterDelete(scope, triggerElement) {
+  if (patchClearedPlanShelf(scope, triggerElement)) return;
+  if (scope?.kind === 'section' && (scope.side === 'Gauche' || scope.side === 'Droite')) {
+    rerenderSection(scope.aisle, scope.side, Math.max(0, Number(scope.section) - 1));
+    return;
+  }
+  if (scope?.kind === 'side' && (scope.side === 'Gauche' || scope.side === 'Droite')) {
+    rerenderSide(scope.aisle, scope.side);
+    return;
+  }
+  refreshPlanUi();
+}
+
+async function deletePlanProducts(productIds, scopeLabel='cette zone', scope=null, triggerElement=null) {
   const ids = [...new Set((productIds || []).map(Number).filter(id => Number.isInteger(id) && id > 0))];
   if (!ids.length || planBulkActionBusy) return;
   if (!requireEditorSession('supprimer des produits du plan')) return;
   if (!confirm(`Supprimer ${ids.length} produit(s) de ${scopeLabel} ?\n\nLa structure du plan restera intacte.`)) return;
-  setPlanBulkBusy(true);
+  setPlanBulkBusy(true, triggerElement);
   const data = await apiBulkDeleteLayoutProducts({
     product_ids: ids,
     expected_products: _selectedProductVersions(ids),
   });
-  setPlanBulkBusy(false);
+  setPlanBulkBusy(false, triggerElement);
   if (!data.success) {
     showPlanActionMessage(data.error || 'Suppression impossible. Aucun produit n a ete retire.');
     return;
@@ -1746,9 +1840,9 @@ async function deletePlanProducts(productIds, scopeLabel='cette zone') {
   for (const id of deleted) planSelectedProductIds.delete(id);
   if (typeof invalidateProductSearchIndexes === 'function') invalidateProductSearchIndexes();
   lastProductsRefreshAt = Date.now();
-  savePlanSnapshot();
+  schedulePlanSnapshotSave();
   planMoveMode = false;
-  refreshPlanUi();
+  refreshPlanScopeAfterDelete(scope, triggerElement);
   showPlanActionMessage(`${Number(data.removed_products || deleted.size)} produit(s) supprime(s); structure conservee.`, 'success');
 }
 
@@ -2762,7 +2856,7 @@ function renderShelfCard(aisle, side, sectionIndex, shelfIndex, positions, shelf
       <span class="shelf-title">${shelfTitle}</span>
       ${renderPlanDropButton(aisle, side, sectionIndex + 1, shelfIndex + 1, 'shelf')}
       ${isLibre
-        ? `<span style="font-size:10px;color:#8b5cf6;font-weight:700">LIBRE · ${shelfFilled} prod.</span>
+        ? `<span data-plan-shelf-count="libre" style="font-size:10px;color:#8b5cf6;font-weight:700">LIBRE · ${shelfFilled} prod.</span>
            <button title="Définir un nombre fixe de positions" style="background:none;border:1px solid #a78bfa;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
                    onclick="setShelfPositionCount('${jsq(aisle)}','${jsq(side)}',${sectionIndex},${shelfIndex},prompt('Nombre de positions fixes ?','8')||0)">→ Positions fixes</button>`
         : `<button title="Retirer une position" style="background:none;border:1px solid #e2e8f0;border-radius:5px;cursor:pointer;font-size:14px;padding:1px 8px;line-height:1.3;${positions<=1?'opacity:.3;cursor:default':''}" onclick="setShelfPositionCount('${jsq(aisle)}','${jsq(side)}',${sectionIndex},${shelfIndex},${positions-1})" ${positions<=1?'disabled':''}>➖</button>
@@ -2770,7 +2864,7 @@ function renderShelfCard(aisle, side, sectionIndex, shelfIndex, positions, shelf
                  style="width:46px;padding:2px 4px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px;text-align:center"
                  onchange="setShelfPositionCount('${jsq(aisle)}','${jsq(side)}',${sectionIndex},${shelfIndex},this.value)"/>
            <button title="Ajouter une position" style="background:none;border:1px solid #e2e8f0;border-radius:5px;cursor:pointer;font-size:14px;padding:1px 8px;line-height:1.3" onclick="setShelfPositionCount('${jsq(aisle)}','${jsq(side)}',${sectionIndex},${shelfIndex},${positions+1})">➕</button>
-           <span style="font-size:11px;color:#64748b">${shelfFilled} prod.</span>
+           <span data-plan-shelf-count="plain" style="font-size:11px;color:#64748b">${shelfFilled} prod.</span>
            <button title="Passer en mode libre (cosmétiques, presentoirs...)" style="background:none;border:1px solid #e2e8f0;border-radius:4px;color:#8b5cf6;cursor:pointer;font-size:10px;padding:1px 5px"
                    onclick="setShelfPositionCount('${jsq(aisle)}','${jsq(side)}',${sectionIndex},${shelfIndex},0)">📦 Libre</button>`
       }
@@ -4041,7 +4135,7 @@ function _facadeShelfGrid(aisle, sideName, fk, shelves, labels) {
                style="width:46px;padding:2px 4px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px;text-align:center"
                onchange="setFacadeShelfPositions('${jsq(aisle)}','${jsq(fk)}',${shi},this.value)"/>
         <span style="font-size:10px;color:#94a3b8">pos</span>
-        <span style="font-size:11px;color:#64748b">${filled} prod.</span>
+        <span data-plan-shelf-count="plain" style="font-size:11px;color:#64748b">${filled} prod.</span>
         <button type="button" class="plan-delete-action" onclick="removeFacadeShelf('${jsq(aisle)}','${jsq(fk)}',${shi},this)"
                 style="margin-left:auto;background:none;border:1px solid #f1b8c2;border-radius:5px;color:#c8102e;cursor:pointer;font-size:12px;padding:2px 8px;line-height:1.5"
                 title="Supprimer cette tablette">✕ Suppr.</button>
@@ -4117,10 +4211,10 @@ function renderPresentoirSection(aisle, config) {
         ).length;
         const isLibre = positions === 0;
         const posCtrl = isLibre
-          ? `<span style="font-size:10px;color:#8b5cf6;font-weight:700">LIBRE · ${filled}</span>`
+          ? `<span data-plan-shelf-count="libre" style="font-size:10px;color:#8b5cf6;font-weight:700">LIBRE · ${filled} prod.</span>`
           : `<input type="number" min="1" value="${positions}" style="width:44px;padding:2px 4px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px;text-align:center"
                onchange="setPresentoirShelfPositions('${jsq(aisle)}',${pi},${fi},${shi},this.value)"/>
-             <span style="font-size:10px;color:#94a3b8">pos · ${filled} prod.</span>`;
+             <span data-plan-shelf-count="positions" style="font-size:10px;color:#94a3b8">pos · ${filled} prod.</span>`;
         return `<div class="plan-shelf-card" ${planDropTargetAttrs(aisle, sideName, 1, shi + 1, 'shelf')}
           style="${bg}${isLibre?';border-color:#a78bfa;background:#faf5ff':''}">
           <div class="shelf-header" style="gap:4px">

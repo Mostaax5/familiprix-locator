@@ -7,6 +7,7 @@ const saveCalls = [];
 const removalCalls = [];
 const bulkMoveCalls = [];
 const bulkDeleteCalls = [];
+const fullPlanRefreshes = [];
 const structureMoveCalls = [];
 const aisleReorderCalls = [];
 const localStorageValues = new Map();
@@ -340,7 +341,7 @@ async function run() {
   context.normalizeProduct = product => ({...product});
   context.requireEditorSession = () => true;
   context.invalidateProductSearchIndexes = () => {};
-  context.refreshPlanUi = () => {};
+  context.refreshPlanUi = () => { fullPlanRefreshes.push(Date.now()); };
   context.savePlanSnapshot = () => {};
   context.apiBulkMoveLayoutProducts = async payload => {
     bulkMoveCalls.push(payload);
@@ -384,6 +385,63 @@ async function run() {
     'product-only deletion must preserve the tablet structure',
   );
   const renderedTablet = vm.runInContext("renderShelfCard('1','Gauche',0,0,2,'')", context);
+
+  const shelfProductList = {outerHTML: ''};
+  const shelfCount = {dataset: {planShelfCount: 'plain'}, textContent: '1 prod.'};
+  let shelfDeleteButtonRemoved = false;
+  const shelfDeleteButton = {
+    dataset: {
+      selectKind: 'shelf', selectAisle: '1', selectSide: 'Gauche',
+      selectSection: '1', selectShelf: '1',
+    },
+    textContent: 'Vider produits (1)',
+    disabled: false,
+    setAttribute() {},
+    removeAttribute() {},
+    remove() { shelfDeleteButtonRemoved = true; },
+  };
+  const shelfCard = {
+    querySelector(selector) {
+      if (selector === '.plan-product-list') return shelfProductList;
+      if (selector === '.plan-products-only-delete') return shelfDeleteButton;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-plan-shelf-count]') return [shelfCount];
+      if (selector === '.plan-select-checkbox') return [];
+      return [];
+    },
+  };
+  shelfDeleteButton.closest = selector => selector === '.plan-shelf-card' ? shelfCard : null;
+  context.testShelfDeleteButton = shelfDeleteButton;
+  context.apiBulkDeleteLayoutProducts = async payload => {
+    bulkDeleteCalls.push(payload);
+    return {
+      success: true,
+      removed_products: payload.product_ids.length,
+      deleted_product_ids: payload.product_ids,
+    };
+  };
+  const refreshCountBeforeTabletClear = fullPlanRefreshes.length;
+  await vm.runInContext(
+    'deletePlanScopeProductsFromElement(testShelfDeleteButton)',
+    context,
+  );
+  assert.deepStrictEqual(
+    Array.from(context.allProductsCache, product => product.id),
+    [103],
+    'the tablet button should remove only the products on that tablet',
+  );
+  assert.strictEqual(
+    fullPlanRefreshes.length, refreshCountBeforeTabletClear,
+    'clearing one tablet must not rebuild the full expanded plan',
+  );
+  assert(shelfProductList.outerHTML.includes('aucun produit importé'),
+    'the cleared tablet should immediately display its empty positions');
+  assert.strictEqual(shelfCount.textContent, '0 prod.');
+  assert.strictEqual(shelfDeleteButtonRemoved, true,
+    'the tablet clear button should disappear once the tablet is empty');
+
   assert(renderedTablet.includes('data-select-kind="shelf"'), 'a tablet should have a scope selector');
   assert(renderedTablet.includes('data-drop-mode="shelf"'), 'a tablet should be a drop destination');
   assert(renderedTablet.includes('Vider produits (1)'), 'a tablet should expose product-only clearing');
