@@ -1,4 +1,11 @@
 // ── Layout config helpers ─────────────────────────────────────────────────────
+function markProductsCacheChanged() {
+  lastProductsRefreshAt = Math.max(
+    Date.now(), Number(lastProductsRefreshAt || 0) + 1
+  );
+  return lastProductsRefreshAt;
+}
+
 function defaultLayoutConfig(maxSection=0, maxShelf=0, maxPosition=0) {
   const sCount = Math.max(0, Number(maxSection) || 0);
   const shCount = Math.max(0, Number(maxShelf) || 0);
@@ -484,7 +491,7 @@ function applyPlanogramImportResult(aisle, side, data) {
       String(product.aisle) === aisleKey && String(product.side) === sideKey
     ));
     allProductsCache = untouched.concat(data.products.map(normalizeProduct));
-    lastProductsRefreshAt = Date.now();
+    markProductsCacheChanged();
   }
 
   savePlanSnapshot();
@@ -653,7 +660,7 @@ async function refreshProductsCache(force=false) {
     try {
       allProductsCache = await apiGetProducts();
       mapLayouts.forEach(layout => syncLayoutRecord(layout));
-      lastProductsRefreshAt = Date.now();
+      markProductsCacheChanged();
       savePlanSnapshot();
       void saveProductMediaSnapshot(allProductsCache);
     } catch (e) {}
@@ -1686,7 +1693,7 @@ function _applyBulkProductUpdates(products) {
     return update ? normalizeProduct({...product, ...update}) : product;
   });
   if (typeof invalidateProductSearchIndexes === 'function') invalidateProductSearchIndexes();
-  lastProductsRefreshAt = Date.now();
+  markProductsCacheChanged();
   savePlanSnapshot();
 }
 
@@ -1789,31 +1796,95 @@ function _planShelfPositionCount(scope) {
   return _planoFixtureForSide(layout.config, scope.side)?.shelves?.[shelfIndex] ?? null;
 }
 
-function patchClearedPlanShelf(scope, triggerElement) {
+function _planShelfCountLabel(format, count) {
+  if (format === 'libre') return `LIBRE · ${count} prod.`;
+  if (format === 'positions') return `pos · ${count} prod.`;
+  return `${count} prod.`;
+}
+
+function patchClearedPlanShelf(scope, triggerElement, finalizeClear=true) {
   if (scope?.kind !== 'shelf' || typeof triggerElement?.closest !== 'function') return false;
   const card = triggerElement.closest('.plan-shelf-card');
   const productList = card?.querySelector?.('.plan-product-list');
   const positions = _planShelfPositionCount(scope);
   if (!card || !productList || positions === null) return false;
+  const productCount = productsAtShelf(
+    scope.aisle, scope.side, scope.section, scope.shelf
+  ).length;
   productList.outerHTML = renderShelfProductList(
     scope.aisle, scope.side, scope.section, scope.shelf, positions
   );
   card.querySelectorAll?.('[data-plan-shelf-count]').forEach(element => {
-    const format = element.dataset.planShelfCount;
-    element.textContent = format === 'libre'
-      ? 'LIBRE · 0 prod.'
-      : (format === 'positions' ? 'pos · 0 prod.' : '0 prod.');
+    element.textContent = _planShelfCountLabel(
+      element.dataset.planShelfCount, productCount
+    );
   });
-  card.querySelector?.('.plan-products-only-delete')?.remove();
+  const deleteButton = card.querySelector?.('.plan-products-only-delete');
+  if (deleteButton) {
+    deleteButton.dataset.productCount = String(productCount);
+    if (finalizeClear && productCount === 0) deleteButton.remove();
+  }
   const shelfCheckbox = card.querySelector?.('.plan-select-checkbox[data-select-kind="shelf"]');
-  if (shelfCheckbox) {
+  if (shelfCheckbox && productCount === 0) {
     shelfCheckbox.checked = false;
     shelfCheckbox.indeterminate = false;
     shelfCheckbox.disabled = true;
   }
   card.classList?.remove?.('plan-scope-selected', 'plan-scope-partial');
-  syncPlanBulkToolbarUi();
+  if (productCount > 0) syncPlanSelectionUi(card);
+  else syncPlanBulkToolbarUi();
   return true;
+}
+
+function setPlanShelfClearStatus(triggerElement, message='', state='saving') {
+  if (typeof triggerElement?.closest !== 'function') return;
+  const card = triggerElement.closest('.plan-shelf-card');
+  if (!card || typeof document.createElement !== 'function') return;
+  let status = card.querySelector?.('.plan-shelf-clear-status');
+  if (!message) {
+    status?.remove?.();
+    return;
+  }
+  if (!status) {
+    status = document.createElement('div');
+    status.className = 'plan-shelf-clear-status';
+    status.setAttribute('role', 'status');
+    card.querySelector?.('.shelf-header')?.insertAdjacentElement?.('afterend', status);
+  }
+  status.dataset.state = state;
+  status.textContent = message;
+}
+
+function beginOptimisticPlanShelfClear(scope, triggerElement) {
+  if (scope?.kind !== 'shelf') return null;
+  const removedProducts = [];
+  const removedSelectedIds = [];
+  allProductsCache = allProductsCache.filter(product => {
+    if (!_planProductMatchesScope(product, scope)) return true;
+    removedProducts.push(product);
+    const id = Number(product.id);
+    if (planSelectedProductIds.has(id)) removedSelectedIds.push(id);
+    planSelectedProductIds.delete(id);
+    return false;
+  });
+  if (typeof invalidateProductSearchIndexes === 'function') invalidateProductSearchIndexes();
+  markProductsCacheChanged();
+  planMoveMode = false;
+  patchClearedPlanShelf(scope, triggerElement, false);
+  return {removedProducts, removedSelectedIds};
+}
+
+function rollbackOptimisticPlanShelfClear(scope, triggerElement, state) {
+  if (!state) return;
+  const existingIds = new Set(allProductsCache.map(product => Number(product.id)));
+  const missing = state.removedProducts.filter(
+    product => !existingIds.has(Number(product.id))
+  );
+  if (missing.length) allProductsCache = allProductsCache.concat(missing);
+  for (const id of state.removedSelectedIds) planSelectedProductIds.add(id);
+  if (typeof invalidateProductSearchIndexes === 'function') invalidateProductSearchIndexes();
+  markProductsCacheChanged();
+  patchClearedPlanShelf(scope, triggerElement, false);
 }
 
 function refreshPlanScopeAfterDelete(scope, triggerElement) {
@@ -1850,30 +1921,51 @@ async function deletePlanProducts(
   if (!requireEditorSession('supprimer des produits du plan')) return;
   if (!confirm(`Supprimer ${count} produit(s) de ${scopeLabel} ?\n\nLa structure du plan restera intacte.`)) return;
   setPlanBulkBusy(true, triggerElement);
+  const optimisticState = scope?.kind === 'shelf'
+    ? beginOptimisticPlanShelfClear(scope, triggerElement)
+    : null;
+  if (optimisticState) {
+    setPlanShelfClearStatus(triggerElement, 'Sauvegarde...', 'saving');
+  }
   const payload = scope
     ? {scope}
     : {product_ids: ids, expected_products: _selectedProductVersions(ids)};
   const data = await apiBulkDeleteLayoutProducts(payload);
   setPlanBulkBusy(false, triggerElement);
   if (!data.success) {
+    rollbackOptimisticPlanShelfClear(scope, triggerElement, optimisticState);
+    setPlanShelfClearStatus(
+      triggerElement,
+      `Suppression impossible : ${data.error || 'erreur reseau'}. Produits restaures.`,
+      'error'
+    );
     showPlanActionMessage(data.error || 'Suppression impossible. Aucun produit n a ete retire.');
     return;
   }
   const deleted = new Set((data.deleted_product_ids || ids).map(Number));
-  const locallyRemovedIds = [];
-  allProductsCache = allProductsCache.filter(product => {
-    const remove = scope
-      ? _planProductMatchesScope(product, scope)
-      : deleted.has(Number(product.id));
-    if (remove) locallyRemovedIds.push(Number(product.id));
-    return !remove;
-  });
+  const locallyRemovedIds = (optimisticState?.removedProducts || []).map(
+    product => Number(product.id)
+  );
+  if (!optimisticState) {
+    allProductsCache = allProductsCache.filter(product => {
+      const remove = scope
+        ? _planProductMatchesScope(product, scope)
+        : deleted.has(Number(product.id));
+      if (remove) locallyRemovedIds.push(Number(product.id));
+      return !remove;
+    });
+  }
   for (const id of [...deleted, ...locallyRemovedIds]) planSelectedProductIds.delete(id);
   if (typeof invalidateProductSearchIndexes === 'function') invalidateProductSearchIndexes();
-  lastProductsRefreshAt = Date.now();
+  markProductsCacheChanged();
   schedulePlanSnapshotSave();
   planMoveMode = false;
-  refreshPlanScopeAfterDelete(scope, triggerElement);
+  if (optimisticState) {
+    setPlanShelfClearStatus(triggerElement, 'Produits retires.', 'success');
+    patchClearedPlanShelf(scope, triggerElement, true);
+  } else {
+    refreshPlanScopeAfterDelete(scope, triggerElement);
+  }
   showPlanActionMessage(`${Number(data.removed_products || deleted.size)} produit(s) supprime(s); structure conservee.`, 'success');
 }
 
@@ -3559,7 +3651,7 @@ async function removeAisleLayout(aisle) {
     );
     for (const id of removedIds) planSelectedProductIds.delete(id);
     if (typeof invalidateProductSearchIndexes === 'function') invalidateProductSearchIndexes();
-    lastProductsRefreshAt = Date.now();
+    markProductsCacheChanged();
     clearLayoutDirty(aisle);
     lastLayoutsRefreshAt = Date.now();
     planStartDraft = getCursorSelection();
@@ -3750,7 +3842,7 @@ function applyLocalProductRemoval(aisle, side, field, removedNumber, sectionNumb
     kept.push(product);
   }
   allProductsCache = kept;
-  lastProductsRefreshAt = Date.now();
+  markProductsCacheChanged();
 }
 
 async function commitLayoutRemoval({aisle, endpoint, payload, nextConfig, button, productRemoval, successLabel}) {
@@ -4029,7 +4121,7 @@ async function swapPositions(aisle, side, section, shelf, posA, posB) {
   const a = at(posA), b = at(posB);
   if (a) a.position = String(posB);
   if (b) b.position = String(posA);
-  lastProductsRefreshAt = Date.now();   // invalidate memoized shelf/count indexes
+  markProductsCacheChanged();   // invalidate memoized shelf/count indexes
   rerenderShelfCard(aisle, side, parseInt(section) - 1, parseInt(shelf) - 1);
 }
 

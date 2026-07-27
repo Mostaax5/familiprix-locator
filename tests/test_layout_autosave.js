@@ -414,19 +414,36 @@ async function run() {
   };
   shelfDeleteButton.closest = selector => selector === '.plan-shelf-card' ? shelfCard : null;
   context.testShelfDeleteButton = shelfDeleteButton;
-  context.apiBulkDeleteLayoutProducts = async payload => {
+  let finishTabletClear;
+  context.apiBulkDeleteLayoutProducts = payload => {
     bulkDeleteCalls.push(payload);
-    return {
-      success: true,
-      removed_products: 1,
-      deleted_product_ids: [102],
-    };
+    return new Promise(resolve => {
+      finishTabletClear = () => resolve({
+        success: true,
+        removed_products: 1,
+        deleted_product_ids: [102],
+      });
+    });
   };
   const refreshCountBeforeTabletClear = fullPlanRefreshes.length;
-  await vm.runInContext(
+  const tabletClearPromise = vm.runInContext(
     'deletePlanScopeProductsFromElement(testShelfDeleteButton)',
     context,
   );
+  assert.deepStrictEqual(
+    Array.from(context.allProductsCache, product => product.id),
+    [103],
+    'the tablet must look empty before the network request finishes',
+  );
+  assert(shelfProductList.outerHTML.includes('aucun produit importé'),
+    'the optimistic tablet render should be immediate');
+  assert.strictEqual(shelfCount.textContent, '0 prod.');
+  assert.strictEqual(shelfDeleteButton.textContent, 'Suppression...');
+  assert.strictEqual(shelfDeleteButton.disabled, true);
+  assert.strictEqual(shelfDeleteButtonRemoved, false,
+    'the pending button stays available for rollback until the server commits');
+  finishTabletClear();
+  await tabletClearPromise;
   assert.deepStrictEqual(
     Array.from(context.allProductsCache, product => product.id),
     [103],
@@ -451,6 +468,32 @@ async function run() {
     },
     'the tablet clear must use exact server-side coordinates, not stale product versions',
   );
+
+  context.allProductsCache = context.allProductsCache.concat([{
+    id: 104, name: 'Produit rollback', aisle: '1', side: 'Gauche',
+    section: '1', shelf: '1', position: '1', modified_at: 'v4',
+  }]);
+  context.lastProductsRefreshAt += 1;
+  shelfDeleteButtonRemoved = false;
+  shelfDeleteButton.textContent = 'Vider produits (1)';
+  shelfDeleteButton.disabled = false;
+  shelfDeleteButton.dataset.productCount = '1';
+  context.apiBulkDeleteLayoutProducts = async payload => {
+    bulkDeleteCalls.push(payload);
+    return {success: false, error: 'database test failure'};
+  };
+  await vm.runInContext(
+    'deletePlanScopeProductsFromElement(testShelfDeleteButton)',
+    context,
+  );
+  assert(
+    Array.from(context.allProductsCache, product => product.id).includes(104),
+    'a failed commit must restore the products on the tablet',
+  );
+  assert(shelfProductList.outerHTML.includes('Produit rollback'));
+  assert.strictEqual(shelfCount.textContent, '1 prod.');
+  assert.strictEqual(shelfDeleteButtonRemoved, false);
+  assert.strictEqual(shelfDeleteButton.disabled, false);
 
   assert(renderedTablet.includes('data-select-kind="shelf"'), 'a tablet should have a scope selector');
   assert(renderedTablet.includes('data-drop-mode="shelf"'), 'a tablet should be a drop destination');

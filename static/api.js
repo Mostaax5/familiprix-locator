@@ -193,7 +193,8 @@ async function apiBulkDeleteLayoutProducts(payload) {
     const {res, data} = await apiFetch('/api/layout/products/bulk-delete', {
       method: 'POST',
       headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      keepalive: Boolean(payload?.scope)
     });
     return res.ok ? data : {
       success: false,

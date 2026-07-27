@@ -92,14 +92,14 @@ function upsertCachedProduct(product) {
   if (index >= 0) allProductsCache[index] = normalized;
   else allProductsCache.push(normalized);
   if (typeof invalidateProductSearchIndexes === 'function') invalidateProductSearchIndexes();
-  lastProductsRefreshAt = Date.now();
+  markProductsCacheChanged();
   if (typeof savePlanSnapshot === 'function') savePlanSnapshot();
 }
 
 function removeCachedProduct(productId) {
   allProductsCache = allProductsCache.filter(item => Number(item.id) !== Number(productId));
   if (typeof invalidateProductSearchIndexes === 'function') invalidateProductSearchIndexes();
-  lastProductsRefreshAt = Date.now();
+  markProductsCacheChanged();
   if (typeof savePlanSnapshot === 'function') savePlanSnapshot();
 }
 
