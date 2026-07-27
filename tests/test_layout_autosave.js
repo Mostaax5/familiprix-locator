@@ -392,7 +392,7 @@ async function run() {
   const shelfDeleteButton = {
     dataset: {
       selectKind: 'shelf', selectAisle: '1', selectSide: 'Gauche',
-      selectSection: '1', selectShelf: '1',
+      selectSection: '1', selectShelf: '1', productCount: '1',
     },
     textContent: 'Vider produits (1)',
     disabled: false,
@@ -418,8 +418,8 @@ async function run() {
     bulkDeleteCalls.push(payload);
     return {
       success: true,
-      removed_products: payload.product_ids.length,
-      deleted_product_ids: payload.product_ids,
+      removed_products: 1,
+      deleted_product_ids: [102],
     };
   };
   const refreshCountBeforeTabletClear = fullPlanRefreshes.length;
@@ -441,6 +441,16 @@ async function run() {
   assert.strictEqual(shelfCount.textContent, '0 prod.');
   assert.strictEqual(shelfDeleteButtonRemoved, true,
     'the tablet clear button should disappear once the tablet is empty');
+  const tabletClearPayload = bulkDeleteCalls.at(-1);
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(tabletClearPayload)),
+    {
+      scope: {
+        kind: 'shelf', aisle: '1', side: 'Gauche', section: '1', shelf: '1',
+      },
+    },
+    'the tablet clear must use exact server-side coordinates, not stale product versions',
+  );
 
   assert(renderedTablet.includes('data-select-kind="shelf"'), 'a tablet should have a scope selector');
   assert(renderedTablet.includes('data-drop-mode="shelf"'), 'a tablet should be a drop destination');

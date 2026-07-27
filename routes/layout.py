@@ -269,6 +269,50 @@ def _product_rows_by_ids(db, product_ids):
     return [by_id[product_id] for product_id in product_ids if product_id in by_id]
 
 
+def _product_rows_for_delete_scope(db, raw_scope):
+    if not isinstance(raw_scope, dict):
+        return None, None, "Zone de suppression invalide."
+    kind = str(raw_scope.get("kind", "") or "").strip().lower()
+    if kind not in {"aisle", "side", "section", "shelf"}:
+        return None, None, "Type de zone invalide."
+    scope = {
+        "kind": kind,
+        "aisle": str(raw_scope.get("aisle", "") or "").strip(),
+        "side": str(raw_scope.get("side", "") or "").strip(),
+        "section": str(raw_scope.get("section", "") or "").strip(),
+        "shelf": str(raw_scope.get("shelf", "") or "").strip(),
+    }
+    required = {
+        "aisle": ("aisle",),
+        "side": ("aisle", "side"),
+        "section": ("aisle", "side", "section"),
+        "shelf": ("aisle", "side", "section", "shelf"),
+    }[kind]
+    if any(not scope[field] for field in required):
+        return None, None, "Coordonnees de la zone incompletes."
+    if len(scope["aisle"]) > 40 or any(
+        len(scope[field]) > 240 or "\x00" in scope[field]
+        for field in ("side", "section", "shelf")
+    ):
+        return None, None, "Coordonnees de la zone invalides."
+
+    clauses = ["aisle=?"]
+    params = [scope["aisle"]]
+    if kind in {"side", "section", "shelf"}:
+        clauses.append("side=?")
+        params.append(scope["side"])
+    if kind in {"section", "shelf"}:
+        clauses.append("section=?")
+        params.append(scope["section"])
+    if kind == "shelf":
+        clauses.append("shelf=?")
+        params.append(scope["shelf"])
+    query = "SELECT * FROM products WHERE " + " AND ".join(clauses) + " ORDER BY id"
+    if getattr(db, "backend", "sqlite") == "postgres":
+        query += " FOR UPDATE"
+    return db.execute(query, tuple(params)).fetchall(), scope, None
+
+
 def _target_shelves(config, side, section):
     if side in ("Gauche", "Droite"):
         section_index = clamp_non_negative_int(section) - 1
@@ -710,44 +754,59 @@ def bulk_delete_layout_products():
     if error:
         return error
     data = request.get_json() or {}
-    product_ids = _clean_product_ids(data.get("product_ids"))
-    if not product_ids:
-        return jsonify({"success": False, "error": "Aucun produit selectionne."}), 400
     db = get_db()
-    rows = _product_rows_by_ids(db, product_ids)
-    if len(rows) != len(product_ids):
-        return jsonify({
-            "success": False,
-            "code": "stale_products",
-            "error": "La selection a change. Rechargez le plan; aucun produit n'a ete supprime.",
-        }), 409
-    expected_products = data.get("expected_products")
-    if isinstance(expected_products, dict):
-        stale_ids = [
-            int(row["id"]) for row in rows
-            if str(row["id"]) in expected_products
-            and str(row["modified_at"] or "") != str(expected_products[str(row["id"])] or "")
-        ]
-        if stale_ids:
+    scope = None
+    if "scope" in data:
+        rows, scope, scope_error = _product_rows_for_delete_scope(db, data.get("scope"))
+        if scope_error:
+            return jsonify({"success": False, "error": scope_error}), 400
+    else:
+        product_ids = _clean_product_ids(data.get("product_ids"))
+        if not product_ids:
+            return jsonify({"success": False, "error": "Aucun produit selectionne."}), 400
+        rows = _product_rows_by_ids(db, product_ids)
+        if len(rows) != len(product_ids):
             return jsonify({
                 "success": False,
                 "code": "stale_products",
-                "error": "Un produit selectionne a ete modifie. Rechargez le plan avant de le supprimer.",
-                "stale_product_ids": stale_ids,
+                "error": "La selection a change. Rechargez le plan; aucun produit n'a ete supprime.",
             }), 409
+        expected_products = data.get("expected_products")
+        if isinstance(expected_products, dict):
+            stale_ids = [
+                int(row["id"]) for row in rows
+                if str(row["id"]) in expected_products
+                and str(row["modified_at"] or "") != str(expected_products[str(row["id"])] or "")
+            ]
+            if stale_ids:
+                return jsonify({
+                    "success": False,
+                    "code": "stale_products",
+                    "error": "Un produit selectionne a ete modifie. Rechargez le plan avant de le supprimer.",
+                    "stale_product_ids": stale_ids,
+                }), 409
+    if not rows:
+        return jsonify({
+            "success": True,
+            "removed_products": 0,
+            "deleted_product_ids": [],
+            "scope": scope,
+        })
     from routes.products import archive_and_delete_products
     try:
-        # Lock and re-check every selected row before archiving any of them.
-        result = db.executemany(
-            """UPDATE products SET id=id
-               WHERE id=? AND COALESCE(modified_at, '')=?""",
-            [
-                (int(row["id"]), str(row["modified_at"] or ""))
-                for row in rows
-            ],
-        )
-        if result.rowcount != len(rows):
-            raise _StaleBulkProductError()
+        if scope is None:
+            # Explicit mixed selections retain optimistic concurrency checks.
+            # Scoped clears are already locked by one exact SELECT FOR UPDATE.
+            result = db.executemany(
+                """UPDATE products SET id=id
+                   WHERE id=? AND COALESCE(modified_at, '')=?""",
+                [
+                    (int(row["id"]), str(row["modified_at"] or ""))
+                    for row in rows
+                ],
+            )
+            if result.rowcount != len(rows):
+                raise _StaleBulkProductError()
         removed_count = archive_and_delete_products(db, rows, username, utc_now_iso())
         db.commit()
     except _StaleBulkProductError:
@@ -769,6 +828,7 @@ def bulk_delete_layout_products():
         "success": True,
         "removed_products": removed_count,
         "deleted_product_ids": deleted_ids,
+        "scope": scope,
     })
 
 

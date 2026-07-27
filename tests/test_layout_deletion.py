@@ -453,6 +453,72 @@ class LayoutDeletionTests(unittest.TestCase):
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM products").fetchone()[0], 3)
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM removed_products").fetchone()[0], 0)
 
+    def test_bulk_delete_scope_clears_current_shelf_despite_product_changes(self):
+        self.db.execute(
+            """INSERT INTO products
+               (id, aisle, side, section, shelf, position, modified_at)
+               VALUES (4, 'A1', 'Gauche', '1', '1', '2', 'enriched-after-page-load')"""
+        )
+        self.db.execute(
+            "UPDATE products SET modified_at='also-enriched' WHERE id=1"
+        )
+        self.db.commit()
+
+        response = self.post(
+            "/api/layout/products/bulk-delete",
+            {
+                "scope": {
+                    "kind": "shelf", "aisle": "A1", "side": "Gauche",
+                    "section": "1", "shelf": "1",
+                },
+                "product_ids": [999999],
+                "expected_products": {"1": "stale-phone-version"},
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["removed_products"], 2)
+        self.assertEqual(response.get_json()["deleted_product_ids"], [1, 4])
+        self.assertEqual(
+            [row[0] for row in self.db.execute(
+                "SELECT id FROM products ORDER BY id"
+            ).fetchall()],
+            [2, 3],
+        )
+        self.assertEqual(self.stored_config(), self.config)
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM removed_products").fetchone()[0],
+            2,
+        )
+
+        repeated = self.post(
+            "/api/layout/products/bulk-delete",
+            {"scope": {
+                "kind": "shelf", "aisle": "A1", "side": "Gauche",
+                "section": "1", "shelf": "1",
+            }},
+        )
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(repeated.get_json()["removed_products"], 0)
+
+    def test_bulk_delete_scope_rejects_incomplete_coordinates(self):
+        response = self.post(
+            "/api/layout/products/bulk-delete",
+            {"scope": {
+                "kind": "shelf", "aisle": "A1", "side": "Gauche",
+                "section": "1",
+            }},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM products").fetchone()[0], 3
+        )
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM removed_products").fetchone()[0],
+            0,
+        )
+
     def test_reorder_aisles_changes_only_the_persistent_store_order(self):
         self.add_second_aisle()
         before_products = [tuple(row) for row in self.db.execute(

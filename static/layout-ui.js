@@ -1748,7 +1748,7 @@ async function movePlanSelection(target) {
 function renderPlanScopeDeleteButton(kind, aisle, side='', section='1', shelf='', count=0) {
   if (!Number(count)) return '';
   return `<button type="button" class="btn btn-outline btn-inline plan-products-only-delete"
-    ${planSelectionDataAttrs(kind, aisle, side, section, shelf, '')}
+    ${planSelectionDataAttrs(kind, aisle, side, section, shelf, '')} data-product-count="${Number(count)}"
     onclick="deletePlanScopeProductsFromElement(this,event)">Vider produits (${Number(count)})</button>`;
 }
 
@@ -1761,14 +1761,16 @@ function deletePlanScopeProductsFromElement(element, event) {
     section: String(element.dataset.selectSection || '1'),
     shelf: String(element.dataset.selectShelf || ''),
   };
-  const ids = planScopeProductIds(scope.kind, element);
   const labels = {
     shelf: 'cette tablette',
     section: 'cette section',
     side: 'ce cote',
     aisle: 'cette allee',
   };
-  return deletePlanProducts(ids, labels[scope.kind] || 'cette zone', scope, element);
+  return deletePlanProducts(
+    [], labels[scope.kind] || 'cette zone', scope, element,
+    Math.max(0, Number(element.dataset.productCount) || 0)
+  );
 }
 
 function deleteSelectedPlanProducts() {
@@ -1803,7 +1805,14 @@ function patchClearedPlanShelf(scope, triggerElement) {
       : (format === 'positions' ? 'pos · 0 prod.' : '0 prod.');
   });
   card.querySelector?.('.plan-products-only-delete')?.remove();
-  syncPlanSelectionUi(card);
+  const shelfCheckbox = card.querySelector?.('.plan-select-checkbox[data-select-kind="shelf"]');
+  if (shelfCheckbox) {
+    shelfCheckbox.checked = false;
+    shelfCheckbox.indeterminate = false;
+    shelfCheckbox.disabled = true;
+  }
+  card.classList?.remove?.('plan-scope-selected', 'plan-scope-partial');
+  syncPlanBulkToolbarUi();
   return true;
 }
 
@@ -1820,24 +1829,46 @@ function refreshPlanScopeAfterDelete(scope, triggerElement) {
   refreshPlanUi();
 }
 
-async function deletePlanProducts(productIds, scopeLabel='cette zone', scope=null, triggerElement=null) {
+function _planProductMatchesScope(product, scope) {
+  if (!scope || String(product.aisle) !== String(scope.aisle)) return false;
+  if (scope.kind === 'aisle') return true;
+  if (String(product.side) !== String(scope.side)) return false;
+  if (scope.kind === 'side') return true;
+  if (String(product.section) !== String(scope.section)) return false;
+  if (scope.kind === 'section') return true;
+  return scope.kind === 'shelf' && String(product.shelf) === String(scope.shelf);
+}
+
+async function deletePlanProducts(
+  productIds, scopeLabel='cette zone', scope=null, triggerElement=null, displayedCount=null
+) {
   const ids = [...new Set((productIds || []).map(Number).filter(id => Number.isInteger(id) && id > 0))];
-  if (!ids.length || planBulkActionBusy) return;
+  const count = scope
+    ? Math.max(0, Number(displayedCount) || ids.length)
+    : ids.length;
+  if ((!scope && !ids.length) || planBulkActionBusy) return;
   if (!requireEditorSession('supprimer des produits du plan')) return;
-  if (!confirm(`Supprimer ${ids.length} produit(s) de ${scopeLabel} ?\n\nLa structure du plan restera intacte.`)) return;
+  if (!confirm(`Supprimer ${count} produit(s) de ${scopeLabel} ?\n\nLa structure du plan restera intacte.`)) return;
   setPlanBulkBusy(true, triggerElement);
-  const data = await apiBulkDeleteLayoutProducts({
-    product_ids: ids,
-    expected_products: _selectedProductVersions(ids),
-  });
+  const payload = scope
+    ? {scope}
+    : {product_ids: ids, expected_products: _selectedProductVersions(ids)};
+  const data = await apiBulkDeleteLayoutProducts(payload);
   setPlanBulkBusy(false, triggerElement);
   if (!data.success) {
     showPlanActionMessage(data.error || 'Suppression impossible. Aucun produit n a ete retire.');
     return;
   }
   const deleted = new Set((data.deleted_product_ids || ids).map(Number));
-  allProductsCache = allProductsCache.filter(product => !deleted.has(Number(product.id)));
-  for (const id of deleted) planSelectedProductIds.delete(id);
+  const locallyRemovedIds = [];
+  allProductsCache = allProductsCache.filter(product => {
+    const remove = scope
+      ? _planProductMatchesScope(product, scope)
+      : deleted.has(Number(product.id));
+    if (remove) locallyRemovedIds.push(Number(product.id));
+    return !remove;
+  });
+  for (const id of [...deleted, ...locallyRemovedIds]) planSelectedProductIds.delete(id);
   if (typeof invalidateProductSearchIndexes === 'function') invalidateProductSearchIndexes();
   lastProductsRefreshAt = Date.now();
   schedulePlanSnapshotSave();
