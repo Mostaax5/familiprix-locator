@@ -96,6 +96,10 @@ assert(
   layoutUiSource.includes('section_direction: sectionDirection'),
   'the import request must send the selected section direction to the server'
 );
+assert(
+  layoutUiSource.includes('expected_layout_config: layout.config'),
+  'the import request must distinguish a changed version from a changed structure'
+);
 
 const missingDinMarkup = vm.runInContext(
   "regulatoryIdentifiersMarkup({regulatory_identifiers: []})", context
@@ -422,6 +426,11 @@ async function run() {
         success: true,
         removed_products: 1,
         deleted_product_ids: [102],
+        layout_modified_at: 'server-after-clear',
+        layout: {
+          ...context.mapLayouts[0],
+          modified_at: 'server-after-clear',
+        },
       });
     });
   };
@@ -458,6 +467,8 @@ async function run() {
   assert.strictEqual(shelfCount.textContent, '0 prod.');
   assert.strictEqual(shelfDeleteButtonRemoved, true,
     'the tablet clear button should disappear once the tablet is empty');
+  assert.strictEqual(context.mapLayouts[0].modified_at, 'server-after-clear',
+    'clearing a tablet should synchronize the current aisle version for reimport');
   const tabletClearPayload = bulkDeleteCalls.at(-1);
   assert.deepStrictEqual(
     JSON.parse(JSON.stringify(tabletClearPayload)),

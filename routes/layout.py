@@ -154,6 +154,25 @@ def get_layout_row(db, aisle):
     ).fetchone()
 
 
+def _layout_row_payload(row):
+    if not row:
+        return None
+    return {
+        "aisle": str(row["aisle"]),
+        "sort_order": int(row["sort_order"] or 0),
+        "max_section": str(row["max_section"] or "0"),
+        "max_shelf": str(row["max_shelf"] or "0"),
+        "max_position": str(row["max_position"] or "0"),
+        "config": normalize_layout_config(
+            row["config_json"], row["max_section"],
+            row["max_shelf"], row["max_position"],
+        ),
+        "enabled": int(row["enabled"] or 0),
+        "modified_by": str(row["modified_by"] or ""),
+        "modified_at": str(row["modified_at"] or ""),
+    }
+
+
 def _get_shelves_for_side(config, side):
     if side in ("Gauche", "Droite"):
         return None, True
@@ -786,11 +805,16 @@ def bulk_delete_layout_products():
                     "stale_product_ids": stale_ids,
                 }), 409
     if not rows:
+        layout_row = get_layout_row(db, scope["aisle"]) if scope else None
         return jsonify({
             "success": True,
             "removed_products": 0,
             "deleted_product_ids": [],
             "scope": scope,
+            "layout_modified_at": (
+                str(layout_row["modified_at"] or "") if layout_row else ""
+            ),
+            "layout": _layout_row_payload(layout_row),
         })
     from routes.products import archive_and_delete_products
     try:
@@ -824,11 +848,16 @@ def bulk_delete_layout_products():
             "error": "Suppression annulee: aucun produit n'a ete retire.",
         }), 500
     deleted_ids = [int(row["id"]) for row in rows]
+    layout_row = get_layout_row(db, scope["aisle"]) if scope else None
     return jsonify({
         "success": True,
         "removed_products": removed_count,
         "deleted_product_ids": deleted_ids,
         "scope": scope,
+        "layout_modified_at": (
+            str(layout_row["modified_at"] or "") if layout_row else ""
+        ),
+        "layout": _layout_row_payload(layout_row),
     })
 
 

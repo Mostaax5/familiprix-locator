@@ -4281,19 +4281,42 @@ def bulk_import_products():
     row = get_layout_row(db, aisle)
     if not row:
         return jsonify({"success": False, "error": f"L'allée {aisle} n'existe pas dans le plan. Créez d'abord l'allée."}), 400
+    config = normalize_layout_config(
+        row["config_json"], row["max_section"],
+        row["max_shelf"], row["max_position"],
+    )
     if "expected_layout_modified_at" in data:
         expected_layout_version = str(data.get("expected_layout_modified_at") or "")
         current_layout_version = str(row["modified_at"] or "")
         if expected_layout_version != current_layout_version:
-            return jsonify({
-                "success": False,
-                "code": "stale_layout",
-                "error": (
-                    "Importation annulée: le plan de cette allée a changé depuis "
-                    "l'aperçu. Rechargez le planogramme avant de continuer."
-                ),
-            }), 409
-    config = normalize_layout_config(row["config_json"], row["max_section"], row["max_shelf"], row["max_position"])
+            expected_config = data.get("expected_layout_config")
+            same_structure = (
+                isinstance(expected_config, dict)
+                and normalize_layout_config(
+                    expected_config, row["max_section"],
+                    row["max_shelf"], row["max_position"],
+                ) == config
+            )
+            if not same_structure:
+                return jsonify({
+                    "success": False,
+                    "code": "stale_layout",
+                    "error": (
+                        "Le plan physique de cette allée a changé. "
+                        "L'aperçu vient d'être actualisé; vérifiez-le puis "
+                        "relancez l'importation."
+                    ),
+                    "layout": {
+                        "aisle": aisle,
+                        "max_section": str(row["max_section"] or "0"),
+                        "max_shelf": str(row["max_shelf"] or "0"),
+                        "max_position": str(row["max_position"] or "0"),
+                        "config": config,
+                        "enabled": int(row["enabled"] or 0),
+                        "modified_by": str(row["modified_by"] or ""),
+                        "modified_at": current_layout_version,
+                    },
+                }), 409
     is_fixture = side not in ("Gauche", "Droite")
     if is_fixture:
         fixture = fixture_for_side(config, side)

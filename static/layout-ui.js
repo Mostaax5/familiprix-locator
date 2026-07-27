@@ -1943,6 +1943,12 @@ async function deletePlanProducts(
     return;
   }
   const deleted = new Set((data.deleted_product_ids || ids).map(Number));
+  if (scope?.aisle && data.layout) {
+    applyPlanogramImportResult(scope.aisle, scope.side || '', {layout: data.layout});
+  } else if (scope?.aisle && Object.prototype.hasOwnProperty.call(data, 'layout_modified_at')) {
+    const layout = getMutableLayout(scope.aisle);
+    if (layout) layout.modified_at = String(data.layout_modified_at || '');
+  }
   const locallyRemovedIds = (optimisticState?.removedProducts || []).map(
     product => Number(product.id)
   );
@@ -5028,6 +5034,7 @@ async function importPlanogram() {
         section_direction: sectionDirection,
         replace_existing: replace,
         expected_layout_modified_at: layout.modified_at || '',
+        expected_layout_config: layout.config,
         skip_non_stock:   skipNS,
         products: planoData.products,
         plano: planoData.plano || {},
@@ -5067,6 +5074,10 @@ async function importPlanogram() {
         if (activeTab === 'add') refreshPlanUi();
       });
     } else {
+      if (data.code === 'stale_layout' && data.layout) {
+        applyPlanogramImportResult(aisle, side, {layout: data.layout});
+        updatePlanoPreview();
+      }
       msg.textContent = data.error || 'Erreur lors de l’importation.';
       msg.style.color = '#c8102e';
     }

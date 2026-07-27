@@ -721,8 +721,52 @@ class PlanogramMetadataTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.get_json()["code"], "stale_layout")
+        self.assertEqual(response.get_json()["layout"]["modified_at"], "server-v2")
         self.assertEqual(db.execute("SELECT name FROM products").fetchone()[0], "OLD PRODUCT")
         self.assertEqual(db.execute("SELECT COUNT(*) FROM removed_products").fetchone()[0], 0)
+        db.close()
+
+    def test_bulk_import_accepts_newer_timestamp_when_structure_is_unchanged(self):
+        db = self.make_plan_db()
+        current_config = json.loads(
+            db.execute(
+                "SELECT config_json FROM aisle_layouts WHERE aisle='1'"
+            ).fetchone()[0]
+        )
+        db.execute("UPDATE aisle_layouts SET modified_at='server-v2' WHERE aisle='1'")
+        db.execute(
+            """INSERT INTO products
+               (name, barcode, aisle, side, section, shelf, position)
+               VALUES ('OLD PRODUCT', '111', '1', 'Gauche', '1', '1', '1')"""
+        )
+        db.commit()
+        app = self.make_test_app()
+        payload = {
+            "aisle": "1", "side": "Gauche", "start_section": 1,
+            "start_tablette": 1, "tablette_start": 1, "tablette_end": 1,
+            "replace_existing": True,
+            "expected_layout_modified_at": "phone-v1",
+            "expected_layout_config": current_config,
+            "products": [
+                {
+                    "tablette": 1, "position": 1,
+                    "barcode": "222", "name": "NEW PRODUCT",
+                },
+            ],
+        }
+
+        with patch("routes.products.get_db", return_value=db), \
+             patch("auth.get_db", return_value=db), \
+             patch("routes.products.schedule_image_fill"), \
+             patch("routes.gist._schedule_gist_backup"):
+            with app.test_client() as client:
+                response = client.post("/api/products/bulk-import", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            db.execute("SELECT name FROM products").fetchone()[0],
+            "NEW PRODUCT",
+        )
         db.close()
 
     def test_planogram_flow_uses_manual_section_shelf_counts_as_boundaries(self):

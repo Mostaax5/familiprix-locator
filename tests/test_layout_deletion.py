@@ -479,6 +479,10 @@ class LayoutDeletionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["removed_products"], 2)
         self.assertEqual(response.get_json()["deleted_product_ids"], [1, 4])
+        self.assertEqual(response.get_json()["layout_modified_at"], "")
+        self.assertEqual(
+            response.get_json()["layout"]["config"], self.config
+        )
         self.assertEqual(
             [row[0] for row in self.db.execute(
                 "SELECT id FROM products ORDER BY id"
