@@ -5399,7 +5399,7 @@ _CATALOG_ENRICH = {
 }
 
 
-_ENRICH_CHUNK = 12        # bounded payloads keep Render memory stable
+_ENRICH_CHUNK = 1         # save each lookup immediately; no long invisible batch
 _ENRICH_WORKERS = 1       # one source lookup at a time; employee requests stay fast
 _ENRICH_LOOKUP_FANOUT = 2 # background online parsing while PDFs get priority
 _AUTO_CATALOG_ENRICH = os.environ.get(
