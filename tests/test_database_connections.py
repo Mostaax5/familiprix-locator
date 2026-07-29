@@ -81,11 +81,14 @@ class DatabaseConnectionTests(unittest.TestCase):
              ), \
              patch.object(database, "init_postgres_db") as full_migration, \
              patch.object(database, "_set_postgres_schema_version") as set_version, \
-             patch.object(database, "ensure_best_effort_unique_indexes"), \
+             patch.object(
+                 database, "ensure_best_effort_unique_indexes"
+             ) as ensure_indexes, \
              patch.object(database, "_POSTGRES_PRODUCT_SCHEMA_READY", False):
             database.init_db()
 
         full_migration.assert_not_called()
+        ensure_indexes.assert_not_called()
         set_version.assert_called_once_with(db)
         db.close.assert_called_once()
 

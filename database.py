@@ -319,6 +319,9 @@ def init_db():
                 db.commit()
                 _POSTGRES_PRODUCT_SCHEMA_READY = True
                 _POSTGRES_PRODUCT_SCHEMA_ERROR = ""
+            if schema_is_current or can_bootstrap_version:
+                _POSTGRES_AUTH_SCHEMA_READY = True
+                return
             print("Base de données partagee prete : PostgreSQL")
         else:
             init_sqlite_db(db)
