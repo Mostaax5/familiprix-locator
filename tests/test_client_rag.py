@@ -15,6 +15,7 @@ from routes.ai import (
     generate_documented_client_answer,
     health_canada_documents,
     health_canada_nhp_documents,
+    lookup_familiprix_product,
     normalize_documented_client_answer,
     normalize_verified_client_answer,
     normalize_url,
@@ -70,6 +71,54 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(normalize_url(base, "http://example.com/product/123"), "")
         self.assertFalse(_outbound_url_allowed("https://user:pass@example.com/private"))
 
+    def test_familiprix_lookup_uses_internal_code_and_validates_exact_upc(self):
+        product_url = (
+            "https://magasiner.familiprix.com/fr/sante/produit/"
+            "p/000000000000120407"
+        )
+        search_html = (
+            '<a href="/fr/sante/produit/p/000000000000120407">Produit</a>'
+        )
+        product_html = """
+            <script type="application/ld+json">
+            {
+              "@type": "Product",
+              "name": "BENYLIN SIROP GORGE ET TOUX 250 ML",
+              "brand": {"name": "Benylin"},
+              "sku": "120407",
+              "gtin12": "062600264206",
+              "description": "Soulage le mal de gorge et la toux.",
+              "image": "https://images.example/benylin.jpg"
+            }
+            </script>
+        """
+        requested_urls = []
+
+        def fake_fetch(url):
+            requested_urls.append(url)
+            if "/p/" in url:
+                return product_html, product_url
+            return search_html, url
+
+        with patch("routes.ai.fetch_text", side_effect=fake_fetch):
+            product = lookup_familiprix_product(
+                "062600264206", product_code="120407"
+            )
+
+        self.assertIsNotNone(product)
+        self.assertEqual(product["product_code"], "120407")
+        self.assertEqual(product["source"], "Familiprix")
+        self.assertEqual(
+            product["description"], "Soulage le mal de gorge et la toux."
+        )
+        self.assertIn("text=120407", requested_urls[0])
+
+        with patch("routes.ai.fetch_text", side_effect=fake_fetch):
+            mismatch = lookup_familiprix_product(
+                "063000000000", product_code="120407"
+            )
+        self.assertIsNone(mismatch)
+
     def test_hybrid_retrieval_corrects_spoken_french_brand_typo(self):
         advil = {"id": 1, "name": "Advil Extra Fort", "brand": "Advil", "barcode": "111"}
         unrelated = {"id": 2, "name": "Tylenol Regular", "brand": "Tylenol", "barcode": "222"}
@@ -90,6 +139,41 @@ class ClientRagTests(unittest.TestCase):
             matches = hybrid_client_candidates("Jai besoin dadvile", plan, limit=10)
 
         self.assertEqual([item["name"] for item in matches], ["Advil Extra Fort"])
+
+    def test_full_question_words_do_not_retrieve_unrelated_products(self):
+        products = [{
+            "id": 1, "name": "BENYLIN SIROP GORGE TOUX 250ML",
+            "brand": "Benylin", "barcode": "111",
+            "description": "Sirop pour la gorge et la toux.",
+        }, {
+            "id": 2, "name": "RESTORALAX POUDRE 510G",
+            "brand": "RestoraLAX", "barcode": "222",
+            "description": "Produit facile à prendre et meilleur format familial.",
+        }, {
+            "id": 3, "name": "CANESTEN CREME 15G",
+            "brand": "Canesten", "barcode": "333",
+            "description": "Demandez pourquoi ce produit convient à la peau.",
+        }]
+        corpus = [(
+            product,
+            search_row(
+                product["name"], product["brand"],
+                product["description"], product["barcode"],
+            ),
+        ) for product in products]
+        question = "Quelle est le meilleur produit pour la gorge et pourquoi"
+
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            matches = hybrid_client_candidates(
+                question, build_client_query_plan(question, "documented"),
+                limit=20,
+            )
+
+        self.assertEqual(
+            [product["name"] for product in matches],
+            ["BENYLIN SIROP GORGE TOUX 250ML"],
+        )
 
     def test_headache_retrieval_uses_the_full_intent_not_the_word_tete(self):
         question = "Jai male a la tete que prendre"
@@ -698,7 +782,7 @@ class ClientRagTests(unittest.TestCase):
             )
 
         call = provider.call_args
-        self.assertEqual(call.kwargs["max_tokens"], 1100)
+        self.assertEqual(call.kwargs["max_tokens"], 1800)
         self.assertNotIn("comparisons", call.kwargs["schema"]["properties"])
         compact_payload = call.args[1]
         self.assertNotIn("required_schema", compact_payload)
@@ -1054,6 +1138,37 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertEqual(payload["max_tokens"], 1100)
 
+    def test_kimi_k26_keeps_thinking_for_documented_answer_only(self):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "choices": [{
+                "message": {"content": json.dumps({"answer": "ok"})},
+            }],
+            "usage": {},
+        }).encode("utf-8")
+
+        with patch("routes.ai.KIMI_DOCUMENTED_MODEL", "kimi-k2.6"), \
+             patch("routes.ai.KIMI_MODEL", "kimi-k2.6"), \
+             patch("routes.ai._safe_urlopen", return_value=response) as opener, \
+             patch("routes.ai._log_ai_usage"):
+            _kimi_json_request(
+                [{"role": "user", "content": "documented"}],
+                max_tokens=1800, quality_mode=True,
+            )
+            documented_payload = json.loads(
+                opener.call_args.args[0].data.decode("utf-8")
+            )
+            _kimi_json_request(
+                [{"role": "user", "content": "plan"}],
+                max_tokens=450, quality_mode=False,
+            )
+            plan_payload = json.loads(
+                opener.call_args.args[0].data.decode("utf-8")
+            )
+
+        self.assertNotIn("thinking", documented_payload)
+        self.assertEqual(plan_payload["thinking"], {"type": "disabled"})
+
     def test_documented_kimi_timeout_makes_only_one_paid_request(self):
         with patch("routes.ai.KIMI_API_KEY", "secret"), \
              patch("routes.ai._safe_urlopen", side_effect=TimeoutError("slow")) as opener:
@@ -1250,6 +1365,76 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(payload["highlighted_product_ids"], ["product:1"])
         old_planner.assert_not_called()
         verifier.assert_called_once()
+
+    def test_kimi_reads_the_full_question_before_catalogue_retrieval(self):
+        candidate = {
+            "id": 1, "client_id": "product:1",
+            "name": "BENYLIN SIROP GORGE TOUX 250ML", "brand": "Benylin",
+            "barcode": "111", "aisle": "Labo", "side": "A",
+            "section": "2", "shelf": "2", "position": "1", "in_stock": 1,
+        }
+        ai_plan = {
+            "intent": "symptom_product_advice",
+            "corrected_query": "Meilleur produit pour un mal de gorge",
+            "search_queries": ["mal de gorge", "sore throat", "gorge"],
+            "keywords": ["gorge", "irritation"],
+            "must_include": ["gorge"],
+            "exclude": ["laxatif", "antifongique"],
+            "wants_all": False,
+            "needs_comparison": True,
+            "answer_language": "fr",
+            "medical": True,
+        }
+        documented = {
+            "answer": "Le choix dépend des symptômes; ce produit vise la gorge.",
+            "selected_product_ids": ["product:1"],
+            "follow_up_questions": [], "safety_flags": [],
+            "pharmacist_referral": False, "pharmacist_reason": "",
+            "key_points": [], "comparisons": [], "useful_guidance": [],
+            "important_checks": [], "source_ids": ["store-plan"],
+            "degraded": False, "warning": "",
+        }
+        captured = {}
+
+        def retrieve(question, plan, limit=60):
+            captured["question"] = question
+            captured["plan"] = dict(plan)
+            return [candidate]
+
+        with patch(
+            "routes.ai.configured_ai_provider",
+            return_value={"name": "kimi", "label": "Kimi", "model": "kimi-k2.6"},
+        ), patch(
+            "routes.ai._check_ai_rate_limit", return_value=True
+        ), patch(
+            "routes.ai.generate_client_query_plan", return_value=ai_plan
+        ) as planner, patch(
+            "routes.products.hybrid_client_candidates", side_effect=retrieve
+        ), patch(
+            "routes.products.hydrate_candidate_images"
+        ), patch(
+            "routes.ai.retrieve_client_documentation", return_value=[{
+                "source_id": "store-plan", "title": "Plan actuel",
+                "publisher": "Familiprix Locator", "url": "",
+                "evidence": "BENYLIN", "candidate_ids": ["product:1"],
+            }]
+        ), patch(
+            "routes.ai.generate_documented_client_answer",
+            return_value=documented,
+        ), patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": (
+                        "Quelle est le meilleur produit pour la gorge et pourquoi"
+                    ),
+                    "mode": "documented",
+                })
+
+        self.assertEqual(response.status_code, 200)
+        planner.assert_called_once()
+        self.assertTrue(captured["plan"]["planned_by_ai"])
+        self.assertEqual(captured["plan"]["must_include"], ["gorge"])
+        self.assertIn("laxatif", captured["plan"]["exclude"])
 
     def test_simple_product_lookup_does_not_call_ai(self):
         candidate = {
@@ -1503,11 +1688,17 @@ class ClientRagTests(unittest.TestCase):
                  "routes.ai.generate_documented_client_answer",
                  return_value=documented,
              ) as generator, \
-             patch(
-                 "routes.ai.configured_ai_provider",
-                 return_value={"name": "kimi", "label": "Kimi", "model": "kimi-k2.6"},
-             ), \
-             patch("routes.ai._check_ai_rate_limit", return_value=True), \
+              patch(
+                  "routes.ai.configured_ai_provider",
+                  return_value={"name": "kimi", "label": "Kimi", "model": "kimi-k2.6"},
+              ), \
+              patch(
+                  "routes.ai.generate_client_query_plan",
+                  return_value=build_client_query_plan(
+                      "Jai mal à la tête que prendre", "documented"
+                  ),
+              ), \
+              patch("routes.ai._check_ai_rate_limit", return_value=True), \
              patch("routes.ai.log_ai_interaction"):
             with app.test_client() as client:
                 response = client.post("/api/client/help", json={

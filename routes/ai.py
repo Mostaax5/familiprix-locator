@@ -154,7 +154,7 @@ OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 KIMI_API_KEY = os.environ.get("KIMI_API_KEY", os.environ.get("MOONSHOT_API_KEY", "")).strip()
 KIMI_MODEL = os.environ.get("KIMI_MODEL", "kimi-k2.6").strip() or "kimi-k2.6"
 KIMI_DOCUMENTED_MODEL = (
-    os.environ.get("KIMI_DOCUMENTED_MODEL", "kimi-k3").strip() or "kimi-k3"
+    os.environ.get("KIMI_DOCUMENTED_MODEL", KIMI_MODEL).strip() or KIMI_MODEL
 )
 KIMI_BASE_URL = os.environ.get(
     "KIMI_BASE_URL", "https://api.moonshot.ai/v1"
@@ -186,10 +186,16 @@ except (TypeError, ValueError):
     _AI_REQUEST_TIMEOUT_SECONDS = 12
 try:
     _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = min(
-        30, max(8, int(os.environ.get("AI_DOCUMENTED_REQUEST_TIMEOUT", "18")))
+        24, max(12, int(os.environ.get("AI_DOCUMENTED_REQUEST_TIMEOUT", "18")))
     )
 except (TypeError, ValueError):
     _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = 18
+try:
+    _AI_QUERY_PLAN_TIMEOUT_SECONDS = min(
+        7, max(3, int(os.environ.get("AI_QUERY_PLAN_TIMEOUT", "5")))
+    )
+except (TypeError, ValueError):
+    _AI_QUERY_PLAN_TIMEOUT_SECONDS = 5
 _DEEPSEEK_DOCUMENTED_THINKING = (
     os.environ.get("DEEPSEEK_DOCUMENTED_THINKING", "").strip().lower()
     in {"1", "true", "yes", "on"}
@@ -596,8 +602,15 @@ def extract_structured_product_data(html, barcode_candidates=None):
         brand = extract_structured_brand(product.get("brand"))
         description = clean_html_text(str(product.get("description", "")).strip())
         image_url = extract_structured_image(product.get("image"))
+        product_code = str(
+            product.get("sku") or product.get("productID")
+            or product.get("productId") or ""
+        ).strip()
         if name or brand or description or image_url:
-            return {"name": name, "brand": brand, "description": description, "image_url": image_url}
+            return {
+                "name": name, "brand": brand, "description": description,
+                "image_url": image_url, "product_code": product_code,
+            }
     return {}
 
 
@@ -615,7 +628,14 @@ def _find_product_node(obj, barcode_candidates, depth):
                     brand = str(raw_brand.get("name", "") if isinstance(raw_brand, dict) else raw_brand).strip()
                     description = clean_html_text(str(obj.get("description") or obj.get("shortDescription") or ""))
                     image = str(obj.get("image") or obj.get("imageUrl") or obj.get("thumbnail") or "").strip()
-                    return {"name": name, "brand": brand, "description": description, "image_url": image}
+                    product_code = str(
+                        obj.get("sku") or obj.get("productCode")
+                        or obj.get("productId") or ""
+                    ).strip()
+                    return {
+                        "name": name, "brand": brand, "description": description,
+                        "image_url": image, "product_code": product_code,
+                    }
         for value in obj.values():
             if isinstance(value, (dict, list)):
                 result = _find_product_node(value, barcode_candidates, depth + 1)
@@ -660,7 +680,16 @@ def find_familiprix_product_url(html, final_url, barcode_candidates):
     return None
 
 
-def parse_familiprix_product_page(html, url, barcode, barcode_candidates=None):
+def _familiprix_code_key(value):
+    text = str(value or "").strip()
+    digits = normalized_digits(text)
+    if digits:
+        return digits.lstrip("0") or "0"
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def parse_familiprix_product_page(html, url, barcode, barcode_candidates=None,
+                                  product_code=""):
     barcode_candidates = barcode_candidates or build_barcode_candidates(barcode)
     if not page_mentions_barcode(html, barcode_candidates):
         return None
@@ -675,22 +704,44 @@ def parse_familiprix_product_page(html, url, barcode, barcode_candidates=None):
     ]))
     image_url = structured.get("image_url") or first_regex(html, [r'<meta property="og:image" content="([^"]+)"'])
     brand = structured.get("brand") or infer_brand_from_title(title)
+    page_product_code = (
+        embedded.get("product_code") or structured.get("product_code")
+        or first_regex(html, [
+            r'"sku"\s*:\s*"([^"]+)"',
+            r'"productCode"\s*:\s*"([^"]+)"',
+        ])
+    )
+    if not page_product_code:
+        page_product_code = first_regex(str(url or ""), [r"/p/0*([0-9]+)(?:[/?#]|$)"])
+    if product_code and page_product_code and (
+        _familiprix_code_key(product_code) != _familiprix_code_key(page_product_code)
+    ):
+        return None
     if not title:
         return None
     return attach_regulatory_candidates({
         "name": title, "brand": brand, "description": description,
         "barcode": barcode, "source": "Familiprix", "source_url": url,
         "image_url": image_url,
+        "product_code": str(page_product_code or product_code or "").strip(),
+        "source_record_id": str(page_product_code or product_code or barcode).strip(),
     }, html)
 
 
-def lookup_familiprix_product(barcode, barcode_candidates=None):
+def lookup_familiprix_product(barcode, barcode_candidates=None, product_code=""):
     barcode_candidates = barcode_candidates or build_barcode_candidates(barcode)
-    search_urls = [
-        f"https://magasiner.familiprix.com/fr/search?text={barcode}",
-        f"https://magasiner.familiprix.com/fr/search?q={barcode}",
-        f"https://magasiner.familiprix.com/fr/recherche?q={barcode}",
-    ]
+    search_terms = list(dict.fromkeys(
+        value for value in (
+            str(product_code or "").strip(),
+            str(barcode or "").strip(),
+        ) if value
+    ))
+    search_urls = []
+    for term in search_terms:
+        search_urls.extend([
+            f"https://magasiner.familiprix.com/fr/search?{urlencode({'text': term})}",
+            f"https://magasiner.familiprix.com/fr/search?{urlencode({'q': term})}",
+        ])
     for url in search_urls:
         html, final_url = fetch_text(url)
         if not html:
@@ -701,7 +752,10 @@ def lookup_familiprix_product(barcode, barcode_candidates=None):
         product_html, product_final_url = fetch_text(product_url)
         if not product_html:
             product_html, product_final_url = html, final_url
-        product = parse_familiprix_product_page(product_html, product_final_url, barcode, barcode_candidates)
+        product = parse_familiprix_product_page(
+            product_html, product_final_url, barcode, barcode_candidates,
+            product_code=product_code,
+        )
         if product:
             return product
     return None
@@ -1360,7 +1414,8 @@ def _parse_chat_json(raw_text):
     return parsed if isinstance(parsed, dict) else None
 
 
-def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=False):
+def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=False,
+                       timeout_seconds=None):
     """Call Kimi's OpenAI-compatible endpoint with bounded response memory."""
     model = KIMI_DOCUMENTED_MODEL if quality_mode else KIMI_MODEL
     payload = {
@@ -1371,6 +1426,10 @@ def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=F
     }
     if quality_mode and model.startswith("kimi-k3"):
         payload["reasoning_effort"] = KIMI_DOCUMENTED_REASONING_EFFORT
+    elif model.startswith("kimi-k2.6") and not quality_mode:
+        # Query planning is deliberately short. The documented answer call keeps
+        # K2.6 thinking enabled (its default) so reasoning is spent on the answer.
+        payload["thinking"] = {"type": "disabled"}
     request_obj = Request(
         f"{KIMI_BASE_URL}/chat/completions",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -1381,7 +1440,7 @@ def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=F
         method="POST",
     )
     try:
-        timeout = (
+        timeout = timeout_seconds or (
             _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS
             if quality_mode else _AI_REQUEST_TIMEOUT_SECONDS
         )
@@ -1419,7 +1478,8 @@ def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=F
     return parsed
 
 
-def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mode=False):
+def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mode=False,
+                           timeout_seconds=None):
     """Call DeepSeek's OpenAI-compatible chat endpoint and return parsed JSON."""
     model = DEEPSEEK_DOCUMENTED_MODEL if quality_mode else DEEPSEEK_MODEL
     payload = {
@@ -1442,7 +1502,7 @@ def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mo
         method="POST",
     )
     try:
-        timeout = (
+        timeout = timeout_seconds or (
             _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS
             if quality_mode else _AI_REQUEST_TIMEOUT_SECONDS
         )
@@ -1557,20 +1617,20 @@ def _openai_structured_request(system_prompt, user_payload, max_tokens,
 
 def _provider_structured_request(system_prompt, user_payload, max_tokens,
                                  schema_name, schema, question_preview="",
-                                 quality_mode=False):
+                                 quality_mode=False, timeout_seconds=None):
     provider = configured_ai_provider()["name"]
     if provider == "kimi":
         return _kimi_json_request([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
         ], max_tokens=max_tokens, question_preview=question_preview,
-           quality_mode=quality_mode)
+           quality_mode=quality_mode, timeout_seconds=timeout_seconds)
     if provider == "deepseek":
         return _deepseek_json_request([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
         ], max_tokens=max_tokens, question_preview=question_preview,
-           quality_mode=quality_mode)
+           quality_mode=quality_mode, timeout_seconds=timeout_seconds)
     if provider == "gemini":
         return _gemini_structured_request(
             system_prompt, user_payload, max_tokens, question_preview
@@ -1604,15 +1664,22 @@ _CLIENT_QUERY_PLAN_SCHEMA = {
 
 _CLIENT_QUERY_PLAN_INSTRUCTIONS = (
     "Tu es le planificateur de recherche d'un catalogue de pharmacie québécoise. "
-    "Analyse la phrase complète et l'historique récent sans perdre son intention. Une question "
+    "Lis et analyse d'abord la phrase complète et l'historique récent sans perdre son intention. "
+    "Identifie l'objet principal, le besoin, les contraintes, les variantes demandées et ce qui "
+    "doit être exclu. Ne traite jamais un mot isolé comme l'intention complète. Une question "
     "de suivi comme 'et pour les enfants?' doit devenir une requête autonome qui conserve le "
     "produit ou besoin discuté juste avant. Corrige les fautes probables "
     "de marques et produits (exemple: advile/dadvile -> Advil), mais ne transforme jamais "
     "une demande de nourriture en demande de médicament. Génère des requêtes bilingues "
-    "français/anglais et des synonymes qui peuvent réellement apparaître dans le nom, la "
-    "marque, la description ou les notes d'un produit. Pour un symptôme, ajoute les familles "
-    "ou ingrédients pertinents; pour un assortiment, conserve toutes les contraintes de "
-    "catégorie, saveur, format et marque. wants_all=true pour 'tous/toutes/all/each'. "
+    "français/anglais et uniquement des synonymes précis qui peuvent réellement apparaître dans "
+    "le nom, la marque, la description ou les notes d'un produit. search_queries contient des "
+    "formulations de recherche courtes, pas des phrases de réponse. must_include contient les "
+    "concepts indispensables à l'identité ou à l'usage demandé; exclude contient les catégories "
+    "voisines mais non demandées. Pour un symptôme, ajoute les familles ou ingrédients "
+    "raisonnablement pertinents sans prétendre poser un diagnostic; pour un assortiment, "
+    "conserve toutes les contraintes de catégorie, saveur, format et marque. Le plan doit "
+    "fonctionner pour n'importe quelle catégorie du magasin, pas seulement les médicaments. "
+    "wants_all=true pour 'tous/toutes/all/each'. "
     "needs_comparison=true quand l'utilisateur demande une différence ou comparaison. "
     "Retourne uniquement un objet JSON respectant exactement le schéma demandé."
 )
@@ -1668,10 +1735,11 @@ def generate_client_query_plan(question, history=None):
         _CLIENT_QUERY_PLAN_INSTRUCTIONS,
         {"conversation": normalize_client_history(history), "question": question,
          "required_schema": _CLIENT_QUERY_PLAN_SCHEMA},
-        max_tokens=900,
+        max_tokens=450,
         schema_name="client_query_plan",
         schema=_CLIENT_QUERY_PLAN_SCHEMA,
         question_preview=question,
+        timeout_seconds=_AI_QUERY_PLAN_TIMEOUT_SECONDS,
     )
     return normalize_client_query_plan(parsed, question) if isinstance(parsed, dict) else None
 
@@ -1910,6 +1978,9 @@ def product_context_for_client_rag(product):
         "plan_status": "PLANO" if product.get("is_plano") else "HORS-PLANO",
         "locations": product.get("locations") or [],
         "description": description,
+        "description_status": (
+            "verified" if "description" in verified_fields else "unverified"
+        ),
         "category": verified_value("category"),
         "package_size": verified_value("package_size"),
         "package_unit": verified_value("package_unit"),
@@ -2277,6 +2348,11 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "ou une propriété à un produit précis. Les fiches Santé Canada ont priorité sur les fiches "
     "de catalogue; les noms de planogramme et descriptions peuvent être abrégés ou incomplets. "
     "Évalue chaque candidat selon le sens de la phrase complète, jamais selon un mot isolé. "
+    "Reformule mentalement l'objectif complet avant de répondre: ce que la personne cherche, "
+    "le niveau de détail demandé, les critères de choix et la raison attendue. Cette méthode "
+    "s'applique à toute question et à toute catégorie du magasin. Un candidat qui partage "
+    "seulement un terme avec la demande mais ne satisfait pas son objet ou son usage principal "
+    "doit être rejeté. "
     "Un mot désignant une partie du corps ne suffit pas: pour « mal de tête », garde seulement "
     "les produits réellement liés au soulagement de la douleur et rejette notamment les têtes "
     "de brosse à dents, les nettoyants tête-aux-pieds et les produits sans indication pertinente. "
@@ -2290,6 +2366,8 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "answer est une réponse directe de 3 à 6 phrases que l'employé peut dire au client. "
     "La première phrase répond sans détour à la question. Elle doit répondre à « quoi "
     "choisir et pourquoi » lorsque c'est la question, sans se contenter de nommer des produits. "
+    "Lorsqu'on demande le meilleur choix, explique d'abord les critères qui changent la décision, "
+    "puis indique quel candidat convient à chaque contexte réellement étayé. "
     "Traite chaque dimension explicitement demandée: par exemple types, saveurs et contexte "
     "d'utilisation doivent recevoir trois réponses distinctes, même si certaines données sont "
     "absentes et doivent être signalées comme telles. "
@@ -2299,8 +2377,10 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "du texte générique uniquement pour atteindre ce nombre. Le serveur "
     "ajoutera lui-même les cartes, emplacements et comparaisons produit par produit: ne les "
     "répète pas. Place les vérifications médicales dans safety_flags. "
-    "Chaque affirmation fondée sur un document cite son source_id exact; une connaissance "
-    "générale non documentée garde source_ids vide. source_ids contient toutes les sources "
+    "Chaque affirmation fondée sur un document cite son source_id exact. Tu peux utiliser tes "
+    "connaissances générales pour expliquer un concept ou les critères de choix, mais jamais "
+    "pour inventer un attribut d'un produit précis; une connaissance générale non documentée "
+    "garde source_ids vide. source_ids contient toutes les sources "
     "effectivement utilisées. selected_product_ids garde les produits réellement liés, "
     "jusqu'à 12, et aucun autre. Copie les noms de produits exactement lorsqu'ils apparaissent "
     "dans le texte. Les attributs absents ou signalés non vérifiés dans les candidats ne sont "
@@ -3126,7 +3206,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             return "liquide ou suspension"
         if tokens.intersection({"gum", "gomme", "gommes", "gummies"}) or coded("gum"):
             return "gommes"
-        if tokens.intersection({"vapo", "spray", "vaporisateur"}) or coded("vapo"):
+        if tokens.intersection({"vapo", "spray", "vaporisateur", "pompe"}) or coded("vapo"):
             return "vaporisateur"
         if (
             tokens.intersection({"caps", "capsule", "capsules"})
@@ -4219,7 +4299,7 @@ def generate_documented_client_answer(question, query_plan, candidates, document
         key: query_plan.get(key)
         for key in (
             "intent", "corrected_query", "wants_all", "needs_comparison",
-            "answer_language", "medical",
+            "answer_language", "medical", "keywords", "must_include", "exclude",
         )
     }
     parsed = _provider_structured_request(
@@ -4233,7 +4313,7 @@ def generate_documented_client_answer(question, query_plan, candidates, document
             "candidates": contexts,
             "documents": document_contexts,
         },
-        max_tokens=1100,
+        max_tokens=1800,
         schema_name="client_documented_answer",
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,
@@ -4866,6 +4946,12 @@ _CATALOG_ENRICH = {
 _ENRICH_CHUNK = 20        # lookups submitted per batch — Stop reacts within one batch
 _ENRICH_WORKERS = 2       # workers prepare rows, but the memory guard serializes
 _ENRICH_LOOKUP_FANOUT = 2 # background online parsing while PDFs get priority
+_CATALOG_ENRICH_VERSION = "familiprix_exact_v2"
+_CATALOG_ENRICH_DONE_STATUSES = (
+    _CATALOG_ENRICH_VERSION,
+    "reviewed_online_v2",
+    "no_match_v2",
+)
 
 
 def _enrich_marker_path():
@@ -4909,10 +4995,17 @@ def _catalog_enrich_worker():
     def _lookup(r):
         try:
             with memory_intensive_task("catalog_enrichment"):
-                online = lookup_product_online(
-                    r.get("barcode", ""), max_workers=_ENRICH_LOOKUP_FANOUT,
-                    wait_for_cleanup=True,
+                barcode = r.get("barcode", "")
+                online = lookup_familiprix_product(
+                    barcode,
+                    build_barcode_candidates(barcode),
+                    product_code=r.get("product_code", ""),
                 )
+                if not online:
+                    online = lookup_product_online(
+                        barcode, max_workers=_ENRICH_LOOKUP_FANOUT,
+                        wait_for_cleanup=True, background=True,
+                    )
             return r, online
         except Exception:
             return r, None
@@ -4924,25 +5017,33 @@ def _catalog_enrich_worker():
             made_progress = False
             try:
                 db = connect_db()
-                # Only products not yet tried (no description AND no enrich tag) so
-                # re-runs and reconnects resume exactly where the run stopped.
+                status_placeholders = ",".join(
+                    "?" for _ in _CATALOG_ENRICH_DONE_STATUSES
+                )
                 remaining_row = db.execute(
                     "SELECT COUNT(*) AS n FROM product_reference "
-                    "WHERE TRIM(COALESCE(description,'')) = '' "
-                    "AND TRIM(COALESCE(enrich_status,'')) = '' "
+                    f"WHERE TRIM(COALESCE(enrich_status,'')) NOT IN ({status_placeholders}) "
                     "AND TRIM(COALESCE(name,'')) <> '' "
-                    "AND TRIM(COALESCE(barcode,'')) <> ''"
+                    "AND TRIM(COALESCE(barcode,'')) <> ''",
+                    _CATALOG_ENRICH_DONE_STATUSES,
                 ).fetchone()
                 remaining = int(
                     remaining_row["n"] if isinstance(remaining_row, dict)
                     else remaining_row[0]
                 )
                 rows = [dict(r) for r in db.execute(
-                    "SELECT barcode, name, brand, image_url, product_code FROM product_reference "
-                    "WHERE TRIM(COALESCE(description,'')) = '' AND TRIM(COALESCE(enrich_status,'')) = '' "
+                    "SELECT barcode, name, brand, description, image_url, product_code "
+                    "FROM product_reference "
+                    f"WHERE TRIM(COALESCE(enrich_status,'')) NOT IN ({status_placeholders}) "
                     "AND TRIM(COALESCE(name,'')) <> '' "
                     "AND TRIM(COALESCE(barcode,'')) <> '' "
-                    "ORDER BY barcode LIMIT 100").fetchall()]
+                    "ORDER BY CASE WHEN EXISTS ("
+                    "SELECT 1 FROM products p WHERE p.gtin_key=product_reference.gtin_key"
+                    ") THEN 0 ELSE 1 END, "
+                    "CASE WHEN TRIM(COALESCE(description,''))='' THEN 0 ELSE 1 END, "
+                    "barcode LIMIT 100",
+                    _CATALOG_ENRICH_DONE_STATUSES,
+                ).fetchall()]
                 if not rows:
                     break                      # everything processed — real Terminé
                 placed_by_barcode = {}
@@ -4967,7 +5068,7 @@ def _catalog_enrich_worker():
                     )
                     placed_params.extend(batch_barcodes)
                 placed_query = (
-                    "SELECT id, barcode, brand, description, image_url, product_code "
+                    "SELECT id, name, barcode, brand, description, image_url, product_code "
                     "FROM products WHERE " + " OR ".join(placed_filters)
                 )
                 for product_row in db.execute(
@@ -5005,19 +5106,34 @@ def _catalog_enrich_worker():
                             if matched:
                                 updated_at = utc_now_iso()
                                 reference = dict(online or {})
+                                exact_familiprix = (
+                                    str(reference.get("source", "") or "").strip().lower()
+                                    == "familiprix"
+                                )
                                 reference.update({
                                     "barcode": bc,
-                                    "brand": str(r.get("brand", "") or "").strip() or brand,
+                                    "brand": (
+                                        brand if exact_familiprix
+                                        else str(r.get("brand", "") or "").strip() or brand
+                                    ),
                                     "description": desc,
-                                    "image_url": str(r.get("image_url", "") or "").strip() or img,
+                                    "image_url": (
+                                        img if exact_familiprix
+                                        else str(r.get("image_url", "") or "").strip() or img
+                                    ),
                                     "product_code": str(r.get("product_code", "") or "").strip(),
                                 })
                                 upsert_reference_candidate(
-                                    db, reference, imported_at=updated_at
+                                    db, reference, imported_at=updated_at,
+                                    promote_higher_priority=exact_familiprix,
                                 )
                                 db.execute(
-                                    "UPDATE product_reference SET enrich_status='reviewed_online', updated_at=? WHERE barcode=?",
-                                    (updated_at, bc),
+                                    "UPDATE product_reference SET enrich_status=?, updated_at=? WHERE barcode=?",
+                                    (
+                                        _CATALOG_ENRICH_VERSION
+                                        if exact_familiprix else "reviewed_online_v2",
+                                        updated_at, bc,
+                                    ),
                                 )
                                 key = gtin_identity_key(bc)
                                 affected_product_ids = []
@@ -5025,6 +5141,7 @@ def _catalog_enrich_worker():
                                     update_product_metadata_from_reference(
                                         db, product, reference, now=updated_at,
                                         match_method="exact_gtin",
+                                        promote_higher_priority=exact_familiprix,
                                     )
                                     affected_product_ids.append(int(product["id"]))
                                     _CATALOG_ENRICH["linked"] += 1
@@ -5038,8 +5155,10 @@ def _catalog_enrich_worker():
                                 _CATALOG_ENRICH["updated"] += 1
                             else:
                                 # Tag it so we know it still needs a real description.
-                                db.execute("UPDATE product_reference SET enrich_status='no_match', updated_at=? WHERE barcode=?",
-                                           (utc_now_iso(), bc))
+                                db.execute(
+                                    "UPDATE product_reference SET enrich_status='no_match_v2', updated_at=? WHERE barcode=?",
+                                    (utc_now_iso(), bc),
+                                )
                                 db.commit()
                                 _CATALOG_ENRICH["skipped"] += 1
                             _CATALOG_ENRICH["done"] += 1
@@ -5080,8 +5199,11 @@ def catalog_enrich_start():
     try:
         row = db.execute(
             "SELECT COUNT(*) AS n FROM product_reference "
-            "WHERE TRIM(COALESCE(description,'')) = '' AND TRIM(COALESCE(enrich_status,'')) = '' "
-            "AND TRIM(COALESCE(name,'')) <> ''").fetchone()
+            "WHERE TRIM(COALESCE(enrich_status,'')) NOT IN (?,?,?) "
+            "AND TRIM(COALESCE(name,'')) <> '' "
+            "AND TRIM(COALESCE(barcode,'')) <> ''",
+            _CATALOG_ENRICH_DONE_STATUSES,
+        ).fetchone()
         total = row["n"] if isinstance(row, dict) else row[0]
     except Exception:
         total = 0
@@ -5301,7 +5423,49 @@ def client_help():
             question, follow_up=follow_up, focus_product_id=focus_product_id,
             selected_text=selected_text,
         )
-    query_plan = build_client_query_plan(question, response_mode)
+    local_query_plan = build_client_query_plan(question, response_mode)
+    query_plan = dict(local_query_plan)
+    active_ai_provider = {}
+    ai_rate_checked = False
+    if response_mode != "lookup":
+        active_ai_provider = configured_ai_provider()
+        if not active_ai_provider["name"]:
+            return jsonify({
+                "success": False,
+                "error": "Aucune clé IA n’est configurée sur le serveur.",
+            }), 503
+
+        # Kimi reads the complete request before catalogue retrieval. This short,
+        # non-thinking pass produces typo corrections, bilingual concepts and
+        # exclusions; the documented answer call keeps reasoning enabled.
+        if active_ai_provider["name"] == "kimi":
+            if not _check_ai_rate_limit():
+                return jsonify({
+                    "success": False,
+                    "error": "Trop de requêtes IA. Réessayez dans une heure.",
+                }), 429
+            ai_rate_checked = True
+            ai_query_plan = generate_client_query_plan(question, history)
+            if ai_query_plan:
+                query_plan = ai_query_plan
+                specific_local_intent = str(local_query_plan.get("intent", "") or "")
+                if specific_local_intent not in {
+                    "product_lookup", "advice_or_comparison", ""
+                }:
+                    query_plan["intent"] = specific_local_intent
+                query_plan["wants_all"] = bool(
+                    query_plan.get("wants_all") or local_query_plan.get("wants_all")
+                )
+                query_plan["needs_comparison"] = bool(
+                    query_plan.get("needs_comparison")
+                    or local_query_plan.get("needs_comparison")
+                )
+                query_plan["medical"] = bool(
+                    query_plan.get("medical") or local_query_plan.get("medical")
+                )
+                query_plan["planned_by_ai"] = True
+            else:
+                query_plan["planned_by_ai"] = False
 
     # Retrieval is immediate and inventory-safe: only mapped store-plan products
     # can become cards. A direct reply stays inside the products from that thread.
@@ -5321,7 +5485,10 @@ def client_help():
             )
             if previous_user:
                 retrieval_question = f"{previous_user} {question}"
-                query_plan = build_client_query_plan(retrieval_question, response_mode)
+                if not query_plan.get("planned_by_ai"):
+                    query_plan = build_client_query_plan(
+                        retrieval_question, response_mode
+                    )
         candidates = hybrid_client_candidates(retrieval_question, query_plan, limit=candidate_limit)
     if response_mode != "lookup":
         candidates = filter_client_answer_category(question, candidates)
@@ -5399,7 +5566,7 @@ def client_help():
             or is_catalogue_supported_comparison
         )
     )
-    active_ai_provider = configured_ai_provider()
+    active_ai_provider = active_ai_provider or configured_ai_provider()
     # Kimi composes every explicit documented request. The existing deterministic
     # summaries remain the resilient path while Kimi is not configured and avoid
     # changing the legacy providers' latency contract.
@@ -5411,7 +5578,7 @@ def client_help():
     if not use_local_documented_summary:
         if not active_ai_provider["name"]:
             return jsonify({"success": False, "error": "Aucune clé IA n’est configurée sur le serveur."}), 503
-        if not _check_ai_rate_limit():
+        if not ai_rate_checked and not _check_ai_rate_limit():
             return jsonify({"success": False, "error": "Trop de requetes IA. Reessayez dans une heure."}), 429
 
     query_plan["context_product_ids"] = context_product_ids
@@ -5425,7 +5592,10 @@ def client_help():
         8 if query_plan.get("intent") in {"headache_relief", "fever_relief"}
         else (
             12 if use_local_documented_summary
-            else 8 if response_mode == "documented"
+            # Let the documented answerer perform the final semantic filter.
+            # Eight candidates was too narrow for broad store questions and let
+            # early lexical noise displace valid products.
+            else 12 if response_mode == "documented"
             else 16
         )
     )
@@ -5435,7 +5605,11 @@ def client_help():
         diversify_brands=(
             query_plan.get("intent") in {"headache_relief", "fever_relief"}
         ),
-        question=question,
+        question=" ".join(filter(None, [
+            question,
+            str(query_plan.get("corrected_query", "") or ""),
+            " ".join(query_plan.get("must_include") or []),
+        ])),
     )
     documents = []
     if response_mode == "documented":

@@ -96,8 +96,9 @@ SEARCH_STOPWORDS = {
     # tokens and pulled in unrelated products. Keep in sync with config.js.
     "besoin", "cherche", "cherchez", "chose", "choses", "conseil", "conseillez",
     "contre", "donner", "faudrait", "faut", "madame", "medicament", "medicaments",
-    "meilleur", "meilleure", "monsieur", "peut", "peux", "plait", "prendre",
-    "produit", "produits", "quelque", "quelques", "quoi", "recommande",
+    "est", "meilleur", "meilleure", "monsieur", "peut", "peux", "plait",
+    "pourquoi", "prendre", "produit", "produits", "quel", "quelle", "quels",
+    "quelles", "quelque", "quelques", "quoi", "recommande",
     "recommandez", "suggestion", "svp", "veut", "veux", "voudrais",
     # Request-shaping words describe how to present an answer, not what product
     # to retrieve. Keeping them in long questions flooded the candidate list.
@@ -108,7 +109,8 @@ SEARCH_STOPWORDS = {
     "laquelle", "lesquelles", "lequel", "lesquels", "magasin", "montrer",
     "montre", "qu", "saveur", "saveurs", "show", "sorte", "sortes", "store",
     "te", "tell", "tout", "tous", "toute", "toutes", "tu", "type", "types",
-    "usage", "usages", "use", "uses", "utiliser", "vous", "you",
+    "should", "sont", "usage", "usages", "use", "uses", "utiliser", "vous",
+    "why", "you",
 }
 
 # ── Intent lexicon ───────────────────────────────────────────────────────────────
@@ -392,6 +394,9 @@ def _reference_corpus(db):
             name = normalize_search_text(official_name)
             brand = normalize_search_text(verified_brand)
             desc = normalize_search_text(available_description)
+            identity_hay = " ".join([
+                name, brand, normalize_search_text(verified.get("description", "")),
+            ])
             rows.append({
                 "barcode": d.get("barcode", ""), "name": official_name,
                 "brand": verified_brand, "description": available_description,
@@ -412,6 +417,7 @@ def _reference_corpus(db):
                     name, brand, desc,
                     " ".join(normalize_search_text(item.get("value", "")) for item in identifiers),
                 ]),
+                "_identity_hay": identity_hay,
                 "_tokens": tuple(name.split()),
                 "_brand_tokens": tuple(brand.split()),
             })
@@ -427,6 +433,7 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
     matches ('advil extra fort') outrank the generic one ('advil'). Intent
     (symptom→category, capped at 300) and abbreviations floor the score."""
     name, brand, hay, bc, toks = row["_name"], row["_brand"], row["_hay"], row["_bc"], row["_tokens"]
+    identity_hay = row.get("_identity_hay", hay)
     score = 0
     if dq and bc:
         if bc == dq: score += 1200
@@ -466,7 +473,8 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
         for t in intent_terms:          # (uncapped, 'toux' ranked dishwasher 'pastilles'
             if name.startswith(t): ib = 300; break    # above real cough syrup)
             elif t in name: ib = max(ib, 300)
-            elif t in hay: ib = max(ib, 200)
+            elif t in identity_hay: ib = max(ib, 200)
+            elif t in hay: ib = max(ib, 80)
             else:
                 # Same abbreviated-name rule as above: 'dormir' expands to
                 # 'melatonine', which must reach a product named 'MELAT …'.
@@ -764,12 +772,9 @@ def _product_search_row(item, aliases=(), identifiers=()):
 
     name = normalize_search_text(item.get("name", ""))
     brand = normalize_search_text(verified("brand"))
-    hay = " ".join([
+    verified_semantics = " ".join([
         name, brand,
-        # A description is a retrieval clue, not an identity key.  Use the
-        # available text for search while retaining its verification status on
-        # the product returned to the employee and to the AI.
-        normalize_search_text(item.get("description", "")),
+        normalize_search_text(verified("description")),
         normalize_search_text(verified("official_name_fr")),
         normalize_search_text(verified("official_name_en")),
         normalize_search_text(verified("category")),
@@ -783,6 +788,13 @@ def _product_search_row(item, aliases=(), identifiers=()):
         normalize_search_text(verified("compatibility")),
         normalize_search_text(verified("purpose")),
         normalize_search_text(verified("route_of_administration")),
+    ])
+    hay = " ".join([
+        verified_semantics,
+        # Available unverified descriptions remain searchable, but they are
+        # evidence rather than identity and therefore receive less semantic
+        # weight than verified fields.
+        normalize_search_text(item.get("description", "")),
         " ".join(normalize_search_text(alias) for alias in aliases),
         " ".join(
             normalize_search_text(identifier.get("value", ""))
@@ -794,6 +806,7 @@ def _product_search_row(item, aliases=(), identifiers=()):
         "_name": name,
         "_brand": brand,
         "_hay": hay,
+        "_identity_hay": verified_semantics,
         "_tokens": tuple(name.split()),
         "_brand_tokens": tuple(brand.split()),
     }
@@ -1246,7 +1259,6 @@ _HEADACHE_RELIEF_TERMS = (
 _PADDED_HEADACHE_RELIEF_TERMS = tuple(
     f" {term} " for term in _HEADACHE_RELIEF_TERMS
 )
-
 
 def _is_headache_request(query):
     """Recognize a headache as a phrase, never from the body-part word alone."""
@@ -2059,16 +2071,25 @@ def planogram_metadata(existing, reference, barcode, product_code=""):
 
 
 def update_product_metadata_from_reference(
-    db, product, reference, now=None, match_method="exact_gtin"
+    db, product, reference, now=None, match_method="exact_gtin",
+    promote_higher_priority=False,
 ):
     """Attach only exact, trusted, conflict-free metadata and retain evidence."""
     original = dict(product or {})
     if not original.get("id"):
         return False
     timestamp = now or utc_now_iso()
-    assessment = assess_metadata_candidate(original, reference, match_method=match_method)
     source = str(reference.get("source", "") or "")
     source_url = str(reference.get("source_url", "") or "")
+    source_type, source_priority = classify_source(source, source_url)
+    assessment_input = original
+    if promote_higher_priority and source_type == "store_catalog":
+        assessment_input = dict(original)
+        assessment_input["description"] = ""
+        assessment_input["image_url"] = ""
+    assessment = assess_metadata_candidate(
+        assessment_input, reference, match_method=match_method
+    )
     conflicts = dict(reference.get("_conflicts") or {})
     for issue in assessment.issues:
         create_review_issue(
@@ -2109,6 +2130,24 @@ def update_product_metadata_from_reference(
         field_auto_apply = assessment.accepted and (
             field_verified if field_evidence else assessment.auto_apply
         )
+        current_evidence = active_field_evidence(
+            db, original["id"], field
+        ) if current else {}
+        can_promote = bool(
+            promote_higher_priority
+            and source_type == "store_catalog"
+            and field in {"brand", "description", "image_url"}
+            and current
+            and current != incoming
+            and field_auto_apply
+            and current_evidence.get("source_type") != "manual"
+            and (
+                not current_evidence
+                or source_priority > int(
+                    current_evidence.get("source_priority") or 0
+                )
+            )
+        )
         previous_evidence = field_evidence_for_value(
             db, original["id"], field, incoming
         )
@@ -2121,9 +2160,15 @@ def update_product_metadata_from_reference(
             match_method=match_method, confidence=field_confidence,
             verification_status=status, imported_at=timestamp,
             last_verified_at=timestamp if status == "verified" else "",
-            active=bool(current == incoming and status == "verified"),
+            active=bool(
+                status == "verified" and (current == incoming or can_promote)
+            ),
         )
         if current and current != incoming:
+            if can_promote:
+                merged[field] = incoming
+                changed_fields[field] = incoming
+                continue
             issue_type = {
                 "image_url": "possible_wrong_image",
                 "description": "possible_wrong_description",
@@ -3741,11 +3786,13 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
 
         fuzzy = _fuzzy_product_score(row, fuzzy_tokens)
         hay = row["_hay"]
+        identity_hay = row.get("_identity_hay", hay)
         bm25 = 0.0
         if retrieval_token_set:
             doc_length = max(1, hay.count(" ") + 1)
             for token in retrieval_token_set:
-                frequency = _normalized_token_count(hay, token)
+                identity_frequency = _normalized_token_count(identity_hay, token)
+                frequency = identity_frequency or _normalized_token_count(hay, token)
                 if not frequency:
                     continue
                 df = document_frequency.get(token, 0)
@@ -3755,7 +3802,11 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
                 denominator = frequency + 1.2 * (
                     1 - 0.75 + 0.75 * doc_length / average_length
                 )
-                bm25 += inverse_frequency * ((frequency * 2.2) / denominator)
+                evidence_weight = 1.0 if identity_frequency else 0.3
+                bm25 += (
+                    inverse_frequency * ((frequency * 2.2) / denominator)
+                    * evidence_weight
+                )
 
         must_hits = sum(1 for value in normalized_must_include if value in hay)
         exclusion_penalty = 260 if any(value in hay for value in exclude) else 0

@@ -58,6 +58,61 @@ class ProductDataAccuracyTests(unittest.TestCase):
             gtin_identity_key("63848966068"),
         )
 
+    def test_exact_familiprix_page_replaces_lower_quality_description(self):
+        db = self.make_db()
+        barcode = "063848966068"
+        upsert_reference_candidate(db, {
+            "barcode": barcode,
+            "name": "BIOMEDIC PRODUCT",
+            "description": "Generic marketing description.",
+            "image_url": "https://images.example/generic.jpg",
+            "source": "Open Products Facts",
+        }, imported_at="2026-01-01T00:00:00Z")
+
+        upsert_reference_candidate(db, {
+            "barcode": barcode,
+            "name": "BIOMEDIC PRODUCT",
+            "description": "Exact package description from the retailer.",
+            "image_url": "https://images.example/exact.jpg",
+            "product_code": "189026",
+            "source": "Familiprix",
+            "source_url": "https://magasiner.familiprix.com/fr/p/189026",
+        }, imported_at="2026-01-02T00:00:00Z", promote_higher_priority=True)
+
+        row = dict(db.execute(
+            "SELECT * FROM product_reference WHERE barcode=?", (barcode,)
+        ).fetchone())
+        self.assertEqual(
+            row["description"],
+            "Exact package description from the retailer.",
+        )
+        self.assertEqual(row["image_url"], "https://images.example/exact.jpg")
+
+    def test_exact_familiprix_refresh_does_not_overwrite_manual_description(self):
+        db = self.make_db()
+        barcode = "063848966068"
+        upsert_reference_candidate(db, {
+            "barcode": barcode,
+            "name": "BIOMEDIC PRODUCT",
+            "description": "Description vérifiée par la gestionnaire.",
+            "source": "Manual manager verification",
+        }, imported_at="2026-01-01T00:00:00Z")
+
+        upsert_reference_candidate(db, {
+            "barcode": barcode,
+            "name": "BIOMEDIC PRODUCT",
+            "description": "Description Familiprix plus récente.",
+            "source": "Familiprix",
+            "source_url": "https://magasiner.familiprix.com/fr/p/189026",
+        }, imported_at="2026-01-02T00:00:00Z", promote_higher_priority=True)
+
+        row = dict(db.execute(
+            "SELECT * FROM product_reference WHERE barcode=?", (barcode,)
+        ).fetchone())
+        self.assertEqual(
+            row["description"], "Description vérifiée par la gestionnaire."
+        )
+
     def test_same_upc_with_different_package_count_requires_review(self):
         result = assess_metadata_candidate(
             {"barcode": "063848966068", "name": "Advil 50 comprimes"},

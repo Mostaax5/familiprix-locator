@@ -696,7 +696,9 @@ def record_reference_evidence(
         return False
 
 
-def upsert_reference_candidate(db, candidate, *, imported_at=""):
+def upsert_reference_candidate(
+    db, candidate, *, imported_at="", promote_higher_priority=False
+):
     """Store one exact-package catalogue candidate without field guessing.
 
     Conflicting values are retained as evidence and returned to the caller for
@@ -718,12 +720,49 @@ def upsert_reference_candidate(db, candidate, *, imported_at=""):
     existing = next((row for row in rows if str(row.get("barcode", "")) == barcode), None)
     if existing is None and len(rows) == 1:
         existing = rows[0]
-    anchor = existing or {"barcode": barcode, "name": item.get("name", ""), "brand": item.get("brand", "")}
+    anchor = existing or {
+        "barcode": barcode, "name": item.get("name", ""),
+        "brand": item.get("brand", ""),
+    }
+    if promote_higher_priority and source_type == "store_catalog":
+        # A stale description or image must not prevent an exact Familiprix UPC
+        # page from correcting that same field. Stable identity fields still
+        # participate in package and brand conflict detection.
+        anchor = dict(anchor)
+        anchor["description"] = ""
+        anchor["image_url"] = ""
     assessment = assess_metadata_candidate(anchor, item, match_method="exact_gtin")
     valid = bool(canonical_gtin(barcode, require_valid=True))
     can_verify = valid and assessment.auto_apply
     evidence_status = "verified" if can_verify else "requires_review"
     source_record_id = str(item.get("source_record_id", "") or item.get("product_code", "") or barcode)
+
+    promotable_fields = {"brand", "description", "image_url"}
+    promoted_fields = set()
+
+    def can_promote(field, current, incoming):
+        if (
+            not promote_higher_priority
+            or source_type != "store_catalog"
+            or field not in promotable_fields
+            or not can_verify
+            or not current
+            or current == incoming
+        ):
+            return False
+        evidence_row = db.execute(
+            """SELECT source_type, source_priority
+               FROM product_reference_evidence
+               WHERE gtin_key=? AND field_name=? AND active=1
+               ORDER BY source_priority DESC, confidence DESC, id DESC LIMIT 1""",
+            (key, field),
+        ).fetchone()
+        evidence = dict(evidence_row) if evidence_row else {}
+        if evidence.get("source_type") == "manual":
+            return False
+        return not evidence or source_priority > int(
+            evidence.get("source_priority") or 0
+        )
 
     conflicts = []
     for field in REFERENCE_FIELDS:
@@ -731,7 +770,10 @@ def upsert_reference_candidate(db, candidate, *, imported_at=""):
         if not incoming:
             continue
         current = str((existing or {}).get(field, "") or "").strip()
-        active = bool(can_verify and (not current or current == incoming))
+        promote = can_promote(field, current, incoming)
+        if promote:
+            promoted_fields.add(field)
+        active = bool(can_verify and (not current or current == incoming or promote))
         record_reference_evidence(
             db, barcode, field, incoming, source=source, source_url=source_url,
             source_record_id=source_record_id, match_method="exact_gtin",
@@ -739,7 +781,7 @@ def upsert_reference_candidate(db, candidate, *, imported_at=""):
             imported_at=imported_at, last_verified_at=imported_at if can_verify else "",
             active=active,
         )
-        if current and current != incoming:
+        if current and current != incoming and not promote:
             conflicts.append({
                 "type": "multiple_possible_matches", "field": field,
                 "reason": "conflicting_reference_value", "existing": current,
@@ -755,6 +797,8 @@ def upsert_reference_candidate(db, candidate, *, imported_at=""):
             incoming = str(item.get(field, "") or "").strip()
             current = str(existing.get(field, "") or "").strip()
             if incoming and not current and can_verify:
+                updates[field] = incoming
+            elif incoming and field in promoted_fields:
                 updates[field] = incoming
         updates.update({
             "gtin_key": key,

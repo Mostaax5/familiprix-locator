@@ -72,8 +72,9 @@ const SEARCH_STOPWORDS = new Set([
   // Filler words of a spoken client request — mirror of routes/products.py.
   'besoin','cherche','cherchez','chose','choses','conseil','conseillez',
   'contre','donner','faudrait','faut','madame','medicament','medicaments',
-  'meilleur','meilleure','monsieur','peut','peux','plait','prendre',
-  'produit','produits','quelque','quelques','quoi','recommande',
+  'est','meilleur','meilleure','monsieur','peut','peux','plait','pourquoi','prendre',
+  'produit','produits','quel','quelle','quels','quelles','quelque','quelques',
+  'quoi','recommande',
   'recommandez','suggestion','svp','veut','veux','voudrais',
   // Request-shaping words affect presentation, not product retrieval.
   'all','available','avoir','avons','context','contexts','contexte','contextes',
@@ -81,7 +82,8 @@ const SEARCH_STOPWORDS = new Set([
   'explain','explique','expliquer','flavor','flavors','flavour','flavours','gout','gouts',
   'have','laquelle','lesquelles','lequel','lesquels','magasin','montrer','montre','qu',
   'saveur','saveurs','show','sorte','sortes','store','te','tell','tout','tous','toute',
-  'toutes','tu','type','types','usage','usages','use','uses','utiliser','vous','you'
+  'should','sont','toutes','tu','type','types','usage','usages','use','uses',
+  'utiliser','vous','why','you'
 ]);
 
 window.AppConfig = { STORAGE_KEYS, LOCKED_TABS, SEARCH_STOPWORDS, STORES };
