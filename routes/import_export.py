@@ -1187,9 +1187,9 @@ def _import_planogram_catalog_locked():
                 WHERE gtin_key IN ({placeholders})
                   AND (
                     TRIM(COALESCE(description,''))=''
-                    OR enrich_status LIKE 'no_match%'
+                    OR enrich_status LIKE ?
                   )""",
-            tuple(keys),
+            (*keys, "no_match%"),
         )
 
     # Link descriptions/images that were enriched before this import to all

@@ -2804,9 +2804,9 @@ def _process_planogram_post_import_job(job):
                                WHERE gtin_key=?
                                  AND (
                                    TRIM(COALESCE(description,''))=''
-                                   OR enrich_status LIKE 'no_match%'
+                                   OR enrich_status LIKE ?
                                  )""",
-                            (reference_key,),
+                            (reference_key, "no_match%"),
                         )
                     for field in item.get("verified_fields") or []:
                         if field not in FIELD_NAMES:

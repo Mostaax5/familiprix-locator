@@ -5705,11 +5705,12 @@ def _catalog_description_coverage(db):
                       THEN 1 ELSE 0 END) AS thin,
              SUM(CASE WHEN LENGTH(TRIM(COALESCE(description,''))) >= 55
                       THEN 1 ELSE 0 END) AS usable,
-             SUM(CASE WHEN LOWER(COALESCE(source,'')) LIKE '%familiprix%'
+             SUM(CASE WHEN LOWER(COALESCE(source,'')) LIKE ?
                            AND TRIM(COALESCE(description,''))<>''
                       THEN 1 ELSE 0 END) AS exact_familiprix
            FROM product_reference
-           WHERE TRIM(COALESCE(name,'')) <> ''"""
+           WHERE TRIM(COALESCE(name,'')) <> ''""",
+        ("%familiprix%",),
     ).fetchone()
     values = dict(row) if row else {}
     return {
@@ -5882,7 +5883,9 @@ def catalog_needs_description_count():
     n = row["n"] if isinstance(row, dict) else row[0]
     no_match = db.execute(
         "SELECT COUNT(*) AS n FROM product_reference "
-        "WHERE enrich_status LIKE 'no_match%'").fetchone()
+        "WHERE enrich_status LIKE ?",
+        ("no_match%",),
+    ).fetchone()
     nm = no_match["n"] if isinstance(no_match, dict) else no_match[0]
     return jsonify({"needs_description": int(n or 0), "no_match": int(nm or 0)})
 
