@@ -935,7 +935,8 @@ def parse_familiprix_product_page(html, url, barcode, barcode_candidates=None,
     }, html)
 
 
-def lookup_familiprix_product(barcode, barcode_candidates=None, product_code=""):
+def lookup_familiprix_product(barcode, barcode_candidates=None, product_code="",
+                              direct_only=False):
     barcode_candidates = barcode_candidates or build_barcode_candidates(barcode)
     clean_product_code = normalized_digits(product_code)
     if clean_product_code and len(clean_product_code) <= 18:
@@ -954,6 +955,8 @@ def lookup_familiprix_product(barcode, barcode_candidates=None, product_code="")
             )
             if direct_product:
                 return direct_product
+    if direct_only:
+        return None
 
     search_terms = list(dict.fromkeys(
         value for value in (
@@ -5465,6 +5468,7 @@ def _catalog_enrich_worker():
                     barcode,
                     build_barcode_candidates(barcode),
                     product_code=r.get("product_code", ""),
+                    direct_only=True,
                 )
                 if not online:
                     online = lookup_product_online(

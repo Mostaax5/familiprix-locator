@@ -125,6 +125,14 @@ class ClientRagTests(unittest.TestCase):
             )
         self.assertIsNone(mismatch)
 
+        requested_urls.clear()
+        with patch("routes.ai.fetch_text", side_effect=fake_fetch):
+            direct_mismatch = lookup_familiprix_product(
+                "063000000000", product_code="120407", direct_only=True
+            )
+        self.assertIsNone(direct_mismatch)
+        self.assertEqual(len(requested_urls), 1)
+
     def test_familiprix_page_imports_readable_description_and_exact_facts(self):
         html = """
           <script type="application/ld+json">
