@@ -1232,6 +1232,9 @@ _HEADACHE_RELIEF_TERMS = (
     "aspirine", "aspirin", "aas", "asa", "analgesique", "antidouleur",
     "pain reliever", "pain relief", "soul douleur", "soul m tete", "migraine",
 )
+_PADDED_HEADACHE_RELIEF_TERMS = tuple(
+    f" {term} " for term in _HEADACHE_RELIEF_TERMS
+)
 
 
 def _is_headache_request(query):
@@ -1250,18 +1253,16 @@ def _is_fever_request(query):
     return bool(set(norm.split()).intersection({"fievre", "fever", "febrile"}))
 
 
-def _headache_relief_named_product(value):
+def _headache_relief_named_product(value, normalized=False):
     """Require the sellable product's name to identify a pain-relief family.
 
     Descriptions are useful for ranking, but imported enrichment can be stale or
     wrong. A contaminated description must never turn an unrelated room
     fragrance, cough product, or toothbrush into a headache recommendation.
     """
-    padded = f" {normalize_search_text(value)} "
-    return any(
-        f" {normalize_search_text(term)} " in padded
-        for term in _HEADACHE_RELIEF_TERMS
-    )
+    text = str(value or "")
+    padded = f" {text if normalized else normalize_search_text(text)} "
+    return any(term in padded for term in _PADDED_HEADACHE_RELIEF_TERMS)
 
 
 def client_request_intent(query):
@@ -1469,9 +1470,11 @@ def product_matches_client_request(product, query):
     )
 
 
-def product_query_role_adjustment(query, row):
+def product_query_role_adjustment(query, row, electric_request=None):
     """Rank the requested object before its accessories without hiding either."""
-    if not _is_electric_toothbrush_request(query):
+    if electric_request is None:
+        electric_request = _is_electric_toothbrush_request(query)
+    if not electric_request:
         return 0
     name = str(row.get("_name", "") or "")
     is_replacement = any(marker in name for marker in (
@@ -3070,11 +3073,13 @@ def rank_products_for_query(products, query, limit=60):
     required_concepts = client_required_concept_groups(query)
     excluded_concepts = client_excluded_concept_terms(query)
     analgesic_name_required = _is_headache_request(query) or _is_fever_request(query)
+    electric_request = _is_electric_toothbrush_request(query)
     ranked = []
     for product in products:
         row = _product_search_row(product)
         if analgesic_name_required and not _headache_relief_named_product(
-            f"{row.get('_name', '')} {row.get('_brand', '')}"
+            f"{row.get('_name', '')} {row.get('_brand', '')}",
+            normalized=True,
         ):
             continue
         if not row_matches_client_concepts(
@@ -3085,7 +3090,9 @@ def rank_products_for_query(products, query, limit=60):
             _fast_reference_score(
                 row, nq, dq, qtokens, intent_terms, abbrevs,
             )
-            + product_query_role_adjustment(query, row)
+            + product_query_role_adjustment(
+                query, row, electric_request=electric_request,
+            )
         )
         if score > 0:
             ranked.append((score, product))
@@ -3350,6 +3357,7 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None, field=""):
     required_concepts = client_required_concept_groups(query)
     excluded_concepts = client_excluded_concept_terms(query)
     analgesic_name_required = _is_headache_request(query) or _is_fever_request(query)
+    electric_request = _is_electric_toothbrush_request(query)
     exclude = exclude_barcodes or set()
     ranked = []
     for row in _reference_corpus(db):
@@ -3359,7 +3367,8 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None, field=""):
             continue
         if not field:
             if analgesic_name_required and not _headache_relief_named_product(
-                f"{row.get('_name', '')} {row.get('_brand', '')}"
+                f"{row.get('_name', '')} {row.get('_brand', '')}",
+                normalized=True,
             ):
                 continue
             if not row_matches_client_concepts(
@@ -3377,7 +3386,9 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None, field=""):
                 _fast_reference_score(
                     row, nq, dq, qtokens, intent_terms, abbrevs,
                 )
-                + product_query_role_adjustment(query, row)
+                + product_query_role_adjustment(
+                    query, row, electric_request=electric_request,
+                )
             )
         )
         if score > 0:
@@ -3565,6 +3576,7 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
     analgesic_name_required = (
         _is_headache_request(question) or _is_fever_request(question)
     )
+    electric_request = _is_electric_toothbrush_request(question)
 
     def clean_list(value, max_items=20):
         if not isinstance(value, list):
@@ -3658,7 +3670,8 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
             continue
         seen_documents.add(key)
         if analgesic_name_required and not _headache_relief_named_product(
-            f"{row.get('_name', '')} {row.get('_brand', '')}"
+            f"{row.get('_name', '')} {row.get('_brand', '')}",
+            normalized=True,
         ):
             continue
         if not row_matches_client_concepts(row, required_concepts, excluded_concepts):
@@ -3695,7 +3708,9 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
             + min(260, int(bm25 * 34))
             + (must_hits * 35)
             - exclusion_penalty
-            + product_query_role_adjustment(question, row)
+            + product_query_role_adjustment(
+                question, row, electric_request=electric_request,
+            )
         )
         if exact_upc:
             score = max(score, 2000)
@@ -3882,10 +3897,12 @@ def search_products():
     required_concepts = client_required_concept_groups(query)
     excluded_concepts = client_excluded_concept_terms(query)
     analgesic_name_required = _is_headache_request(query) or _is_fever_request(query)
+    electric_request = _is_electric_toothbrush_request(query)
     ranked = []
     for item, row in corpus:
         if analgesic_name_required and not _headache_relief_named_product(
-            f"{row.get('_name', '')} {row.get('_brand', '')}"
+            f"{row.get('_name', '')} {row.get('_brand', '')}",
+            normalized=True,
         ):
             continue
         if not row_matches_client_concepts(
@@ -3896,7 +3913,9 @@ def search_products():
             _fast_reference_score(
                 row, nq, dq, qtokens, intent_terms, abbrevs,
             )
-            + product_query_role_adjustment(query, row)
+            + product_query_role_adjustment(
+                query, row, electric_request=electric_request,
+            )
         )
         if score > 0:
             ranked.append((score, item))

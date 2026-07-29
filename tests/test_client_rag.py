@@ -205,6 +205,44 @@ class ClientRagTests(unittest.TestCase):
             "Jai mal a la tete et je cherche un analgesique topique",
         ))
 
+    def test_headache_search_normalizes_the_query_not_every_catalogue_term(self):
+        question = "Jai mal a la tete que prendre"
+        corpus = []
+        for index in range(1200):
+            product = {
+                "id": index + 1,
+                "name": (
+                    "TYLENOL 500MG CO100"
+                    if index == 0 else f"PRODUIT DIVERS {index}"
+                ),
+                "brand": "Tylenol" if index == 0 else "Marque",
+                "barcode": str(600000000000 + index),
+                "aisle": "1", "side": "A", "section": "1",
+                "shelf": "1", "position": str(index + 1),
+                "in_stock": 1, "is_plano": 1,
+            }
+            corpus.append((
+                product,
+                search_row(
+                    product["name"], product["brand"],
+                    barcode=product["barcode"],
+                ),
+            ))
+        plan = build_client_query_plan(question, "documented")
+
+        with patch(
+            "routes.products._employee_product_corpus", return_value=corpus,
+        ), patch(
+            "routes.products.get_db", return_value=object(),
+        ), patch(
+            "routes.products.normalize_search_text",
+            wraps=products_module.normalize_search_text,
+        ) as normalize:
+            matches = hybrid_client_candidates(question, plan, limit=8)
+
+        self.assertEqual(matches[0]["name"], "TYLENOL 500MG CO100")
+        self.assertLess(normalize.call_count, 200)
+
     def test_headache_filter_does_not_restore_unrelated_candidates(self):
         candidates = [
             {"id": 1, "name": "ADVIL 200MG CO100", "brand": "Advil"},
