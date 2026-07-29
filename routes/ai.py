@@ -164,6 +164,10 @@ KIMI_DOCUMENTED_REASONING_EFFORT = (
 )
 if KIMI_DOCUMENTED_REASONING_EFFORT not in {"low", "high", "max"}:
     KIMI_DOCUMENTED_REASONING_EFFORT = "high"
+_KIMI_DOCUMENTED_LONG_THINKING = (
+    os.environ.get("KIMI_DOCUMENTED_LONG_THINKING", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
 DEEPSEEK_MODEL   = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash").strip() or "deepseek-v4-flash"
 DEEPSEEK_DOCUMENTED_MODEL = (
@@ -1426,10 +1430,16 @@ def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=F
     }
     if quality_mode and model.startswith("kimi-k3"):
         payload["reasoning_effort"] = KIMI_DOCUMENTED_REASONING_EFFORT
-    elif model.startswith("kimi-k2.6") and not quality_mode:
-        # Query planning is deliberately short. The documented answer call keeps
-        # K2.6 thinking enabled (its default) so reasoning is spent on the answer.
-        payload["thinking"] = {"type": "disabled"}
+    elif model.startswith(("kimi-k2.6", "kimi-k2.5")):
+        # K2.6 long-thinking shares max_tokens with the visible answer and is
+        # intentionally opt-in for this synchronous employee workflow. The
+        # normal documented request still analyses the full question, but does
+        # not spend the HTTP budget on hidden reasoning tokens.
+        if quality_mode and _KIMI_DOCUMENTED_LONG_THINKING:
+            payload["thinking"] = {"type": "enabled"}
+            payload["max_tokens"] = max(16_000, int(max_tokens))
+        else:
+            payload["thinking"] = {"type": "disabled"}
     request_obj = Request(
         f"{KIMI_BASE_URL}/chat/completions",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -3620,7 +3630,7 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             name = str(product.get("name", "") or "").strip()
             if name and excerpt:
                 evidence_items.append((name, excerpt))
-            if len(evidence_items) >= (3 if query_plan.get("needs_comparison") else 1):
+            if len(evidence_items) >= 3:
                 break
         if query_plan.get("needs_comparison") and len(evidence_items) >= 2:
             answer = (
@@ -3631,6 +3641,17 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                 )
                 + " Comparez ensuite l'usage précis, le format et les avertissements sur "
                 "l'emballage; une fiche marquée non vérifiée doit être confirmée."
+            )
+        elif len(evidence_items) >= 2:
+            answer = (
+                "Les options les plus directement liées à la demande sont : "
+                + " ".join(
+                    f"{name} — {excerpt}."
+                    for name, excerpt in evidence_items
+                )
+                + " Le meilleur choix dépend du symptôme précis et des différences "
+                "confirmées sur l'étiquette; ne retenez pas un produit qui partage "
+                "seulement un mot avec la demande."
             )
         elif evidence_items:
             name, excerpt = evidence_items[0]
@@ -4195,7 +4216,9 @@ def _compact_documented_product_context(product, include_identifiers=False):
         "name": str(context.get("name", "") or "")[:300],
         "brand": str(context.get("brand", "") or "")[:160],
         "description": str(context.get("description", "") or "")[:280],
-        "description_verified": bool(context.get("description_verified")),
+        "description_verified": (
+            str(context.get("description_status", "") or "") == "verified"
+        ),
         "data_status": str(context.get("data_status", "") or "")[:60],
         "verified_facts": facts,
     }
@@ -4313,7 +4336,7 @@ def generate_documented_client_answer(question, query_plan, candidates, document
             "candidates": contexts,
             "documents": document_contexts,
         },
-        max_tokens=1800,
+        max_tokens=1200,
         schema_name="client_documented_answer",
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,
@@ -5423,8 +5446,7 @@ def client_help():
             question, follow_up=follow_up, focus_product_id=focus_product_id,
             selected_text=selected_text,
         )
-    local_query_plan = build_client_query_plan(question, response_mode)
-    query_plan = dict(local_query_plan)
+    query_plan = build_client_query_plan(question, response_mode)
     active_ai_provider = {}
     ai_rate_checked = False
     if response_mode != "lookup":
@@ -5435,37 +5457,10 @@ def client_help():
                 "error": "Aucune clé IA n’est configurée sur le serveur.",
             }), 503
 
-        # Kimi reads the complete request before catalogue retrieval. This short,
-        # non-thinking pass produces typo corrections, bilingual concepts and
-        # exclusions; the documented answer call keeps reasoning enabled.
-        if active_ai_provider["name"] == "kimi":
-            if not _check_ai_rate_limit():
-                return jsonify({
-                    "success": False,
-                    "error": "Trop de requêtes IA. Réessayez dans une heure.",
-                }), 429
-            ai_rate_checked = True
-            ai_query_plan = generate_client_query_plan(question, history)
-            if ai_query_plan:
-                query_plan = ai_query_plan
-                specific_local_intent = str(local_query_plan.get("intent", "") or "")
-                if specific_local_intent not in {
-                    "product_lookup", "advice_or_comparison", ""
-                }:
-                    query_plan["intent"] = specific_local_intent
-                query_plan["wants_all"] = bool(
-                    query_plan.get("wants_all") or local_query_plan.get("wants_all")
-                )
-                query_plan["needs_comparison"] = bool(
-                    query_plan.get("needs_comparison")
-                    or local_query_plan.get("needs_comparison")
-                )
-                query_plan["medical"] = bool(
-                    query_plan.get("medical") or local_query_plan.get("medical")
-                )
-                query_plan["planned_by_ai"] = True
-            else:
-                query_plan["planned_by_ai"] = False
+        # Retrieval prepares a small inventory-grounded context locally. Kimi
+        # then reads the complete question, history, plan and candidates in one
+        # request. A separate planning request doubled latency and could time out
+        # before the answer request even started.
 
     # Retrieval is immediate and inventory-safe: only mapped store-plan products
     # can become cards. A direct reply stays inside the products from that thread.
@@ -5485,10 +5480,9 @@ def client_help():
             )
             if previous_user:
                 retrieval_question = f"{previous_user} {question}"
-                if not query_plan.get("planned_by_ai"):
-                    query_plan = build_client_query_plan(
-                        retrieval_question, response_mode
-                    )
+                query_plan = build_client_query_plan(
+                    retrieval_question, response_mode
+                )
         candidates = hybrid_client_candidates(retrieval_question, query_plan, limit=candidate_limit)
     if response_mode != "lookup":
         candidates = filter_client_answer_category(question, candidates)
@@ -5595,8 +5589,8 @@ def client_help():
             # Let the documented answerer perform the final semantic filter.
             # Eight candidates was too narrow for broad store questions and let
             # early lexical noise displace valid products.
-            else 12 if response_mode == "documented"
-            else 16
+            else 8 if response_mode == "documented"
+            else 10
         )
     )
     answer_candidates = select_client_answer_candidates(

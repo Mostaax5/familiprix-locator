@@ -153,6 +153,14 @@ class ClientRagTests(unittest.TestCase):
             "id": 3, "name": "CANESTEN CREME 15G",
             "brand": "Canesten", "barcode": "333",
             "description": "Demandez pourquoi ce produit convient à la peau.",
+        }, {
+            "id": 4, "name": "TYLENOL MAL DOS CA18",
+            "brand": "Tylenol", "barcode": "444",
+            "description": "Soulagement du mal de dos.",
+        }, {
+            "id": 5, "name": "LAKOTA ANALG BIL MAL DOS 88ML",
+            "brand": "Lakota", "barcode": "555",
+            "description": "Analgésique pour le mal de dos.",
         }]
         corpus = [(
             product,
@@ -161,7 +169,10 @@ class ClientRagTests(unittest.TestCase):
                 product["description"], product["barcode"],
             ),
         ) for product in products]
-        question = "Quelle est le meilleur produit pour la gorge et pourquoi"
+        question = (
+            "Quel est le meilleur produit pour le mal de gorge et la toux, "
+            "et pourquoi?"
+        )
 
         with patch("routes.products.get_db", return_value=object()), \
              patch("routes.products._products_corpus", return_value=corpus):
@@ -755,6 +766,7 @@ class ClientRagTests(unittest.TestCase):
             "id": 7, "client_id": "product:7",
             "name": "ADVIL 200MG CO100", "brand": "Advil",
             "description": "Comprimés d'ibuprofène.",
+            "_verified_fields": ["description"],
             "aisle": "Labo", "side": "A", "section": "2",
             "shelf": "4", "position": "1",
         }
@@ -782,12 +794,15 @@ class ClientRagTests(unittest.TestCase):
             )
 
         call = provider.call_args
-        self.assertEqual(call.kwargs["max_tokens"], 1800)
+        self.assertEqual(call.kwargs["max_tokens"], 1200)
         self.assertNotIn("comparisons", call.kwargs["schema"]["properties"])
         compact_payload = call.args[1]
         self.assertNotIn("required_schema", compact_payload)
         self.assertNotIn("locations", compact_payload["candidates"][0])
         self.assertNotIn("field_sources", compact_payload["candidates"][0])
+        self.assertTrue(
+            compact_payload["candidates"][0]["description_verified"]
+        )
         self.assertEqual(result["selected_product_ids"], ["product:7"])
         self.assertEqual(result["comparisons"][0]["candidate_id"], "product:7")
 
@@ -1138,7 +1153,7 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertEqual(payload["max_tokens"], 1100)
 
-    def test_kimi_k26_keeps_thinking_for_documented_answer_only(self):
+    def test_kimi_k26_uses_bounded_non_thinking_mode_by_default(self):
         response = MagicMock()
         response.__enter__.return_value.read.return_value = json.dumps({
             "choices": [{
@@ -1166,7 +1181,9 @@ class ClientRagTests(unittest.TestCase):
                 opener.call_args.args[0].data.decode("utf-8")
             )
 
-        self.assertNotIn("thinking", documented_payload)
+        self.assertEqual(
+            documented_payload["thinking"], {"type": "disabled"}
+        )
         self.assertEqual(plan_payload["thinking"], {"type": "disabled"})
 
     def test_documented_kimi_timeout_makes_only_one_paid_request(self):
@@ -1366,25 +1383,14 @@ class ClientRagTests(unittest.TestCase):
         old_planner.assert_not_called()
         verifier.assert_called_once()
 
-    def test_kimi_reads_the_full_question_before_catalogue_retrieval(self):
+    def test_kimi_reads_the_full_question_in_one_answer_request(self):
         candidate = {
             "id": 1, "client_id": "product:1",
             "name": "BENYLIN SIROP GORGE TOUX 250ML", "brand": "Benylin",
             "barcode": "111", "aisle": "Labo", "side": "A",
             "section": "2", "shelf": "2", "position": "1", "in_stock": 1,
         }
-        ai_plan = {
-            "intent": "symptom_product_advice",
-            "corrected_query": "Meilleur produit pour un mal de gorge",
-            "search_queries": ["mal de gorge", "sore throat", "gorge"],
-            "keywords": ["gorge", "irritation"],
-            "must_include": ["gorge"],
-            "exclude": ["laxatif", "antifongique"],
-            "wants_all": False,
-            "needs_comparison": True,
-            "answer_language": "fr",
-            "medical": True,
-        }
+        question = "Quelle est le meilleur produit pour la gorge et pourquoi"
         documented = {
             "answer": "Le choix dépend des symptômes; ce produit vise la gorge.",
             "selected_product_ids": ["product:1"],
@@ -1407,7 +1413,7 @@ class ClientRagTests(unittest.TestCase):
         ), patch(
             "routes.ai._check_ai_rate_limit", return_value=True
         ), patch(
-            "routes.ai.generate_client_query_plan", return_value=ai_plan
+            "routes.ai.generate_client_query_plan"
         ) as planner, patch(
             "routes.products.hybrid_client_candidates", side_effect=retrieve
         ), patch(
@@ -1421,20 +1427,19 @@ class ClientRagTests(unittest.TestCase):
         ), patch(
             "routes.ai.generate_documented_client_answer",
             return_value=documented,
-        ), patch("routes.ai.log_ai_interaction"):
+        ) as generator, patch("routes.ai.log_ai_interaction"):
             with app.test_client() as client:
                 response = client.post("/api/client/help", json={
-                    "question": (
-                        "Quelle est le meilleur produit pour la gorge et pourquoi"
-                    ),
+                    "question": question,
                     "mode": "documented",
                 })
 
         self.assertEqual(response.status_code, 200)
-        planner.assert_called_once()
-        self.assertTrue(captured["plan"]["planned_by_ai"])
-        self.assertEqual(captured["plan"]["must_include"], ["gorge"])
-        self.assertIn("laxatif", captured["plan"]["exclude"])
+        planner.assert_not_called()
+        generator.assert_called_once()
+        self.assertEqual(generator.call_args.args[0], question)
+        self.assertEqual(captured["question"], question)
+        self.assertEqual(captured["plan"]["corrected_query"], question)
 
     def test_simple_product_lookup_does_not_call_ai(self):
         candidate = {

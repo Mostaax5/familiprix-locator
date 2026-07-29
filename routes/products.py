@@ -96,7 +96,8 @@ SEARCH_STOPWORDS = {
     # tokens and pulled in unrelated products. Keep in sync with config.js.
     "besoin", "cherche", "cherchez", "chose", "choses", "conseil", "conseillez",
     "contre", "donner", "faudrait", "faut", "madame", "medicament", "medicaments",
-    "est", "meilleur", "meilleure", "monsieur", "peut", "peux", "plait",
+    "est", "mal", "male", "maux", "meilleur", "meilleure", "monsieur",
+    "peut", "peux", "plait",
     "pourquoi", "prendre", "produit", "produits", "quel", "quelle", "quels",
     "quelles", "quelque", "quelques", "quoi", "recommande",
     "recommandez", "suggestion", "svp", "veut", "veux", "voudrais",
@@ -223,6 +224,7 @@ SEARCH_ABBREVIATIONS = {
     "traitement": ["trait", "trmt"],
     "vitamine": ["vit"], "vitamines": ["vit"],
     "gouttes": ["gtte", "gttes", "got"], "goutte": ["gtte", "got"],
+    "toux": ["tx"],
     "pastille": ["past"], "pastilles": ["past"],
     "protection": ["prot"],
     "feminine": ["fem"], "feminin": ["fem"],
@@ -3591,6 +3593,54 @@ def _search_corpus_statistics(corpus):
     )
 
 
+def _client_query_anchor_tokens(query, document_frequency, document_count):
+    """Return the rarest literal concepts from the employee's full request.
+
+    Intent expansion is deliberately broad. Requiring at least one distinctive
+    literal concept prevents a shared generic word (for example ``mal``) from
+    turning a throat request into back-pain results. Unknown words are omitted
+    so misspellings can still use the fuzzy matcher.
+    """
+    known = []
+    for token in dict.fromkeys(tokenize_search_query(query)):
+        frequency = int(document_frequency.get(token, 0) or 0)
+        if frequency > 0:
+            known.append((frequency, token))
+    if not known:
+        return ()
+    known.sort(key=lambda item: (item[0], item[1]))
+    minimum_frequency = known[0][0]
+    rare_cutoff = max(minimum_frequency, int(minimum_frequency * 1.5))
+    corpus_cutoff = max(1, int(max(1, document_count) * 0.12))
+    return tuple(
+        token for frequency, token in known
+        if frequency <= rare_cutoff and frequency <= corpus_cutoff
+    )[:4]
+
+
+def _row_matches_query_anchor(row, anchor_tokens):
+    if not anchor_tokens:
+        return True
+    identity_tokens = str(
+        row.get("_identity_hay", row.get("_hay", "")) or ""
+    ).split()
+    for expected in anchor_tokens:
+        abbreviations = set(SEARCH_ABBREVIATIONS.get(expected, ()))
+        for actual in identity_tokens:
+            if actual == expected or actual in abbreviations:
+                return True
+            if (
+                len(actual) >= 4
+                and len(expected) >= 4
+                and (
+                    actual.startswith(expected)
+                    or expected.startswith(actual)
+                )
+            ):
+                return True
+    return False
+
+
 def _client_candidate_id(item, catalog_only=False):
     if not catalog_only and item.get("id") is not None:
         return f"product:{item['id']}"
@@ -3740,6 +3790,11 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         document_frequency, doc_count, average_length = (
             _search_corpus_statistics(corpus)
         )
+    anchor_tokens = ()
+    if not required_concepts:
+        anchor_tokens = _client_query_anchor_tokens(
+            question, document_frequency, doc_count
+        )
     # Fuzzy edit-distance work is needed only for words absent from the store
     # vocabulary. Exact catalogue words already have stronger deterministic
     # scores, so comparing them against every product wastes most search CPU.
@@ -3776,6 +3831,12 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
             normalized=True,
         ):
             continue
+        exact_upc = bool(upc_digits and row["_bc"] in upc_digits)
+        if (
+            not exact_upc
+            and not _row_matches_query_anchor(row, anchor_tokens)
+        ):
+            continue
         if not row_matches_client_concepts(row, required_concepts, excluded_concepts):
             continue
         lexical = 0
@@ -3810,7 +3871,6 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
 
         must_hits = sum(1 for value in normalized_must_include if value in hay)
         exclusion_penalty = 260 if any(value in hay for value in exclude) else 0
-        exact_upc = bool(upc_digits and row["_bc"] in upc_digits)
         score = (
             max(lexical, fuzzy)
             + min(260, int(bm25 * 34))

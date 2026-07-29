@@ -72,7 +72,8 @@ const SEARCH_STOPWORDS = new Set([
   // Filler words of a spoken client request — mirror of routes/products.py.
   'besoin','cherche','cherchez','chose','choses','conseil','conseillez',
   'contre','donner','faudrait','faut','madame','medicament','medicaments',
-  'est','meilleur','meilleure','monsieur','peut','peux','plait','pourquoi','prendre',
+  'est','mal','male','maux','meilleur','meilleure','monsieur','peut','peux','plait',
+  'pourquoi','prendre',
   'produit','produits','quel','quelle','quels','quelles','quelque','quelques',
   'quoi','recommande',
   'recommandez','suggestion','svp','veut','veux','voudrais',

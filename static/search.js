@@ -86,7 +86,7 @@ const SEARCH_ABBREVIATIONS = {
   brosse:['bross','bro'], rasoir:['ras'], rasage:['ras'],
   vaporisateur:['vapo','vap'], nettoyant:['nett','net'],
   traitement:['trait','trmt'], vitamine:['vit'], vitamines:['vit'],
-  gouttes:['gtte','gttes','got'], goutte:['gtte','got'],
+  gouttes:['gtte','gttes','got'], goutte:['gtte','got'], toux:['tx'],
   pastille:['past'], pastilles:['past'], protection:['prot'],
   feminine:['fem'], feminin:['fem'], quotidien:['quot'],
   naturel:['nat'], naturels:['nat'], naturelle:['nat'],
