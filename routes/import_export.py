@@ -8,12 +8,16 @@ import secrets
 import tempfile
 import threading
 import unicodedata
-from flask import Blueprint, request, jsonify, Response, g
+from flask import Blueprint, request, jsonify, Response, g, stream_with_context
 from database import get_db
 from auth import require_editor, utc_now_iso
 from security import record_security_event
 from routes.layout import layout_metrics, normalize_layout_config, valid_aisle_name
-from routes.products import product_payload_error, safe_http_url
+from routes.products import (
+    product_payload_error,
+    release_optional_product_caches,
+    safe_http_url,
+)
 from memory_guard import memory_intensive_task, release_unused_memory
 from product_data import (
     assess_metadata_candidate,
@@ -54,6 +58,9 @@ def _bounded_env_int(name, default, minimum, maximum):
 
 _MAX_PDF_BYTES = _bounded_env_int("PLANOGRAM_PDF_MAX_MB", 20, 1, 40) * 1024 * 1024
 _MAX_PDF_PAGES = _bounded_env_int("PLANOGRAM_PDF_MAX_PAGES", 120, 1, 250)
+_MAX_PDF_PRODUCTS = _bounded_env_int(
+    "PLANOGRAM_PDF_MAX_PRODUCTS", 20_000, 100, 50_000
+)
 _MAX_CATALOG_BYTES = _bounded_env_int("PLANOGRAM_CATALOG_MAX_MB", 24, 1, 40) * 1024 * 1024
 _MAX_CATALOG_PLANOGRAMS = 500
 _MAX_CATALOG_PRODUCTS = 100_000
@@ -115,6 +122,7 @@ def _launch_parse_thread(job_id):
             # to pdfplumber for any unfamiliar document instead of risking a
             # silently incomplete import.
             with memory_intensive_task("planogram_pdf", priority=True):
+                release_optional_product_caches()
                 with _PDF_PARSE_LOCK:
                     products, plano_meta, parse_method = _parse_planogram_file(pdf_path)
             tablettes = {}
@@ -147,6 +155,15 @@ def _launch_parse_thread(job_id):
 
 @import_export_bp.route("/api/export", methods=["GET"])
 def export_database():
+    with memory_intensive_task("database_export", priority=True):
+        release_optional_product_caches()
+        try:
+            return _export_database_locked()
+        finally:
+            release_unused_memory()
+
+
+def _export_database_locked():
     db = get_db()
     products = [dict(p) for p in db.execute("SELECT * FROM products ORDER BY aisle, side, section, shelf, position").fetchall()]
     layouts  = [dict(r) for r in db.execute("SELECT * FROM aisle_layouts ORDER BY aisle").fetchall()]
@@ -157,17 +174,66 @@ def export_database():
         "aisle_layouts": layouts,
         "product_data": build_product_data_backup(db),
     }
-    data = json.dumps(payload, ensure_ascii=False, indent=2)
     filename = f"familiprix-backup-{utc_now_iso()[:10]}.json"
-    return Response(
-        data,
+    fd, path = tempfile.mkstemp(prefix="familiprix-backup-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            json.dump(payload, output, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise
+    products.clear()
+    layouts.clear()
+    payload.clear()
+    release_unused_memory()
+    cleanup_state = {"done": False}
+    cleanup_lock = threading.Lock()
+
+    def cleanup_export():
+        with cleanup_lock:
+            if cleanup_state["done"]:
+                return
+            cleanup_state["done"] = True
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        release_unused_memory()
+
+    def stream_export():
+        try:
+            with open(path, "rb") as source:
+                while True:
+                    chunk = source.read(256 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+        finally:
+            cleanup_export()
+
+    response = Response(
+        stream_with_context(stream_export()),
         mimetype="application/json",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+    response.call_on_close(cleanup_export)
+    return response
 
 
 @import_export_bp.route("/api/import", methods=["POST"])
 def import_database():
+    with memory_intensive_task("database_import", priority=True):
+        release_optional_product_caches()
+        try:
+            return _import_database_locked()
+        finally:
+            release_unused_memory()
+
+
+def _import_database_locked():
     username, error = require_editor()
     if error:
         return error
@@ -697,7 +763,7 @@ def _parse_planogram_pdf_fast(pdf_path):
                         stats["candidate_slots"].add((int(tab), int(pos)))
                     parser._feed_row(values)
                     last_product_coordinate = group["coordinate"]
-                    if len(parser.products) > _MAX_CATALOG_PRODUCTS:
+                    if len(parser.products) > _MAX_PDF_PRODUCTS:
                         raise ValueError("PDF product limit exceeded")
                 if (
                     has_header
@@ -764,7 +830,7 @@ def _parse_planogram_pdf_compatibility(pdf_path):
             tables = page.extract_tables() or []
             for table in tables:
                 parser.feed_table(table)
-                if len(parser.products) > _MAX_CATALOG_PRODUCTS:
+                if len(parser.products) > _MAX_PDF_PRODUCTS:
                     raise ValueError("PDF product limit exceeded")
             del tables
             try:
@@ -776,6 +842,8 @@ def _parse_planogram_pdf_compatibility(pdf_path):
 
 
 def _parse_planogram_file(pdf_path):
+    products = None
+    stats = None
     try:
         products, metadata, stats = _parse_planogram_pdf_fast(pdf_path)
         if _fast_planogram_is_trustworthy(products, stats):
@@ -789,6 +857,11 @@ def _parse_planogram_file(pdf_path):
             "[PLANOGRAM] Fast parse unavailable; using compatibility fallback: "
             f"{type(exc).__name__}."
         )
+    # Do not retain PDFium's full fast-parser result while pdfplumber creates its
+    # own page/table structures for the compatibility pass.
+    products = None
+    stats = None
+    release_unused_memory()
     products, metadata = _parse_planogram_pdf_compatibility(pdf_path)
     return products, metadata, "pdfplumber-fallback"
 
@@ -882,6 +955,15 @@ def parse_planogram_status(job_id):
 
 @import_export_bp.route("/api/import/planogram-catalog", methods=["POST"])
 def import_planogram_catalog():
+    with memory_intensive_task("planogram_catalog", priority=True):
+        release_optional_product_caches()
+        try:
+            return _import_planogram_catalog_locked()
+        finally:
+            release_unused_memory()
+
+
+def _import_planogram_catalog_locked():
     """Bulk-ingest a pre-parsed catalogue of all planograms.
 
     UPC, retailer code, and the printed planogram name are store identity data.

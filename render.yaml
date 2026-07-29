@@ -10,5 +10,9 @@ services:
     autoDeployTrigger: commit
     plan: free
     envVars:
+      # Keep the four-thread worker from retaining one large glibc allocation
+      # arena per thread after catalogue and PDF work has finished.
+      - key: MALLOC_ARENA_MAX
+        value: "2"
       - key: APP_PASSWORD_HASH
         sync: false

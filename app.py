@@ -387,7 +387,10 @@ def _start_self_keepalive():
         # the in-memory search corpora so the first human request is instant —
         # the first visitor after a restart used to pay the whole index build.
         time.sleep(5)
-        for path in ("/api/system/info", "/api/products", "/api/client/find?q=warmup&limit=1"):
+        # Client-find warms the same placed-product search corpus. Do not make
+        # this process download its own multi-megabyte /api/products response
+        # while startup maintenance is also active.
+        for path in ("/api/system/info", "/api/client/find?q=warmup&limit=1"):
             try:
                 req = UrlRequest(f"{base_url}{path}", headers=internal_headers)
                 with opener.open(req, timeout=60) as resp:

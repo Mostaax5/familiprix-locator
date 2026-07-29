@@ -21,7 +21,8 @@ class PerformanceContractTests(unittest.TestCase):
         self.assertIn("0.0.0.0", gunicorn_config)
         self.assertIn("os.environ.get('PORT', '10000')", gunicorn_config)
         self.assertIn("threads = 4", gunicorn_config)
-        self.assertIn("max_requests = 2000", gunicorn_config)
+        self.assertIn("max_requests = 1000", gunicorn_config)
+        self.assertIn("MALLOC_ARENA_MAX", render_config)
 
     def test_planogram_replacement_is_enabled_by_default(self):
         source = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
@@ -116,13 +117,21 @@ class PerformanceContractTests(unittest.TestCase):
         search_ui = (ROOT / "static" / "search.js").read_text(encoding="utf-8")
         template = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
 
-        self.assertIn('_PRODUCTS_PAYLOAD_VERSION = "compact-stream-v3"', product_routes)
+        self.assertIn('_PRODUCTS_PAYLOAD_VERSION = "compact-stream-v4"', product_routes)
         etag_start = product_routes.index("etag = hashlib.sha256")
         self.assertIn("_PRODUCTS_PAYLOAD_VERSION", product_routes[etag_start:etag_start + 300])
         self.assertIn("@_serialized_product_corpus", product_routes)
         self.assertIn("stream_with_context(generate())", product_routes)
         self.assertIn("bootstrap_product_payload(item)", product_routes)
         self.assertIn("_PRODUCT_STREAM_CHUNK_BYTES = 256 * 1024", product_routes)
+        self.assertIn("_PRODUCT_STREAM_LOCK.acquire(blocking=False)", product_routes)
+        self.assertIn("response.call_on_close(close_product_stream)", product_routes)
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        warmup_loop = app_source[
+            app_source.index("for path in ("):
+            app_source.index("while True:", app_source.index("for path in ("))
+        ]
+        self.assertNotIn('"/api/products"', warmup_loop)
         self.assertIn('rel="preconnect" href="https://magasiner.familiprix.com"', template)
         self.assertIn("scheduleRenderedProductImageHydration();", layout_ui)
         self.assertIn('loading="${imagePriority ? \'eager\' : \'lazy\'}"', layout_ui)

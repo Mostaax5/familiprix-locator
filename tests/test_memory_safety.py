@@ -4,6 +4,8 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
+from flask import Flask
+
 from memory_guard import memory_intensive_task, memory_snapshot
 from routes import ai, products
 
@@ -161,6 +163,10 @@ class MemorySafetyTests(unittest.TestCase):
             "section": "2",
             "shelf": "6",
             "position": "1",
+            "brand": "",
+            "description": "",
+            "image_url": "",
+            "search_terms": "",
             "modified_at": "audit-only",
             "primary_source": "audit-only",
             "_identifiers": [{
@@ -177,6 +183,10 @@ class MemorySafetyTests(unittest.TestCase):
 
         self.assertNotIn("modified_at", compact)
         self.assertNotIn("primary_source", compact)
+        self.assertNotIn("brand", compact)
+        self.assertNotIn("description", compact)
+        self.assertNotIn("image_url", compact)
+        self.assertNotIn("search_terms", compact)
         self.assertNotIn("identifiers", compact)
         self.assertNotIn("regulatory_identifiers", compact)
         self.assertEqual(len(compact["_identifiers"]), 1)
@@ -187,6 +197,120 @@ class MemorySafetyTests(unittest.TestCase):
         self.assertEqual(
             public["regulatory_identifiers"][0]["status"], "probable"
         )
+
+    def test_busy_product_bootstrap_returns_retry_without_waiting(self):
+        app = Flask(__name__)
+        self.assertFalse(products._PRODUCT_STREAM_LOCK.locked())
+        products._PRODUCT_STREAM_LOCK.acquire()
+        try:
+            with app.test_request_context("/api/products"), patch.object(
+                products, "get_db", return_value=object(),
+            ), patch.object(
+                products, "products_state_key", return_value=(1,),
+            ), patch.object(
+                products, "product_identifier_state_key", return_value=(2,),
+            ), patch.object(
+                products, "reference_identifier_state_key", return_value=(3,),
+            ), patch.object(
+                products, "client_etag_matches", return_value=False,
+            ):
+                response = products.get_products()
+        finally:
+            products._PRODUCT_STREAM_LOCK.release()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers["Retry-After"], "2")
+        self.assertTrue(response.get_json()["retry"])
+
+    def test_unstarted_product_stream_releases_its_single_flight_slot(self):
+        app = Flask(__name__)
+        self.assertFalse(products._PRODUCT_STREAM_LOCK.locked())
+        with app.test_request_context("/api/products"), patch.object(
+            products, "get_db", return_value=object(),
+        ), patch.object(
+            products, "products_state_key", return_value=(1,),
+        ), patch.object(
+            products, "product_identifier_state_key", return_value=(2,),
+        ), patch.object(
+            products, "reference_identifier_state_key", return_value=(3,),
+        ), patch.object(
+            products, "client_etag_matches", return_value=False,
+        ), patch.object(
+            products, "release_unused_memory",
+        ):
+            response = products.get_products()
+            self.assertTrue(products._PRODUCT_STREAM_LOCK.locked())
+            response.close()
+
+        self.assertFalse(products._PRODUCT_STREAM_LOCK.locked())
+
+    def test_product_stream_uses_and_closes_its_own_database_connection(self):
+        app = Flask(__name__)
+
+        class StreamDatabase:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        stream_db = StreamDatabase()
+        item = {
+            "id": 1, "name": "Advil", "barcode": "1", "product_code": "",
+            "aisle": "1", "side": "A", "section": "1", "shelf": "1",
+            "position": "1", "facings": 1, "is_plano": 1, "in_stock": 1,
+            "linked_position": "", "flipped_label": 0,
+        }
+        with app.test_request_context("/api/products"), patch.object(
+            products, "get_db", return_value=object(),
+        ), patch.object(
+            products, "connect_db", return_value=stream_db,
+        ), patch.object(
+            products, "_products_corpus",
+            return_value=[(item, {"_name": "advil"})],
+        ), patch.object(
+            products, "products_state_key", return_value=(1,),
+        ), patch.object(
+            products, "product_identifier_state_key", return_value=(2,),
+        ), patch.object(
+            products, "reference_identifier_state_key", return_value=(3,),
+        ), patch.object(
+            products, "client_etag_matches", return_value=False,
+        ), patch.object(
+            products, "release_unused_memory",
+        ):
+            response = products.get_products()
+            body = b"".join(response.iter_encoded())
+            response.close()
+
+        self.assertIn(b'"name":"Advil"', body)
+        self.assertTrue(stream_db.closed)
+        self.assertFalse(products._PRODUCT_STREAM_LOCK.locked())
+
+    def test_optional_reference_cache_can_be_released_before_pdf_work(self):
+        original_reference = dict(products._REF_CACHE)
+        original_retries = dict(products._IMAGE_FILL_RETRY_AFTER)
+        try:
+            products._REF_CACHE.update(
+                key=("catalogue",), rows=[{"barcode": "1"}, {"barcode": "2"}],
+                built_at=time.time(),
+            )
+            products._IMAGE_FILL_RETRY_AFTER.clear()
+            products._IMAGE_FILL_RETRY_AFTER.update({
+                "expired": time.time() - 1,
+                "future": time.time() + 60,
+            })
+            with patch.object(products, "release_unused_memory"):
+                released = products.release_optional_product_caches()
+
+            self.assertEqual(released["reference_rows"], 2)
+            self.assertEqual(products._REF_CACHE["rows"], [])
+            self.assertNotIn("expired", products._IMAGE_FILL_RETRY_AFTER)
+            self.assertIn("future", products._IMAGE_FILL_RETRY_AFTER)
+        finally:
+            products._REF_CACHE.clear()
+            products._REF_CACHE.update(original_reference)
+            products._IMAGE_FILL_RETRY_AFTER.clear()
+            products._IMAGE_FILL_RETRY_AFTER.update(original_retries)
 
     def test_bm25_token_counter_does_not_match_substrings(self):
         haystack = "advil confort advil ibuprofene"

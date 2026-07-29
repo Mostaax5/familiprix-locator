@@ -36,9 +36,20 @@ async function apiGetProducts() {
   // 'no-cache' (NOT no-store): the browser keeps the last copy and revalidates
   // with If-None-Match — when nothing changed the server answers an instant 304
   // and the ~1 MB list is served from the phone's own cache.
-  const {res, data} = await apiFetch('/api/products', {cache: 'no-cache'});
-  if (!res.ok) throw new Error('products-fetch');
-  return Array.isArray(data) ? data.map(normalizeProduct) : [];
+  // Render can build one full catalogue safely at a time. If another phone
+  // started that bounded stream first, retry here without occupying another
+  // Gunicorn thread or presenting an error to the employee.
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const {res, data} = await apiFetch('/api/products', {cache: 'no-cache'});
+    if (res.ok) return Array.isArray(data) ? data.map(normalizeProduct) : [];
+    if (res.status !== 503 || !data?.retry) throw new Error('products-fetch');
+    const retryAfter = Math.max(
+      500,
+      Math.min(3000, Number(res.headers.get('Retry-After') || 1) * 1000)
+    );
+    await new Promise(resolve => window.setTimeout(resolve, retryAfter));
+  }
+  throw new Error('products-fetch-busy');
 }
 
 async function apiSearchProducts(query, field='') {

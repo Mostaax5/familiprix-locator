@@ -25,11 +25,11 @@ limit_request_fields = 50
 limit_request_field_size = 8190
 # Any runtime files created by the worker are private to its operating-system user.
 umask = 0o077
-# Recycle the worker every ~2000 requests (± jitter): Python/pdfplumber don't
+# Recycle the worker every ~1000 requests (± jitter): Python/pdfplumber don't
 # always return freed memory to the OS, so over a long uptime RSS creeps up.
 # The previous 500-request interval repeatedly restarted all boot maintenance
 # during a normal workday and created avoidable cold-index windows.
 # (A recycle can kill a background plano parse — the status endpoint detects the
 # dead pid and relaunches it from the stored PDF, so jobs self-heal.)
-max_requests = 2000
-max_requests_jitter = 200
+max_requests = 1000
+max_requests_jitter = 100

@@ -11,7 +11,12 @@ from difflib import SequenceMatcher
 from functools import wraps
 from urllib.parse import urlsplit
 from flask import Blueprint, Response, jsonify, request, stream_with_context
-from database import get_db, DatabaseIntegrityError, product_search_generation
+from database import (
+    connect_db,
+    get_db,
+    DatabaseIntegrityError,
+    product_search_generation,
+)
 from auth import require_editor, utc_now_iso, side_display_label
 from routes.layout import validate_layout_slot, aisle_sort_key
 from memory_guard import (
@@ -504,8 +509,14 @@ _PROD_LOCK = threading.RLock()
 _PROD_REFRESH_LOCK = threading.Lock()
 _PROD_REFRESH_RUNNING = False
 _PROD_IDENTIFIER_DRIFT_TTL_S = 120.0
-_PRODUCTS_PAYLOAD_VERSION = "compact-stream-v3"
+_PRODUCTS_PAYLOAD_VERSION = "compact-stream-v4"
 _PRODUCT_STREAM_CHUNK_BYTES = 256 * 1024
+# A phone bootstrap is several megabytes before compression. Gunicorn has four
+# request threads, so allowing all four to serialize and gzip the catalogue at
+# once can multiply the process RSS enough to trigger Render's memory restart.
+# Extra devices receive a short retry response instead of occupying another
+# server thread while one bounded stream is already in progress.
+_PRODUCT_STREAM_LOCK = threading.Lock()
 
 
 def _serialized_product_corpus(function):
@@ -1631,11 +1642,20 @@ def _compact_search_cache_product(item):
     placement consumed memory without changing employee search results.
     """
     product = dict(item or {})
-    compact = {
-        field: product.get(field)
-        for field in _SEARCH_CACHE_PRODUCT_FIELDS
-        if field in product
+    always_keep = {
+        "id", "name", "barcode", "product_code", "aisle", "side",
+        "section", "shelf", "position", "facings", "is_plano",
+        "in_stock", "linked_position", "flipped_label",
     }
+    compact = {}
+    for field in _SEARCH_CACHE_PRODUCT_FIELDS:
+        if field not in product:
+            continue
+        value = product.get(field)
+        # Most enriched fields are blank for most products. Keeping every blank
+        # key on every shelf placement used several MB without helping search.
+        if field in always_keep or value not in (None, "", [], {}):
+            compact[field] = value
     for field in (
         "_verified_fields", "_field_sources", "_search_aliases", "_identifiers",
     ):
@@ -2822,6 +2842,43 @@ _IMAGE_ERROR_RETRY_SECONDS = 30
 _IMAGE_FILL_MAX_PENDING = 24
 
 
+def release_optional_product_caches():
+    """Drop rebuildable catalogue state before a rare high-memory operation.
+
+    The placed-product corpus stays warm because every employee search depends
+    on it. The reference corpus can be rebuilt from PostgreSQL, so releasing it
+    before PDF/catalogue work creates useful headroom without losing any data.
+    """
+    with _REF_LOCK:
+        reference_rows = len(_REF_CACHE.get("rows") or [])
+        _REF_CACHE.update(gen=-1, key=None, rows=[], built_at=0.0)
+
+    now = time.time()
+    with _IMAGE_FILL_STATE_LOCK:
+        expired = [
+            barcode for barcode, retry_at in _IMAGE_FILL_RETRY_AFTER.items()
+            if retry_at <= now
+        ]
+        for barcode in expired:
+            _IMAGE_FILL_RETRY_AFTER.pop(barcode, None)
+        # The retry map is only a network-throttling convenience. Bound it even
+        # when thousands of catalogue UPCs have no online image.
+        if len(_IMAGE_FILL_RETRY_AFTER) > 4096:
+            keep = dict(sorted(
+                _IMAGE_FILL_RETRY_AFTER.items(),
+                key=lambda entry: entry[1],
+                reverse=True,
+            )[:4096])
+            _IMAGE_FILL_RETRY_AFTER.clear()
+            _IMAGE_FILL_RETRY_AFTER.update(keep)
+
+    release_unused_memory()
+    return {
+        "reference_rows": reference_rows,
+        "expired_image_retries": len(expired),
+    }
+
+
 def persist_image_for_barcode(db, barcode, image_url, now=None, source="", source_url="", candidate=None):
     """Store an exact-package image suggestion; auto-attach only if verified."""
     image_url = str(image_url or "").strip()
@@ -3748,42 +3805,85 @@ def get_products():
     )).encode()).hexdigest()
     if client_etag_matches(etag):
         return "", 304
-    with memory_intensive_task("product_bootstrap", priority=True):
-        products = sorted(
-            _products_corpus(db),
-            key=lambda entry: location_sort_key(entry[0]),
-        )
+    if not _PRODUCT_STREAM_LOCK.acquire(blocking=False):
+        response = jsonify({
+            "success": False,
+            "retry": True,
+            "error": "Le catalogue est deja en cours de chargement.",
+        })
+        response.status_code = 503
+        response.headers["Retry-After"] = "2"
+        return response
+
+    release_state = {"done": False}
+    release_lock = threading.Lock()
+
+    def release_stream_slot():
+        with release_lock:
+            if release_state["done"]:
+                return
+            release_state["done"] = True
+            _PRODUCT_STREAM_LOCK.release()
 
     def generate():
-        first = True
-        chunks = ["["]
-        chunk_size = 1
-        try:
-            for item, _search_row in products:
-                encoded = json.dumps(
-                    bootstrap_product_payload(item),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
+        products = []
+        stream_db = None
+        # Keep the high-memory gate for the complete JSON/compression stream,
+        # not only the database read. This prevents a PDF parse, catalogue job,
+        # or second bootstrap from stacking its peak on this response.
+        with memory_intensive_task("product_bootstrap", priority=True):
+            first = True
+            chunks = ["["]
+            chunk_size = 1
+            try:
+                # Flask closes the request-scoped connection before it starts
+                # iterating a streamed response. Give the stream one explicit
+                # connection and close it in the same generator lifecycle.
+                stream_db = connect_db()
+                products = sorted(
+                    _products_corpus(stream_db),
+                    key=lambda entry: location_sort_key(entry[0]),
                 )
-                piece = encoded if first else f",{encoded}"
-                first = False
-                chunks.append(piece)
-                chunk_size += len(piece)
-                if chunk_size >= _PRODUCT_STREAM_CHUNK_BYTES:
-                    yield "".join(chunks)
-                    chunks = []
-                    chunk_size = 0
-            chunks.append("]")
-            yield "".join(chunks)
-        finally:
-            products.clear()
-            release_unused_memory()
+                for item, _search_row in products:
+                    encoded = json.dumps(
+                        bootstrap_product_payload(item),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    piece = encoded if first else f",{encoded}"
+                    first = False
+                    chunks.append(piece)
+                    chunk_size += len(piece)
+                    if chunk_size >= _PRODUCT_STREAM_CHUNK_BYTES:
+                        yield "".join(chunks)
+                        chunks = []
+                        chunk_size = 0
+                chunks.append("]")
+                yield "".join(chunks)
+            finally:
+                if stream_db is not None:
+                    try:
+                        stream_db.close()
+                    except Exception:
+                        pass
+                products.clear()
+                chunks.clear()
+                release_stream_slot()
+                release_unused_memory()
 
     response = Response(
         stream_with_context(generate()),
         mimetype="application/json",
     )
     response.set_etag(etag, weak=True)
+    # WSGI can close a response before entering its generator (client disconnect,
+    # conditional middleware, etc.). Release the single-flight slot in that case,
+    # and trim once more after Flask-Compress has released its gzip buffers.
+    def close_product_stream():
+        release_stream_slot()
+        release_unused_memory()
+
+    response.call_on_close(close_product_stream)
     return response
 
 
@@ -4964,6 +5064,8 @@ def product_memory_status():
         **memory_snapshot(),
         "product_cache_rows": len(_PROD_CACHE.get("rows") or []),
         "reference_cache_rows": len(_REF_CACHE.get("rows") or []),
+        "image_retry_rows": len(_IMAGE_FILL_RETRY_AFTER),
+        "product_stream_active": _PRODUCT_STREAM_LOCK.locked(),
         "payload_version": _PRODUCTS_PAYLOAD_VERSION,
     })
 
@@ -5030,14 +5132,16 @@ def _quality_audit_worker(product_ids, employee, unchecked_only=False):
         with _QUALITY_AUDIT_LOCK:
             _QUALITY_AUDIT_STATE.update(total=len(ids), scanned=0, issues=0)
         for start in range(0, len(ids), 200):
-            result = audit_product_data(
-                db, ids[start:start + 200], trigger_type="manager_audit",
-                employee=employee,
-            )
-            db.commit()
+            with memory_intensive_task("quality_audit"):
+                result = audit_product_data(
+                    db, ids[start:start + 200], trigger_type="manager_audit",
+                    employee=employee,
+                )
+                db.commit()
             with _QUALITY_AUDIT_LOCK:
                 _QUALITY_AUDIT_STATE["scanned"] += int(result.get("scanned", 0))
                 _QUALITY_AUDIT_STATE["issues"] += int(result.get("issues", 0))
+            release_unused_memory()
             time.sleep(0.02)
         with _QUALITY_AUDIT_LOCK:
             _QUALITY_AUDIT_STATE["completed_at"] = utc_now_iso()
