@@ -501,8 +501,9 @@ _PROD_CACHE = {
     "average_document_length": 1.0, "statistics_rows_id": 0,
 }
 _PROD_LOCK = threading.RLock()
+_PROD_REFRESH_LOCK = threading.Lock()
+_PROD_REFRESH_RUNNING = False
 _PROD_IDENTIFIER_DRIFT_TTL_S = 120.0
-_PROD_STATE_RECHECK_S = 120.0
 _PRODUCTS_PAYLOAD_VERSION = "compact-stream-v3"
 _PRODUCT_STREAM_CHUNK_BYTES = 256 * 1024
 
@@ -517,11 +518,12 @@ def _serialized_product_corpus(function):
 
 
 def _product_corpus_fast_ready():
+    # Product/search writes bump the process-local generation on commit. Media
+    # and audit writes deliberately do not, so a new picture cannot make an
+    # employee search rebuild the whole catalogue inside the request.
     return bool(
         _PROD_CACHE["rows"]
         and _PROD_CACHE.get("generation") == product_search_generation()
-        and time.time() - float(_PROD_CACHE.get("state_checked_at", 0) or 0)
-        < _PROD_STATE_RECHECK_S
     )
 
 
@@ -1043,17 +1045,52 @@ def _products_corpus(db, allow_identifier_stale=False):
 
 
 def _employee_product_corpus(db):
-    """Return a warm corpus without waiting behind background web lookups.
+    """Always return a warm corpus without waiting for catalogue maintenance.
 
-    Only a cold or invalidated rebuild needs the process-wide memory guard.
-    Normal searches allocate very little and must stay immediately available.
+    A plan edit invalidates the generation immediately, but the previous
+    immutable list remains safe to search while one background thread builds
+    and atomically swaps in the new version. Only a genuinely cold process
+    performs a synchronous build; Render warms that process before real use.
     """
-    if _product_corpus_fast_ready():
-        with _PROD_LOCK:
-            if _product_corpus_fast_ready():
-                return _PROD_CACHE["rows"]
+    warm_rows = _PROD_CACHE.get("rows")
+    if warm_rows:
+        if not _product_corpus_fast_ready():
+            _schedule_product_corpus_refresh()
+        return warm_rows
     with memory_intensive_task("product_corpus", priority=True):
         return _products_corpus(db, allow_identifier_stale=True)
+
+
+def _schedule_product_corpus_refresh():
+    """Refresh an invalidated search corpus without blocking employee requests."""
+    global _PROD_REFRESH_RUNNING
+    with _PROD_REFRESH_LOCK:
+        if _PROD_REFRESH_RUNNING:
+            return
+        _PROD_REFRESH_RUNNING = True
+
+    def worker():
+        global _PROD_REFRESH_RUNNING
+        db = None
+        try:
+            from database import connect_db
+
+            db = connect_db()
+            with memory_intensive_task("product_corpus_refresh"):
+                _products_corpus(db, allow_identifier_stale=False)
+        except Exception as exc:
+            print(f"[Recherche] actualisation de l'index impossible: {exc}")
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+            with _PROD_REFRESH_LOCK:
+                _PROD_REFRESH_RUNNING = False
+            release_unused_memory()
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def public_product_payload(item):
