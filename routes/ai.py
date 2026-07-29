@@ -1427,8 +1427,8 @@ def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=F
                        timeout_seconds=None, realtime_model=False):
     """Call Kimi's OpenAI-compatible endpoint with bounded response memory."""
     model = (
-        KIMI_DOCUMENTED_MODEL if quality_mode
-        else KIMI_REALTIME_MODEL if realtime_model
+        KIMI_REALTIME_MODEL if realtime_model
+        else KIMI_DOCUMENTED_MODEL if quality_mode
         else KIMI_MODEL
     )
     payload = {

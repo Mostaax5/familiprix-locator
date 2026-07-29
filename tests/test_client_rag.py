@@ -1199,11 +1199,14 @@ class ClientRagTests(unittest.TestCase):
         with patch(
             "routes.ai.KIMI_REALTIME_MODEL", "moonshot-v1-8k"
         ), patch(
+            "routes.ai.KIMI_DOCUMENTED_MODEL", "kimi-k3"
+        ), patch(
             "routes.ai._safe_urlopen", return_value=response
         ) as opener, patch("routes.ai._log_ai_usage"):
             result = _kimi_json_request(
                 [{"role": "user", "content": "question courte"}],
                 max_tokens=500,
+                quality_mode=True,
                 realtime_model=True,
             )
 
