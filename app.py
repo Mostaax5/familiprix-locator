@@ -395,9 +395,10 @@ def _start_self_keepalive():
                     "utf-8", errors="replace"
                 )
             )
-            if info.get("database_boot_pending") or info.get(
-                "database_boot_error"
-            ):
+            catalogue_schema = info.get("catalogue_schema") or {}
+            # Best-effort index maintenance can keep the broad boot flag true
+            # after every table needed by employee search is already usable.
+            if not catalogue_schema.get("ready"):
                 return False
             request_internal("/api/client/find?q=warmup&limit=1", 60)
             return True

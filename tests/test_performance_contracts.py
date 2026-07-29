@@ -134,7 +134,7 @@ class PerformanceContractTests(unittest.TestCase):
         warmup = app_source[warmup_start:warmup_end]
         self.assertNotIn('"/api/products"', warmup)
         self.assertIn("for _attempt in range(12)", warmup)
-        self.assertIn("database_boot_pending", warmup)
+        self.assertIn('catalogue_schema.get("ready")', warmup)
         self.assertIn('rel="preconnect" href="https://magasiner.familiprix.com"', template)
         self.assertIn("scheduleRenderedProductImageHydration();", layout_ui)
         self.assertIn('loading="${imagePriority ? \'eager\' : \'lazy\'}"', layout_ui)
