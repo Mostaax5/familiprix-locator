@@ -3,6 +3,7 @@ import re
 import time
 import traceback
 import codecs
+import json
 import secrets
 from urllib.parse import urlsplit
 from flask import Flask, render_template, send_from_directory, jsonify, request, g
@@ -382,27 +383,46 @@ def _start_self_keepalive():
 
     internal_headers = internal_request_headers()
 
+    def request_internal(path, timeout):
+        req = UrlRequest(f"{base_url}{path}", headers=internal_headers)
+        with opener.open(req, timeout=timeout) as resp:
+            return resp.read(64 * 1024)
+
+    def try_warm_search():
+        try:
+            info = json.loads(
+                request_internal("/api/system/info", 30).decode(
+                    "utf-8", errors="replace"
+                )
+            )
+            if info.get("database_boot_pending") or info.get(
+                "database_boot_error"
+            ):
+                return False
+            request_internal("/api/client/find?q=warmup&limit=1", 60)
+            return True
+        except Exception:
+            return False
+
     def worker():
         # Warm-up FIRST: right after any (re)start, hit the endpoints that build
         # the in-memory search corpora so the first human request is instant —
         # the first visitor after a restart used to pay the whole index build.
-        time.sleep(5)
         # Client-find warms the same placed-product search corpus. Do not make
         # this process download its own multi-megabyte /api/products response
         # while startup maintenance is also active.
-        for path in ("/api/system/info", "/api/client/find?q=warmup&limit=1"):
-            try:
-                req = UrlRequest(f"{base_url}{path}", headers=internal_headers)
-                with opener.open(req, timeout=60) as resp:
-                    resp.read()
-            except Exception:
-                pass
+        search_warmed = False
+        for _attempt in range(12):
+            time.sleep(5)
+            if try_warm_search():
+                search_warmed = True
+                break
         while True:
             time.sleep(300)
             try:
-                req = UrlRequest(f"{base_url}/api/system/info", headers=internal_headers)
-                with opener.open(req, timeout=30) as resp:
-                    resp.read()
+                request_internal("/api/system/info", 30)
+                if not search_warmed and try_warm_search():
+                    search_warmed = True
             except Exception:
                 pass   # transient failure — the next ping is 5 minutes away
 

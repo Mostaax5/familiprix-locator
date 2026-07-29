@@ -127,11 +127,14 @@ class PerformanceContractTests(unittest.TestCase):
         self.assertIn("_PRODUCT_STREAM_LOCK.acquire(blocking=False)", product_routes)
         self.assertIn("response.call_on_close(close_product_stream)", product_routes)
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
-        warmup_loop = app_source[
-            app_source.index("for path in ("):
-            app_source.index("while True:", app_source.index("for path in ("))
-        ]
-        self.assertNotIn('"/api/products"', warmup_loop)
+        warmup_start = app_source.index("def _start_self_keepalive")
+        warmup_end = app_source.index(
+            "def _finish_persistence_boot", warmup_start
+        )
+        warmup = app_source[warmup_start:warmup_end]
+        self.assertNotIn('"/api/products"', warmup)
+        self.assertIn("for _attempt in range(12)", warmup)
+        self.assertIn("database_boot_pending", warmup)
         self.assertIn('rel="preconnect" href="https://magasiner.familiprix.com"', template)
         self.assertIn("scheduleRenderedProductImageHydration();", layout_ui)
         self.assertIn('loading="${imagePriority ? \'eager\' : \'lazy\'}"', layout_ui)
