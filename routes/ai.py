@@ -43,6 +43,8 @@ _AI_LOGGING_ENABLED = os.environ.get("AI_LOGGING_ENABLED", "").strip().lower() i
 }
 _ai_log_cleanup_lock = threading.Lock()
 _ai_log_last_cleanup = 0.0
+_KIMI_MODELS_CACHE = {"checked_at": 0.0, "models": set()}
+_KIMI_MODELS_LOCK = threading.Lock()
 
 
 def _bounded_log_json(value):
@@ -1424,13 +1426,66 @@ def _parse_chat_json(raw_text):
     return parsed if isinstance(parsed, dict) else None
 
 
+def _available_kimi_models():
+    now = time.time()
+    cached = _KIMI_MODELS_CACHE.get("models") or set()
+    if cached and now - float(_KIMI_MODELS_CACHE.get("checked_at", 0) or 0) < 3600:
+        return set(cached)
+    with _KIMI_MODELS_LOCK:
+        cached = _KIMI_MODELS_CACHE.get("models") or set()
+        if cached and now - float(
+            _KIMI_MODELS_CACHE.get("checked_at", 0) or 0
+        ) < 3600:
+            return set(cached)
+        request_obj = Request(
+            f"{KIMI_BASE_URL}/models",
+            headers={"Authorization": f"Bearer {KIMI_API_KEY}"},
+            method="GET",
+        )
+        try:
+            with _safe_urlopen(request_obj, timeout=3) as response:
+                payload = json.loads(
+                    _read_limited_response(response, max_bytes=250_000).decode(
+                        "utf-8"
+                    )
+                )
+            models = {
+                str(item.get("id", "") or "").strip()
+                for item in payload.get("data", [])
+                if isinstance(item, dict) and str(item.get("id", "") or "").strip()
+            }
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+            models = set()
+        _KIMI_MODELS_CACHE.update(checked_at=now, models=models)
+        return models
+
+
+def _select_kimi_model(quality_mode=False, realtime_model=False):
+    if not realtime_model:
+        return KIMI_DOCUMENTED_MODEL if quality_mode else KIMI_MODEL
+    available = _available_kimi_models()
+    preferences = (
+        KIMI_REALTIME_MODEL,
+        "moonshot-v1-8k",
+        "moonshot-v1-auto",
+        "kimi-k2-turbo-preview",
+        "kimi-k2.5",
+        KIMI_MODEL,
+        "kimi-k2.6",
+    )
+    if available:
+        return next(
+            (model for model in preferences if model in available),
+            sorted(available)[0],
+        )
+    return KIMI_MODEL
+
+
 def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=False,
                        timeout_seconds=None, realtime_model=False):
     """Call Kimi's OpenAI-compatible endpoint with bounded response memory."""
-    model = (
-        KIMI_REALTIME_MODEL if realtime_model
-        else KIMI_DOCUMENTED_MODEL if quality_mode
-        else KIMI_MODEL
+    model = _select_kimi_model(
+        quality_mode=quality_mode, realtime_model=realtime_model
     )
     global _AI_LAST_MODEL
     _AI_LAST_MODEL = model
@@ -2325,6 +2380,7 @@ def generate_verified_client_answer(question, query_plan, candidates, history=No
         schema=_CLIENT_VERIFICATION_SCHEMA,
         question_preview=question,
         realtime_model=True,
+        timeout_seconds=8,
     )
     if not isinstance(parsed, dict):
         return None
@@ -4364,6 +4420,7 @@ def generate_documented_client_answer(question, query_plan, candidates, document
         question_preview=question,
         quality_mode=True,
         realtime_model=True,
+        timeout_seconds=8,
     )
     if not isinstance(parsed, dict):
         return grounded_documented_fallback(query_plan, candidates, documents)

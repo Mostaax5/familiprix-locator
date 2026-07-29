@@ -1201,6 +1201,9 @@ class ClientRagTests(unittest.TestCase):
         ), patch(
             "routes.ai.KIMI_DOCUMENTED_MODEL", "kimi-k3"
         ), patch(
+            "routes.ai._available_kimi_models",
+            return_value={"moonshot-v1-8k", "kimi-k2.6"},
+        ), patch(
             "routes.ai._safe_urlopen", return_value=response
         ) as opener, patch("routes.ai._log_ai_usage"):
             result = _kimi_json_request(
