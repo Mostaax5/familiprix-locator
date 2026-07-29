@@ -5424,7 +5424,11 @@ def _write_enrich_marker():
     status endpoint can detect a dead run (pid changed) and RESUME it alone."""
     try:
         with open(_enrich_marker_path(), "w", encoding="utf-8") as fh:
-            json.dump({**_CATALOG_ENRICH, "pid": os.getpid()}, fh)
+            json.dump({
+                **_CATALOG_ENRICH,
+                "pid": os.getpid(),
+                "version": _CATALOG_ENRICH_VERSION,
+            }, fh)
     except OSError:
         pass
 
@@ -5472,6 +5476,42 @@ def _catalog_enrich_worker():
         except Exception:
             return r, None
 
+    def _placed_products_by_barcode(db, reference_rows):
+        """Load only the shelf products touched by one completed network batch."""
+        placed_by_barcode = {}
+        batch_keys = list(dict.fromkeys(
+            gtin_identity_key(row.get("barcode", "")) for row in reference_rows
+            if gtin_identity_key(row.get("barcode", ""))
+        ))
+        batch_barcodes = list(dict.fromkeys(
+            str(row.get("barcode", "") or "").strip() for row in reference_rows
+            if str(row.get("barcode", "") or "").strip()
+        ))
+        placed_filters = []
+        placed_params = []
+        if batch_keys:
+            placed_filters.append(
+                "gtin_key IN (" + ",".join("?" for _ in batch_keys) + ")"
+            )
+            placed_params.extend(batch_keys)
+        if batch_barcodes:
+            placed_filters.append(
+                "barcode IN (" + ",".join("?" for _ in batch_barcodes) + ")"
+            )
+            placed_params.extend(batch_barcodes)
+        if not placed_filters:
+            return placed_by_barcode
+        placed_query = (
+            "SELECT id, name, barcode, brand, description, image_url, product_code "
+            "FROM products WHERE " + " OR ".join(placed_filters)
+        )
+        for product_row in db.execute(placed_query, tuple(placed_params)):
+            product = dict(product_row)
+            key = gtin_identity_key(product.get("barcode", ""))
+            if key:
+                placed_by_barcode.setdefault(key, {})[product["id"]] = product
+        return placed_by_barcode
+
     attempts_without_progress = 0
     try:
         while attempts_without_progress < 5 and _CATALOG_ENRICH["running"]:
@@ -5506,40 +5546,13 @@ def _catalog_enrich_worker():
                     "barcode LIMIT 100",
                     _CATALOG_ENRICH_DONE_STATUSES,
                 ).fetchall()]
+                # Do not hold a database connection while external catalogues
+                # respond. Search and plan edits remain independent of a slow
+                # product website.
+                db.close()
+                db = None
                 if not rows:
                     break                      # everything processed — real Terminé
-                placed_by_barcode = {}
-                batch_keys = list(dict.fromkeys(
-                    gtin_identity_key(row.get("barcode", "")) for row in rows
-                    if gtin_identity_key(row.get("barcode", ""))
-                ))
-                batch_barcodes = list(dict.fromkeys(
-                    str(row.get("barcode", "") or "").strip() for row in rows
-                    if str(row.get("barcode", "") or "").strip()
-                ))
-                placed_filters = []
-                placed_params = []
-                if batch_keys:
-                    placed_filters.append(
-                        "gtin_key IN (" + ",".join("?" for _ in batch_keys) + ")"
-                    )
-                    placed_params.extend(batch_keys)
-                if batch_barcodes:
-                    placed_filters.append(
-                        "barcode IN (" + ",".join("?" for _ in batch_barcodes) + ")"
-                    )
-                    placed_params.extend(batch_barcodes)
-                placed_query = (
-                    "SELECT id, name, barcode, brand, description, image_url, product_code "
-                    "FROM products WHERE " + " OR ".join(placed_filters)
-                )
-                for product_row in db.execute(
-                    placed_query, tuple(placed_params)
-                ):
-                    product = dict(product_row)
-                    key = gtin_identity_key(product.get("barcode", ""))
-                    if key:
-                        placed_by_barcode.setdefault(key, {})[product["id"]] = product
                 _CATALOG_ENRICH["total"] = _CATALOG_ENRICH["done"] + remaining
                 _CATALOG_ENRICH.pop("error", None)
                 _write_enrich_marker()
@@ -5547,7 +5560,16 @@ def _catalog_enrich_worker():
                     for i in range(0, len(rows), _ENRICH_CHUNK):
                         if not _CATALOG_ENRICH["running"]:
                             return             # deliberate stop — finally cleans up
-                        for r, online in pool.map(_lookup, rows[i:i + _ENRICH_CHUNK]):
+                        lookup_results = list(
+                            pool.map(_lookup, rows[i:i + _ENRICH_CHUNK])
+                        )
+                        if not _CATALOG_ENRICH["running"]:
+                            return
+                        db = connect_db()
+                        placed_by_barcode = _placed_products_by_barcode(
+                            db, [r for r, _online in lookup_results]
+                        )
+                        for r, online in lookup_results:
                             bc = r.get("barcode", "")
                             # Poison-row immunity: a malformed online payload tags the
                             # row as no_match and moves on — it must never kill the run.
@@ -5633,6 +5655,9 @@ def _catalog_enrich_worker():
                             _CATALOG_ENRICH["done"] += 1
                             made_progress = True
                             attempts_without_progress = 0
+                        db.close()
+                        db = None
+                        lookup_results.clear()
                         _write_enrich_marker()   # once per batch — the resume checkpoint
                         # Free the batch's parsed online payloads NOW (some sources
                         # return hundreds of KB per product) — RSS creep OOM'd us once.
@@ -5703,7 +5728,13 @@ def schedule_catalog_enrichment(*, force=False):
         if _CATALOG_ENRICH["running"]:
             return False
         marker = _read_enrich_marker() or {}
-        paused = bool(_CATALOG_ENRICH.get("paused") or marker.get("paused"))
+        marker_is_current = (
+            marker.get("version") == _CATALOG_ENRICH_VERSION
+        )
+        paused = bool(
+            _CATALOG_ENRICH.get("paused")
+            or (marker_is_current and marker.get("paused"))
+        )
         if paused and not force:
             _CATALOG_ENRICH["paused"] = True
             return False
@@ -5763,11 +5794,14 @@ def maybe_resume_enrichment():
         if _CATALOG_ENRICH["running"]:
             return False
         marker = _read_enrich_marker()
-        if marker and marker.get("paused"):
+        marker_is_current = bool(
+            marker and marker.get("version") == _CATALOG_ENRICH_VERSION
+        )
+        if marker_is_current and marker.get("paused"):
             _CATALOG_ENRICH["paused"] = True
             return False
         return schedule_catalog_enrichment(
-            force=bool(marker and marker.get("running"))
+            force=bool(marker_is_current and marker.get("running"))
         )
     except Exception:
         return False
