@@ -2312,7 +2312,7 @@ _CLIENT_DOCUMENTED_SCHEMA = {
     "properties": {
         "answer": {"type": "string"},
         "key_points": {
-            "type": "array", "maxItems": 6,
+            "type": "array", "maxItems": 3,
             "items": {
                 "type": "object",
                 "properties": {
@@ -2325,23 +2325,14 @@ _CLIENT_DOCUMENTED_SCHEMA = {
             },
         },
         "selected_product_ids": {
-            "type": "array", "items": {"type": "string"}, "maxItems": 12,
+            "type": "array", "items": {"type": "string"}, "maxItems": 8,
         },
-        "follow_up_questions": {
-            "type": "array", "items": {"type": "string"}, "maxItems": 4,
-        },
-        "safety_flags": {
-            "type": "array", "items": {"type": "string"}, "maxItems": 5,
-        },
-        "pharmacist_referral": {"type": "boolean"},
-        "pharmacist_reason": {"type": "string"},
         "source_ids": {
             "type": "array", "items": {"type": "string"}, "maxItems": 8,
         },
     },
     "required": [
-        "answer", "key_points", "selected_product_ids", "follow_up_questions",
-        "safety_flags", "pharmacist_referral", "pharmacist_reason", "source_ids",
+        "answer", "key_points", "selected_product_ids", "source_ids",
     ],
     "additionalProperties": False,
 }
@@ -2373,7 +2364,7 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "clairement qu'elle est générale lorsqu'aucun document ne la confirme pour le produit. "
     "N'invente jamais de dose, de durée, d'ingrédient, de bénéfice ou de source. "
     "Reste structuré et précis: la réponse complète doit être facile à parcourir rapidement. "
-    "answer est une réponse directe de 3 à 6 phrases que l'employé peut dire au client. "
+    "answer est une réponse directe de 2 à 4 phrases que l'employé peut dire au client. "
     "La première phrase répond sans détour à la question. Elle doit répondre à « quoi "
     "choisir et pourquoi » lorsque c'est la question, sans se contenter de nommer des produits. "
     "Lorsqu'on demande le meilleur choix, explique d'abord les critères qui changent la décision, "
@@ -2381,12 +2372,12 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "Traite chaque dimension explicitement demandée: par exemple types, saveurs et contexte "
     "d'utilisation doivent recevoir trois réponses distinctes, même si certaines données sont "
     "absentes et doivent être signalées comme telles. "
-    "Donne de 2 à 6 key_points lorsque les preuves le permettent; chaque élément fait au plus "
+    "Donne de 1 à 3 key_points lorsque les preuves le permettent; chaque élément fait au plus "
     "deux phrases. key_points contient les faits décisifs, les différences pratiques et les "
     "limites de l'information, avec des titres très courts. Ne remplis jamais une section avec "
     "du texte générique uniquement pour atteindre ce nombre. Le serveur "
     "ajoutera lui-même les cartes, emplacements et comparaisons produit par produit: ne les "
-    "répète pas. Place les vérifications médicales dans safety_flags. "
+    "répète pas. Le serveur ajoute les vérifications médicales. "
     "Chaque affirmation fondée sur un document cite son source_id exact. Tu peux utiliser tes "
     "connaissances générales pour expliquer un concept ou les critères de choix, mais jamais "
     "pour inventer un attribut d'un produit précis; une connaissance générale non documentée "
@@ -2406,9 +2397,10 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "Pour une demande médicale, "
     "ne pose pas de diagnostic, ne remplace pas l'étiquette et oriente vers le pharmacien en "
     "cas de grossesse, bébé, interaction, allergie, symptômes graves ou persistants, difficulté "
-    "respiratoire, ou incertitude clinique. Retourne uniquement un objet JSON avec exactement "
-    "ces clés: answer, key_points, selected_product_ids, follow_up_questions, safety_flags, "
-    "pharmacist_referral, pharmacist_reason et source_ids. Chaque key_point contient exactement "
+    "respiratoire, ou incertitude clinique. Le serveur ajoute les avertissements, questions de "
+    "suivi, comparaisons et emplacements: ne les génère pas. Retourne uniquement un objet JSON "
+    "avec exactement ces clés: answer, key_points, selected_product_ids et source_ids. "
+    "Chaque key_point contient exactement "
     "heading, detail et source_ids."
 )
 
@@ -4215,7 +4207,7 @@ def _compact_documented_product_context(product, include_identifiers=False):
         "candidate_id": str(context.get("candidate_id", "") or ""),
         "name": str(context.get("name", "") or "")[:300],
         "brand": str(context.get("brand", "") or "")[:160],
-        "description": str(context.get("description", "") or "")[:280],
+        "description": str(context.get("description", "") or "")[:220],
         "description_verified": (
             str(context.get("description_status", "") or "") == "verified"
         ),
@@ -4315,9 +4307,9 @@ def generate_documented_client_answer(question, query_plan, candidates, document
         "source_id": str(document.get("source_id", "") or ""),
         "title": str(document.get("title", "") or "")[:180],
         "publisher": str(document.get("publisher", "") or "")[:100],
-        "evidence": str(document.get("evidence", "") or "")[:700],
+        "evidence": str(document.get("evidence", "") or "")[:500],
         "candidate_ids": (document.get("candidate_ids", []) or [])[:12],
-    } for document in documents[:10]]
+    } for document in documents[:8]]
     compact_plan = {
         key: query_plan.get(key)
         for key in (
@@ -4336,7 +4328,7 @@ def generate_documented_client_answer(question, query_plan, candidates, document
             "candidates": contexts,
             "documents": document_contexts,
         },
-        max_tokens=1200,
+        max_tokens=700,
         schema_name="client_documented_answer",
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,
@@ -4354,6 +4346,19 @@ def generate_documented_client_answer(question, query_plan, candidates, document
     grounded = grounded_documented_fallback(
         query_plan, candidates, documents, degraded=False
     )
+    for key in ("follow_up_questions", "safety_flags"):
+        if not result.get(key):
+            result[key] = grounded.get(key, [])
+    if not result.get("pharmacist_referral"):
+        result["pharmacist_referral"] = bool(
+            grounded.get("pharmacist_referral", False)
+        )
+    if not result.get("pharmacist_reason"):
+        result["pharmacist_reason"] = str(
+            grounded.get("pharmacist_reason", "") or ""
+        )
+    if not result.get("key_points"):
+        result["key_points"] = grounded.get("key_points", [])[:3]
     selected_ids = set(result.get("selected_product_ids") or [])
     result["comparisons"] = [
         comparison for comparison in grounded.get("comparisons", [])

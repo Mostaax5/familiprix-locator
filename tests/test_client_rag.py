@@ -778,10 +778,6 @@ class ClientRagTests(unittest.TestCase):
             "answer": "L'ibuprofène est une option contre la douleur.",
             "key_points": [],
             "selected_product_ids": ["product:7"],
-            "follow_up_questions": [],
-            "safety_flags": [],
-            "pharmacist_referral": False,
-            "pharmacist_reason": "",
             "source_ids": ["store-plan"],
         }
 
@@ -794,8 +790,11 @@ class ClientRagTests(unittest.TestCase):
             )
 
         call = provider.call_args
-        self.assertEqual(call.kwargs["max_tokens"], 1200)
+        self.assertEqual(call.kwargs["max_tokens"], 700)
         self.assertNotIn("comparisons", call.kwargs["schema"]["properties"])
+        self.assertNotIn(
+            "follow_up_questions", call.kwargs["schema"]["properties"]
+        )
         compact_payload = call.args[1]
         self.assertNotIn("required_schema", compact_payload)
         self.assertNotIn("locations", compact_payload["candidates"][0])
@@ -805,6 +804,7 @@ class ClientRagTests(unittest.TestCase):
         )
         self.assertEqual(result["selected_product_ids"], ["product:7"])
         self.assertEqual(result["comparisons"][0]["candidate_id"], "product:7")
+        self.assertTrue(result["safety_flags"])
 
     def test_documented_answer_keeps_products_when_ai_is_unavailable(self):
         product = {
