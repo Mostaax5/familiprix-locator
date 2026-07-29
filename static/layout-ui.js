@@ -4469,10 +4469,17 @@ async function pollCatalogEnrich() {
       const retry = incomplete
         ? ` · <b>cliquez « Enrichir » pour continuer</b>${s.error ? ` (cause: ${esc(s.error)})` : ''}`
         : '';
+      const coverage = s.coverage || {};
+      const catalogue = coverage.total
+        ? ` · Catalogue : <b>${coverage.usable || 0}</b> descriptions utilisables`
+          + ` · ${coverage.thin || 0} courtes · ${coverage.missing || 0} manquantes`
+          + ` · ${coverage.exact_familiprix || 0} de source Familiprix exacte`
+        : '';
       msg.innerHTML = `${head} ${s.done || 0}/${s.total || 0} (${pct}%)${eta} · `
-        + `<b>${s.updated || 0}</b> descriptions/images ajoutées · `
+        + `<b>${s.descriptions || 0}</b> descriptions améliorées · `
+        + `${s.images || 0} images ajoutées · `
         + `${s.linked || 0} produit(s) du plan mis à jour · `
-        + `${s.skipped || 0} sans correspondance fiable${resumed}${retry}`;
+        + `${s.skipped || 0} sans correspondance fiable${catalogue}${resumed}${retry}`;
     }
   }
   const stop = document.getElementById('catalogEnrichStop');

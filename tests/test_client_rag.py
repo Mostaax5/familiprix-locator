@@ -19,6 +19,7 @@ from routes.ai import (
     normalize_documented_client_answer,
     normalize_verified_client_answer,
     normalize_url,
+    parse_familiprix_product_page,
     retrieve_client_documentation,
     select_client_answer_candidates,
     _unconfirmed_identifier_notice,
@@ -109,15 +110,86 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(product["product_code"], "120407")
         self.assertEqual(product["source"], "Familiprix")
         self.assertEqual(
-            product["description"], "Soulage le mal de gorge et la toux."
+            product["description"],
+            "BENYLIN SIROP GORGE ET TOUX 250 ML. "
+            "Soulage le mal de gorge et la toux.",
         )
-        self.assertIn("text=120407", requested_urls[0])
+        self.assertEqual(
+            requested_urls[0],
+            "https://magasiner.familiprix.com/fr/p/000000000000120407",
+        )
 
         with patch("routes.ai.fetch_text", side_effect=fake_fetch):
             mismatch = lookup_familiprix_product(
                 "063000000000", product_code="120407"
             )
         self.assertIsNone(mismatch)
+
+    def test_familiprix_page_imports_readable_description_and_exact_facts(self):
+        html = """
+          <script type="application/ld+json">
+          {
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+              {"item": {"name": "Accueil"}},
+              {"item": {"name": "Santé"}},
+              {"item": {"name": "Rhume et toux"}},
+              {"item": {"name": "Sirops"}},
+              {"item": {"name": "Benylin Mal de Gorge 250ml"}}
+            ]
+          }
+          </script>
+          <script type="application/ld+json">
+          {
+            "@type": "Product",
+            "name": "Benylin Mal de Gorge 250ml",
+            "brand": {"name": "Benylin"},
+            "sku": "120407",
+            "gtin12": "062600264206",
+            "description": "Soulage rapidement :<br>- mal de gorge<br>- toux grasse",
+            "image": "https://images.example/benylin.jpg"
+          }
+          </script>
+          <div class="product-specification-item">
+            <span><b>Forme</b></span><span>SIROP</span>
+          </div>
+          <div class="product-specification-item">
+            <span><b>#DIN</b></span><span>02479869</span>
+          </div>
+          <button class="product-information-section-btn">
+            Avertissements et allégations sur le produit
+          </button>
+          <div class="product-information-section-text">
+            MISES EN GARDE<br>Usages<br>- toux grasse<br>- mal de gorge
+          </div>
+          <button class="product-information-section-btn">Ingrédients</button>
+          <div class="product-information-section-text">
+            Glycérine<br>- eau purifiée
+          </div>
+        """
+        product = parse_familiprix_product_page(
+            html,
+            "https://magasiner.familiprix.com/fr/product/p/000000000000120407",
+            "062600264206",
+            product_code="120407",
+        )
+
+        self.assertIsNotNone(product)
+        self.assertEqual(product["category"], "Santé > Rhume et toux > Sirops")
+        self.assertEqual(product["dosage_form"], "SIROP")
+        self.assertEqual(product["package_size"], "250")
+        self.assertEqual(product["package_unit"], "ml")
+        self.assertIn("mal de gorge; toux grasse", product["description"].lower())
+        self.assertIn("toux grasse; mal de gorge", product["purpose"].lower())
+        self.assertIn("glycérine; eau purifiée", product["ingredients"].lower())
+        self.assertTrue(
+            any(
+                identifier.get("type") == "DIN"
+                and identifier.get("value") == "02479869"
+                and identifier.get("source") == "Familiprix"
+                for identifier in product["regulatory_identifiers"]
+            )
+        )
 
     def test_hybrid_retrieval_corrects_spoken_french_brand_typo(self):
         advil = {"id": 1, "name": "Advil Extra Fort", "brand": "Advil", "barcode": "111"}

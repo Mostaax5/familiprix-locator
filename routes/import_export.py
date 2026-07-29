@@ -1027,6 +1027,7 @@ def _import_planogram_catalog_locked():
             local_by_code.setdefault(code_key, []).append(d)
 
     planos = ref_upserts = enriched = products_seen = review_issues = 0
+    description_retry_keys = set()
     affected_ids = set()
     for plano in payload:
         if not isinstance(plano, dict):
@@ -1079,6 +1080,8 @@ def _import_planogram_catalog_locked():
             identity_result = upsert_reference_candidate(
                 db, identity_candidate, imported_at=now
             )
+            if identity_result.get("gtin_key"):
+                description_retry_keys.add(identity_result["gtin_key"])
             ref_upserts += 1
             has_supplemental_metadata = any(
                 str(metadata_candidate.get(field, "") or "").strip()
@@ -1175,6 +1178,20 @@ def _import_planogram_catalog_locked():
                 if changed:
                     enriched += 1
 
+    ordered_retry_keys = sorted(description_retry_keys)
+    for start in range(0, len(ordered_retry_keys), 400):
+        keys = ordered_retry_keys[start:start + 400]
+        placeholders = ",".join("?" for _ in keys)
+        db.execute(
+            f"""UPDATE product_reference SET enrich_status=''
+                WHERE gtin_key IN ({placeholders})
+                  AND (
+                    TRIM(COALESCE(description,''))=''
+                    OR enrich_status LIKE 'no_match%'
+                  )""",
+            tuple(keys),
+        )
+
     # Link descriptions/images that were enriched before this import to all
     # already-placed copies of the same UPC. Existing/manual values win.
     metadata_linked = sync_reference_metadata_to_products(db, now=now)
@@ -1191,6 +1208,11 @@ def _import_planogram_catalog_locked():
     try:
         from routes.regulatory import schedule_regulatory_enrichment
         schedule_regulatory_enrichment()
+    except Exception:
+        pass
+    try:
+        from routes.ai import schedule_catalog_enrichment
+        schedule_catalog_enrichment()
     except Exception:
         pass
     return jsonify({

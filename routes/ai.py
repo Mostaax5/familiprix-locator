@@ -5,6 +5,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from html import unescape
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -17,6 +18,7 @@ from product_data import (
     classify_source,
     gtin_identity_key,
     gtin_check_digit_valid,
+    normalize_text,
     upsert_reference_identifier,
     upsert_reference_candidate,
 )
@@ -485,9 +487,166 @@ def first_regex(text, patterns):
 
 def clean_html_text(value):
     value = re.sub(r"<[^>]+>", " ", value or "")
-    value = (value.replace("&amp;", "&").replace("&quot;", '"')
-             .replace("&#39;", "'").replace("&nbsp;", " "))
+    value = unescape(value)
     return re.sub(r"\s+", " ", value).strip()
+
+
+def clean_product_description(value, max_chars=900):
+    """Turn source HTML/list fragments into compact, readable catalogue prose."""
+    text = str(value or "")
+    text = re.sub(r"(?i)<\s*br\s*/?\s*>", "; ", text)
+    text = re.sub(r"(?i)</?\s*li\b[^>]*>", "; ", text)
+    text = clean_html_text(text)
+    text = re.sub(r"\s*(?:;|\|)\s*(?:-\s*)?", "; ", text)
+    text = re.sub(r"(?<=:)\s*-\s*", " ", text)
+    text = re.sub(r"\s+-\s+", "; ", text)
+    text = re.sub(r"(?:;\s*){2,}", "; ", text)
+    text = re.sub(r":\s*;\s*", ": ", text)
+    text = re.sub(r";\s+Et\b", "; et", text)
+    text = re.sub(r"\s+([,.;:])", r"\1", text).strip(" ;")
+    if not text:
+        return ""
+    text = text[0].upper() + text[1:]
+    if text[-1] not in ".!?":
+        text += "."
+    if len(text) <= max_chars:
+        return text
+    shortened = text[:max_chars + 1]
+    boundary = max(
+        shortened.rfind(". "),
+        shortened.rfind("; "),
+        shortened.rfind(", "),
+        shortened.rfind(" "),
+    )
+    if boundary >= max_chars // 2:
+        shortened = shortened[:boundary]
+    return shortened.rstrip(" ,;:.") + "."
+
+
+def _json_ld_blocks(html):
+    for block in re.findall(
+        r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>',
+        html or "", flags=re.IGNORECASE | re.DOTALL,
+    ):
+        try:
+            yield json.loads(block.strip())
+        except (TypeError, json.JSONDecodeError):
+            continue
+
+
+def _json_ld_nodes(value, expected_type):
+    nodes = []
+
+    def collect(item):
+        if isinstance(item, dict):
+            raw_type = item.get("@type")
+            types = raw_type if isinstance(raw_type, list) else [raw_type]
+            if any(
+                str(node_type or "").lower() == expected_type.lower()
+                for node_type in types
+            ):
+                nodes.append(item)
+            for nested in item.values():
+                if isinstance(nested, (dict, list)):
+                    collect(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                collect(nested)
+
+    collect(value)
+    return nodes
+
+
+def extract_familiprix_category(html, product_name=""):
+    for payload in _json_ld_blocks(html):
+        for breadcrumb in _json_ld_nodes(payload, "BreadcrumbList"):
+            names = []
+            for entry in breadcrumb.get("itemListElement") or []:
+                if not isinstance(entry, dict):
+                    continue
+                item = entry.get("item")
+                name = (
+                    item.get("name", "") if isinstance(item, dict)
+                    else entry.get("name", "")
+                )
+                name = clean_html_text(str(name or ""))
+                if name:
+                    names.append(name)
+            if len(names) >= 3:
+                # Drop Accueil and the exact product; retain a useful hierarchy.
+                return " > ".join(names[1:-1][-3:])
+    return ""
+
+
+def extract_familiprix_sections(html):
+    sections = {}
+    pattern = re.compile(
+        r'<button[^>]*class="[^"]*product-information-section-btn[^"]*"[^>]*>'
+        r'(.*?)</button>\s*'
+        r'<div[^>]*class="[^"]*product-information-section-text[^"]*"[^>]*>'
+        r'(.*?)</div>',
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for title_html, body_html in pattern.findall(html or ""):
+        title = clean_html_text(title_html).lower()
+        body = clean_product_description(body_html, max_chars=3000)
+        if title and body:
+            sections[title] = body
+    return sections
+
+
+def extract_familiprix_specifications(html):
+    specifications = {}
+    pattern = re.compile(
+        r'<div[^>]*class="[^"]*product-specification-item[^"]*"[^>]*>\s*'
+        r'<span[^>]*>\s*<b[^>]*>(.*?)</b>\s*</span>\s*'
+        r'<span[^>]*>(.*?)</span>',
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for label_html, value_html in pattern.findall(html or ""):
+        label = clean_html_text(label_html).lstrip("#").strip().lower()
+        value = clean_html_text(value_html)
+        if (
+            label and value
+            and value.lower() not in {"n/a", "n.d.", "non disponible"}
+        ):
+            specifications[label] = value
+    return specifications
+
+
+def _source_package_fields(product_name):
+    match = re.search(
+        r"\b(\d+(?:[.,]\d+)?)\s*"
+        r"(ml|l|mg|mcg|g|kg|un|unités?|comprimés?|capsules?|caplets?)\b",
+        str(product_name or ""), flags=re.IGNORECASE,
+    )
+    if not match:
+        return "", ""
+    unit = match.group(2).lower()
+    unit = {
+        "unité": "un", "unités": "un",
+        "comprimé": "comprimés", "capsule": "capsules",
+        "caplet": "caplets",
+    }.get(unit, unit)
+    return match.group(1).replace(",", "."), unit
+
+
+def build_precise_source_description(name, description, *, category="", dosage_form=""):
+    cleaned = clean_product_description(description)
+    if len(cleaned) >= 55:
+        return cleaned
+    exact_name = clean_product_description(name, max_chars=360).rstrip(".")
+    details = []
+    if dosage_form:
+        details.append(f"forme {str(dosage_form).lower()}")
+    if category:
+        details.append(f"catégorie {str(category).split('>')[-1].strip()}")
+    identity = exact_name
+    if details:
+        identity += f" ({', '.join(details)})"
+    if cleaned and normalize_text(cleaned) not in normalize_text(identity):
+        identity += f". {cleaned}"
+    return clean_product_description(identity)
 
 
 def sanitize_title(title, source_name):
@@ -612,7 +771,9 @@ def extract_structured_product_data(html, barcode_candidates=None):
             continue
         name = str(product.get("name", "")).strip()
         brand = extract_structured_brand(product.get("brand"))
-        description = clean_html_text(str(product.get("description", "")).strip())
+        description = clean_product_description(
+            str(product.get("description", "")).strip()
+        )
         image_url = extract_structured_image(product.get("image"))
         product_code = str(
             product.get("sku") or product.get("productID")
@@ -711,11 +872,34 @@ def parse_familiprix_product_page(html, url, barcode, barcode_candidates=None,
         r"<h1[^>]*>(.*?)</h1>", r'<meta property="og:title" content="([^"]+)"', r"<title>(.*?)</title>",
     ])
     title = sanitize_title(clean_html_text(title), "Familiprix")
-    description = structured.get("description") or clean_html_text(first_regex(html, [
+    raw_description = structured.get("description") or first_regex(html, [
         r'<meta name="description" content="([^"]+)"', r'<meta property="og:description" content="([^"]+)"',
-    ]))
+    ])
     image_url = structured.get("image_url") or first_regex(html, [r'<meta property="og:image" content="([^"]+)"'])
     brand = structured.get("brand") or infer_brand_from_title(title)
+    category = extract_familiprix_category(html, title)
+    specifications = extract_familiprix_specifications(html)
+    sections = extract_familiprix_sections(html)
+    dosage_form = specifications.get("forme", "")
+    package_size, package_unit = _source_package_fields(title)
+    purpose = ""
+    warning_section = next((
+        value for section_title, value in sections.items()
+        if "avertissement" in section_title or "allégation" in section_title
+    ), "")
+    usage_match = re.search(
+        r"\bUsages?\b\s*[:;.-]*\s*(.+)$",
+        warning_section, flags=re.IGNORECASE | re.DOTALL,
+    )
+    if usage_match:
+        purpose = clean_product_description(usage_match.group(1), max_chars=700)
+    ingredients = next((
+        value for section_title, value in sections.items()
+        if "ingrédient" in section_title or "ingredient" in section_title
+    ), "")
+    description = build_precise_source_description(
+        title, raw_description, category=category, dosage_form=dosage_form,
+    )
     page_product_code = (
         embedded.get("product_code") or structured.get("product_code")
         or first_regex(html, [
@@ -737,11 +921,40 @@ def parse_familiprix_product_page(html, url, barcode, barcode_candidates=None,
         "image_url": image_url,
         "product_code": str(page_product_code or product_code or "").strip(),
         "source_record_id": str(page_product_code or product_code or barcode).strip(),
+        "category": category,
+        "package_size": package_size,
+        "package_unit": package_unit,
+        "dosage_form": dosage_form,
+        "strength": (
+            specifications.get("teneur", "")
+            if specifications.get("teneur", "").replace("0", "").strip(" ./") else ""
+        ),
+        "ingredients": ingredients,
+        "purpose": purpose,
+        "official_name_fr": title,
     }, html)
 
 
 def lookup_familiprix_product(barcode, barcode_candidates=None, product_code=""):
     barcode_candidates = barcode_candidates or build_barcode_candidates(barcode)
+    clean_product_code = normalized_digits(product_code)
+    if clean_product_code and len(clean_product_code) <= 18:
+        # Familiprix product URLs accept the exact 18-digit internal code and
+        # redirect to the canonical page. This avoids four search-page requests
+        # for the normal planogram path.
+        direct_url = (
+            f"{FAMILIPRIX_BASE_URL}/fr/p/"
+            f"{clean_product_code.zfill(18)}"
+        )
+        direct_html, direct_final_url = fetch_text(direct_url)
+        if direct_html:
+            direct_product = parse_familiprix_product_page(
+                direct_html, direct_final_url or direct_url, barcode,
+                barcode_candidates, product_code=product_code,
+            )
+            if direct_product:
+                return direct_product
+
     search_terms = list(dict.fromkeys(
         value for value in (
             str(product_code or "").strip(),
@@ -750,10 +963,10 @@ def lookup_familiprix_product(barcode, barcode_candidates=None, product_code="")
     ))
     search_urls = []
     for term in search_terms:
-        search_urls.extend([
-            f"https://magasiner.familiprix.com/fr/search?{urlencode({'text': term})}",
-            f"https://magasiner.familiprix.com/fr/search?{urlencode({'q': term})}",
-        ])
+        search_urls.append(
+            f"{FAMILIPRIX_BASE_URL}/fr/search?"
+            f"{urlencode({'text': term})}"
+        )
     for url in search_urls:
         html, final_url = fetch_text(url)
         if not html:
@@ -4765,6 +4978,34 @@ def extract_openai_output_text(payload):
 
 # ── Reference catalog (local, growing product database) ─────────────────────────
 
+def _store_reference_regulatory_candidates(db, product, imported_at):
+    barcode = normalized_digits(product.get("barcode", ""))
+    stored = 0
+    if not barcode:
+        return stored
+    for identifier in product.get("regulatory_identifiers") or []:
+        source = str(identifier.get("source", "") or product.get("source", ""))
+        source_url = str(
+            identifier.get("source_url", "") or product.get("source_url", "")
+        )
+        if upsert_reference_identifier(
+            db, barcode, identifier.get("type", ""),
+            identifier.get("value", ""), authority=HEALTH_CANADA_AUTHORITY,
+            source=source, source_url=source_url,
+            source_record_id=(
+                identifier.get("product_name", "")
+                or product.get("name", "")
+                or identifier.get("value", "")
+            ),
+            match_method="exact_gtin_labeled_source",
+            confidence=0.92 if source.lower() == "familiprix" else 0.75,
+            verification_status="requires_review",
+            imported_at=imported_at,
+        ):
+            stored += 1
+    return stored
+
+
 def _reference_upsert(db, product):
     """Store an online candidate as evidence; never overwrite trusted fields."""
     barcode = normalized_digits(product.get("barcode", ""))
@@ -4778,24 +5019,7 @@ def _reference_upsert(db, product):
         db, candidate, imported_at=utc_now_iso()
     )
     imported_at = utc_now_iso()
-    for identifier in candidate.get("regulatory_identifiers") or []:
-        source = str(identifier.get("source", "") or candidate.get("source", ""))
-        source_url = str(
-            identifier.get("source_url", "") or candidate.get("source_url", "")
-        )
-        upsert_reference_identifier(
-            db, barcode, identifier.get("type", ""),
-            identifier.get("value", ""), authority=HEALTH_CANADA_AUTHORITY,
-            source=source, source_url=source_url,
-            source_record_id=(
-                identifier.get("product_name", "")
-                or candidate.get("name", "")
-                or identifier.get("value", "")
-            ),
-            match_method="exact_gtin_labeled_source",
-            confidence=0.75, verification_status="requires_review",
-            imported_at=imported_at,
-        )
+    _store_reference_regulatory_candidates(db, candidate, imported_at)
     return bool(result.get("stored"))
 
 
@@ -4976,7 +5200,8 @@ def ai_grounded_product_lookup(barcode):
 
 
 def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False,
-                          require_image=False, background=False):
+                          require_image=False, background=False,
+                          skip_familiprix=False):
     """UPC lookup for a PHARMACY catalog (food, beauty, meds, vitamins, baby,
     bandages, eye care, Familiprix house brand…). Broad coverage but fast: it
     returns as soon as a trusted result is found (good_enough), so it doesn't wait
@@ -5032,19 +5257,24 @@ def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False,
     if not _satisfactory(best, best_score):
         tasks = []
         for bc in candidates:
-            tasks.append(lambda c=bc, cs=candidates: lookup_familiprix_product(c, cs))
+            if not skip_familiprix:
+                tasks.append(
+                    lambda c=bc, cs=candidates:
+                    lookup_familiprix_product(c, cs)
+                )
             tasks.append(lambda c=bc: lookup_barcodelookup(c))
             tasks.append(lambda c=bc: lookup_go_upc(c))
         if background:
             # Familiprix is the highest-value store-specific fallback. Avoid the
             # slower generic HTML scrapers during automatic maintenance.
-            tasks = tasks[:1]
-        p2, s2 = best_lookup_result(
-            tasks, max_workers=_cap(8), good_enough=GOOD_ENOUGH,
-            wait_for_cleanup=wait_for_cleanup,
-            require_image=require_image,
-        )
-        best, best_score = _merge_candidate(best, best_score, p2, s2)
+            tasks = tasks[:1 if not skip_familiprix else 2]
+        if tasks:
+            p2, s2 = best_lookup_result(
+                tasks, max_workers=_cap(8), good_enough=GOOD_ENOUGH,
+                wait_for_cleanup=wait_for_cleanup,
+                require_image=require_image,
+            )
+            best, best_score = _merge_candidate(best, best_score, p2, s2)
 
     # Phase 3 — pharmacy sites (Jean Coutu / Brunet / Pharmaprix), last resort.
     if not background and not _satisfactory(best, best_score):
@@ -5165,17 +5395,22 @@ def reference_count_route():
 _CATALOG_ENRICH = {
     "running": False, "done": 0, "total": 0,
     "updated": 0, "linked": 0, "skipped": 0,
+    "descriptions": 0, "images": 0, "paused": False,
 }
 
 
-_ENRICH_CHUNK = 20        # lookups submitted per batch — Stop reacts within one batch
-_ENRICH_WORKERS = 2       # workers prepare rows, but the memory guard serializes
+_ENRICH_CHUNK = 12        # bounded payloads keep Render memory stable
+_ENRICH_WORKERS = 1       # one source lookup at a time; employee requests stay fast
 _ENRICH_LOOKUP_FANOUT = 2 # background online parsing while PDFs get priority
-_CATALOG_ENRICH_VERSION = "familiprix_exact_v2"
+_AUTO_CATALOG_ENRICH = os.environ.get(
+    "AUTO_CATALOG_ENRICH", "1"
+).strip().lower() in {"1", "true", "yes", "on"}
+_CATALOG_ENRICH_LOCK = threading.Lock()
+_CATALOG_ENRICH_VERSION = "familiprix_exact_v3"
 _CATALOG_ENRICH_DONE_STATUSES = (
     _CATALOG_ENRICH_VERSION,
-    "reviewed_online_v2",
-    "no_match_v2",
+    "reviewed_online_v3",
+    "no_match_v3",
 )
 
 
@@ -5215,6 +5450,7 @@ def _catalog_enrich_worker():
     from database import connect_db
     from routes.products import (
         audit_product_data, build_barcode_candidates, normalized_digits,
+        bump_reference_cache, invalidate_product_search_cache,
         update_product_metadata_from_reference,
     )
     def _lookup(r):
@@ -5230,6 +5466,7 @@ def _catalog_enrich_worker():
                     online = lookup_product_online(
                         barcode, max_workers=_ENRICH_LOOKUP_FANOUT,
                         wait_for_cleanup=True, background=True,
+                        skip_familiprix=True,
                     )
             return r, online
         except Exception:
@@ -5352,11 +5589,14 @@ def _catalog_enrich_worker():
                                     db, reference, imported_at=updated_at,
                                     promote_higher_priority=exact_familiprix,
                                 )
+                                _store_reference_regulatory_candidates(
+                                    db, reference, updated_at,
+                                )
                                 db.execute(
                                     "UPDATE product_reference SET enrich_status=?, updated_at=? WHERE barcode=?",
                                     (
                                         _CATALOG_ENRICH_VERSION
-                                        if exact_familiprix else "reviewed_online_v2",
+                                        if exact_familiprix else "reviewed_online_v3",
                                         updated_at, bc,
                                     ),
                                 )
@@ -5378,10 +5618,14 @@ def _catalog_enrich_worker():
                                     )
                                 db.commit()
                                 _CATALOG_ENRICH["updated"] += 1
+                                if desc and desc != str(r.get("description", "") or "").strip():
+                                    _CATALOG_ENRICH["descriptions"] += 1
+                                if img and img != str(r.get("image_url", "") or "").strip():
+                                    _CATALOG_ENRICH["images"] += 1
                             else:
                                 # Tag it so we know it still needs a real description.
                                 db.execute(
-                                    "UPDATE product_reference SET enrich_status='no_match_v2', updated_at=? WHERE barcode=?",
+                                    "UPDATE product_reference SET enrich_status='no_match_v3', updated_at=? WHERE barcode=?",
                                     (utc_now_iso(), bc),
                                 )
                                 db.commit()
@@ -5393,6 +5637,11 @@ def _catalog_enrich_worker():
                         # Free the batch's parsed online payloads NOW (some sources
                         # return hundreds of KB per product) — RSS creep OOM'd us once.
                         release_unused_memory()
+                # Publish one bounded page at a time. Rebuilding the 9k-row
+                # search corpus after every product caused the old Render OOM;
+                # waiting for the entire multi-hour pass left AI context stale.
+                bump_reference_cache()
+                invalidate_product_search_cache()
                 # Continue with the next bounded database page. Keeping only
                 # 100 references and their matching shelf rows in memory avoids
                 # retaining a second full catalogue throughout enrichment.
@@ -5411,6 +5660,89 @@ def _catalog_enrich_worker():
         _write_enrich_marker()
 
 
+def _catalog_pending_count(db):
+    row = db.execute(
+        "SELECT COUNT(*) AS n FROM product_reference "
+        "WHERE TRIM(COALESCE(enrich_status,'')) NOT IN (?,?,?) "
+        "AND TRIM(COALESCE(name,'')) <> '' "
+        "AND TRIM(COALESCE(barcode,'')) <> ''",
+        _CATALOG_ENRICH_DONE_STATUSES,
+    ).fetchone()
+    return int((row["n"] if isinstance(row, dict) else row[0]) or 0)
+
+
+def _catalog_description_coverage(db):
+    row = db.execute(
+        """SELECT
+             COUNT(*) AS total,
+             SUM(CASE WHEN TRIM(COALESCE(description,''))='' THEN 1 ELSE 0 END) AS missing,
+             SUM(CASE WHEN LENGTH(TRIM(COALESCE(description,''))) BETWEEN 1 AND 54
+                      THEN 1 ELSE 0 END) AS thin,
+             SUM(CASE WHEN LENGTH(TRIM(COALESCE(description,''))) >= 55
+                      THEN 1 ELSE 0 END) AS usable,
+             SUM(CASE WHEN LOWER(COALESCE(source,'')) LIKE '%familiprix%'
+                           AND TRIM(COALESCE(description,''))<>''
+                      THEN 1 ELSE 0 END) AS exact_familiprix
+           FROM product_reference
+           WHERE TRIM(COALESCE(name,'')) <> ''"""
+    ).fetchone()
+    values = dict(row) if row else {}
+    return {
+        key: int(values.get(key) or 0)
+        for key in ("total", "missing", "thin", "usable", "exact_familiprix")
+    }
+
+
+def schedule_catalog_enrichment(*, force=False):
+    """Start one durable, low-memory catalogue pass when rows need this version."""
+    from database import connect_db
+
+    if not force and os.environ.get("PYTEST_CURRENT_TEST"):
+        return False
+    with _CATALOG_ENRICH_LOCK:
+        if _CATALOG_ENRICH["running"]:
+            return False
+        marker = _read_enrich_marker() or {}
+        paused = bool(_CATALOG_ENRICH.get("paused") or marker.get("paused"))
+        if paused and not force:
+            _CATALOG_ENRICH["paused"] = True
+            return False
+        if not force and not _AUTO_CATALOG_ENRICH:
+            return False
+
+        db = None
+        try:
+            db = connect_db()
+            total = _catalog_pending_count(db)
+        except Exception:
+            return False
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+        if total <= 0:
+            _CATALOG_ENRICH.update(
+                running=False, total=0, done=0, paused=False,
+            )
+            _write_enrich_marker()
+            return False
+
+        _CATALOG_ENRICH.update(
+            running=True, done=0, updated=0, linked=0, skipped=0,
+            descriptions=0, images=0, paused=False,
+            total=total, started_at=time.time(),
+        )
+        _CATALOG_ENRICH.pop("error", None)
+        _write_enrich_marker()
+        threading.Thread(
+            target=_catalog_enrich_worker, daemon=True,
+            name="catalog-description-enrichment",
+        ).start()
+        return True
+
+
 @ai_bp.route("/api/import/catalog-enrich/start", methods=["POST"])
 def catalog_enrich_start():
     username, error = require_editor()
@@ -5418,48 +5750,25 @@ def catalog_enrich_start():
         return error
     if _CATALOG_ENRICH["running"]:
         return jsonify({"success": True, "already_running": True, **_CATALOG_ENRICH})
-    # Compute the total and flag running SYNCHRONOUSLY so the first status poll can't
-    # race the worker thread's startup and stop early (the '0/0' bug).
-    db = get_db()
-    try:
-        row = db.execute(
-            "SELECT COUNT(*) AS n FROM product_reference "
-            "WHERE TRIM(COALESCE(enrich_status,'')) NOT IN (?,?,?) "
-            "AND TRIM(COALESCE(name,'')) <> '' "
-            "AND TRIM(COALESCE(barcode,'')) <> ''",
-            _CATALOG_ENRICH_DONE_STATUSES,
-        ).fetchone()
-        total = row["n"] if isinstance(row, dict) else row[0]
-    except Exception:
-        total = 0
-    _CATALOG_ENRICH.update(running=True, done=0, updated=0, linked=0, skipped=0,
-                           total=int(total or 0), started_at=time.time())
-    _CATALOG_ENRICH.pop("error", None)   # a fresh run must not display an old failure
-    import threading
-    threading.Thread(target=_catalog_enrich_worker, daemon=True).start()
-    return jsonify({"success": True, "started": True, "total": _CATALOG_ENRICH["total"]})
+    started = schedule_catalog_enrichment(force=True)
+    return jsonify({
+        "success": True, "started": started,
+        "total": _CATALOG_ENRICH["total"],
+    })
 
 
 def maybe_resume_enrichment():
-    """Self-heal: if the marker says a run was active in ANOTHER process (worker
-    recycle/restart killed its thread mid-run), relaunch it — progress is already
-    committed row by row, so the worker naturally resumes on what's left. Called
-    from the status poll AND from /api/system/info, which the keep-alive pings hit
-    every 10 minutes: the run recovers even with every phone closed. Returns True
-    when a resume was launched."""
+    """Resume an interrupted pass or automatically start the current version."""
     try:
         if _CATALOG_ENRICH["running"]:
             return False
         marker = _read_enrich_marker()
-        if not (marker and marker.get("running") and marker.get("pid") != os.getpid()):
+        if marker and marker.get("paused"):
+            _CATALOG_ENRICH["paused"] = True
             return False
-        _CATALOG_ENRICH.update(running=True, done=0, updated=0, linked=0, skipped=0,
-                               total=0, started_at=time.time())
-        _CATALOG_ENRICH.pop("error", None)
-        _write_enrich_marker()
-        import threading
-        threading.Thread(target=_catalog_enrich_worker, daemon=True).start()
-        return True
+        return schedule_catalog_enrichment(
+            force=bool(marker and marker.get("running"))
+        )
     except Exception:
         return False
 
@@ -5470,6 +5779,10 @@ def catalog_enrich_status():
     state = dict(_CATALOG_ENRICH)
     if resumed:
         state["resumed"] = True
+    try:
+        state["coverage"] = _catalog_description_coverage(get_db())
+    except Exception:
+        state["coverage"] = {}
     if state.get("running") and state.get("done") and state.get("started_at"):
         elapsed = max(1.0, time.time() - float(state["started_at"]))
         rate = state["done"] / elapsed
@@ -5485,6 +5798,7 @@ def catalog_enrich_stop():
     if error:
         return error
     _CATALOG_ENRICH["running"] = False
+    _CATALOG_ENRICH["paused"] = True
     _write_enrich_marker()   # a deliberate stop must NOT be auto-resumed
     return jsonify({"success": True})
 
@@ -5511,7 +5825,11 @@ def catalog_needs_description():
 
     for r in rows:
         d = dict(r)
-        status = "aucune correspondance en ligne" if d.get("enrich_status") == "no_match" else "pas encore tenté"
+        status = (
+            "aucune correspondance en ligne"
+            if str(d.get("enrich_status", "")).startswith("no_match")
+            else "pas encore tenté"
+        )
         writer.writerow([safe_csv_cell(d.get("barcode", "")), safe_csv_cell(d.get("product_code", "")),
                          safe_csv_cell(d.get("name", "")),
                          safe_csv_cell(str(d.get("source", "")).replace("Planogramme: ", "")), status])
@@ -5527,7 +5845,8 @@ def catalog_needs_description_count():
         "WHERE TRIM(COALESCE(description,'')) = '' AND TRIM(COALESCE(name,'')) <> ''").fetchone()
     n = row["n"] if isinstance(row, dict) else row[0]
     no_match = db.execute(
-        "SELECT COUNT(*) AS n FROM product_reference WHERE enrich_status = 'no_match'").fetchone()
+        "SELECT COUNT(*) AS n FROM product_reference "
+        "WHERE enrich_status LIKE 'no_match%'").fetchone()
     nm = no_match["n"] if isinstance(no_match, dict) else no_match[0]
     return jsonify({"needs_description": int(n or 0), "no_match": int(nm or 0)})
 

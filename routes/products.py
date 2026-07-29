@@ -529,6 +529,12 @@ _PRODUCT_STREAM_CHUNK_BYTES = 256 * 1024
 _PRODUCT_STREAM_LOCK = threading.Lock()
 
 
+def invalidate_product_search_cache():
+    """Make the next search rebuild after a bounded metadata batch."""
+    with _PROD_LOCK:
+        _PROD_CACHE["generation"] = -1
+
+
 def _serialized_product_corpus(function):
     """Prevent concurrent cold requests from building duplicate full corpora."""
     @wraps(function)
@@ -2770,7 +2776,7 @@ def _process_planogram_post_import_job(job):
                         source="Planogramme magasin",
                         payload=item.get("identifier_payload") or {},
                     )
-                    upsert_reference_candidate(
+                    reference_result = upsert_reference_candidate(
                         db,
                         {
                             "barcode": product.get("barcode", ""),
@@ -2785,6 +2791,23 @@ def _process_planogram_post_import_job(job):
                         },
                         imported_at=job["imported_at"],
                     )
+                    reference_key = str(
+                        reference_result.get("gtin_key", "") or current_key
+                    )
+                    if reference_key:
+                        # A previously missing source gets another exact-code
+                        # attempt after reimport; complete current-version rows
+                        # are left alone.
+                        db.execute(
+                            """UPDATE product_reference
+                               SET enrich_status=''
+                               WHERE gtin_key=?
+                                 AND (
+                                   TRIM(COALESCE(description,''))=''
+                                   OR enrich_status LIKE 'no_match%'
+                                 )""",
+                            (reference_key,),
+                        )
                     for field in item.get("verified_fields") or []:
                         if field not in FIELD_NAMES:
                             continue
@@ -2833,6 +2856,11 @@ def _process_planogram_post_import_job(job):
             except Exception:
                 pass
         release_unused_memory()
+    try:
+        from routes.ai import schedule_catalog_enrichment
+        schedule_catalog_enrichment()
+    except Exception:
+        pass
 
 
 def schedule_planogram_post_import(items, employee, imported_at):
