@@ -791,6 +791,7 @@ class ClientRagTests(unittest.TestCase):
 
         call = provider.call_args
         self.assertEqual(call.kwargs["max_tokens"], 700)
+        self.assertTrue(call.kwargs["realtime_model"])
         self.assertNotIn("comparisons", call.kwargs["schema"]["properties"])
         self.assertNotIn(
             "follow_up_questions", call.kwargs["schema"]["properties"]
@@ -1185,6 +1186,31 @@ class ClientRagTests(unittest.TestCase):
             documented_payload["thinking"], {"type": "disabled"}
         )
         self.assertEqual(plan_payload["thinking"], {"type": "disabled"})
+
+    def test_kimi_realtime_request_uses_short_generation_model(self):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "choices": [{
+                "message": {"content": json.dumps({"answer": "ok"})},
+            }],
+            "usage": {},
+        }).encode("utf-8")
+
+        with patch(
+            "routes.ai.KIMI_REALTIME_MODEL", "moonshot-v1-8k"
+        ), patch(
+            "routes.ai._safe_urlopen", return_value=response
+        ) as opener, patch("routes.ai._log_ai_usage"):
+            result = _kimi_json_request(
+                [{"role": "user", "content": "question courte"}],
+                max_tokens=500,
+                realtime_model=True,
+            )
+
+        payload = json.loads(opener.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(result, {"answer": "ok"})
+        self.assertEqual(payload["model"], "moonshot-v1-8k")
+        self.assertNotIn("thinking", payload)
 
     def test_documented_kimi_timeout_makes_only_one_paid_request(self):
         with patch("routes.ai.KIMI_API_KEY", "secret"), \

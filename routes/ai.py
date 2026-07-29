@@ -153,8 +153,13 @@ OPENAI_MODEL    = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 KIMI_API_KEY = os.environ.get("KIMI_API_KEY", os.environ.get("MOONSHOT_API_KEY", "")).strip()
 KIMI_MODEL = os.environ.get("KIMI_MODEL", "kimi-k2.6").strip() or "kimi-k2.6"
+KIMI_REALTIME_MODEL = (
+    os.environ.get("KIMI_REALTIME_MODEL", "moonshot-v1-8k").strip()
+    or "moonshot-v1-8k"
+)
 KIMI_DOCUMENTED_MODEL = (
-    os.environ.get("KIMI_DOCUMENTED_MODEL", KIMI_MODEL).strip() or KIMI_MODEL
+    os.environ.get("KIMI_DOCUMENTED_MODEL", KIMI_REALTIME_MODEL).strip()
+    or KIMI_REALTIME_MODEL
 )
 KIMI_BASE_URL = os.environ.get(
     "KIMI_BASE_URL", "https://api.moonshot.ai/v1"
@@ -1419,9 +1424,13 @@ def _parse_chat_json(raw_text):
 
 
 def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=False,
-                       timeout_seconds=None):
+                       timeout_seconds=None, realtime_model=False):
     """Call Kimi's OpenAI-compatible endpoint with bounded response memory."""
-    model = KIMI_DOCUMENTED_MODEL if quality_mode else KIMI_MODEL
+    model = (
+        KIMI_DOCUMENTED_MODEL if quality_mode
+        else KIMI_REALTIME_MODEL if realtime_model
+        else KIMI_MODEL
+    )
     payload = {
         "model": model,
         "messages": messages,
@@ -1627,14 +1636,16 @@ def _openai_structured_request(system_prompt, user_payload, max_tokens,
 
 def _provider_structured_request(system_prompt, user_payload, max_tokens,
                                  schema_name, schema, question_preview="",
-                                 quality_mode=False, timeout_seconds=None):
+                                 quality_mode=False, timeout_seconds=None,
+                                 realtime_model=False):
     provider = configured_ai_provider()["name"]
     if provider == "kimi":
         return _kimi_json_request([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
         ], max_tokens=max_tokens, question_preview=question_preview,
-           quality_mode=quality_mode, timeout_seconds=timeout_seconds)
+           quality_mode=quality_mode, timeout_seconds=timeout_seconds,
+           realtime_model=realtime_model)
     if provider == "deepseek":
         return _deepseek_json_request([
             {"role": "system", "content": system_prompt},
@@ -1750,6 +1761,7 @@ def generate_client_query_plan(question, history=None):
         schema=_CLIENT_QUERY_PLAN_SCHEMA,
         question_preview=question,
         timeout_seconds=_AI_QUERY_PLAN_TIMEOUT_SECONDS,
+        realtime_model=True,
     )
     return normalize_client_query_plan(parsed, question) if isinstance(parsed, dict) else None
 
@@ -2295,6 +2307,7 @@ def generate_verified_client_answer(question, query_plan, candidates, history=No
         schema_name="client_verified_answer",
         schema=_CLIENT_VERIFICATION_SCHEMA,
         question_preview=question,
+        realtime_model=True,
     )
     if not isinstance(parsed, dict):
         return None
@@ -4333,6 +4346,7 @@ def generate_documented_client_answer(question, query_plan, candidates, document
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,
         quality_mode=True,
+        realtime_model=True,
     )
     if not isinstance(parsed, dict):
         return grounded_documented_fallback(query_plan, candidates, documents)
