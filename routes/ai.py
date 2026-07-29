@@ -1426,6 +1426,60 @@ def _parse_chat_json(raw_text):
     return parsed if isinstance(parsed, dict) else None
 
 
+def _partial_json_answer(raw_text):
+    """Recover a completed ``answer`` string from a bounded JSON stream."""
+    match = re.search(
+        r'"answer"\s*:\s*("(?:\\.|[^"\\])*")',
+        str(raw_text or ""),
+        flags=re.DOTALL,
+    )
+    if not match:
+        return ""
+    try:
+        return str(json.loads(match.group(1)) or "").strip()
+    except (TypeError, json.JSONDecodeError):
+        return ""
+
+
+def _read_kimi_stream(response, deadline):
+    content_parts = []
+    usage = {}
+    total_bytes = 0
+    while time.monotonic() < deadline:
+        raw_line = response.readline()
+        if not raw_line:
+            break
+        total_bytes += len(raw_line)
+        if total_bytes > _MAX_ONLINE_BODY_BYTES:
+            break
+        line = raw_line.decode("utf-8", "replace").strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            event = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        event_usage = event.get("usage")
+        if isinstance(event_usage, dict):
+            usage = event_usage
+        choices = event.get("choices") or []
+        delta = (choices[0] if choices else {}).get("delta") or {}
+        content = delta.get("content")
+        if content:
+            content_parts.append(str(content))
+    raw_text = "".join(content_parts)
+    parsed = _parse_chat_json(raw_text)
+    if parsed is not None:
+        return parsed, usage
+    partial_answer = _partial_json_answer(raw_text)
+    if partial_answer:
+        return {"_partial_answer": partial_answer}, usage
+    return None, usage
+
+
 def _available_kimi_models():
     now = time.time()
     cached = _KIMI_MODELS_CACHE.get("models") or set()
@@ -1521,7 +1575,39 @@ def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=F
             _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS
             if quality_mode else _AI_REQUEST_TIMEOUT_SECONDS
         )
+        stream_response = bool(
+            realtime_model
+            and model.startswith(("kimi-k2.6", "kimi-k2.5"))
+        )
+        if stream_response:
+            payload["stream"] = True
+            request_obj = Request(
+                f"{KIMI_BASE_URL}/chat/completions",
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {KIMI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
         with _safe_urlopen(request_obj, timeout=timeout) as response:
+            if stream_response:
+                parsed, usage = _read_kimi_stream(
+                    response, time.monotonic() + timeout
+                )
+                if parsed is None:
+                    _set_ai_error(
+                        "Le service n'a pas terminé sa réponse dans le délai prévu."
+                    )
+                    return None
+                _log_ai_usage(
+                    "kimi",
+                    usage.get("prompt_tokens", 0),
+                    usage.get("completion_tokens", 0),
+                    question_preview,
+                    model_override=model,
+                )
+                return parsed
             raw_response = json.loads(
                 _read_limited_response(response).decode("utf-8")
             )
@@ -2384,6 +2470,20 @@ def generate_verified_client_answer(question, query_plan, candidates, history=No
     )
     if not isinstance(parsed, dict):
         return None
+    partial_answer = str(parsed.get("_partial_answer", "") or "").strip()
+    if partial_answer:
+        parsed = {
+            "answer": partial_answer,
+            "selected_product_ids": [
+                str(product.get("client_id", "") or "")
+                for product in candidates[:10]
+                if product.get("client_id")
+            ],
+            "follow_up_questions": [],
+            "safety_flags": [],
+            "pharmacist_referral": False,
+            "pharmacist_reason": "",
+        }
     return normalize_verified_client_answer(
         parsed, [product.get("client_id", "") for product in candidates]
     )
@@ -4424,6 +4524,15 @@ def generate_documented_client_answer(question, query_plan, candidates, document
     )
     if not isinstance(parsed, dict):
         return grounded_documented_fallback(query_plan, candidates, documents)
+    partial_answer = str(parsed.get("_partial_answer", "") or "").strip()
+    if partial_answer:
+        grounded = grounded_documented_fallback(
+            query_plan, candidates, documents, degraded=False
+        )
+        grounded["answer"] = partial_answer
+        grounded["degraded"] = False
+        grounded["warning"] = ""
+        return grounded
     result = normalize_documented_client_answer(
         parsed, [product.get("client_id", "") for product in candidates], documents
     )

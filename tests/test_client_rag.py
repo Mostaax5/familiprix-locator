@@ -1218,6 +1218,61 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(payload["model"], "moonshot-v1-8k")
         self.assertNotIn("thinking", payload)
 
+    def test_kimi_realtime_k26_reads_bounded_stream(self):
+        expected = {
+            "answer": "Réponse IA directe.",
+            "key_points": [],
+            "selected_product_ids": ["product:1"],
+            "source_ids": ["store-plan"],
+        }
+        event = json.dumps({
+            "choices": [{
+                "delta": {
+                    "content": json.dumps(expected, ensure_ascii=False),
+                },
+            }],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 10},
+        }, ensure_ascii=False)
+
+        class StreamResponse:
+            def __init__(self):
+                self.lines = iter([
+                    f"data: {event}\n\n".encode("utf-8"),
+                    b"data: [DONE]\n\n",
+                ])
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def readline(self):
+                return next(self.lines, b"")
+
+        with patch(
+            "routes.ai.KIMI_REALTIME_MODEL", "moonshot-v1-8k"
+        ), patch(
+            "routes.ai.KIMI_MODEL", "kimi-k2.6"
+        ), patch(
+            "routes.ai._available_kimi_models", return_value={"kimi-k2.6"}
+        ), patch(
+            "routes.ai._safe_urlopen", return_value=StreamResponse()
+        ) as opener, patch("routes.ai._log_ai_usage"):
+            result = _kimi_json_request(
+                [{"role": "user", "content": "question"}],
+                max_tokens=700,
+                quality_mode=True,
+                realtime_model=True,
+                timeout_seconds=8,
+            )
+
+        payload = json.loads(opener.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(result, expected)
+        self.assertEqual(payload["model"], "kimi-k2.6")
+        self.assertTrue(payload["stream"])
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
+
     def test_documented_kimi_timeout_makes_only_one_paid_request(self):
         with patch("routes.ai.KIMI_API_KEY", "secret"), \
              patch("routes.ai._safe_urlopen", side_effect=TimeoutError("slow")) as opener:
