@@ -5429,7 +5429,7 @@ def schedule_reference_metadata_sync():
                     id_rows = db.execute(
                         """SELECT id FROM products
                            WHERE id>? AND TRIM(COALESCE(barcode,'')) <> ''
-                           ORDER BY id LIMIT 200""",
+                           ORDER BY id LIMIT 25""",
                         (last_id,),
                     ).fetchall()
                     ids = [int(first_column(row)) for row in id_rows]
@@ -5507,7 +5507,7 @@ def schedule_initial_product_quality_audit():
                     rows = db.execute(
                         """SELECT id FROM products
                            WHERE TRIM(COALESCE(quality_checked_at,''))=''
-                           ORDER BY id LIMIT 100"""
+                           ORDER BY id LIMIT 25"""
                     ).fetchall()
                     ids = [int(first_column(row)) for row in rows]
                     if not ids:
