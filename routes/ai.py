@@ -299,6 +299,7 @@ def configured_ai_provider():
 
 # Last AI failure reason — surfaced to the UI so we stop guessing why "no answer".
 _AI_LAST_ERROR = ""
+_AI_LAST_MODEL = ""
 
 
 def _set_ai_error(msg):
@@ -1431,6 +1432,8 @@ def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=F
         else KIMI_DOCUMENTED_MODEL if quality_mode
         else KIMI_MODEL
     )
+    global _AI_LAST_MODEL
+    _AI_LAST_MODEL = model
     payload = {
         "model": model,
         "messages": messages,
@@ -1468,8 +1471,22 @@ def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=F
                 _read_limited_response(response).decode("utf-8")
             )
     except HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", "replace")[:1000]
+        except Exception:
+            pass
+        detail = ""
+        try:
+            error = json.loads(body).get("error") or {}
+            detail = str(
+                error.get("message", "") if isinstance(error, dict) else error
+            ).strip()
+        except (TypeError, json.JSONDecodeError):
+            detail = ""
         _set_ai_error(
-            f"Le service de réponse est temporairement indisponible (HTTP {exc.code})."
+            "Le service de réponse est temporairement indisponible "
+            f"(HTTP {exc.code}{': ' + detail[:180] if detail else ''})."
         )
         return None
     except (URLError, TimeoutError):
@@ -5452,8 +5469,9 @@ def client_help():
     if len(question) > 2000:
         return jsonify({"success": False, "error": "La question est trop longue."}), 400
 
-    global _AI_LAST_ERROR
+    global _AI_LAST_ERROR, _AI_LAST_MODEL
     _AI_LAST_ERROR = ""
+    _AI_LAST_MODEL = ""
     if requested_mode == "documented":
         response_mode = "documented"
     elif requested_mode == "ai":
@@ -5744,12 +5762,24 @@ def client_help():
     public_highlighted_products = [
         public_product_payload(product) for product in highlighted_products
     ]
-    return jsonify({"success": True, "response_mode": response_mode,
-                    "answer": answer, "products": public_highlighted_products,
-                    "highlighted_product_ids": verified["selected_product_ids"],
-                    "query_plan": query_plan, "advice": advice,
-                    "elapsed_ms": elapsed_ms, "degraded": degraded,
-                    "warning": warning})
+    response_payload = {
+        "success": True,
+        "response_mode": response_mode,
+        "answer": answer,
+        "products": public_highlighted_products,
+        "highlighted_product_ids": verified["selected_product_ids"],
+        "query_plan": query_plan,
+        "advice": advice,
+        "elapsed_ms": elapsed_ms,
+        "degraded": degraded,
+        "warning": warning,
+    }
+    if request.headers.get("X-AI-Diagnostics", "") == "1":
+        response_payload["ai_diagnostics"] = {
+            "model": _AI_LAST_MODEL,
+            "error": _AI_LAST_ERROR,
+        }
+    return jsonify(response_payload)
 
 
 @ai_bp.route("/api/ai/feedback", methods=["POST"])
