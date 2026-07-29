@@ -16,3 +16,13 @@ services:
         value: "2"
       - key: APP_PASSWORD_HASH
         sync: false
+      - key: KIMI_API_KEY
+        sync: false
+      - key: KIMI_MODEL
+        value: kimi-k2.6
+      - key: KIMI_DOCUMENTED_MODEL
+        value: kimi-k3
+      - key: KIMI_DOCUMENTED_REASONING_EFFORT
+        value: high
+      - key: AI_DOCUMENTED_REQUEST_TIMEOUT
+        value: "18"

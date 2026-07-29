@@ -91,9 +91,13 @@ def log_ai_interaction(kind, question, context, response):
         return
     try:
         prov = configured_ai_provider()
+        documented_models = {
+            "kimi": KIMI_DOCUMENTED_MODEL,
+            "deepseek": DEEPSEEK_DOCUMENTED_MODEL,
+        }
         logged_model = (
-            DEEPSEEK_DOCUMENTED_MODEL
-            if kind == "client_documented_rag" and prov["name"] == "deepseek"
+            documented_models.get(prov["name"], prov["model"])
+            if kind == "client_documented_rag"
             else prov["model"]
         )
         body = request.get_json(silent=True) or {}
@@ -147,6 +151,19 @@ GEMINI_BASE_URL = os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.
 OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY",  "").strip()
 OPENAI_MODEL    = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+KIMI_API_KEY = os.environ.get("KIMI_API_KEY", os.environ.get("MOONSHOT_API_KEY", "")).strip()
+KIMI_MODEL = os.environ.get("KIMI_MODEL", "kimi-k2.6").strip() or "kimi-k2.6"
+KIMI_DOCUMENTED_MODEL = (
+    os.environ.get("KIMI_DOCUMENTED_MODEL", "kimi-k3").strip() or "kimi-k3"
+)
+KIMI_BASE_URL = os.environ.get(
+    "KIMI_BASE_URL", "https://api.moonshot.ai/v1"
+).rstrip("/")
+KIMI_DOCUMENTED_REASONING_EFFORT = (
+    os.environ.get("KIMI_DOCUMENTED_REASONING_EFFORT", "high").strip().lower()
+)
+if KIMI_DOCUMENTED_REASONING_EFFORT not in {"low", "high", "max"}:
+    KIMI_DOCUMENTED_REASONING_EFFORT = "high"
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
 DEEPSEEK_MODEL   = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash").strip() or "deepseek-v4-flash"
 DEEPSEEK_DOCUMENTED_MODEL = (
@@ -169,10 +186,10 @@ except (TypeError, ValueError):
     _AI_REQUEST_TIMEOUT_SECONDS = 12
 try:
     _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = min(
-        6, max(4, int(os.environ.get("AI_DOCUMENTED_REQUEST_TIMEOUT", "5")))
+        30, max(8, int(os.environ.get("AI_DOCUMENTED_REQUEST_TIMEOUT", "18")))
     )
 except (TypeError, ValueError):
-    _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = 5
+    _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = 18
 _DEEPSEEK_DOCUMENTED_THINKING = (
     os.environ.get("DEEPSEEK_DOCUMENTED_THINKING", "").strip().lower()
     in {"1", "true", "yes", "on"}
@@ -242,14 +259,20 @@ def _log_ai_usage(provider: str, input_tokens: int, output_tokens: int,
     else:
         cost = None
     preview = question_preview[:60].replace("\n", " ")
-    model = model_override or {"gemini": GEMINI_MODEL, "openai": OPENAI_MODEL,
-                               "deepseek": DEEPSEEK_MODEL}.get(provider, "")
+    model = model_override or {
+        "gemini": GEMINI_MODEL,
+        "openai": OPENAI_MODEL,
+        "kimi": KIMI_MODEL,
+        "deepseek": DEEPSEEK_MODEL,
+    }.get(provider, "")
     cost_text = f" cost=${cost:.6f}" if cost is not None else ""
     print(f"[AI-COST] provider={provider} model={model} in={input_tokens} out={output_tokens}"
           f"{cost_text} q=\"{preview}\"")
 
 
 def configured_ai_provider():
+    if KIMI_API_KEY:
+        return {"name": "kimi", "label": "Kimi", "model": KIMI_MODEL}
     if DEEPSEEK_API_KEY:
         return {"name": "deepseek", "label": "DeepSeek", "model": DEEPSEEK_MODEL}
     if GEMINI_API_KEY:
@@ -1159,6 +1182,8 @@ def _attach_locatable_recommendations(advice, candidate_objs):
 
 def generate_product_assist_payload(name, brand, description, barcode):
     provider = configured_ai_provider()
+    if provider["name"] == "kimi":
+        return generate_product_assist_payload_kimi(name, brand, description, barcode)
     if provider["name"] == "deepseek":
         return generate_product_assist_payload_deepseek(name, brand, description, barcode)
     if provider["name"] == "gemini":
@@ -1170,6 +1195,8 @@ def generate_product_assist_payload(name, brand, description, barcode):
 
 def generate_client_help_payload(question, products):
     provider = configured_ai_provider()
+    if provider["name"] == "kimi":
+        return generate_client_help_payload_kimi(question, products)
     if provider["name"] == "deepseek":
         return generate_client_help_payload_deepseek(question, products)
     if provider["name"] == "gemini":
@@ -1321,6 +1348,77 @@ def generate_client_help_payload_openai(question, products):
     return normalize_client_help_payload(parsed)
 
 
+def _parse_chat_json(raw_text):
+    text = str(raw_text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        parsed = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=False):
+    """Call Kimi's OpenAI-compatible endpoint with bounded response memory."""
+    model = KIMI_DOCUMENTED_MODEL if quality_mode else KIMI_MODEL
+    payload = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "response_format": {"type": "json_object"},
+    }
+    if quality_mode and model.startswith("kimi-k3"):
+        payload["reasoning_effort"] = KIMI_DOCUMENTED_REASONING_EFFORT
+    request_obj = Request(
+        f"{KIMI_BASE_URL}/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {KIMI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        timeout = (
+            _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS
+            if quality_mode else _AI_REQUEST_TIMEOUT_SECONDS
+        )
+        with _safe_urlopen(request_obj, timeout=timeout) as response:
+            raw_response = json.loads(
+                _read_limited_response(response).decode("utf-8")
+            )
+    except HTTPError as exc:
+        _set_ai_error(
+            f"Le service de réponse est temporairement indisponible (HTTP {exc.code})."
+        )
+        return None
+    except (URLError, TimeoutError):
+        _set_ai_error(
+            "Le service de réponse est injoignable (réseau ou délai dépassé)."
+        )
+        return None
+    except json.JSONDecodeError:
+        _set_ai_error("Le service a renvoyé une réponse illisible.")
+        return None
+
+    usage = raw_response.get("usage", {})
+    _log_ai_usage(
+        "kimi",
+        usage.get("prompt_tokens", 0),
+        usage.get("completion_tokens", 0),
+        question_preview,
+        model_override=model,
+    )
+    choices = raw_response.get("choices", [])
+    message = (choices[0] if choices else {}).get("message") or {}
+    parsed = _parse_chat_json(message.get("content", ""))
+    if parsed is None:
+        _set_ai_error("Le service a renvoyé une réponse invalide.")
+    return parsed
+
+
 def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mode=False):
     """Call DeepSeek's OpenAI-compatible chat endpoint and return parsed JSON."""
     model = DEEPSEEK_DOCUMENTED_MODEL if quality_mode else DEEPSEEK_MODEL
@@ -1374,11 +1472,10 @@ def _deepseek_json_request(messages, max_tokens, question_preview="", quality_mo
     if not raw_text:
         _set_ai_error("Le service a renvoyé une réponse vide.")
         return None
-    try:
-        return json.loads(raw_text)
-    except json.JSONDecodeError:
+    parsed = _parse_chat_json(raw_text)
+    if parsed is None:
         _set_ai_error("Le service a renvoyé une réponse invalide.")
-        return None
+    return parsed
 
 
 def _gemini_structured_request(system_prompt, user_payload, max_tokens, question_preview=""):
@@ -1462,6 +1559,12 @@ def _provider_structured_request(system_prompt, user_payload, max_tokens,
                                  schema_name, schema, question_preview="",
                                  quality_mode=False):
     provider = configured_ai_provider()["name"]
+    if provider == "kimi":
+        return _kimi_json_request([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        ], max_tokens=max_tokens, question_preview=question_preview,
+           quality_mode=quality_mode)
     if provider == "deepseek":
         return _deepseek_json_request([
             {"role": "system", "content": system_prompt},
@@ -2128,7 +2231,7 @@ _CLIENT_DOCUMENTED_SCHEMA = {
     "properties": {
         "answer": {"type": "string"},
         "key_points": {
-            "type": "array", "maxItems": 4,
+            "type": "array", "maxItems": 6,
             "items": {
                 "type": "object",
                 "properties": {
@@ -2183,14 +2286,17 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "Tu peux expliquer une différence générale entre des formes ou catégories, mais indique "
     "clairement qu'elle est générale lorsqu'aucun document ne la confirme pour le produit. "
     "N'invente jamais de dose, de durée, d'ingrédient, de bénéfice ou de source. "
-    "Reste concis: la réponse complète doit être lisible rapidement. answer est une réponse "
-    "directe de 2 à 4 phrases que l'employé peut dire au client. Elle doit répondre à « quoi "
+    "Reste structuré et précis: la réponse complète doit être facile à parcourir rapidement. "
+    "answer est une réponse directe de 3 à 6 phrases que l'employé peut dire au client. "
+    "La première phrase répond sans détour à la question. Elle doit répondre à « quoi "
     "choisir et pourquoi » lorsque c'est la question, sans se contenter de nommer des produits. "
     "Traite chaque dimension explicitement demandée: par exemple types, saveurs et contexte "
     "d'utilisation doivent recevoir trois réponses distinctes, même si certaines données sont "
     "absentes et doivent être signalées comme telles. "
-    "Donne au maximum 4 key_points; chaque élément fait au plus deux phrases. key_points contient "
-    "les faits décisifs et les différences pratiques, avec des titres très courts. Le serveur "
+    "Donne de 2 à 6 key_points lorsque les preuves le permettent; chaque élément fait au plus "
+    "deux phrases. key_points contient les faits décisifs, les différences pratiques et les "
+    "limites de l'information, avec des titres très courts. Ne remplis jamais une section avec "
+    "du texte générique uniquement pour atteindre ce nombre. Le serveur "
     "ajoutera lui-même les cartes, emplacements et comparaisons produit par produit: ne les "
     "répète pas. Place les vérifications médicales dans safety_flags. "
     "Chaque affirmation fondée sur un document cite son source_id exact; une connaissance "
@@ -4106,9 +4212,9 @@ def generate_documented_client_answer(question, query_plan, candidates, document
         "source_id": str(document.get("source_id", "") or ""),
         "title": str(document.get("title", "") or "")[:180],
         "publisher": str(document.get("publisher", "") or "")[:100],
-        "evidence": str(document.get("evidence", "") or "")[:420],
-        "candidate_ids": (document.get("candidate_ids", []) or [])[:8],
-    } for document in documents[:7]]
+        "evidence": str(document.get("evidence", "") or "")[:700],
+        "candidate_ids": (document.get("candidate_ids", []) or [])[:12],
+    } for document in documents[:10]]
     compact_plan = {
         key: query_plan.get(key)
         for key in (
@@ -4127,7 +4233,7 @@ def generate_documented_client_answer(question, query_plan, candidates, document
             "candidates": contexts,
             "documents": document_contexts,
         },
-        max_tokens=480,
+        max_tokens=1100,
         schema_name="client_documented_answer",
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,
@@ -4170,6 +4276,17 @@ def generate_documented_client_answer(question, query_plan, candidates, document
 
 def generate_client_help_payload_deepseek(question, products):
     parsed = _deepseek_json_request([
+        {"role": "system", "content": _CLIENT_HELP_INSTRUCTIONS},
+        {"role": "user", "content": json.dumps({
+            "question": question,
+            "products": products,
+        }, ensure_ascii=False)},
+    ], max_tokens=2048, question_preview=question)
+    return normalize_client_help_payload(parsed) if isinstance(parsed, dict) else None
+
+
+def generate_client_help_payload_kimi(question, products):
+    parsed = _kimi_json_request([
         {"role": "system", "content": _CLIENT_HELP_INSTRUCTIONS},
         {"role": "user", "content": json.dumps({
             "question": question,
@@ -4268,6 +4385,20 @@ def generate_product_assist_payload_openai(name, brand, description, barcode):
 def generate_product_assist_payload_deepseek(name, brand, description, barcode):
     prompt = {"name": name, "brand": brand, "description": description, "barcode": barcode}
     parsed = _deepseek_json_request([
+        {"role": "system", "content": (
+            "Tu aides les employés d'une pharmacie Familiprix au Québec. "
+            "Retourne uniquement un objet JSON valide en français avec exactement les clés "
+            "search_terms (tableau), usage_notes (texte) et alternative_suggestions (tableau). "
+            "Sois concis, concret, prudent sur le plan médical et ne donne pas de diagnostic."
+        )},
+        {"role": "user", "content": json.dumps({"product": prompt}, ensure_ascii=False)},
+    ], max_tokens=400, question_preview=name)
+    return normalize_assist_payload(parsed) if isinstance(parsed, dict) else None
+
+
+def generate_product_assist_payload_kimi(name, brand, description, barcode):
+    prompt = {"name": name, "brand": brand, "description": description, "barcode": barcode}
+    parsed = _kimi_json_request([
         {"role": "system", "content": (
             "Tu aides les employés d'une pharmacie Familiprix au Québec. "
             "Retourne uniquement un objet JSON valide en français avec exactement les clés "
@@ -5268,12 +5399,17 @@ def client_help():
             or is_catalogue_supported_comparison
         )
     )
+    active_ai_provider = configured_ai_provider()
+    # Kimi composes every explicit documented request. The existing deterministic
+    # summaries remain the resilient path while Kimi is not configured and avoid
+    # changing the legacy providers' latency contract.
     use_local_documented_summary = bool(
         response_mode == "documented"
         and is_immediate_documented_question
+        and active_ai_provider["name"] != "kimi"
     )
     if not use_local_documented_summary:
-        if not configured_ai_provider()["name"]:
+        if not active_ai_provider["name"]:
             return jsonify({"success": False, "error": "Aucune clé IA n’est configurée sur le serveur."}), 503
         if not _check_ai_rate_limit():
             return jsonify({"success": False, "error": "Trop de requetes IA. Reessayez dans une heure."}), 429

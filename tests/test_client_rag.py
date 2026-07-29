@@ -1,13 +1,14 @@
 import json
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app import app
 from routes import products as products_module
 from routes.ai import (
     _outbound_url_allowed,
     _deepseek_json_request,
+    _kimi_json_request,
     build_client_query_plan,
     classify_client_request,
     filter_client_answer_category,
@@ -697,7 +698,7 @@ class ClientRagTests(unittest.TestCase):
             )
 
         call = provider.call_args
-        self.assertEqual(call.kwargs["max_tokens"], 480)
+        self.assertEqual(call.kwargs["max_tokens"], 1100)
         self.assertNotIn("comparisons", call.kwargs["schema"]["properties"])
         compact_payload = call.args[1]
         self.assertNotIn("required_schema", compact_payload)
@@ -1010,6 +1011,60 @@ class ClientRagTests(unittest.TestCase):
         first_payload = json.loads(opener.call_args_list[0].args[0].data.decode("utf-8"))
         self.assertEqual(first_payload["model"], "deepseek-v4-pro")
         self.assertEqual(first_payload["thinking"], {"type": "disabled"})
+
+    def test_documented_kimi_request_uses_k3_reasoning_and_json_mode(self):
+        model_result = {
+            "answer": "Réponse documentée.",
+            "key_points": [],
+            "selected_product_ids": [],
+            "follow_up_questions": [],
+            "safety_flags": [],
+            "pharmacist_referral": False,
+            "pharmacist_reason": "",
+            "source_ids": [],
+        }
+        api_response = {
+            "choices": [{
+                "message": {"content": json.dumps(model_result, ensure_ascii=False)},
+            }],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 60},
+        }
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(
+            api_response, ensure_ascii=False,
+        ).encode("utf-8")
+
+        with patch("routes.ai.KIMI_API_KEY", "secret"), \
+             patch("routes.ai.KIMI_DOCUMENTED_MODEL", "kimi-k3"), \
+             patch("routes.ai.KIMI_DOCUMENTED_REASONING_EFFORT", "high"), \
+             patch("routes.ai._safe_urlopen", return_value=response) as opener, \
+             patch("routes.ai._log_ai_usage"):
+            result = _kimi_json_request(
+                [{"role": "user", "content": "test"}],
+                max_tokens=1100,
+                quality_mode=True,
+            )
+
+        self.assertEqual(result, model_result)
+        request_obj = opener.call_args.args[0]
+        payload = json.loads(request_obj.data.decode("utf-8"))
+        self.assertEqual(request_obj.full_url, "https://api.moonshot.ai/v1/chat/completions")
+        self.assertEqual(payload["model"], "kimi-k3")
+        self.assertEqual(payload["reasoning_effort"], "high")
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["max_tokens"], 1100)
+
+    def test_documented_kimi_timeout_makes_only_one_paid_request(self):
+        with patch("routes.ai.KIMI_API_KEY", "secret"), \
+             patch("routes.ai._safe_urlopen", side_effect=TimeoutError("slow")) as opener:
+            result = _kimi_json_request(
+                [{"role": "user", "content": "test"}],
+                max_tokens=1100,
+                quality_mode=True,
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(opener.call_count, 1)
 
     def test_small_ai_context_keeps_different_product_forms(self):
         candidates = [
@@ -1410,13 +1465,59 @@ class ClientRagTests(unittest.TestCase):
         self.assertIn("gommes", payload["answer"])
         self.assertIn("liquide ou suspension", payload["answer"])
         generator.assert_not_called()
-        provider.assert_not_called()
+        provider.assert_called_once()
         rate_limit.assert_not_called()
         retriever.assert_called_once_with(
             unittest.mock.ANY,
             unittest.mock.ANY,
             include_live_regulatory=False,
         )
+
+    def test_kimi_composes_common_documented_questions_instead_of_bypassing_ai(self):
+        candidates = [{
+            "id": 1, "client_id": "product:1",
+            "name": "TYLENOL 500MG X/F CO100", "brand": "Tylenol",
+            "description": "Contient de l'acétaminophène.",
+            "barcode": "1001", "aisle": "Labo", "side": "A",
+            "section": "2", "shelf": "3", "position": "4",
+        }]
+        documented = {
+            "answer": "Pour un mal de tête, voici le choix pertinent et les vérifications utiles.",
+            "selected_product_ids": ["product:1"],
+            "follow_up_questions": [],
+            "safety_flags": [],
+            "pharmacist_referral": False,
+            "pharmacist_reason": "",
+            "key_points": [],
+            "comparisons": [],
+            "useful_guidance": [],
+            "important_checks": [],
+            "source_ids": ["store-plan"],
+            "degraded": False,
+            "warning": "",
+        }
+        with patch("routes.products.hybrid_client_candidates", return_value=candidates), \
+             patch("routes.products.hydrate_candidate_images"), \
+             patch("routes.ai.retrieve_client_documentation", return_value=[]), \
+             patch(
+                 "routes.ai.generate_documented_client_answer",
+                 return_value=documented,
+             ) as generator, \
+             patch(
+                 "routes.ai.configured_ai_provider",
+                 return_value={"name": "kimi", "label": "Kimi", "model": "kimi-k2.6"},
+             ), \
+             patch("routes.ai._check_ai_rate_limit", return_value=True), \
+             patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": "Jai mal à la tête que prendre",
+                    "mode": "documented",
+                })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["answer"], documented["answer"])
+        generator.assert_called_once()
 
     def test_documented_form_comparison_skips_ai_delay(self):
         candidates = [{
@@ -1456,7 +1557,7 @@ class ClientRagTests(unittest.TestCase):
         self.assertLess(payload["elapsed_ms"], 1000)
         self.assertIn("façon de les prendre", payload["answer"])
         generator.assert_not_called()
-        provider.assert_not_called()
+        provider.assert_called_once()
         rate_limit.assert_not_called()
 
     def test_catalogue_supported_comparison_skips_ai_delay(self):
@@ -1508,7 +1609,7 @@ class ClientRagTests(unittest.TestCase):
             },
         )
         generator.assert_not_called()
-        provider.assert_not_called()
+        provider.assert_called_once()
         rate_limit.assert_not_called()
 
     def test_documented_wound_comparison_skips_ai_delay(self):
@@ -1546,7 +1647,7 @@ class ClientRagTests(unittest.TestCase):
         self.assertFalse(payload["degraded"])
         self.assertIn("forme un gel", payload["answer"])
         generator.assert_not_called()
-        provider.assert_not_called()
+        provider.assert_called_once()
         rate_limit.assert_not_called()
 
     def test_documented_toothbrush_power_comparison_skips_ai_delay(self):
@@ -1586,7 +1687,7 @@ class ClientRagTests(unittest.TestCase):
         self.assertIn("brosse à pile", payload["answer"])
         self.assertIn("brosse rechargeable", payload["answer"])
         generator.assert_not_called()
-        provider.assert_not_called()
+        provider.assert_called_once()
         rate_limit.assert_not_called()
         retriever.assert_called_once_with(
             unittest.mock.ANY,
@@ -1643,7 +1744,7 @@ class ClientRagTests(unittest.TestCase):
             ["Choix rapide", "Avant de proposer", "Ne pas combiner", "Quand référer"],
         )
         generator.assert_not_called()
-        provider.assert_not_called()
+        provider.assert_called_once()
         rate_limit.assert_not_called()
         retriever.assert_called_once_with(
             unittest.mock.ANY,
@@ -1684,7 +1785,7 @@ class ClientRagTests(unittest.TestCase):
         self.assertIn("Pour soulager une fièvre", payload["answer"])
         self.assertIn("acétaminophène", payload["answer"])
         generator.assert_not_called()
-        provider.assert_not_called()
+        provider.assert_called_once()
         rate_limit.assert_not_called()
 
 
