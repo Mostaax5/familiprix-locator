@@ -71,6 +71,24 @@ class DatabaseConnectionTests(unittest.TestCase):
         }
         self.assertFalse(database._postgres_auth_schema_complete(db))
 
+    def test_current_postgres_schema_version_skips_historical_migrations(self):
+        db = Mock(backend="postgres")
+        with patch.object(database, "connect_db", return_value=db), \
+             patch.object(database, "ensure_auth_schema"), \
+             patch.object(
+                 database, "_postgres_stored_schema_version",
+                 return_value=database._POSTGRES_SCHEMA_VERSION,
+             ), \
+             patch.object(database, "init_postgres_db") as full_migration, \
+             patch.object(database, "_set_postgres_schema_version") as set_version, \
+             patch.object(database, "ensure_best_effort_unique_indexes"), \
+             patch.object(database, "_POSTGRES_PRODUCT_SCHEMA_READY", False):
+            database.init_db()
+
+        full_migration.assert_not_called()
+        set_version.assert_called_once_with(db)
+        db.close.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import threading
+import time
 from flask import g, has_app_context
 
 try:
@@ -30,6 +31,8 @@ _POSTGRES_AUTH_SCHEMA_READY = False
 _PRODUCT_SCHEMA_LOCK = threading.RLock()
 _POSTGRES_PRODUCT_SCHEMA_READY = False
 _POSTGRES_PRODUCT_SCHEMA_ERROR = ""
+_POSTGRES_SCHEMA_VERSION_SETTING = "database_schema_version"
+_POSTGRES_SCHEMA_VERSION = "2026-07-29-product-data-v1"
 _PRODUCT_SEARCH_GENERATION = 0
 _PRODUCT_SEARCH_GENERATION_LOCK = threading.Lock()
 
@@ -244,6 +247,52 @@ def close_db(_error=None):
         db.close()
 
 
+def _postgres_stored_schema_version(db):
+    row = db.execute(
+        "SELECT setting_value FROM app_settings WHERE setting_key=?",
+        (_POSTGRES_SCHEMA_VERSION_SETTING,),
+    ).fetchone()
+    if not row:
+        return ""
+    values = dict(row)
+    return str(values.get("setting_value", "") or "").strip()
+
+
+def _set_postgres_schema_version(db):
+    db.execute(
+        """INSERT INTO app_settings(setting_key, setting_value, updated_at)
+           VALUES(?,?,?)
+           ON CONFLICT(setting_key) DO UPDATE SET
+             setting_value=excluded.setting_value,
+             updated_at=excluded.updated_at""",
+        (
+            _POSTGRES_SCHEMA_VERSION_SETTING,
+            _POSTGRES_SCHEMA_VERSION,
+            int(time.time()),
+        ),
+    )
+
+
+def _postgres_existing_schema_compatible(db):
+    """Recognize the complete pre-version production schema once."""
+    if not _postgres_product_data_schema_complete(db):
+        return False
+    required_tables = (
+        "products", "product_reference", "aisle_layouts", "ai_logs",
+        "removed_products", "planogram_imports",
+    )
+    placeholders = ",".join("?" for _ in required_tables)
+    row = db.execute(
+        f"""SELECT COUNT(DISTINCT table_name) AS count
+            FROM information_schema.tables
+            WHERE table_schema=current_schema()
+              AND table_name IN ({placeholders})""",
+        required_tables,
+    ).fetchone()
+    values = dict(row) if row else {}
+    return int(values.get("count") or 0) == len(required_tables)
+
+
 def init_db():
     global _POSTGRES_AUTH_SCHEMA_READY, _POSTGRES_PRODUCT_SCHEMA_READY
     global _POSTGRES_PRODUCT_SCHEMA_ERROR
@@ -258,7 +307,15 @@ def init_db():
             # larger product and planogram migration running at startup.
             ensure_auth_schema(db)
             with _PRODUCT_SCHEMA_LOCK:
-                init_postgres_db(db)
+                stored_version = _postgres_stored_schema_version(db)
+                schema_is_current = stored_version == _POSTGRES_SCHEMA_VERSION
+                can_bootstrap_version = (
+                    not stored_version
+                    and _postgres_existing_schema_compatible(db)
+                )
+                if not (schema_is_current or can_bootstrap_version):
+                    init_postgres_db(db)
+                _set_postgres_schema_version(db)
                 db.commit()
                 _POSTGRES_PRODUCT_SCHEMA_READY = True
                 _POSTGRES_PRODUCT_SCHEMA_ERROR = ""
