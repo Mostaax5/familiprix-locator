@@ -9,7 +9,7 @@ from html import unescape
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
-from flask import Blueprint, request, jsonify, Response, g
+from flask import Blueprint, request, jsonify, Response, g, current_app
 from database import get_db
 from auth import require_editor, utc_now_iso, side_display_label
 from memory_guard import memory_intensive_task, release_unused_memory
@@ -5809,7 +5809,9 @@ def maybe_resume_enrichment():
 
 @ai_bp.route("/api/import/catalog-enrich/status", methods=["GET"])
 def catalog_enrich_status():
-    resumed = maybe_resume_enrichment()
+    resumed = False
+    if not current_app.config.get("DB_BOOT_PENDING", False):
+        resumed = maybe_resume_enrichment()
     state = dict(_CATALOG_ENRICH)
     if resumed:
         state["resumed"] = True

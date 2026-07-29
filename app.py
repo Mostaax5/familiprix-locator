@@ -110,6 +110,7 @@ _ASYNC_RENDER_BOOT = bool(
     or os.environ.get("RENDER", "").strip()
 )
 DB_BOOT_PENDING = _ASYNC_RENDER_BOOT
+app.config["DB_BOOT_PENDING"] = DB_BOOT_PENDING
 
 # Keep local setup deterministic. On Render the same work runs below after the
 # app object is ready, so a busy PostgreSQL lock cannot block /healthz.
@@ -453,6 +454,7 @@ def _finish_persistence_boot():
                     f"{attempt}/{len(retry_delays)} impossible: {exc}"
                 )
         DB_BOOT_PENDING = False
+        app.config["DB_BOOT_PENDING"] = False
 
     if initialized:
         _restore_from_gist_if_empty()
@@ -461,6 +463,7 @@ def _finish_persistence_boot():
         schedule_backfill_missing()  # fetch missing product images in background
         if _ASYNC_RENDER_BOOT:
             schedule_regulatory_enrichment_after()
+        maybe_resume_enrichment()
 
 
 if _ASYNC_RENDER_BOOT:
