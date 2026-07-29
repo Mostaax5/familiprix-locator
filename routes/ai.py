@@ -3129,12 +3129,29 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             if dressing_type:
                 traits.append(dressing_type)
                 wound_dressing_groups[dressing_type].append(candidate_id)
-        for label, markers in ingredient_markers:
-            if any(marker in normalized_details for marker in markers):
-                if label not in ingredient_families:
-                    ingredient_families.append(label)
-                traits.append(f"mention de {label}")
-                break
+        matched_ingredients = [
+            label for label, markers in ingredient_markers
+            if any(marker in normalized_details for marker in markers)
+        ]
+        # Planogram names often carry only the well-known medicine brand. These
+        # mappings identify the brand family for comparison while every package
+        # strength and combination still has to be confirmed on its own label.
+        brand_ingredient_markers = (
+            ("acétaminophène", ("tylenol", "tempra", "atasol")),
+            ("ibuprofène", ("advil", "motrin")),
+            ("naproxène", ("aleve",)),
+            ("acide acétylsalicylique", ("aspirin", "aspirine")),
+        )
+        for label, markers in brand_ingredient_markers:
+            if any(
+                re.search(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])", normalized_name)
+                for marker in markers
+            ) and label not in matched_ingredients:
+                matched_ingredients.append(label)
+        for label in matched_ingredients:
+            if label not in ingredient_families:
+                ingredient_families.append(label)
+            traits.append(f"famille {label}; confirmer l'ingrédient du produit exact")
         if is_toothbrush_query:
             if "tete" in normalized_name:
                 role = "tête de remplacement"
@@ -3251,13 +3268,16 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         ]
         if has_acetaminophen and nsaid_families:
             choice = (
-                "les deux choix courants repérés sont l'acétaminophène et un AINS comme "
-                f"{nsaid_families[0]}"
+                "les familles courantes repérées sont l'acétaminophène et les AINS "
+                f"({', '.join(nsaid_families)})"
             )
         elif has_acetaminophen:
             choice = "le choix clairement repéré est l'acétaminophène"
         elif nsaid_families:
-            choice = f"le choix clairement repéré est un AINS comme {nsaid_families[0]}"
+            choice = (
+                "les choix clairement repérés sont des AINS "
+                f"({', '.join(nsaid_families)})"
+            )
         else:
             choice = "choisissez un produit à un seul ingrédient actif après l'avoir confirmé"
         answer = (
@@ -3277,13 +3297,16 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         ]
         if has_acetaminophen and nsaid_families:
             choices = (
-                "les choix repérés comprennent l'acétaminophène et un AINS comme "
-                f"{nsaid_families[0]}"
+                "les choix repérés comprennent l'acétaminophène et les AINS "
+                f"({', '.join(nsaid_families)})"
             )
         elif has_acetaminophen:
             choices = "le choix clairement repéré est l'acétaminophène"
         elif nsaid_families:
-            choices = f"le choix clairement repéré est un AINS comme {nsaid_families[0]}"
+            choices = (
+                "les choix clairement repérés sont des AINS "
+                f"({', '.join(nsaid_families)})"
+            )
         else:
             choices = (
                 "confirmez d'abord l'ingrédient actif du produit avec le pharmacien"
@@ -4517,7 +4540,7 @@ def ai_grounded_product_lookup(barcode):
 
 
 def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False,
-                          require_image=False):
+                          require_image=False, background=False):
     """UPC lookup for a PHARMACY catalog (food, beauty, meds, vitamins, baby,
     bandages, eye care, Familiprix house brand…). Broad coverage but fast: it
     returns as soon as a trusted result is found (good_enough), so it doesn't wait
@@ -4525,14 +4548,18 @@ def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False,
     and the broken EAN API is not used. Returns a product dict or None.
 
     max_workers caps EACH phase's internal thread pool. Interactive scans keep the
-    full fan-out (fastest single answer); batch enrichment passes a small cap —
-    several uncapped lookups in parallel meant 4×16 sockets + parsers at once,
-    which is what kept blowing Render's 512 MB memory limit."""
+    full fan-out (fastest single answer). ``background`` gives automatic image
+    enrichment a strict source budget: one missing public result must never
+    monopolize the only Render instance while employees are using the app."""
     barcode = str(barcode or "").strip()
     if not barcode:
         return None
     GOOD_ENOUGH = 24
     candidates = build_barcode_candidates(barcode)
+    if background:
+        # The original UPC plus one equivalent zero-padded GTIN cover useful
+        # package variants without turning one missing image into dozens of calls.
+        candidates = candidates[:2]
     best, best_score = None, 0
 
     def _cap(n):
@@ -4556,6 +4583,8 @@ def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False,
         tasks.append(lambda c=bc: lookup_brocade(c))
         for sn, su in PRODUCT_LOOKUP_SOURCES:
             tasks.append(lambda c=bc, n=sn, u=su: lookup_open_facts_product(n, u, c))
+    if background:
+        tasks = tasks[:7]
     best, best_score = best_lookup_result(
         tasks, max_workers=_cap(16), good_enough=GOOD_ENOUGH,
         wait_for_cleanup=wait_for_cleanup,
@@ -4570,6 +4599,10 @@ def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False,
             tasks.append(lambda c=bc, cs=candidates: lookup_familiprix_product(c, cs))
             tasks.append(lambda c=bc: lookup_barcodelookup(c))
             tasks.append(lambda c=bc: lookup_go_upc(c))
+        if background:
+            # Familiprix is the highest-value store-specific fallback. Avoid the
+            # slower generic HTML scrapers during automatic maintenance.
+            tasks = tasks[:1]
         p2, s2 = best_lookup_result(
             tasks, max_workers=_cap(8), good_enough=GOOD_ENOUGH,
             wait_for_cleanup=wait_for_cleanup,
@@ -4578,7 +4611,7 @@ def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False,
         best, best_score = _merge_candidate(best, best_score, p2, s2)
 
     # Phase 3 — pharmacy sites (Jean Coutu / Brunet / Pharmaprix), last resort.
-    if not _satisfactory(best, best_score):
+    if not background and not _satisfactory(best, best_score):
         tasks = []
         for bc in candidates:
             for sn, su in PHARMACY_LOOKUP_SOURCES:
@@ -4591,7 +4624,7 @@ def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False,
         best, best_score = _merge_candidate(best, best_score, p3, s3)
 
     # Phase 4 — AI web-grounded identification (opt-in via AI_DEEP_LOOKUP, off by default).
-    if not best:
+    if not background and not best:
         ai_found = ai_grounded_product_lookup(barcode)
         if ai_found:
             best = ai_found
@@ -5166,7 +5199,7 @@ def client_help():
     hydrate_candidate_images(candidates, queue_missing=False)
 
     if response_mode == "lookup":
-        hydrate_candidate_images(candidates, queue_missing=True, queue_limit=24)
+        hydrate_candidate_images(candidates, queue_missing=True, queue_limit=12)
         elapsed_ms = int((time.perf_counter() - started_at) * 1000)
         return jsonify({
             "success": True,
@@ -5304,7 +5337,7 @@ def client_help():
         if candidate_id in by_id
     ]
     hydrate_candidate_images(
-        highlighted_products, queue_missing=True, queue_limit=16
+        highlighted_products, queue_missing=True, queue_limit=12
     )
     answer = verified["answer"] or (
         "Aucun produit suffisamment lié à cette demande n'a été trouvé dans la base."

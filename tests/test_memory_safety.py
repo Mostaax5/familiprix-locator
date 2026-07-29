@@ -218,6 +218,25 @@ class MemorySafetyTests(unittest.TestCase):
         self.assertEqual(lookup.call_count, 2)
         self.assertTrue(all(call.kwargs["require_image"] for call in lookup.call_args_list))
 
+    def test_background_image_lookup_has_a_strict_source_budget(self):
+        with patch.object(
+            ai, "best_lookup_result", side_effect=[(None, 0), (None, 0)],
+        ) as lookup, patch.object(
+            ai, "ai_grounded_product_lookup", return_value=None,
+        ):
+            result = ai.lookup_product_online(
+                "063848966068",
+                max_workers=2,
+                wait_for_cleanup=True,
+                require_image=True,
+                background=True,
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(lookup.call_count, 2)
+        self.assertLessEqual(len(lookup.call_args_list[0].args[0]), 7)
+        self.assertEqual(len(lookup.call_args_list[1].args[0]), 1)
+
     def test_lookup_sources_have_one_process_wide_concurrency_limit(self):
         active = 0
         peak = 0

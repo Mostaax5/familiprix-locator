@@ -92,6 +92,41 @@ class PlanogramMetadataTests(unittest.TestCase):
                 products_module._IMAGE_FILL_RETRY_AFTER.clear()
                 products_module._IMAGE_FILL_ACTIVE = original_active
 
+    def test_image_queue_is_bounded_and_visible_items_replace_background_work(self):
+        with products_module._IMAGE_FILL_STATE_LOCK:
+            original_active = products_module._IMAGE_FILL_ACTIVE
+            products_module._IMAGE_FILL_ACTIVE = True
+            products_module._IMAGE_FILL_PENDING.clear()
+            products_module._IMAGE_FILL_QUEUED.clear()
+            products_module._IMAGE_FILL_WORKING.clear()
+            products_module._IMAGE_FILL_RETRY_AFTER.clear()
+        try:
+            background = [
+                f"background-{index}"
+                for index in range(products_module._IMAGE_FILL_MAX_PENDING + 20)
+            ]
+            products_module.schedule_image_fill(background, priority=False)
+            self.assertEqual(
+                len(products_module._IMAGE_FILL_PENDING),
+                products_module._IMAGE_FILL_MAX_PENDING,
+            )
+
+            products_module.schedule_image_fill(["visible-now"], priority=True)
+            self.assertEqual(
+                products_module._IMAGE_FILL_PENDING[0], "visible-now"
+            )
+            self.assertEqual(
+                len(products_module._IMAGE_FILL_PENDING),
+                products_module._IMAGE_FILL_MAX_PENDING,
+            )
+        finally:
+            with products_module._IMAGE_FILL_STATE_LOCK:
+                products_module._IMAGE_FILL_PENDING.clear()
+                products_module._IMAGE_FILL_QUEUED.clear()
+                products_module._IMAGE_FILL_WORKING.clear()
+                products_module._IMAGE_FILL_RETRY_AFTER.clear()
+                products_module._IMAGE_FILL_ACTIVE = original_active
+
     def make_plan_db(self):
         db = self.make_db()
         config = build_default_layout_config(1, 1, 3)

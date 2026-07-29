@@ -349,8 +349,10 @@ class ClientRagTests(unittest.TestCase):
                 response = client.get("/api/client/find?q=brosse%20a%20dent%20electric&limit=100")
 
         self.assertEqual(response.status_code, 200)
-        names = {item["name"] for item in response.get_json()}
+        response_products = response.get_json()
+        names = {item["name"] for item in response_products}
         self.assertEqual(names, {product["name"] for product in products[:7]})
+        self.assertNotIn("TETE", response_products[0]["name"])
         self.assertNotIn("CURAPROX BR/DENT SMART 1", names)
         self.assertNotIn("DENTA RINSE PRO .2% MENT 500ML", names)
         self.assertNotIn("SONICARE IRR S/FIL HX3826/23 1", names)
@@ -467,10 +469,17 @@ class ClientRagTests(unittest.TestCase):
                 response = client.get(
                     "/api/client/find?q=je%20cherche%20de%20la%20watte%20des%20petites%20boules"
                 )
+                employee_response = client.get(
+                    "/api/products/search?q=je%20cherche%20de%20la%20watte%20des%20petites%20boules"
+                )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             [item["name"] for item in response.get_json()],
+            ["PERSONNEL OUATE BOULES 100"],
+        )
+        self.assertEqual(
+            [item["name"] for item in employee_response.get_json()],
             ["PERSONNEL OUATE BOULES 100"],
         )
 

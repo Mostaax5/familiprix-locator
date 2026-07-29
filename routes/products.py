@@ -1432,6 +1432,30 @@ def product_matches_client_request(product, query):
     )
 
 
+def product_query_role_adjustment(query, row):
+    """Rank the requested object before its accessories without hiding either."""
+    if not _is_electric_toothbrush_request(query):
+        return 0
+    name = str(row.get("_name", "") or "")
+    is_replacement = any(marker in name for marker in (
+        "tete br dent", "tete dent", "rech bros", "recharge bros",
+        "soni rech", "refill", "replacement head",
+    ))
+    is_powered_brush = (
+        any(marker in name for marker in (
+            "br dent", "brosse dent", "toothbrush",
+        ))
+        and any(marker in name for marker in (
+            " elec", " pile", "sonicare", "philips one",
+        ))
+    )
+    if is_powered_brush and not is_replacement:
+        return 260
+    if is_replacement:
+        return -40
+    return 0
+
+
 def filter_client_request_products(products, query):
     """Filter loaded products with one compiled set of request constraints."""
     required = client_required_concept_groups(query)
@@ -2755,6 +2779,7 @@ _IMAGE_FILL_RETRY_AFTER = {}
 _IMAGE_FILL_ACTIVE = False
 _IMAGE_MISS_RETRY_SECONDS = 15 * 60
 _IMAGE_ERROR_RETRY_SECONDS = 30
+_IMAGE_FILL_MAX_PENDING = 24
 
 
 def persist_image_for_barcode(db, barcode, image_url, now=None, source="", source_url="", candidate=None):
@@ -2821,6 +2846,12 @@ def schedule_image_fill(barcodes, priority=True):
                         pass
                     _IMAGE_FILL_PENDING.appendleft(code)
                 continue
+            if len(_IMAGE_FILL_PENDING) >= _IMAGE_FILL_MAX_PENDING:
+                if not priority:
+                    break
+                # Visible products take the place of the oldest background item.
+                evicted = _IMAGE_FILL_PENDING.pop()
+                _IMAGE_FILL_QUEUED.discard(evicted)
             if priority:
                 _IMAGE_FILL_PENDING.appendleft(code)
             else:
@@ -2852,31 +2883,15 @@ def schedule_image_fill(barcodes, priority=True):
                     # reference catalogue); only then fan out to online sources.
                     img = find_existing_image_for_barcode(db, bc)
                     product = None
-                    exact_values = exact_gtin_variants(bc)
-                    needs_description = False
-                    for exact_value in exact_values:
-                        status_rows = db.execute(
-                            """SELECT description, description_status FROM products
-                               WHERE barcode=?""",
-                            (exact_value,),
-                        ).fetchall()
-                        if any(
-                            not str(dict(row).get("description", "") or "").strip()
-                            or dict(row).get("description_status") != "verified"
-                            for row in status_rows
-                        ):
-                            needs_description = True
-                            break
-                    if not img or needs_description:
-                        # Online pages and parsers are the memory-heavy part. Keep
-                        # background lookups out of PDF parsing and wait for each
-                        # lookup's source requests to finish before starting another.
-                        with memory_intensive_task("product_image"):
-                            product = lookup_product_online(
-                                bc, max_workers=2, wait_for_cleanup=True,
-                                require_image=not bool(img),
-                            )
-                        img = img or str((product or {}).get("image_url", "")).strip()
+                    if not img:
+                        # One serialized worker with a strict source budget uses
+                        # little memory and must not hold the catalogue/PDF memory
+                        # gate while it waits on external web sites.
+                        product = lookup_product_online(
+                            bc, max_workers=2, wait_for_cleanup=True,
+                            require_image=True, background=True,
+                        )
+                        img = str((product or {}).get("image_url", "")).strip()
                         # Exact UPC sources are still checked against the imported
                         # catalogue name before their image is attached.
                         catalog_rows = _rows_for_barcodes(
@@ -2922,7 +2937,7 @@ def schedule_image_fill(barcodes, priority=True):
                 with _IMAGE_FILL_STATE_LOCK:
                     _IMAGE_FILL_WORKING.discard(bc)
                 processed += 1
-                if processed % 20 == 0:
+                if processed % 8 == 0:
                     release_unused_memory()
         finally:
             try:
@@ -2944,7 +2959,7 @@ def schedule_image_fill(barcodes, priority=True):
     threading.Thread(target=worker, daemon=True).start()
 
 
-def hydrate_candidate_images(products, queue_missing=True, queue_limit=24):
+def hydrate_candidate_images(products, queue_missing=True, queue_limit=12):
     """Attach any already-known UPC image to mapped Client results immediately,
     then optionally queue a small visible subset for background lookup."""
     db = get_db()
@@ -3015,10 +3030,26 @@ def rank_products_for_query(products, query, limit=60):
     abbrevs = abbreviation_terms(query)
     if not nq and not dq and not intent_terms:
         return []
+    required_concepts = client_required_concept_groups(query)
+    excluded_concepts = client_excluded_concept_terms(query)
+    analgesic_name_required = _is_headache_request(query) or _is_fever_request(query)
     ranked = []
     for product in products:
-        score = _fast_reference_score(_product_search_row(product), nq, dq,
-                                      qtokens, intent_terms, abbrevs)
+        row = _product_search_row(product)
+        if analgesic_name_required and not _headache_relief_named_product(
+            f"{row.get('_name', '')} {row.get('_brand', '')}"
+        ):
+            continue
+        if not row_matches_client_concepts(
+            row, required_concepts, excluded_concepts,
+        ):
+            continue
+        score = (
+            _fast_reference_score(
+                row, nq, dq, qtokens, intent_terms, abbrevs,
+            )
+            + product_query_role_adjustment(query, row)
+        )
         if score > 0:
             ranked.append((score, product))
     # Tiebreak: in-stock products before ruptures, then by location.
@@ -3279,6 +3310,9 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None, field=""):
     abbrevs = abbreviation_terms(query)
     if not nq and not dq and not intent_terms:
         return []
+    required_concepts = client_required_concept_groups(query)
+    excluded_concepts = client_excluded_concept_terms(query)
+    analgesic_name_required = _is_headache_request(query) or _is_fever_request(query)
     exclude = exclude_barcodes or set()
     ranked = []
     for row in _reference_corpus(db):
@@ -3286,6 +3320,15 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None, field=""):
             continue
         if row["_bc"] and row["_bc"] in exclude:
             continue
+        if not field:
+            if analgesic_name_required and not _headache_relief_named_product(
+                f"{row.get('_name', '')} {row.get('_brand', '')}"
+            ):
+                continue
+            if not row_matches_client_concepts(
+                row, required_concepts, excluded_concepts,
+            ):
+                continue
         score = (
             max(
                 (_strict_identifier_score(value, query)
@@ -3293,7 +3336,12 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None, field=""):
                 default=0,
             )
             if field else
-            _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs)
+            (
+                _fast_reference_score(
+                    row, nq, dq, qtokens, intent_terms, abbrevs,
+                )
+                + product_query_role_adjustment(query, row)
+            )
         )
         if score > 0:
             ranked.append((score, row))
@@ -3605,7 +3653,13 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         must_hits = sum(1 for value in normalized_must_include if value in hay)
         exclusion_penalty = 260 if any(value in hay for value in exclude) else 0
         exact_upc = bool(upc_digits and row["_bc"] in upc_digits)
-        score = max(lexical, fuzzy) + min(260, int(bm25 * 34)) + (must_hits * 35) - exclusion_penalty
+        score = (
+            max(lexical, fuzzy)
+            + min(260, int(bm25 * 34))
+            + (must_hits * 35)
+            - exclusion_penalty
+            + product_query_role_adjustment(question, row)
+        )
         if exact_upc:
             score = max(score, 2000)
         if score >= 90:
@@ -3693,7 +3747,7 @@ def get_product_images():
             continue
         if product_id > 0 and product_id not in ids:
             ids.append(product_id)
-        if len(ids) >= 100:
+        if len(ids) >= 24:
             break
     if not ids:
         return jsonify({"images": {}})
@@ -3739,7 +3793,7 @@ def get_reference_product_images():
         if barcode and barcode not in seen:
             seen.add(barcode)
             barcodes.append(barcode)
-        if len(barcodes) >= 80:
+        if len(barcodes) >= 24:
             break
     if not barcodes:
         return jsonify({"images": {}})
@@ -3788,9 +3842,25 @@ def search_products():
     abbrevs = abbreviation_terms(query)
     if not nq and not dq and not intent_terms:
         return jsonify([])
+    required_concepts = client_required_concept_groups(query)
+    excluded_concepts = client_excluded_concept_terms(query)
+    analgesic_name_required = _is_headache_request(query) or _is_fever_request(query)
     ranked = []
     for item, row in corpus:
-        score = _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs)
+        if analgesic_name_required and not _headache_relief_named_product(
+            f"{row.get('_name', '')} {row.get('_brand', '')}"
+        ):
+            continue
+        if not row_matches_client_concepts(
+            row, required_concepts, excluded_concepts,
+        ):
+            continue
+        score = (
+            _fast_reference_score(
+                row, nq, dq, qtokens, intent_terms, abbrevs,
+            )
+            + product_query_role_adjustment(query, row)
+        )
         if score > 0:
             ranked.append((score, item))
     ranked.sort(key=lambda e: (-e[0], 1 if e[1].get("in_stock") == 0 else 0,
@@ -4548,8 +4618,8 @@ def bulk_import_products():
             # Plano rows carry no image — reuse a verified image for the same UPC.
             if not image_url and incoming_key in image_by_barcode:
                 image_url = image_by_barcode[incoming_key]
-            if barcode and (not image_url or not description):
-                image_barcodes.append(barcode)   # verify missing metadata in background
+            if barcode and not image_url:
+                image_barcodes.append(barcode)
             pending_insert_values.append((
                 name, brand, description, image_url, source_url, usage_notes,
                 alternatives, barcode, incoming_key, product_code, facings,
@@ -4735,7 +4805,9 @@ def bulk_import_products():
     quality_queued = schedule_planogram_post_import(
         post_import_items, username, now
     )
-    schedule_image_fill(image_barcodes)   # fetch missing plano pictures automatically
+    schedule_image_fill(
+        image_barcodes, priority=False,
+    )  # fetch a bounded background batch without delaying the import
     quality = {
         "success": True, "queued": quality_queued,
         "scanned": 0, "issues": 0, "statuses": {},
@@ -5314,13 +5386,38 @@ def schedule_reference_metadata_sync():
             db = None
             try:
                 db = connect_db()
-                with memory_intensive_task("reference_sync"):
-                    linked = sync_reference_metadata_to_products(db)
-                db.commit()
+                linked = 0
+                last_id = 0
+                while True:
+                    id_rows = db.execute(
+                        """SELECT id FROM products
+                           WHERE id>? AND TRIM(COALESCE(barcode,'')) <> ''
+                           ORDER BY id LIMIT 200""",
+                        (last_id,),
+                    ).fetchall()
+                    ids = [int(first_column(row)) for row in id_rows]
+                    if not ids:
+                        break
+                    with memory_intensive_task("reference_sync"):
+                        linked += sync_reference_metadata_to_products(
+                            db, product_ids=ids,
+                        )
+                        db.commit()
+                    last_id = ids[-1]
+                    release_unused_memory()
+                    time.sleep(0.03)
                 if linked:
-                    print(f"[Catalogue] {linked} produit(s) placé(s) relié(s) à leur description/image.")
+                    print(
+                        f"[Catalogue] {linked} produit(s) placé(s) relié(s) "
+                        "à leur description/image."
+                    )
                 return
             except Exception as exc:
+                if db is not None:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
                 if attempt == 2:
                     print(f"[Catalogue] synchronisation des métadonnées impossible: {exc}")
                 else:
@@ -5415,10 +5512,12 @@ _IMAGE_BACKFILL_BOOT_STARTED = False
 
 
 def schedule_backfill_missing():
-    """At startup, automatically fetch any still-missing product images in the
-    background. It runs once per worker process; after a controlled Gunicorn
-    recycle, the new worker resumes the durable database backlog instead of
-    inheriting a 12-hour temp-file pause from the dead worker."""
+    """Queue only a small recent-image batch after startup.
+
+    A previous version loaded every missing UPC after each Gunicorn recycle.
+    Thousands of slow web misses could then keep the only Render instance busy
+    for minutes. Visible cards and future starts continue the work incrementally.
+    """
     global _IMAGE_BACKFILL_BOOT_STARTED
     with _IMAGE_BACKFILL_BOOT_LOCK:
         if _IMAGE_BACKFILL_BOOT_STARTED:
@@ -5426,7 +5525,7 @@ def schedule_backfill_missing():
         _IMAGE_BACKFILL_BOOT_STARTED = True
 
     def worker():
-        time.sleep(60)
+        time.sleep(90)
         try:
             from database import connect_db
             db = connect_db()
@@ -5434,7 +5533,7 @@ def schedule_backfill_missing():
                 rows = db.execute(
                     "SELECT barcode, MAX(COALESCE(created_at,'')) AS newest FROM products "
                     "WHERE TRIM(COALESCE(barcode,'')) <> '' AND TRIM(COALESCE(image_url,'')) = '' "
-                    "GROUP BY barcode ORDER BY newest DESC"
+                    "GROUP BY barcode ORDER BY newest DESC LIMIT 12"
                 ).fetchall()
                 codes = [(r["barcode"] if isinstance(r, dict) else r[0]) for r in rows]
             finally:

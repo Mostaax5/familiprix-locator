@@ -279,6 +279,10 @@ def add_security_headers(response):
 
 @app.route("/api/system/info", methods=["GET"])
 def get_system_info():
+    if request.method == "HEAD":
+        # External uptime monitors only need proof that the request worker can
+        # answer. Do not turn every HEAD probe into catalogue/database work.
+        return "", 200
     ai_provider = configured_ai_provider()
     try:
         db = get_db()

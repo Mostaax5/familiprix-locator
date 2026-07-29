@@ -1033,7 +1033,10 @@ function updateClientImages(images) {
 }
 
 async function pollClientProductImages(attempt=0) {
-  const missingIds = currentClientMatches.filter(product => product.id && !product.image_url).map(product => product.id);
+  const missingIds = currentClientMatches
+    .filter(product => product.id && !product.image_url)
+    .map(product => product.id)
+    .slice(0, 12);
   if (!missingIds.length || attempt >= 6) return;
   const data = await apiGetProductImages(missingIds);
   updateClientImages(data.images || {});

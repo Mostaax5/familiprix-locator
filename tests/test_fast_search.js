@@ -144,5 +144,36 @@ assert.deepStrictEqual(
   new Set([batteryBrush.id, replacementHeads.id]),
   'the Client predicate must run before the 100-result limit and retain battery brushes and heads'
 );
+assert(
+  electricCandidates.indexOf(batteryBrush) < electricCandidates.indexOf(replacementHeads),
+  'a complete electric toothbrush should rank before replacement heads'
+);
+
+const cottonBalls = {
+  id: 15000, name: 'PERSONNEL OUATE BOULES 100', brand: 'Personnelle',
+  description: '', search_terms: '', usage_notes: '', alternative_suggestions: '',
+  barcode: '999999999991', in_stock: 1,
+};
+const chocolateBalls = {
+  id: 15001, name: 'REGAL BOULE DOR CHOCOLAT 144G', brand: 'Regal',
+  description: '', search_terms: '', usage_notes: '', alternative_suggestions: '',
+  barcode: '999999999992', in_stock: 1,
+};
+const cottonSwabs = {
+  id: 15002, name: 'Q-TIPS COTONS-TIGES 400', brand: 'Q-Tips',
+  description: '', search_terms: '', usage_notes: '', alternative_suggestions: '',
+  barcode: '999999999993', in_stock: 1,
+};
+products.push(cottonBalls, chocolateBalls, cottonSwabs);
+assert.deepStrictEqual(
+  Array.from(
+    context.window.AppSearch.searchProductsFromCache(
+      'je cherche de la watte des petites boules de coton', 40
+    ),
+    product => product.id
+  ),
+  [cottonBalls.id],
+  'spoken cotton-ball searches must reject chocolates and cotton swabs'
+);
 
 console.log(`fast search tests passed (${elapsed.toFixed(1)} ms for 12k products)`);

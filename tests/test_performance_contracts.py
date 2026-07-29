@@ -20,6 +20,8 @@ class PerformanceContractTests(unittest.TestCase):
         self.assertIn("autoDeployTrigger: commit", render_config)
         self.assertIn("0.0.0.0", gunicorn_config)
         self.assertIn("os.environ.get('PORT', '10000')", gunicorn_config)
+        self.assertIn("threads = 4", gunicorn_config)
+        self.assertIn("max_requests = 2000", gunicorn_config)
 
     def test_planogram_replacement_is_enabled_by_default(self):
         source = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
@@ -80,6 +82,22 @@ class PerformanceContractTests(unittest.TestCase):
             "cachedByField.length || allProductsCache.length", field_branch
         )
         self.assertIn("await apiSearchProducts(q, 'identifier')", source)
+        broad_start = source.index("const cached = searchProductsFromCache", end)
+        broad_end = source.index("// Fetch catalogue-only products", broad_start)
+        broad_branch = source[broad_start:broad_end]
+        self.assertIn("const indexed = await apiSearchProducts(q)", broad_branch)
+        self.assertIn("mergeIndexedSearchResults(indexed, cached, 40)", broad_branch)
+        self.assertNotIn("cached.length || allProductsCache.length", broad_branch)
+
+    def test_background_image_work_cannot_block_the_web_memory_gate(self):
+        source = (ROOT / "routes" / "products.py").read_text(encoding="utf-8")
+        start = source.index("def schedule_image_fill")
+        end = source.index("def hydrate_candidate_images", start)
+        worker = source[start:end]
+        self.assertIn("background=True", worker)
+        self.assertNotIn('memory_intensive_task("product_image")', worker)
+        self.assertIn("_IMAGE_FILL_MAX_PENDING = 24", source)
+        self.assertIn("ORDER BY newest DESC LIMIT 12", source)
 
     def test_planogram_reader_uses_fast_validated_path_and_quick_polling(self):
         routes = (ROOT / "routes" / "import_export.py").read_text(encoding="utf-8")

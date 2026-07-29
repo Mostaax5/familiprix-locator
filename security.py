@@ -414,7 +414,7 @@ def _same_origin_request() -> bool:
 def _is_internal_request() -> bool:
     supplied = request.headers.get("X-Familiprix-Internal", "")
     return bool(
-        request.method == "GET"
+        request.method in {"GET", "HEAD"}
         and request.path in _INTERNAL_GET_PATHS
         and supplied
         and hmac.compare_digest(supplied, _INTERNAL_REQUEST_TOKEN)
@@ -422,7 +422,7 @@ def _is_internal_request() -> bool:
 
 
 def _is_public_api_request() -> bool:
-    if request.method == "GET":
+    if request.method in {"GET", "HEAD"}:
         return (
             request.path in _PUBLIC_API_GET_PATHS
             or request.path.startswith(_PUBLIC_API_GET_PREFIXES)

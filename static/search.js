@@ -130,6 +130,78 @@ function isElectricToothbrushRequest(query) {
   return electric && brush && tooth;
 }
 
+const HEADACHE_PRODUCT_TERMS = [
+  'acetaminophene', 'paracetamol', 'acet', 'tylenol', 'tempra', 'atasol',
+  'ibuprofene', 'ibup', 'advil', 'motrin', 'naproxene', 'naprox', 'aleve',
+  'aspirine', 'aspirin', 'aas', 'asa', 'analgesique', 'antidouleur',
+  'pain reliever', 'pain relief', 'soul douleur', 'soul m tete', 'migraine',
+];
+
+function searchConceptMatches(text, terms) {
+  const hayTokens = normalizeSearchText(text).split(/\s+/).filter(Boolean);
+  return terms.some(term => {
+    const expected = normalizeSearchText(term).split(/\s+/).filter(Boolean);
+    if (!expected.length || expected.length > hayTokens.length) return false;
+    for (let start = 0; start <= hayTokens.length - expected.length; start += 1) {
+      if (expected.every((token, offset) => {
+        const actual = hayTokens[start + offset];
+        return actual === token || (token.length >= 4 && actual.startsWith(token));
+      })) return true;
+    }
+    return false;
+  });
+}
+
+function productMatchesHighPrecisionQuery(product, query) {
+  const normalized = normalizeSearchText(query);
+  const tokens = new Set(normalized.split(/\s+/).filter(Boolean));
+  const hay = productSearchText(product);
+  const name = `${product?.name || ''} ${product?.brand || ''}`;
+  const headache = (
+    ['headache', 'migraine', 'cephalee'].some(token => tokens.has(token))
+    || (tokens.has('tete') && ['mal', 'male', 'maux'].some(token => tokens.has(token)))
+  );
+  const fever = ['fievre', 'fever', 'febrile'].some(token => tokens.has(token));
+  if ((headache || fever) && !searchConceptMatches(name, HEADACHE_PRODUCT_TERMS)) {
+    return false;
+  }
+
+  const cottonBalls = ['watte', 'ouate'].some(token => tokens.has(token)) || (
+    ['coton', 'cotton'].some(token => tokens.has(token))
+    && ['boule', 'boules', 'ball', 'balls'].some(token => tokens.has(token))
+  );
+  if (cottonBalls && !(
+    searchConceptMatches(hay, ['coton', 'cotons', 'cotton', 'ouate', 'watte'])
+    && searchConceptMatches(hay, ['boule', 'boules', 'ball', 'balls', 'ouate'])
+  )) return false;
+
+  const transparentDressing = [
+    'membrane transparent', 'pansement transparent', 'film transparent',
+  ].some(marker => normalized.includes(marker))
+    || ['opsite', 'upsite', 'upside'].some(token => tokens.has(token));
+  if (transparentDressing && !(
+    searchConceptMatches(hay, ['transparent', 'transparente', 'transp', 'opsite', 'tegaderm'])
+    && searchConceptMatches(hay, ['pansement', 'pans', 'diach', 'bandage', 'band aid', 'opsite', 'tegaderm'])
+  )) return false;
+
+  if (isElectricToothbrushRequest(normalized)) {
+    if (!(
+      searchConceptMatches(hay, [
+        'brosse dent', 'brosse dents', 'br dent', 'br dents', 'toothbrush',
+        'rech bros', 'recharge bros', 'soni rech', 'tete br dent',
+      ])
+      && searchConceptMatches(hay, [
+        'electrique', 'electric', 'elec', 'pile', 'sonicare', 'philips one',
+        'tete br dent',
+      ])
+    )) return false;
+    if (searchConceptMatches(name, [
+      'irr', 'irrigateur', 'hydropulseur', 'airfloss', 'water flosser', 's fil',
+    ])) return false;
+  }
+  return true;
+}
+
 function intentExpansionTerms(query) {
   const norm = normalizeSearchText(query);
   if (!norm) return [];
@@ -194,6 +266,22 @@ function productSearchFields(product) {
 
 function productSearchText(product) {
   return productSearchFields(product).haystack;
+}
+
+function productQueryRoleAdjustment(product, query) {
+  if (!isElectricToothbrushRequest(query)) return 0;
+  const name = productSearchFields(product).name;
+  const replacement = [
+    'tete br dent', 'tete dent', 'rech bros', 'recharge bros',
+    'soni rech', 'refill', 'replacement head',
+  ].some(marker => name.includes(marker));
+  const poweredBrush = [
+    'br dent', 'brosse dent', 'toothbrush',
+  ].some(marker => name.includes(marker)) && [
+    ' elec', ' pile', 'sonicare', 'philips one',
+  ].some(marker => ` ${name}`.includes(marker));
+  if (poweredBrush && !replacement) return 260;
+  return replacement ? -40 : 0;
 }
 
 function scoreProductForQuery(product, query) {
@@ -312,6 +400,7 @@ function searchProductsFromCache(query, limit=40, minScore=0, predicate=null) {
   const ranked = [];
   for (const product of allProductsCache) {
     if (typeof predicate === 'function' && !predicate(product)) continue;
+    if (!productMatchesHighPrecisionQuery(product, query)) continue;
     let bestScore = 0;
     for (const variant of variants) bestScore = Math.max(bestScore, scoreProductForQuery(product, variant));
     if (intentTerms.length) {
@@ -323,6 +412,7 @@ function searchProductsFromCache(query, limit=40, minScore=0, predicate=null) {
     if (abbrevs.length && abbreviationHit(productSearchFields(product).name, abbrevs)) {
       bestScore = Math.max(bestScore, 430);   // full word matched an abbreviated name
     }
+    bestScore += productQueryRoleAdjustment(product, query);
     if (bestScore > 0 && bestScore >= minScore) ranked.push({score: bestScore, product});
   }
   // Tiebreak: in-stock before ruptures, then by name.
@@ -483,7 +573,7 @@ function startSearchImagePolling(products) {
   const ids = [...new Set((products || [])
     .filter(product => product?.id && !product.image_url)
     .map(product => Number(product.id))
-    .filter(Number.isInteger))].slice(0, 100);
+    .filter(Number.isInteger))].slice(0, 12);
   if (!ids.length || typeof apiGetProductImages !== 'function') return;
 
   const generation = _searchImagePollGeneration;
@@ -524,7 +614,7 @@ function startReferenceImagePolling(products) {
   const barcodes = [...new Set(visibleProducts
     .filter(product => product?.catalog_only && !product.image_url)
     .map(product => normalizedDigits(product.barcode))
-    .filter(Boolean))].slice(0, 80);
+    .filter(Boolean))].slice(0, 12);
   if (!barcodes.length || typeof apiGetReferenceProductImages !== 'function') return;
 
   const generation = _referenceImagePollGeneration;
@@ -666,25 +756,36 @@ async function doSearchValue(q) {
     }
     return;
   }
-  if (cached.length || allProductsCache.length) {
-    // A short digit query (last digits of a UPC) is ambiguous — several products can
-    // share the same ending. Show every match with its full code so the user can pick.
-    const shortDigits = /^\d{4,6}$/.test(q);
-    const hint = (shortDigits && cached.length > 1)
-      ? `<div class="msg info" style="margin-bottom:8px">${cached.length} produits se terminent par <b>${esc(q)}</b>. Vérifiez le code-barres complet ci-dessous pour choisir le bon.</div>`
+  const shortDigits = /^\d{4,6}$/.test(q);
+  const renderPlaced = products => {
+    const hint = (shortDigits && products.length > 1)
+      ? `<div class="msg info" style="margin-bottom:8px">${products.length} produits se terminent par <b>${esc(q)}</b>. Vérifiez le code-barres complet ci-dessous pour choisir le bon.</div>`
       : '';
-    // Group results by barcode — if a barcode appears at multiple locations, merge them
-    div.innerHTML = cached.length ? (hint + groupAndRenderSearchResults(cached)) : '<div class="empty">Aucun produit placé. Recherche dans le catalogue…</div>';
-    // Also search the imported-planogram catalogue for products we carry but that
-    // aren't placed on a shelf yet (server-side, so it doesn't tax the phone).
-    appendReferenceMatches(q, div, cached);
-    return;
+    div.innerHTML = products.length
+      ? (hint + groupAndRenderSearchResults(products))
+      : '<div class="empty">Aucun produit placé. Recherche dans le catalogue…</div>';
+  };
+  if (cached.length) {
+    // Instant first paint from the phone snapshot, followed by an authoritative
+    // server reconciliation below. A partial snapshot must never become a false
+    // “aucun produit” result after a restart or refresh.
+    renderPlaced(cached);
+  } else {
+    div.innerHTML = '<div class="empty">Recherche dans le plan actuel…</div>';
   }
   try {
-    const data = await apiSearchProducts(q);
-    div.innerHTML = data.length ? groupAndRenderSearchResults(data) : '<div class="empty">Aucun produit trouve.</div>';
+    const indexed = await apiSearchProducts(q);
+    if (requestGeneration !== _searchRequestGeneration) return;
+    const data = mergeIndexedSearchResults(indexed, cached, 40);
+    renderPlaced(data);
+    appendReferenceMatches(q, div, data);
   } catch (e) {
-    div.innerHTML = '<div class="msg error">Impossible de rechercher pour le moment.</div>';
+    if (requestGeneration !== _searchRequestGeneration) return;
+    if (cached.length) {
+      appendReferenceMatches(q, div, cached);
+    } else {
+      div.innerHTML = '<div class="msg error">Impossible de rechercher pour le moment.</div>';
+    }
   }
 }
 

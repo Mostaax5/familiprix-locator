@@ -125,6 +125,21 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertEqual(client_find.status_code, 200)
         self.assertEqual(client_find.get_json(), [])
 
+        public_head = self.client.head(
+            "/api/products/search?q=",
+            base_url="https://localhost",
+        )
+        self.assertEqual(public_head.status_code, 200)
+        with patch(
+            "app.get_db",
+            side_effect=AssertionError("HEAD uptime probe must not query the database"),
+        ):
+            system_head = self.client.head(
+                "/api/system/info",
+                base_url="https://localhost",
+            )
+        self.assertEqual(system_head.status_code, 200)
+
         with patch("routes.products.get_db", return_value=self.db):
             products = self.client.get("/api/products", base_url="https://localhost")
         self.assertEqual(products.status_code, 200)
