@@ -85,6 +85,54 @@ class MemorySafetyTests(unittest.TestCase):
             products._PROD_CACHE.clear()
             products._PROD_CACHE.update(original_cache)
 
+    def test_catalogue_metadata_invalidation_keeps_warm_search_available(self):
+        original_cache = dict(products._PROD_CACHE)
+        try:
+            products._PROD_CACHE.update(
+                rows=[({"id": 1}, {"_name": "advil"})],
+                generation=12,
+                metadata_dirty=False,
+                metadata_dirty_at=0.0,
+            )
+
+            products.invalidate_product_search_cache()
+
+            self.assertEqual(products._PROD_CACHE["generation"], 12)
+            self.assertTrue(products._PROD_CACHE["metadata_dirty"])
+            self.assertGreater(products._PROD_CACHE["metadata_dirty_at"], 0)
+        finally:
+            products._PROD_CACHE.clear()
+            products._PROD_CACHE.update(original_cache)
+
+    def test_old_metadata_refresh_is_deferred_when_worker_memory_is_high(self):
+        original_cache = dict(products._PROD_CACHE)
+        warm_rows = [({"id": 1, "name": "Advil"}, {"_name": "advil"})]
+        try:
+            products._PROD_CACHE.update(
+                rows=warm_rows,
+                generation=12,
+                built_at=(
+                    time.time() - products._PROD_IDENTIFIER_DRIFT_TTL_S - 1
+                ),
+                metadata_dirty=True,
+                metadata_dirty_at=time.time() - 20,
+            )
+            with patch.object(
+                products, "product_search_generation", return_value=12,
+            ), patch.object(
+                products, "current_rss_mb",
+                return_value=products._PROD_METADATA_REFRESH_MAX_RSS_MB + 1,
+            ), patch.object(
+                products, "_schedule_product_corpus_refresh",
+            ) as refresh:
+                self.assertIs(
+                    products._employee_product_corpus(object()), warm_rows
+                )
+                refresh.assert_not_called()
+        finally:
+            products._PROD_CACHE.clear()
+            products._PROD_CACHE.update(original_cache)
+
     def test_invalidated_warm_corpus_is_served_while_refresh_starts(self):
         original_cache = dict(products._PROD_CACHE)
         warm_rows = [({"id": 1, "name": "Advil"}, {"_name": "advil"})]

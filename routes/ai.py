@@ -3464,6 +3464,77 @@ def _client_intent_documents(query_plan):
     }]
 
 
+_AI_DESCRIPTION_FACT_RE = re.compile(
+    r"(?i)(?:"
+    r"\b\d+(?:[.,]\d+)?\s*(?:mcg|mg|g|kg|ml|l|%|unit(?:e|é)s?|"
+    r"capsules?|comprim(?:e|é)s?|tablets?)\b|"
+    r"\b(?:contient|renferme|ingredient|ingrédient|formule|formulé|"
+    r"soulage|reduit|réduit|indique|indiqué|destine|destiné|concu|conçu|"
+    r"compatible|convient|utilis|appliquer|nettoie|hydrate|protege|protège|"
+    r"saveur|parfum|concentration|dosage|format|bouteille|recharge|"
+    r"capsule|comprime|comprimé|liqui[\s-]?gel|mini[\s-]?gel)\b"
+    r")"
+)
+_AI_DESCRIPTION_MARKETING_RE = re.compile(
+    r"(?i)\b(?:"
+    r"il y a des|au quotidien|dans ces moments|dans ces instants|"
+    r"bien-etre merite|bien-être mérite|vie active|rythme de vie|"
+    r"presence totale|présence totale|a ete imagine|a été imaginé|"
+    r"une facon moderne|une façon moderne|symbole de|chaque seconde compte"
+    r")\b"
+)
+
+
+def _description_excerpt_for_ai(value, max_chars=900):
+    """Extract exact, useful catalogue facts instead of a marketing preamble."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    max_chars = max(120, int(max_chars or 900))
+    if len(text) <= max_chars and not _AI_DESCRIPTION_MARKETING_RE.search(text):
+        return text
+    sentences = [
+        sentence.strip(" -;\t")
+        for sentence in re.split(
+            r"(?<=[.!?])\s+|\s+[•·]\s+|\s+-\s+(?=[A-ZÀ-ÖØ-Ý0-9])",
+            text,
+        )
+        if sentence.strip(" -;\t")
+    ]
+    if len(sentences) <= 1:
+        return text[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:-")
+
+    scored = []
+    for index, sentence in enumerate(sentences):
+        score = 0
+        fact_hits = len(_AI_DESCRIPTION_FACT_RE.findall(sentence))
+        score += min(8, fact_hits * 2)
+        if re.search(r"\d", sentence):
+            score += 2
+        if 35 <= len(sentence) <= 360:
+            score += 1
+        if _AI_DESCRIPTION_MARKETING_RE.search(sentence):
+            score -= 5
+        scored.append((score, index, sentence))
+
+    selected = []
+    used_chars = 0
+    for score, index, sentence in sorted(
+        scored, key=lambda item: (-item[0], item[1])
+    ):
+        if score <= 0 and selected:
+            break
+        needed = len(sentence) + (1 if selected else 0)
+        if used_chars + needed > max_chars:
+            continue
+        selected.append((index, sentence))
+        used_chars += needed
+        if len(selected) >= 6:
+            break
+    if not selected:
+        return text[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:-")
+    excerpt = " ".join(sentence for _index, sentence in sorted(selected))
+    return excerpt.rstrip(" ,;:-")
+
+
 def retrieve_client_documentation(products, query_plan=None, include_live_regulatory=True):
     product_names = [str(product.get("name", "") or "").strip() for product in products]
     documents = [{
@@ -3512,6 +3583,10 @@ def retrieve_client_documentation(products, query_plan=None, include_live_regula
             value = str(product.get(field, "") or "").strip()
             if not value:
                 continue
+            if field == "description":
+                value = _description_excerpt_for_ai(
+                    value, max_chars=1300,
+                )
             provenance = field_sources.get(field) or {}
             source = str(provenance.get("source", "") or "Source vérifiée")
             source_url = str(provenance.get("source_url", "") or "")
@@ -3535,6 +3610,9 @@ def retrieve_client_documentation(products, query_plan=None, include_live_regula
             status = str(
                 product.get("description_status", "") or "unverified"
             ).strip()
+            description_excerpt = _description_excerpt_for_ai(
+                description, max_chars=1300,
+            )
             documents.append({
                 "source_id": f"catalog-description:{source_index}",
                 "title": f"Description catalogue \u00e0 confirmer - {name}",
@@ -3543,7 +3621,7 @@ def retrieve_client_documentation(products, query_plan=None, include_live_regula
                 "evidence": (
                     f"Statut: {status}; cette description aide \u00e0 identifier le "
                     f"produit mais doit \u00eatre confirm\u00e9e sur l'emballage. "
-                    f"Description: {description}"
+                    f"Description: {description_excerpt}"
                 )[:1800],
                 "candidate_ids": [candidate_id] if candidate_id else [],
                 "verification_status": status,
@@ -4743,6 +4821,19 @@ _DOCUMENTED_COMPACT_FACT_FIELDS = (
 )
 
 
+def _compact_documented_fact(field, value):
+    text = str(value or "").strip()
+    if field == "strength":
+        zero_denominator = re.fullmatch(
+            r"(\d+)(?:[.,]0+)?\s*([A-Za-zµ]+)\s*/\s*0(?:[.,]0+)?"
+            r"(?:\s*[A-Za-zµ]+)?",
+            text,
+        )
+        if zero_denominator:
+            return f"{zero_denominator.group(1)} {zero_denominator.group(2)}"
+    return text
+
+
 def _compact_documented_product_context(product, include_identifiers=False):
     """Keep only facts the answer model can use.
 
@@ -4755,9 +4846,9 @@ def _compact_documented_product_context(product, include_identifiers=False):
     field_sources = product.get("_field_sources") or {}
     description_source = field_sources.get("description") or {}
     facts = {
-        field: str(context.get(field, "") or "").strip()
+        field: _compact_documented_fact(field, context.get(field, ""))
         for field in _DOCUMENTED_COMPACT_FACT_FIELDS
-        if str(context.get(field, "") or "").strip()
+        if _compact_documented_fact(field, context.get(field, ""))
     }
     catalogue_clues = {}
     for field in ("brand", *_DOCUMENTED_COMPACT_FACT_FIELDS):
@@ -4777,7 +4868,9 @@ def _compact_documented_product_context(product, include_identifiers=False):
         "name_source": "store_planogram",
         "brand": str(product.get("brand", "") or "")[:160],
         "catalogue_description": {
-            "text": str(context.get("description", "") or "")[:700],
+            "text": _description_excerpt_for_ai(
+                context.get("description", ""), max_chars=900,
+            ),
             "verification_status": str(
                 context.get("description_status", "") or "unverified"
             )[:60],
@@ -4886,7 +4979,7 @@ def _generate_documented_client_answer_sync(
         "source_id": str(document.get("source_id", "") or ""),
         "title": str(document.get("title", "") or "")[:180],
         "publisher": str(document.get("publisher", "") or "")[:100],
-        "evidence": str(document.get("evidence", "") or "")[:500],
+        "evidence": str(document.get("evidence", "") or "")[:700],
         "candidate_ids": (document.get("candidate_ids", []) or [])[:12],
         "verification_status": str(
             document.get("verification_status", "") or ""

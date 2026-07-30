@@ -20,6 +20,7 @@ from database import (
 from auth import require_editor, utc_now_iso, side_display_label
 from routes.layout import validate_layout_slot, aisle_sort_key
 from memory_guard import (
+    current_rss_mb,
     memory_intensive_task,
     memory_snapshot,
     release_unused_memory,
@@ -513,6 +514,7 @@ _PROD_CACHE = {
     "key": None, "rows": [], "built_at": 0.0,
     "initialized": False,
     "generation": -1, "state_checked_at": 0.0,
+    "metadata_dirty": False, "metadata_dirty_at": 0.0,
     "document_frequency": {}, "document_count": 0,
     "average_document_length": 1.0, "statistics_rows_id": 0,
     "catalog_brands": (), "name_lead_frequency": {},
@@ -520,7 +522,14 @@ _PROD_CACHE = {
 _PROD_LOCK = threading.RLock()
 _PROD_REFRESH_LOCK = threading.Lock()
 _PROD_REFRESH_RUNNING = False
-_PROD_IDENTIFIER_DRIFT_TTL_S = 120.0
+_PROD_IDENTIFIER_DRIFT_TTL_S = max(
+    120.0,
+    float(os.environ.get("PRODUCT_METADATA_REFRESH_INTERVAL_SECONDS", "900") or 900),
+)
+_PROD_METADATA_REFRESH_MAX_RSS_MB = max(
+    128.0,
+    float(os.environ.get("PRODUCT_METADATA_REFRESH_MAX_RSS_MB", "260") or 260),
+)
 _PRODUCTS_PAYLOAD_VERSION = "compact-stream-v4"
 _PRODUCT_STREAM_CHUNK_BYTES = 256 * 1024
 # A phone bootstrap is several megabytes before compression. Gunicorn has four
@@ -532,9 +541,17 @@ _PRODUCT_STREAM_LOCK = threading.Lock()
 
 
 def invalidate_product_search_cache():
-    """Make the next search rebuild after a bounded metadata batch."""
+    """Mark background metadata as stale without expiring employee search.
+
+    Catalogue enrichment changes descriptions, images, and identifiers but not
+    shelf positions. Rebuilding every cached product after each 100-row batch
+    caused repeated 100+ MB allocation spikes on Render. A bounded refresh is
+    scheduled later while the existing immutable search snapshot stays usable.
+    """
     with _PROD_LOCK:
-        _PROD_CACHE["generation"] = -1
+        _PROD_CACHE["metadata_dirty"] = True
+        if not _PROD_CACHE.get("metadata_dirty_at"):
+            _PROD_CACHE["metadata_dirty_at"] = time.time()
 
 
 def _serialized_product_corpus(function):
@@ -1080,6 +1097,7 @@ def _products_corpus(db, allow_identifier_stale=False):
     _PROD_CACHE.update(
         key=key, rows=rows, built_at=time.time(), initialized=True,
         generation=generation, state_checked_at=checked_at,
+        metadata_dirty=False, metadata_dirty_at=0.0,
         document_frequency=dict(document_frequency),
         document_count=document_count,
         average_document_length=(
@@ -1113,6 +1131,14 @@ def _employee_product_corpus(db):
     if warm_rows:
         if not _product_corpus_fast_ready():
             _schedule_product_corpus_refresh()
+        elif (
+            _PROD_CACHE.get("metadata_dirty")
+            and time.time() - float(_PROD_CACHE.get("built_at", 0) or 0)
+            >= _PROD_IDENTIFIER_DRIFT_TTL_S
+        ):
+            rss_mb = current_rss_mb()
+            if rss_mb is None or rss_mb <= _PROD_METADATA_REFRESH_MAX_RSS_MB:
+                _schedule_product_corpus_refresh()
         return warm_rows
     with memory_intensive_task("product_corpus", priority=True):
         return _products_corpus(db, allow_identifier_stale=True)
@@ -1500,7 +1526,7 @@ def client_excluded_concept_terms(query):
             "nuit", "night", "pm", "sommeil", "dormir",
         }):
             groups.append(_compile_client_concept_group((
-                "nuit", "night", "pm", "sommeil", "aid somm",
+                "nuit", "night", "pm", "sommeil", "aid somm", "nt",
             )))
         if not tokens.intersection({
             "combine", "combinaison", "acetaminophene", "acet",
@@ -4187,9 +4213,19 @@ def get_products():
     reuses its stored copy — this endpoint is fetched at every app open and tab
     switch, and used to re-serialize ~1 MB of JSON every time."""
     db = get_db()
+    # During background enrichment the warm cache is intentionally published
+    # at a bounded cadence. Keep its ETag stable too, otherwise every phone
+    # downloads the same multi-megabyte payload after each metadata row update.
+    if _product_corpus_fast_ready() and _PROD_CACHE.get("key"):
+        etag_state = _PROD_CACHE["key"]
+    else:
+        etag_state = (
+            products_state_key(db),
+            product_identifier_state_key(db),
+            reference_identifier_state_key(db),
+        )
     etag = hashlib.sha256(repr((
-        _PRODUCTS_PAYLOAD_VERSION, products_state_key(db),
-        product_identifier_state_key(db), reference_identifier_state_key(db),
+        _PRODUCTS_PAYLOAD_VERSION, etag_state,
     )).encode()).hexdigest()
     if client_etag_matches(etag):
         return "", 304
@@ -4228,9 +4264,14 @@ def get_products():
                 # iterating a streamed response. Give the stream one explicit
                 # connection and close it in the same generator lifecycle.
                 stream_db = connect_db()
+                if _product_corpus_fast_ready():
+                    corpus = _employee_product_corpus(stream_db)
+                else:
+                    corpus = _products_corpus(
+                        stream_db, allow_identifier_stale=False,
+                    )
                 products = sorted(
-                    _products_corpus(stream_db),
-                    key=lambda entry: location_sort_key(entry[0]),
+                    corpus, key=lambda entry: location_sort_key(entry[0]),
                 )
                 for item, _search_row in products:
                     encoded = json.dumps(
@@ -5454,6 +5495,9 @@ def product_memory_status():
         "reference_cache_rows": len(_REF_CACHE.get("rows") or []),
         "image_retry_rows": len(_IMAGE_FILL_RETRY_AFTER),
         "product_stream_active": _PRODUCT_STREAM_LOCK.locked(),
+        "product_metadata_refresh_pending": bool(
+            _PROD_CACHE.get("metadata_dirty")
+        ),
         "payload_version": _PRODUCTS_PAYLOAD_VERSION,
     })
 

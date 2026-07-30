@@ -7,6 +7,7 @@ from app import app
 from routes import products as products_module
 from routes.ai import (
     _compact_documented_product_context,
+    _description_excerpt_for_ai,
     _outbound_url_allowed,
     _deepseek_json_request,
     _kimi_json_request,
@@ -289,6 +290,10 @@ class ClientRagTests(unittest.TestCase):
             "id": 6, "name": "ADVIL NUIT CA20",
             "brand": "Advil", "barcode": "106",
             "description": "Comprimes de nuit.",
+        }, {
+            "id": 7, "name": "ADVIL NT LIQ/GEL CA20",
+            "brand": "Advil", "barcode": "107",
+            "description": "Liqui-gels de nuit.",
         }]
         corpus = [(
             product,
@@ -1507,6 +1512,60 @@ class ClientRagTests(unittest.TestCase):
         )
         self.assertIn(
             "usage_notes", context["search_clues_not_product_facts"]
+        )
+
+    def test_documented_context_prefers_exact_facts_over_marketing_preamble(self):
+        description = (
+            "Il y a des moments ou chaque seconde compte. Dans ces instants, "
+            "le bien-etre merite une reponse moderne. Chaque capsule contient "
+            "200 mg d'ibuprofene. Ce format comprend 40 Liqui-Gels et soulage "
+            "temporairement les maux de tete et la fievre."
+        )
+
+        excerpt = _description_excerpt_for_ai(description, max_chars=150)
+        context = _compact_documented_product_context({
+            "id": 10,
+            "client_id": "product:10",
+            "name": "ADVIL 200MG LIQ/GEL CA40",
+            "description": description,
+            "description_status": "verified",
+            "strength": "200.0 MG / 0.0",
+            "_verified_fields": ["description", "strength"],
+        })
+
+        self.assertIn("200 mg", excerpt)
+        self.assertIn("40 Liqui-Gels", excerpt)
+        self.assertNotIn("chaque seconde compte", excerpt.lower())
+        self.assertEqual(context["verified_facts"]["strength"], "200 MG")
+        self.assertIn(
+            "200 mg", context["catalogue_description"]["text"]
+        )
+        self.assertNotIn(
+            "chaque seconde compte",
+            context["catalogue_description"]["text"].lower(),
+        )
+        documents = retrieve_client_documentation([{
+            "id": 10,
+            "client_id": "product:10",
+            "name": "ADVIL 200MG LIQ/GEL CA40",
+            "description": description,
+            "description_status": "verified",
+            "_verified_fields": ["description"],
+            "_field_sources": {
+                "description": {
+                    "source": "Familiprix",
+                    "source_url": "https://example.test/product",
+                },
+            },
+        }])
+        verified_document = next(
+            item for item in documents
+            if item["source_id"].startswith("catalog:")
+        )
+        self.assertIn("200 mg", verified_document["evidence"])
+        self.assertNotIn(
+            "chaque seconde compte",
+            verified_document["evidence"].lower(),
         )
 
     def test_kimi_k26_uses_bounded_non_thinking_mode_by_default(self):
