@@ -177,10 +177,10 @@ KIMI_REALTIME_REASONING_EFFORT = (
 if KIMI_REALTIME_REASONING_EFFORT not in {"low", "high", "max"}:
     KIMI_REALTIME_REASONING_EFFORT = "low"
 KIMI_DOCUMENTED_REASONING_EFFORT = (
-    os.environ.get("KIMI_DOCUMENTED_REASONING_EFFORT", "high").strip().lower()
+    os.environ.get("KIMI_DOCUMENTED_REASONING_EFFORT", "low").strip().lower()
 )
 if KIMI_DOCUMENTED_REASONING_EFFORT not in {"low", "high", "max"}:
-    KIMI_DOCUMENTED_REASONING_EFFORT = "high"
+    KIMI_DOCUMENTED_REASONING_EFFORT = "low"
 _KIMI_DOCUMENTED_LONG_THINKING = (
     os.environ.get("KIMI_DOCUMENTED_LONG_THINKING", "").strip().lower()
     in {"1", "true", "yes", "on"}
@@ -1778,9 +1778,9 @@ def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=F
         "messages": messages,
     }
     if model.startswith("kimi-k3"):
-        # K3 uses max_completion_tokens and always reasons. Low effort keeps the
-        # conversational mode responsive; documented mode deliberately gets
-        # the stronger reasoning budget.
+        # K3 uses max_completion_tokens and always reasons. Both response modes
+        # stay bounded by their configured effort so an employee receives a
+        # completed answer inside the synchronous service window.
         payload["max_completion_tokens"] = int(max_tokens)
         payload["reasoning_effort"] = (
             KIMI_DOCUMENTED_REASONING_EFFORT
@@ -4833,9 +4833,10 @@ def generate_documented_client_answer(question, query_plan, candidates, document
             "candidates": contexts,
             "documents": document_contexts,
         },
-        # K3's completion budget includes its private reasoning. A 700-token
-        # ceiling often expired before the JSON answer began.
-        max_tokens=2600,
+        # K3's completion budget includes its private reasoning. This leaves
+        # enough room for a useful structured answer without inviting a long
+        # completion that misses the employee-service deadline.
+        max_tokens=2200,
         schema_name="client_documented_answer",
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,

@@ -27,6 +27,6 @@ services:
       - key: KIMI_REALTIME_REASONING_EFFORT
         value: low
       - key: KIMI_DOCUMENTED_REASONING_EFFORT
-        value: high
+        value: low
       - key: AI_DOCUMENTED_REQUEST_TIMEOUT
         value: "18"

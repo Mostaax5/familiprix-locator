@@ -5,6 +5,7 @@ import traceback
 import codecs
 import json
 import secrets
+import threading
 from urllib.parse import urlsplit
 from flask import Flask, render_template, send_from_directory, jsonify, request, g
 from werkzeug.exceptions import HTTPException
@@ -304,6 +305,12 @@ def get_system_info():
         # Diagnostics stay reachable while a first-time migration runs.
         pass
     schema_status = product_data_schema_status()
+    if schema_status["ready"]:
+        # A best-effort startup maintenance call can remain blocked after the
+        # request path has already proved the catalogue schema is operational.
+        # Do not leave enrichment and diagnostics disabled behind a stale flag.
+        _mark_database_ready()
+        _start_persistence_services(background=True)
     if schema_status["ready"] and not DB_BOOT_PENDING:
         # Never resume background enrichment on top of startup migrations.
         maybe_resume_enrichment()
@@ -436,6 +443,55 @@ def _start_self_keepalive():
 # ── Boot ───────────────────────────────────────────────────────────────────────
 
 
+_PERSISTENCE_SERVICES_LOCK = threading.Lock()
+_PERSISTENCE_SERVICES_STARTED = False
+
+
+def _mark_database_ready():
+    global DB_BOOT_ERROR, DB_BOOT_PENDING
+    DB_BOOT_ERROR = ""
+    DB_BOOT_PENDING = False
+    app.config["DB_BOOT_PENDING"] = False
+
+
+def _start_persistence_services(*, background=False):
+    """Start each low-memory catalogue maintenance service at most once."""
+    global _PERSISTENCE_SERVICES_STARTED
+    with _PERSISTENCE_SERVICES_LOCK:
+        if _PERSISTENCE_SERVICES_STARTED:
+            return False
+        _PERSISTENCE_SERVICES_STARTED = True
+
+    def worker():
+        tasks = (
+            _restore_from_gist_if_empty,
+            schedule_reference_metadata_sync,
+            schedule_initial_product_quality_audit,
+            schedule_backfill_missing,
+        )
+        for task in tasks:
+            try:
+                task()
+            except Exception as exc:  # noqa: BLE001 - keep later services alive
+                print(
+                    f"[BOOT] Service catalogue {task.__name__} impossible: {exc}"
+                )
+        if _ASYNC_RENDER_BOOT:
+            try:
+                schedule_regulatory_enrichment_after()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[BOOT] Synchronisation reglementaire impossible: {exc}")
+        maybe_resume_enrichment()
+
+    if background:
+        threading.Thread(
+            target=worker, daemon=True, name="catalogue-post-boot",
+        ).start()
+    else:
+        worker()
+    return True
+
+
 def _finish_persistence_boot():
     global DB_BOOT_ERROR, DB_BOOT_PENDING
     initialized = not _ASYNC_RENDER_BOOT
@@ -455,21 +511,17 @@ def _finish_persistence_boot():
                     f"[BOOT] Initialisation PostgreSQL tentative "
                     f"{attempt}/{len(retry_delays)} impossible: {exc}"
                 )
-        DB_BOOT_PENDING = False
-        app.config["DB_BOOT_PENDING"] = False
+        if initialized:
+            _mark_database_ready()
+        else:
+            DB_BOOT_PENDING = False
+            app.config["DB_BOOT_PENDING"] = False
 
     if initialized:
-        _restore_from_gist_if_empty()
-        schedule_reference_metadata_sync()  # connect catalogue metadata to placed UPCs
-        schedule_initial_product_quality_audit()
-        schedule_backfill_missing()  # fetch missing product images in background
-        if _ASYNC_RENDER_BOOT:
-            schedule_regulatory_enrichment_after()
-        maybe_resume_enrichment()
+        _start_persistence_services()
 
 
 if _ASYNC_RENDER_BOOT:
-    import threading
     threading.Thread(target=_finish_persistence_boot, daemon=True).start()
 else:
     _finish_persistence_boot()
