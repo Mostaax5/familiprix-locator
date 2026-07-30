@@ -296,6 +296,7 @@ def get_system_info():
             "ai_enabled": bool(ai_provider["name"]),
             "ai_provider": ai_provider["name"],
             "ai_provider_label": ai_provider["label"],
+            "ai_model": ai_provider["model"],
         }), 503
     try:
         ensure_product_data_ready(db)
@@ -333,6 +334,7 @@ def get_system_info():
         "ai_enabled": bool(ai_provider["name"]),
         "ai_provider": ai_provider["name"],
         "ai_provider_label": ai_provider["label"],
+        "ai_model": ai_provider["model"],
         "duplicate_slots": int(first_column(duplicate_slots) or 0),
         "duplicate_barcodes": int(first_column(duplicate_barcodes) or 0),
         "reference_count": reference_count(),

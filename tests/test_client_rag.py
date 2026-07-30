@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 from app import app
 from routes import products as products_module
 from routes.ai import (
+    _compact_documented_product_context,
     _outbound_url_allowed,
     _deepseek_json_request,
     _kimi_json_request,
@@ -870,7 +871,7 @@ class ClientRagTests(unittest.TestCase):
             )
 
         call = provider.call_args
-        self.assertEqual(call.kwargs["max_tokens"], 700)
+        self.assertEqual(call.kwargs["max_tokens"], 2600)
         self.assertTrue(call.kwargs["realtime_model"])
         self.assertNotIn("comparisons", call.kwargs["schema"]["properties"])
         self.assertNotIn(
@@ -881,7 +882,7 @@ class ClientRagTests(unittest.TestCase):
         self.assertNotIn("locations", compact_payload["candidates"][0])
         self.assertNotIn("field_sources", compact_payload["candidates"][0])
         self.assertTrue(
-            compact_payload["candidates"][0]["description_verified"]
+            compact_payload["candidates"][0]["catalogue_description"]["verified"]
         )
         self.assertEqual(result["selected_product_ids"], ["product:7"])
         self.assertEqual(result["comparisons"][0]["candidate_id"], "product:7")
@@ -921,7 +922,10 @@ class ClientRagTests(unittest.TestCase):
         self.assertIn("horaire décalé", result["answer"])
         self.assertNotIn("j'ai trouvé", result["answer"].lower())
         self.assertEqual(result["key_points"][0]["heading"], "Choisir selon le besoin")
-        self.assertEqual(result["comparisons"][0]["source_ids"], ["catalog:1"])
+        self.assertEqual(
+            result["comparisons"][0]["source_ids"],
+            ["catalog-description:1", "catalog:1"],
+        )
         self.assertLessEqual(len(result["comparisons"][0]["difference"]), 420)
         self.assertTrue(result["pharmacist_referral"])
 
@@ -1192,7 +1196,7 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(first_payload["model"], "deepseek-v4-pro")
         self.assertEqual(first_payload["thinking"], {"type": "disabled"})
 
-    def test_documented_kimi_request_uses_k3_reasoning_and_json_mode(self):
+    def test_documented_kimi_request_uses_k3_reasoning_and_structured_output(self):
         model_result = {
             "answer": "Réponse documentée.",
             "key_points": [],
@@ -1223,6 +1227,13 @@ class ClientRagTests(unittest.TestCase):
                 [{"role": "user", "content": "test"}],
                 max_tokens=1100,
                 quality_mode=True,
+                schema_name="documented_answer",
+                schema={
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                    "additionalProperties": False,
+                },
             )
 
         self.assertEqual(result, model_result)
@@ -1231,8 +1242,72 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(request_obj.full_url, "https://api.moonshot.ai/v1/chat/completions")
         self.assertEqual(payload["model"], "kimi-k3")
         self.assertEqual(payload["reasoning_effort"], "high")
-        self.assertEqual(payload["response_format"], {"type": "json_object"})
-        self.assertEqual(payload["max_tokens"], 1100)
+        self.assertEqual(payload["response_format"]["type"], "json_schema")
+        self.assertEqual(
+            payload["response_format"]["json_schema"]["name"],
+            "documented_answer",
+        )
+        self.assertTrue(payload["response_format"]["json_schema"]["strict"])
+        self.assertEqual(payload["max_completion_tokens"], 1100)
+        self.assertNotIn("max_tokens", payload)
+
+    def test_kimi_conversational_request_uses_k3_low_reasoning(self):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "choices": [{
+                "message": {"content": json.dumps({"answer": "ok"})},
+            }],
+            "usage": {},
+        }).encode("utf-8")
+
+        with patch("routes.ai.KIMI_MODEL", "kimi-k3"), \
+             patch("routes.ai.KIMI_REALTIME_REASONING_EFFORT", "low"), \
+             patch("routes.ai._safe_urlopen", return_value=response) as opener, \
+             patch("routes.ai._log_ai_usage"):
+            result = _kimi_json_request(
+                [{"role": "user", "content": "question"}],
+                max_tokens=900,
+            )
+
+        payload = json.loads(opener.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(result, {"answer": "ok"})
+        self.assertEqual(payload["model"], "kimi-k3")
+        self.assertEqual(payload["reasoning_effort"], "low")
+        self.assertEqual(payload["max_completion_tokens"], 900)
+        self.assertNotIn("thinking", payload)
+
+    def test_documented_context_keeps_unverified_description_as_flagged_evidence(self):
+        context = _compact_documented_product_context({
+            "id": 9,
+            "client_id": "product:9",
+            "name": "PRODUIT EXEMPLE 100ML",
+            "brand": "Exemple",
+            "description": (
+                "Description catalogue utile mais encore a confirmer pour "
+                "ce paquet exact."
+            ),
+            "description_status": "complete_unverified",
+            "purpose": "Usage catalogue provisoire",
+            "usage_notes": "Indice de recherche seulement",
+            "_verified_fields": [],
+            "_field_sources": {
+                "description": {"source": "Familiprix import"},
+            },
+        })
+
+        self.assertEqual(context["brand"], "Exemple")
+        self.assertFalse(context["catalogue_description"]["verified"])
+        self.assertEqual(
+            context["catalogue_description"]["source"],
+            "Familiprix import",
+        )
+        self.assertEqual(
+            context["catalogue_clues_to_confirm"]["purpose"],
+            "Usage catalogue provisoire",
+        )
+        self.assertIn(
+            "usage_notes", context["search_clues_not_product_facts"]
+        )
 
     def test_kimi_k26_uses_bounded_non_thinking_mode_by_default(self):
         response = MagicMock()
@@ -1267,7 +1342,7 @@ class ClientRagTests(unittest.TestCase):
         )
         self.assertEqual(plan_payload["thinking"], {"type": "disabled"})
 
-    def test_kimi_realtime_request_uses_short_generation_model(self):
+    def test_kimi_documented_request_is_not_downgraded_by_realtime_flag(self):
         response = MagicMock()
         response.__enter__.return_value.read.return_value = json.dumps({
             "choices": [{
@@ -1276,16 +1351,15 @@ class ClientRagTests(unittest.TestCase):
             "usage": {},
         }).encode("utf-8")
 
-        with patch(
-            "routes.ai.KIMI_REALTIME_MODEL", "moonshot-v1-8k"
-        ), patch(
-            "routes.ai.KIMI_DOCUMENTED_MODEL", "kimi-k3"
-        ), patch(
-            "routes.ai._available_kimi_models",
-            return_value={"moonshot-v1-8k", "kimi-k2.6"},
-        ), patch(
-            "routes.ai._safe_urlopen", return_value=response
-        ) as opener, patch("routes.ai._log_ai_usage"):
+        with patch("routes.ai.KIMI_REALTIME_MODEL", "moonshot-v1-8k"), \
+             patch("routes.ai.KIMI_DOCUMENTED_MODEL", "kimi-k3"), \
+             patch("routes.ai._available_kimi_models") as available, \
+             patch("routes.ai._safe_urlopen", return_value=response) as opener, \
+             patch(
+                 "routes.ai._read_kimi_stream",
+                 return_value=({"answer": "ok"}, {}),
+             ), \
+             patch("routes.ai._log_ai_usage"):
             result = _kimi_json_request(
                 [{"role": "user", "content": "question courte"}],
                 max_tokens=500,
@@ -1295,8 +1369,11 @@ class ClientRagTests(unittest.TestCase):
 
         payload = json.loads(opener.call_args.args[0].data.decode("utf-8"))
         self.assertEqual(result, {"answer": "ok"})
-        self.assertEqual(payload["model"], "moonshot-v1-8k")
+        self.assertEqual(payload["model"], "kimi-k3")
+        self.assertEqual(payload["reasoning_effort"], "high")
+        self.assertTrue(payload["stream"])
         self.assertNotIn("thinking", payload)
+        available.assert_not_called()
 
     def test_kimi_realtime_k26_reads_bounded_stream(self):
         expected = {
@@ -1331,11 +1408,7 @@ class ClientRagTests(unittest.TestCase):
                 return next(self.lines, b"")
 
         with patch(
-            "routes.ai.KIMI_REALTIME_MODEL", "moonshot-v1-8k"
-        ), patch(
-            "routes.ai.KIMI_MODEL", "kimi-k2.6"
-        ), patch(
-            "routes.ai._available_kimi_models", return_value={"kimi-k2.6"}
+            "routes.ai.KIMI_DOCUMENTED_MODEL", "kimi-k2.6"
         ), patch(
             "routes.ai._safe_urlopen", return_value=StreamResponse()
         ) as opener, patch("routes.ai._log_ai_usage"):
@@ -1576,7 +1649,7 @@ class ClientRagTests(unittest.TestCase):
 
         with patch(
             "routes.ai.configured_ai_provider",
-            return_value={"name": "kimi", "label": "Kimi", "model": "kimi-k2.6"},
+            return_value={"name": "kimi", "label": "Kimi", "model": "kimi-k3"},
         ), patch(
             "routes.ai._check_ai_rate_limit", return_value=True
         ), patch(
@@ -1607,6 +1680,83 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(generator.call_args.args[0], question)
         self.assertEqual(captured["question"], question)
         self.assertEqual(captured["plan"]["corrected_query"], question)
+
+    def test_kimi_semantic_plan_retries_only_when_local_retrieval_is_empty(self):
+        candidate = {
+            "id": 8, "client_id": "product:8",
+            "name": "GRAVOL 50MG CO20", "brand": "Gravol",
+            "description": "Produit du catalogue pour les nausees.",
+            "barcode": "888", "aisle": "Labo", "side": "A",
+            "section": "2", "shelf": "3", "position": "1", "in_stock": 1,
+        }
+        semantic_plan = {
+            "intent": "nausea_relief",
+            "corrected_query": "Produit pour soulager les nausees",
+            "search_queries": ["nausees Gravol", "dimenhydrinate"],
+            "keywords": ["nausees", "Gravol", "dimenhydrinate"],
+            "must_include": ["nausees"],
+            "exclude": [],
+            "wants_all": False,
+            "needs_comparison": False,
+            "answer_language": "fr",
+            "medical": True,
+        }
+        documented = {
+            "answer": (
+                "Le Gravol est le produit du plan le plus directement lie a "
+                "cette demande; confirmez le format exact sur l'emballage."
+            ),
+            "selected_product_ids": ["product:8"],
+            "follow_up_questions": [],
+            "safety_flags": [],
+            "pharmacist_referral": False,
+            "pharmacist_reason": "",
+            "key_points": [],
+            "comparisons": [],
+            "useful_guidance": [],
+            "important_checks": [],
+            "source_ids": ["store-plan"],
+            "degraded": False,
+            "warning": "",
+        }
+        with patch(
+            "routes.ai.configured_ai_provider",
+            return_value={"name": "kimi", "label": "Kimi", "model": "kimi-k3"},
+        ), patch(
+            "routes.ai._check_ai_rate_limit", return_value=True
+        ) as rate_limit, patch(
+            "routes.products.hybrid_client_candidates",
+            side_effect=[[], [candidate]],
+        ) as retrieval, patch(
+            "routes.ai.generate_client_query_plan", return_value=semantic_plan
+        ) as planner, patch(
+            "routes.products.hydrate_candidate_images"
+        ), patch(
+            "routes.ai.retrieve_client_documentation", return_value=[{
+                "source_id": "store-plan",
+                "title": "Plan actuel",
+                "publisher": "Familiprix Locator",
+                "url": "",
+                "evidence": candidate["name"],
+                "candidate_ids": ["product:8"],
+            }]
+        ), patch(
+            "routes.ai.generate_documented_client_answer",
+            return_value=documented,
+        ), patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": "Il me faut quelque chose pour calmer le coeur leve",
+                    "mode": "documented",
+                })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.get_json()["highlighted_product_ids"], ["product:8"]
+        )
+        self.assertEqual(retrieval.call_count, 2)
+        planner.assert_called_once()
+        rate_limit.assert_called_once()
 
     def test_simple_product_lookup_does_not_call_ai(self):
         candidate = {

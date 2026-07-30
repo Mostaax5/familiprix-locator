@@ -156,18 +156,26 @@ OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY",  "").strip()
 OPENAI_MODEL    = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 KIMI_API_KEY = os.environ.get("KIMI_API_KEY", os.environ.get("MOONSHOT_API_KEY", "")).strip()
-KIMI_MODEL = os.environ.get("KIMI_MODEL", "kimi-k2.6").strip() or "kimi-k2.6"
+# K3 is Kimi's current general-purpose flagship. Keep every default on the
+# same model family; the previous realtime default silently downgraded
+# documented answers to moonshot-v1-8k.
+KIMI_MODEL = os.environ.get("KIMI_MODEL", "kimi-k3").strip() or "kimi-k3"
 KIMI_REALTIME_MODEL = (
-    os.environ.get("KIMI_REALTIME_MODEL", "moonshot-v1-8k").strip()
-    or "moonshot-v1-8k"
+    os.environ.get("KIMI_REALTIME_MODEL", KIMI_MODEL).strip()
+    or KIMI_MODEL
 )
 KIMI_DOCUMENTED_MODEL = (
-    os.environ.get("KIMI_DOCUMENTED_MODEL", KIMI_REALTIME_MODEL).strip()
-    or KIMI_REALTIME_MODEL
+    os.environ.get("KIMI_DOCUMENTED_MODEL", KIMI_MODEL).strip()
+    or KIMI_MODEL
 )
 KIMI_BASE_URL = os.environ.get(
     "KIMI_BASE_URL", "https://api.moonshot.ai/v1"
 ).rstrip("/")
+KIMI_REALTIME_REASONING_EFFORT = (
+    os.environ.get("KIMI_REALTIME_REASONING_EFFORT", "low").strip().lower()
+)
+if KIMI_REALTIME_REASONING_EFFORT not in {"low", "high", "max"}:
+    KIMI_REALTIME_REASONING_EFFORT = "low"
 KIMI_DOCUMENTED_REASONING_EFFORT = (
     os.environ.get("KIMI_DOCUMENTED_REASONING_EFFORT", "high").strip().lower()
 )
@@ -1699,11 +1707,11 @@ def _read_kimi_stream(response, deadline):
 def _available_kimi_models():
     now = time.time()
     cached = _KIMI_MODELS_CACHE.get("models") or set()
-    if cached and now - float(_KIMI_MODELS_CACHE.get("checked_at", 0) or 0) < 3600:
+    if now - float(_KIMI_MODELS_CACHE.get("checked_at", 0) or 0) < 3600:
         return set(cached)
     with _KIMI_MODELS_LOCK:
         cached = _KIMI_MODELS_CACHE.get("models") or set()
-        if cached and now - float(
+        if now - float(
             _KIMI_MODELS_CACHE.get("checked_at", 0) or 0
         ) < 3600:
             return set(cached)
@@ -1731,28 +1739,34 @@ def _available_kimi_models():
 
 
 def _select_kimi_model(quality_mode=False, realtime_model=False):
-    if not realtime_model:
-        return KIMI_DOCUMENTED_MODEL if quality_mode else KIMI_MODEL
+    configured = (
+        KIMI_DOCUMENTED_MODEL if quality_mode
+        else KIMI_REALTIME_MODEL if realtime_model
+        else KIMI_MODEL
+    )
+    if configured.lower() not in {"auto", "latest"}:
+        return configured
+
     available = _available_kimi_models()
     preferences = (
-        KIMI_REALTIME_MODEL,
-        "moonshot-v1-8k",
-        "moonshot-v1-auto",
-        "kimi-k2-turbo-preview",
-        "kimi-k2.5",
-        KIMI_MODEL,
+        "kimi-k3",
         "kimi-k2.6",
+        "kimi-k2.5",
+        "moonshot-v1-8k",
+        "moonshot-v1-32k",
+        "moonshot-v1-128k",
     )
     if available:
         return next(
             (model for model in preferences if model in available),
-            sorted(available)[0],
+            "kimi-k3",
         )
-    return KIMI_MODEL
+    return "kimi-k3"
 
 
 def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=False,
-                       timeout_seconds=None, realtime_model=False):
+                       timeout_seconds=None, realtime_model=False,
+                       schema_name="", schema=None):
     """Call Kimi's OpenAI-compatible endpoint with bounded response memory."""
     model = _select_kimi_model(
         quality_mode=quality_mode, realtime_model=realtime_model
@@ -1762,12 +1776,32 @@ def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=F
     payload = {
         "model": model,
         "messages": messages,
-        "max_tokens": max_tokens,
-        "response_format": {"type": "json_object"},
     }
-    if quality_mode and model.startswith("kimi-k3"):
-        payload["reasoning_effort"] = KIMI_DOCUMENTED_REASONING_EFFORT
-    elif model.startswith(("kimi-k2.6", "kimi-k2.5")):
+    if model.startswith("kimi-k3"):
+        # K3 uses max_completion_tokens and always reasons. Low effort keeps the
+        # conversational mode responsive; documented mode deliberately gets
+        # the stronger reasoning budget.
+        payload["max_completion_tokens"] = int(max_tokens)
+        payload["reasoning_effort"] = (
+            KIMI_DOCUMENTED_REASONING_EFFORT
+            if quality_mode else KIMI_REALTIME_REASONING_EFFORT
+        )
+        if isinstance(schema, dict) and schema_name:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": re.sub(r"[^a-zA-Z0-9_-]", "_", schema_name)[:64],
+                    "strict": True,
+                    "schema": schema,
+                },
+            }
+        else:
+            payload["response_format"] = {"type": "json_object"}
+    else:
+        payload["max_tokens"] = int(max_tokens)
+        payload["response_format"] = {"type": "json_object"}
+
+    if model.startswith(("kimi-k2.6", "kimi-k2.5")):
         # K2.6 long-thinking shares max_tokens with the visible answer and is
         # intentionally opt-in for this synchronous employee workflow. The
         # normal documented request still analyses the full question, but does
@@ -1793,7 +1827,7 @@ def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=F
         )
         stream_response = bool(
             realtime_model
-            and model.startswith(("kimi-k2.6", "kimi-k2.5"))
+            and model.startswith(("kimi-k3", "kimi-k2.6", "kimi-k2.5"))
         )
         if stream_response:
             payload["stream"] = True
@@ -2019,7 +2053,7 @@ def _provider_structured_request(system_prompt, user_payload, max_tokens,
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
         ], max_tokens=max_tokens, question_preview=question_preview,
            quality_mode=quality_mode, timeout_seconds=timeout_seconds,
-           realtime_model=realtime_model)
+           realtime_model=realtime_model, schema_name=schema_name, schema=schema)
     if provider == "deepseek":
         return _deepseek_json_request([
             {"role": "system", "content": system_prompt},
@@ -2130,7 +2164,7 @@ def generate_client_query_plan(question, history=None):
         _CLIENT_QUERY_PLAN_INSTRUCTIONS,
         {"conversation": normalize_client_history(history), "question": question,
          "required_schema": _CLIENT_QUERY_PLAN_SCHEMA},
-        max_tokens=450,
+        max_tokens=900,
         schema_name="client_query_plan",
         schema=_CLIENT_QUERY_PLAN_SCHEMA,
         question_preview=question,
@@ -2677,7 +2711,7 @@ def generate_verified_client_answer(question, query_plan, candidates, history=No
          "focused_product_id": focus_product_id,
          "query_plan": query_plan, "candidates": contexts,
          "required_schema": _CLIENT_VERIFICATION_SCHEMA},
-        max_tokens=800,
+        max_tokens=1400,
         schema_name="client_verified_answer",
         schema=_CLIENT_VERIFICATION_SCHEMA,
         question_preview=question,
@@ -2804,6 +2838,18 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "avec exactement ces clés: answer, key_points, selected_product_ids et source_ids. "
     "Chaque key_point contient exactement "
     "heading, detail et source_ids."
+)
+
+_CLIENT_DOCUMENTED_INSTRUCTIONS += (
+    " Use your general knowledge to answer the customer's actual question and "
+    "explain useful decision criteria, even when the catalogue documentation is "
+    "incomplete. Always separate general knowledge from claims about an exact "
+    "product. catalogue_description and catalogue_clues_to_confirm may be used "
+    "to understand a product's probable role and avoid an empty answer, but if "
+    "they are unverified, describe them as catalogue indications that must be "
+    "confirmed on the package. Never turn a search clue, abbreviation, or "
+    "unverified description into a certain dose, indication, contraindication, "
+    "ingredient, or compatibility claim. Select at most 8 products."
 )
 
 _HEALTH_CANADA_DPD_API = "https://health-products.canada.ca/api/drug"
@@ -3397,6 +3443,36 @@ def retrieve_client_documentation(products, query_plan=None, include_live_regula
             grouped.setdefault((source, source_url), []).append(f"{label}: {value}")
         name = str(product.get("name", "") or "").strip()
         candidate_id = str(product.get("client_id", "") or "")
+        description = str(product.get("description", "") or "").strip()
+        if description and "description" not in verified_fields:
+            source_index += 1
+            provenance = field_sources.get("description") or {}
+            source = str(
+                provenance.get("source", "")
+                or product.get("source", "")
+                or "Catalogue interne"
+            ).strip()
+            source_url = str(
+                provenance.get("source_url", "")
+                or product.get("source_url", "")
+                or ""
+            ).strip()
+            status = str(
+                product.get("description_status", "") or "unverified"
+            ).strip()
+            documents.append({
+                "source_id": f"catalog-description:{source_index}",
+                "title": f"Description catalogue \u00e0 confirmer - {name}",
+                "publisher": source,
+                "url": source_url if source_url.startswith("https://") else "",
+                "evidence": (
+                    f"Statut: {status}; cette description aide \u00e0 identifier le "
+                    f"produit mais doit \u00eatre confirm\u00e9e sur l'emballage. "
+                    f"Description: {description}"
+                )[:1800],
+                "candidate_ids": [candidate_id] if candidate_id else [],
+                "verification_status": status,
+            })
         for (source, source_url), facts in grouped.items():
             source_index += 1
             documents.append({
@@ -4600,21 +4676,45 @@ def _compact_documented_product_context(product, include_identifiers=False):
     small comparison request several times larger without improving its answer.
     """
     context = product_context_for_client_rag(product)
+    verified_fields = set(product.get("_verified_fields") or [])
+    field_sources = product.get("_field_sources") or {}
+    description_source = field_sources.get("description") or {}
     facts = {
         field: str(context.get(field, "") or "").strip()
         for field in _DOCUMENTED_COMPACT_FACT_FIELDS
         if str(context.get(field, "") or "").strip()
     }
+    catalogue_clues = {}
+    for field in ("brand", *_DOCUMENTED_COMPACT_FACT_FIELDS):
+        if field in verified_fields:
+            continue
+        value = str(product.get(field, "") or "").strip()
+        if value:
+            catalogue_clues[field] = value[:500]
+    search_clues = {}
+    for field in ("usage_notes", "search_terms"):
+        value = str(product.get(field, "") or "").strip()
+        if value:
+            search_clues[field] = value[:400]
     compact = {
         "candidate_id": str(context.get("candidate_id", "") or ""),
         "name": str(context.get("name", "") or "")[:300],
-        "brand": str(context.get("brand", "") or "")[:160],
-        "description": str(context.get("description", "") or "")[:220],
-        "description_verified": (
-            str(context.get("description_status", "") or "") == "verified"
-        ),
+        "name_source": "store_planogram",
+        "brand": str(product.get("brand", "") or "")[:160],
+        "catalogue_description": {
+            "text": str(context.get("description", "") or "")[:700],
+            "verification_status": str(
+                context.get("description_status", "") or "unverified"
+            )[:60],
+            "verified": (
+                str(context.get("description_status", "") or "") == "verified"
+            ),
+            "source": str(description_source.get("source", "") or "")[:120],
+        },
         "data_status": str(context.get("data_status", "") or "")[:60],
         "verified_facts": facts,
+        "catalogue_clues_to_confirm": catalogue_clues,
+        "search_clues_not_product_facts": search_clues,
     }
     if include_identifiers:
         compact["verified_identifiers"] = (
@@ -4711,7 +4811,10 @@ def generate_documented_client_answer(question, query_plan, candidates, document
         "publisher": str(document.get("publisher", "") or "")[:100],
         "evidence": str(document.get("evidence", "") or "")[:500],
         "candidate_ids": (document.get("candidate_ids", []) or [])[:12],
-    } for document in documents[:8]]
+        "verification_status": str(
+            document.get("verification_status", "") or ""
+        )[:60],
+    } for document in documents[:12]]
     compact_plan = {
         key: query_plan.get(key)
         for key in (
@@ -4730,13 +4833,14 @@ def generate_documented_client_answer(question, query_plan, candidates, document
             "candidates": contexts,
             "documents": document_contexts,
         },
-        max_tokens=700,
+        # K3's completion budget includes its private reasoning. A 700-token
+        # ceiling often expired before the JSON answer began.
+        max_tokens=2600,
         schema_name="client_documented_answer",
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,
         quality_mode=True,
         realtime_model=True,
-        timeout_seconds=8,
     )
     if not isinstance(parsed, dict):
         return grounded_documented_fallback(query_plan, candidates, documents)
@@ -6051,6 +6155,26 @@ def client_help():
         candidates = hybrid_client_candidates(retrieval_question, query_plan, limit=candidate_limit)
     if response_mode != "lookup":
         candidates = filter_client_answer_category(question, candidates)
+        # Most searches stay on the millisecond local path. When that path has
+        # no usable result, let K3 interpret the complete sentence, then retry
+        # retrieval with its bilingual keywords instead of answering from an
+        # empty or guessed product list.
+        if not candidates and not follow_up:
+            if not ai_rate_checked and not _check_ai_rate_limit():
+                return jsonify({
+                    "success": False,
+                    "error": "Trop de requ\u00eates IA. Reessayez dans une heure.",
+                }), 429
+            ai_rate_checked = True
+            semantic_plan = generate_client_query_plan(question, history)
+            if semantic_plan:
+                query_plan = semantic_plan
+                candidates = hybrid_client_candidates(
+                    question, query_plan, limit=candidate_limit
+                )
+                candidates = filter_client_answer_category(
+                    question, candidates
+                )
     # Reuse known exact-UPC images now. Unknown-image web lookups are queued
     # only for cards that will actually be displayed.
     hydrate_candidate_images(candidates, queue_missing=False)
@@ -6154,7 +6278,7 @@ def client_help():
             # Let the documented answerer perform the final semantic filter.
             # Eight candidates was too narrow for broad store questions and let
             # early lexical noise displace valid products.
-            else 8 if response_mode == "documented"
+            else 12 if response_mode == "documented"
             else 10
         )
     )
