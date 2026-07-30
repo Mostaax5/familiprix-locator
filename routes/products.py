@@ -511,6 +511,7 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
 # (every write path stamps modified_at), so no explicit invalidation hooks are needed.
 _PROD_CACHE = {
     "key": None, "rows": [], "built_at": 0.0,
+    "initialized": False,
     "generation": -1, "state_checked_at": 0.0,
     "document_frequency": {}, "document_count": 0,
     "average_document_length": 1.0, "statistics_rows_id": 0,
@@ -920,7 +921,8 @@ def _products_corpus(db, allow_identifier_stale=False):
     )
     if _PROD_CACHE["key"] == key:
         _PROD_CACHE.update(
-            generation=generation, state_checked_at=checked_at,
+            initialized=True, generation=generation,
+            state_checked_at=checked_at,
         )
         return _PROD_CACHE["rows"]
     # Regulatory enrichment can insert several candidate identifiers per minute.
@@ -1076,7 +1078,7 @@ def _products_corpus(db, allow_identifier_stale=False):
             })
     document_count = max(1, len(search_document_keys))
     _PROD_CACHE.update(
-        key=key, rows=rows, built_at=time.time(),
+        key=key, rows=rows, built_at=time.time(), initialized=True,
         generation=generation, state_checked_at=checked_at,
         document_frequency=dict(document_frequency),
         document_count=document_count,
@@ -1121,7 +1123,7 @@ def product_search_cache_ready():
     # _employee_product_corpus deliberately serves an immutable warm snapshot
     # while a metadata refresh runs in the background. That path is still ready
     # for employees even when its generation is momentarily stale.
-    return bool(_PROD_CACHE.get("rows"))
+    return bool(_PROD_CACHE.get("initialized"))
 
 
 def warm_product_search_cache():

@@ -6,7 +6,9 @@ services:
     # Server tuning lives in gunicorn.conf.py (auto-loaded); command-line flags
     # would silently override it, so keep the start command bare.
     startCommand: gunicorn app:app
-    healthCheckPath: /healthz
+    # Keep the previous revision live until PostgreSQL and the employee-search
+    # corpus are ready. /healthz remains the dependency-free liveness probe.
+    healthCheckPath: /readyz
     autoDeployTrigger: commit
     plan: free
     envVars:

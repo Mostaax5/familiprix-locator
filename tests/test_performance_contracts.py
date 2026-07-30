@@ -6,11 +6,16 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class PerformanceContractTests(unittest.TestCase):
-    def test_render_health_check_does_not_wait_for_database(self):
+    def test_render_deploy_waits_for_search_readiness(self):
         render_config = (ROOT / "render.yaml").read_text(encoding="utf-8")
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
-        self.assertIn("healthCheckPath: /healthz", render_config)
+        self.assertIn("healthCheckPath: /readyz", render_config)
         self.assertIn('@app.route("/healthz")', app_source)
+        self.assertIn('@app.route("/readyz")', app_source)
+        ready_start = app_source.index("def readyz")
+        ready_route = app_source[ready_start:ready_start + 450]
+        self.assertIn("product_search_cache_ready()", ready_route)
+        self.assertNotIn("get_db()", ready_route)
 
     def test_render_runtime_and_port_are_explicit(self):
         render_config = (ROOT / "render.yaml").read_text(encoding="utf-8")

@@ -186,6 +186,19 @@ def healthz():
     return jsonify({"ok": True})
 
 
+@app.route("/readyz")
+def readyz():
+    """Tell Render when this revision is ready for employee traffic."""
+    ready = bool(
+        not DB_BOOT_PENDING
+        and product_search_cache_ready()
+    )
+    return jsonify({
+        "ok": ready,
+        "search_ready": product_search_cache_ready(),
+    }), (200 if ready else 503)
+
+
 @app.route("/manifest.json")
 def manifest():
     return send_from_directory("static", "manifest.json")
