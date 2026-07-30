@@ -6204,6 +6204,13 @@ def assist_product():
 @ai_bp.route("/api/client/help", methods=["POST"])
 def client_help():
     started_at = time.perf_counter()
+    diagnostic_stages = {}
+
+    def mark_stage(name):
+        diagnostic_stages[name] = int(
+            (time.perf_counter() - started_at) * 1000
+        )
+
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"success": False, "error": "Une demande JSON valide est requise."}), 400
@@ -6240,6 +6247,7 @@ def client_help():
             selected_text=selected_text,
         )
     query_plan = build_client_query_plan(question, response_mode)
+    mark_stage("query_plan_ready_ms")
     active_ai_provider = {}
     ai_rate_checked = False
     if response_mode != "lookup":
@@ -6302,6 +6310,7 @@ def client_help():
     # Reuse known exact-UPC images now. Unknown-image web lookups are queued
     # only for cards that will actually be displayed.
     hydrate_candidate_images(candidates, queue_missing=False)
+    mark_stage("retrieval_ready_ms")
 
     if response_mode == "lookup":
         hydrate_candidate_images(candidates, queue_missing=True, queue_limit=12)
@@ -6430,6 +6439,7 @@ def client_help():
             # request path added several seconds and could outlive the AI timeout.
             include_live_regulatory=False,
         )
+        mark_stage("documentation_ready_ms")
         if use_local_documented_summary:
             verified = grounded_documented_fallback(
                 query_plan, answer_candidates, documents, degraded=False,
@@ -6444,6 +6454,7 @@ def client_help():
             question, query_plan, answer_candidates, history,
             selected_text=selected_text, focus_product_id=focus_product_id,
         )
+    mark_stage("answer_ready_ms")
     if not verified:
         return jsonify({"success": False,
                         "error": _AI_LAST_ERROR or "Impossible de préparer la réponse pour le moment."}), 502
@@ -6458,6 +6469,7 @@ def client_help():
     hydrate_candidate_images(
         highlighted_products, queue_missing=True, queue_limit=12
     )
+    mark_stage("answer_images_ready_ms")
     answer = verified["answer"] or (
         "Aucun produit suffisamment lié à cette demande n'a été trouvé dans la base."
     )
@@ -6536,6 +6548,7 @@ def client_help():
         },
         advice,
     )
+    mark_stage("response_ready_ms")
     elapsed_ms = int((time.perf_counter() - started_at) * 1000)
     public_highlighted_products = [
         public_product_payload(product) for product in highlighted_products
@@ -6556,6 +6569,7 @@ def client_help():
         response_payload["ai_diagnostics"] = {
             "model": _AI_LAST_MODEL,
             "error": _AI_LAST_ERROR,
+            "stages": diagnostic_stages,
         }
     return jsonify(response_payload)
 
