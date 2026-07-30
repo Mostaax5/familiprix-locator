@@ -1223,6 +1223,50 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(len(result["follow_up_questions"]), 3)
         self.assertTrue(result["pharmacist_referral"])
 
+    def test_documented_form_summary_uses_verified_rapid_relief_evidence(self):
+        products = [{
+            "client_id": "product:1",
+            "name": "ADVIL 200MG CO100",
+            "description": "Comprimés d'ibuprofène 200 mg.",
+            "description_status": "verified",
+            "_verified_fields": ["description"],
+        }, {
+            "client_id": "product:2",
+            "name": "ADVIL 200MG LIQ/GEL CA40",
+            "description": (
+                "Capsules liqui-gels d'ibuprofène 200 mg présentées pour "
+                "un soulagement rapide."
+            ),
+            "description_status": "verified",
+            "_verified_fields": ["description"],
+        }]
+        plan = build_client_query_plan(
+            "Compare les comprimés Advil et les Liqui-Gels.",
+            "documented",
+        )
+        documents = [{
+            "source_id": "store-plan",
+            "candidate_ids": ["product:1", "product:2"],
+        }, {
+            "source_id": "catalog:liqui-gel",
+            "candidate_ids": ["product:2"],
+            "evidence": products[1]["description"],
+        }]
+
+        with patch("routes.ai._provider_structured_request", return_value=None):
+            result = generate_documented_client_answer(
+                plan["corrected_query"], plan, products, documents,
+            )
+
+        liqui_point = next(
+            point for point in result["key_points"]
+            if point["heading"] == "Liqui-gels"
+        )
+        self.assertIn("soulagement rapide", liqui_point["detail"])
+        self.assertEqual(
+            liqui_point["source_ids"], ["catalog:liqui-gel"]
+        )
+
     def test_melatonin_documentation_skips_the_inapplicable_drug_database(self):
         products = [
             {"client_id": "product:1", "name": "A GAGNON MELATON 5MG GUM 120"},

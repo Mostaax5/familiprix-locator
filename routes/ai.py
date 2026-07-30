@@ -2873,6 +2873,8 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "ou aucun au lieu de remplir la réponse avec des produits voisins. "
     "Tu peux expliquer une différence générale entre des formes ou catégories, mais indique "
     "clairement qu'elle est générale lorsqu'aucun document ne la confirme pour le produit. "
+    "Ne compare jamais le prix, l'économie par dose ou la valeur si aucun prix n'est fourni. "
+    "N'affirme une action plus rapide pour un produit précis que si sa fiche fournie le dit. "
     "N'invente jamais de dose, de durée, d'ingrédient, de bénéfice ou de source. "
     "Reste structuré et précis: la réponse complète doit être facile à parcourir rapidement. "
     "answer est une réponse directe de 2 à 4 phrases que l'employé peut dire au client. "
@@ -3909,6 +3911,8 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         ("citron", ("citron", "lemon")),
     )
     forms = []
+    form_candidate_ids = defaultdict(list)
+    rapid_relief_form_candidate_ids = defaultdict(list)
     doses = []
     flavors = []
     features = []
@@ -3990,6 +3994,25 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                 if form not in forms:
                     forms.append(form)
                 traits.append(form)
+                form_candidate_ids[form].append(candidate_id)
+                description_verified = bool(
+                    str(product.get("description_status", "") or "")
+                    == "verified"
+                    and "description" in set(
+                        product.get("_verified_fields") or []
+                    )
+                )
+                if (
+                    description_verified
+                    and any(marker in normalized_details for marker in (
+                        "soulagement rapide",
+                        "absorbe rapidement",
+                        "action rapide",
+                    ))
+                ):
+                    rapid_relief_form_candidate_ids[form].append(
+                        candidate_id
+                    )
         if not is_toothbrush_query:
             dose_match = re.search(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*mg\b", name, re.IGNORECASE)
             if dose_match:
@@ -4034,6 +4057,12 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         and question_words.intersection(form_comparison_terms)
         and len(forms) >= 2
     )
+    if rapid_relief_form_candidate_ids.get("liqui-gels"):
+        form_guidance["liqui-gels"] = (
+            "capsules contenant une préparation liquide, à avaler entières; "
+            "les fiches exactes examinées les présentent pour un soulagement "
+            "rapide, à confirmer sur l'emballage choisi"
+        )
 
     source_ids_by_product = defaultdict(list)
     valid_source_ids = []
@@ -4546,10 +4575,28 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
         for form in forms[:4]:
             if form not in form_guidance:
                 continue
+            form_sources = []
+            for candidate_id in (
+                rapid_relief_form_candidate_ids.get(form)
+                or form_candidate_ids.get(form)
+                or []
+            ):
+                for source_id in source_ids_by_product.get(
+                    candidate_id, []
+                ):
+                    if (
+                        source_id not in form_sources
+                        and source_id != "store-plan"
+                    ):
+                        form_sources.append(source_id)
+                    if len(form_sources) >= 4:
+                        break
+                if len(form_sources) >= 4:
+                    break
             key_points.append({
                 "heading": form.capitalize(),
                 "detail": form_guidance[form].capitalize() + ".",
-                "source_ids": store_source,
+                "source_ids": form_sources or store_source,
             })
     elif forms:
         key_points.append({
