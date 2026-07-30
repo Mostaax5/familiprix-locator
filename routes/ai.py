@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from flask import Blueprint, request, jsonify, Response, g, current_app
-from database import get_db
+from database import connect_db, get_db
 from auth import require_editor, utc_now_iso, side_display_label
 from memory_guard import memory_intensive_task, release_unused_memory
 from product_data import (
@@ -47,6 +47,10 @@ _AI_LOGGING_ENABLED = os.environ.get("AI_LOGGING_ENABLED", "").strip().lower() i
 }
 _ai_log_cleanup_lock = threading.Lock()
 _ai_log_last_cleanup = 0.0
+_AI_LOG_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="ai-log",
+)
+_AI_LOG_SLOTS = threading.BoundedSemaphore(8)
 _KIMI_MODELS_CACHE = {"checked_at": 0.0, "models": set()}
 _KIMI_MODELS_LOCK = threading.Lock()
 
@@ -89,6 +93,47 @@ def _safe_urlopen(request_obj, timeout):
     return build_opener(_SameHostRedirectHandler(host)).open(request_obj, timeout=timeout)
 
 
+def _persist_ai_log(values):
+    global _ai_log_last_cleanup
+    db = None
+    try:
+        db = connect_db()
+        if db.backend == "postgres":
+            db.execute(
+                "SELECT set_config('statement_timeout', ?, true)",
+                ("5s",),
+            )
+        db.execute(
+            """INSERT INTO ai_logs (created_at, kind, provider, model, question, context_json, response_json, store, employee)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            values,
+        )
+        now = time.time()
+        with _ai_log_cleanup_lock:
+            should_cleanup = now - _ai_log_last_cleanup > 86400
+            if should_cleanup:
+                _ai_log_last_cleanup = now
+        if should_cleanup:
+            db.execute(
+                "DELETE FROM ai_logs WHERE id NOT IN "
+                "(SELECT id FROM ai_logs ORDER BY id DESC LIMIT 5000)"
+            )
+        db.commit()
+    except Exception:
+        if db is not None:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+        _AI_LOG_SLOTS.release()
+
+
 def log_ai_interaction(kind, question, context, response):
     """Persist every AI Q&A as a training example, tagged with store, employee
     (auto from device name — never prompted) and time. Never raises — logging
@@ -109,26 +154,19 @@ def log_ai_interaction(kind, question, context, response):
         body = request.get_json(silent=True) or {}
         store = str(body.get("store", "")).strip()
         employee = str(getattr(g, "auth_username", "") or "").strip()
-        db = get_db()
-        db.execute(
-            """INSERT INTO ai_logs (created_at, kind, provider, model, question, context_json, response_json, store, employee)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (utc_now_iso(), str(kind or "")[:80], prov["name"], logged_model,
-             str(question or "")[:4000], _bounded_log_json(context),
-             _bounded_log_json(response), store[:120], employee[:60]),
+        values = (
+            utc_now_iso(), str(kind or "")[:80], prov["name"], logged_model,
+            str(question or "")[:4000], _bounded_log_json(context),
+            _bounded_log_json(response), store[:120], employee[:60],
         )
-        global _ai_log_last_cleanup
-        now = time.time()
-        with _ai_log_cleanup_lock:
-            if now - _ai_log_last_cleanup > 86400:
-                db.execute(
-                    "DELETE FROM ai_logs WHERE id NOT IN "
-                    "(SELECT id FROM ai_logs ORDER BY id DESC LIMIT 5000)"
-                )
-                _ai_log_last_cleanup = now
-        db.commit()
     except Exception:
-        pass
+        return
+    if not _AI_LOG_SLOTS.acquire(blocking=False):
+        return
+    try:
+        _AI_LOG_EXECUTOR.submit(_persist_ai_log, values)
+    except RuntimeError:
+        _AI_LOG_SLOTS.release()
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 

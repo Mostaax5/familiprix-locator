@@ -200,6 +200,17 @@ class PerformanceContractTests(unittest.TestCase):
         self.assertIn("mode,", source[ai_wait - 500:ai_wait + 500])
         self.assertIn("mode === 'documented'", source[ai_wait - 800:ai_wait + 200])
 
+    def test_ai_training_log_never_writes_on_the_customer_request(self):
+        source = (ROOT / "routes" / "ai.py").read_text(encoding="utf-8")
+        start = source.index("def log_ai_interaction")
+        end = source.index("PHARMACY_LOOKUP_SOURCES", start)
+        logger = source[start:end]
+
+        self.assertIn("_AI_LOG_EXECUTOR.submit(_persist_ai_log, values)", logger)
+        self.assertIn("_AI_LOG_SLOTS.acquire(blocking=False)", logger)
+        self.assertNotIn("db.execute(", logger)
+        self.assertNotIn("db.commit()", logger)
+
 
 if __name__ == "__main__":
     unittest.main()
