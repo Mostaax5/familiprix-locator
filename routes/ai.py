@@ -4,7 +4,9 @@ import re
 import threading
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    ThreadPoolExecutor, TimeoutError as FutureTimeoutError, as_completed,
+)
 from html import unescape
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin, urlparse
@@ -216,6 +218,13 @@ try:
     )
 except (TypeError, ValueError):
     _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = 18
+_DOCUMENTED_AI_HARD_TIMEOUT_SECONDS = min(
+    13, _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS
+)
+_DOCUMENTED_AI_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="documented-ai",
+)
+_DOCUMENTED_AI_GATE = threading.Lock()
 try:
     _AI_QUERY_PLAN_TIMEOUT_SECONDS = min(
         7, max(3, int(os.environ.get("AI_QUERY_PLAN_TIMEOUT", "5")))
@@ -4820,8 +4829,10 @@ def _documented_answer_covers_request(result, query_plan, candidates):
     return True
 
 
-def generate_documented_client_answer(question, query_plan, candidates, documents,
-                                      history=None, selected_text="", focus_product_id=""):
+def _generate_documented_client_answer_sync(
+    question, query_plan, candidates, documents, history=None,
+    selected_text="", focus_product_id="",
+):
     include_identifiers = bool(re.search(
         r"\b(?:DIN(?:[\s-]?HM)?|NPN|UPC|GTIN)\b",
         str(question or ""),
@@ -4926,6 +4937,52 @@ def generate_documented_client_answer(question, query_plan, candidates, document
     result["degraded"] = False
     result["warning"] = ""
     return result
+
+
+def generate_documented_client_answer(
+    question, query_plan, candidates, documents, history=None,
+    selected_text="", focus_product_id="",
+):
+    """Bound the complete external AI operation, including network setup.
+
+    urllib's timeout applies to individual socket operations rather than the
+    full request. One stalled K3 connection could therefore occupy a Gunicorn
+    request thread far beyond the employee-facing deadline. A single process-
+    wide worker prevents queued AI calls and leaves product search responsive.
+    """
+    if not _DOCUMENTED_AI_GATE.acquire(blocking=False):
+        _set_ai_error(
+            "Une reponse documentee est deja en preparation; "
+            "la reponse locale a ete utilisee."
+        )
+        return grounded_documented_fallback(
+            query_plan, candidates, documents, degraded=True,
+        )
+
+    def task():
+        try:
+            return _generate_documented_client_answer_sync(
+                question, query_plan, candidates, documents, history,
+                selected_text=selected_text,
+                focus_product_id=focus_product_id,
+            )
+        finally:
+            _DOCUMENTED_AI_GATE.release()
+
+    future = _DOCUMENTED_AI_EXECUTOR.submit(task)
+    try:
+        return future.result(timeout=_DOCUMENTED_AI_HARD_TIMEOUT_SECONDS)
+    except FutureTimeoutError:
+        # cancel() handles the rare not-yet-started case. A running network call
+        # retains the one AI slot until its own stream deadline closes it.
+        future.cancel()
+        _set_ai_error(
+            "La reponse Kimi depasse le delai de service; "
+            "la reponse locale a ete utilisee."
+        )
+        return grounded_documented_fallback(
+            query_plan, candidates, documents, degraded=True,
+        )
 
 
 def generate_client_help_payload_deepseek(question, products):

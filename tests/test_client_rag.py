@@ -972,6 +972,38 @@ class ClientRagTests(unittest.TestCase):
         self.assertLessEqual(len(result["comparisons"][0]["difference"]), 420)
         self.assertTrue(result["pharmacist_referral"])
 
+    def test_documented_answer_has_a_hard_end_to_end_deadline(self):
+        product = {
+            "id": 1, "client_id": "product:1", "name": "ADVIL 200MG CO100",
+            "brand": "Advil", "description": "Comprimes d'ibuprofene.",
+        }
+        query_plan = build_client_query_plan(
+            "Quelle difference entre comprimes et liqui-gels Advil?",
+            "documented",
+        )
+
+        def slow_provider(*_args, **_kwargs):
+            time.sleep(0.08)
+            return None
+
+        started = time.perf_counter()
+        with patch(
+            "routes.ai._DOCUMENTED_AI_HARD_TIMEOUT_SECONDS", 0.01,
+        ), patch(
+            "routes.ai._provider_structured_request",
+            side_effect=slow_provider,
+        ):
+            result = generate_documented_client_answer(
+                query_plan["corrected_query"], query_plan, [product], [],
+            )
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 0.06)
+        self.assertTrue(result["degraded"])
+        self.assertIn("product:1", result["selected_product_ids"])
+        # Let the bounded worker release its one request slot.
+        time.sleep(0.1)
+
     def test_documented_headache_fallback_remains_useful_when_ai_times_out(self):
         products = [{
             "id": 1, "client_id": "product:1",
