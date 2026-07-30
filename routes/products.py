@@ -514,6 +514,7 @@ _PROD_CACHE = {
     "generation": -1, "state_checked_at": 0.0,
     "document_frequency": {}, "document_count": 0,
     "average_document_length": 1.0, "statistics_rows_id": 0,
+    "catalog_brands": (), "name_lead_frequency": {},
 }
 _PROD_LOCK = threading.RLock()
 _PROD_REFRESH_LOCK = threading.Lock()
@@ -780,6 +781,7 @@ def _product_search_row(item, aliases=(), identifiers=()):
 
     name = normalize_search_text(item.get("name", ""))
     brand = normalize_search_text(verified("brand"))
+    catalog_brand = normalize_search_text(item.get("brand", ""))
     verified_semantics = " ".join([
         name, brand,
         normalize_search_text(verified("description")),
@@ -813,10 +815,15 @@ def _product_search_row(item, aliases=(), identifiers=()):
         "_bc": normalized_digits(item.get("barcode", "")),
         "_name": name,
         "_brand": brand,
+        # An exact employee-entered brand may safely constrain retrieval even
+        # while that catalogue field still carries an "a confirmer" badge. It
+        # is not added to verified semantic evidence or presented as a fact.
+        "_catalog_brand": catalog_brand,
         "_hay": hay,
         "_identity_hay": verified_semantics,
         "_tokens": tuple(name.split()),
         "_brand_tokens": tuple(brand.split()),
+        "_catalog_brand_tokens": tuple(catalog_brand.split()),
     }
 
 
@@ -1007,6 +1014,8 @@ def _products_corpus(db, allow_identifier_stale=False):
     )
     rows = []
     document_frequency = Counter()
+    catalog_brands = set()
+    name_lead_frequency = Counter()
     search_document_keys = set()
     total_document_length = 0
     for product_row in db.execute("SELECT * FROM products"):
@@ -1049,6 +1058,17 @@ def _products_corpus(db, allow_identifier_stale=False):
         if document_key not in search_document_keys:
             search_document_keys.add(document_key)
             tokens = search_row["_hay"].split()
+            catalog_brand = str(
+                search_row.get("_catalog_brand", "") or ""
+            ).strip()
+            if (
+                len(catalog_brand) >= 3
+                and any(character.isalpha() for character in catalog_brand)
+            ):
+                catalog_brands.add(catalog_brand)
+            name_tokens = search_row.get("_tokens") or ()
+            if name_tokens:
+                name_lead_frequency[str(name_tokens[0])] += 1
             total_document_length += max(1, len(tokens))
             document_frequency.update({
                 token for token in tokens
@@ -1065,12 +1085,15 @@ def _products_corpus(db, allow_identifier_stale=False):
             if total_document_length else 1.0
         ),
         statistics_rows_id=id(rows),
+        catalog_brands=tuple(sorted(catalog_brands)),
+        name_lead_frequency=dict(name_lead_frequency),
     )
     del (
         gtin_keys, aliases_by_product, verified_by_product,
         verified_values_by_product, field_sources_by_product,
         identifiers_by_product, reference_identifiers_by_gtin,
-        document_frequency, search_document_keys,
+        document_frequency, catalog_brands, name_lead_frequency,
+        search_document_keys,
     )
     release_unused_memory()
     return rows
@@ -3682,6 +3705,118 @@ def _mapped_product_key(item, row):
     )
 
 
+_GENERIC_PRODUCT_LEAD_TOKENS = frozenset({
+    "accessoire", "accessoires", "apres", "bain", "baume", "bebe",
+    "brosse", "brosses", "capsule", "capsules", "comprime", "comprimes",
+    "conditionneur", "creme", "dent", "dents", "gel", "gels", "huile",
+    "lait", "liquide", "nettoyant", "oral", "pansement", "pansements",
+    "produit", "produits", "recharge", "recharges", "savon", "shampooing",
+    "sirop", "solution", "supplement", "vitamine", "vitamines",
+})
+
+
+def _catalogue_identity_statistics(corpus):
+    """Small exact-identity index for non-cached test and recovery corpora."""
+    catalog_brands = set()
+    name_lead_frequency = Counter()
+    seen_documents = set()
+    for item, row in corpus:
+        key = _mapped_product_key(item, row)
+        if key in seen_documents:
+            continue
+        seen_documents.add(key)
+        brand = str(
+            row.get("_catalog_brand", "") or row.get("_brand", "") or ""
+        ).strip()
+        if (
+            len(brand) >= 3
+            and any(character.isalpha() for character in brand)
+        ):
+            catalog_brands.add(brand)
+        name_tokens = row.get("_tokens") or tuple(
+            str(row.get("_name", "") or "").split()
+        )
+        if name_tokens:
+            name_lead_frequency[str(name_tokens[0])] += 1
+    return catalog_brands, name_lead_frequency
+
+
+def _explicit_catalogue_identity(question, corpus, document_count):
+    """Find brands explicitly named by the employee, without fuzzy guessing.
+
+    Exact brand phrases are strongest. A repeated first product-name token is a
+    conservative fallback for planogram rows whose brand has not been enriched
+    yet (for example ADVIL ...). Category words such as ``brosse`` are excluded.
+    """
+    normalized_query = normalize_search_text(question)
+    if not normalized_query:
+        return (), ()
+    if _PROD_CACHE.get("statistics_rows_id") == id(corpus):
+        catalog_brands = set(_PROD_CACHE.get("catalog_brands") or ())
+        name_lead_frequency = (
+            _PROD_CACHE.get("name_lead_frequency") or {}
+        )
+    else:
+        catalog_brands, name_lead_frequency = (
+            _catalogue_identity_statistics(corpus)
+        )
+
+    padded_query = f" {normalized_query} "
+    matched_brands = {
+        brand for brand in catalog_brands
+        if f" {brand} " in padded_query
+    }
+    if matched_brands:
+        # Prefer "oral b" over a shorter catalogue brand "oral" when both
+        # happen to exist, while preserving true multi-brand comparisons.
+        matched_brands = {
+            brand for brand in matched_brands
+            if not any(
+                brand != other and f" {brand} " in f" {other} "
+                for other in matched_brands
+            )
+        }
+        return tuple(sorted(matched_brands)), ()
+
+    query_tokens = set(tokenize_search_query(normalized_query))
+    frequency_cutoff = max(20, int(max(1, document_count) * 0.12))
+    matched_leads = {
+        token for token in query_tokens
+        if (
+            len(token) >= 4
+            and token not in _GENERIC_PRODUCT_LEAD_TOKENS
+            and 2 <= int(name_lead_frequency.get(token, 0) or 0)
+            <= frequency_cutoff
+        )
+    }
+    return (), tuple(sorted(matched_leads))
+
+
+def _row_matches_explicit_identity(row, brands, lead_tokens):
+    if not brands and not lead_tokens:
+        return True
+    name = str(row.get("_name", "") or "")
+    catalog_brand = str(
+        row.get("_catalog_brand", "") or row.get("_brand", "") or ""
+    )
+    for brand in brands:
+        if (
+            catalog_brand == brand
+            or name == brand
+            or name.startswith(f"{brand} ")
+        ):
+            return True
+    name_tokens = row.get("_tokens") or tuple(name.split())
+    if name_tokens and str(name_tokens[0]) in lead_tokens:
+        return True
+    catalog_brand_tokens = (
+        row.get("_catalog_brand_tokens")
+        or row.get("_brand_tokens")
+        or tuple(catalog_brand.split())
+    )
+    return bool(set(catalog_brand_tokens).intersection(lead_tokens))
+
+
 def _client_location(item):
     return {
         "aisle": str(item.get("aisle", "")).strip(),
@@ -3818,8 +3953,16 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         document_frequency, doc_count, average_length = (
             _search_corpus_statistics(corpus)
         )
+    identity_question = " ".join(filter(None, (question, corrected)))
+    explicit_brands, explicit_name_leads = _explicit_catalogue_identity(
+        identity_question, corpus, doc_count,
+    )
     anchor_tokens = ()
-    if not required_concepts:
+    if (
+        not required_concepts
+        and not explicit_brands
+        and not explicit_name_leads
+    ):
         anchor_tokens = _client_query_anchor_tokens(
             question, document_frequency, doc_count
         )
@@ -3860,6 +4003,13 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         ):
             continue
         exact_upc = bool(upc_digits and row["_bc"] in upc_digits)
+        if (
+            not exact_upc
+            and not _row_matches_explicit_identity(
+                row, explicit_brands, explicit_name_leads,
+            )
+        ):
+            continue
         if (
             not exact_upc
             and not _row_matches_query_anchor(row, anchor_tokens)
@@ -3904,6 +4054,7 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
             + min(260, int(bm25 * 34))
             + (must_hits * 35)
             - exclusion_penalty
+            + (240 if explicit_brands or explicit_name_leads else 0)
             + product_query_role_adjustment(
                 question, row, electric_request=electric_request,
             )

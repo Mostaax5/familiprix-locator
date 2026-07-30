@@ -221,6 +221,48 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertEqual([item["name"] for item in matches], ["Advil Extra Fort"])
 
+    def test_explicit_brand_comparison_excludes_unrelated_liquid_products(self):
+        products = [{
+            "id": 1, "name": "ADVIL 200MG CO100",
+            "brand": "Advil", "barcode": "101",
+            "description": "Comprimes d'ibuprofene 200 mg.",
+        }, {
+            "id": 2, "name": "ADVIL 200MG LIQ/GEL CA40",
+            "brand": "Advil", "barcode": "102",
+            "description": "Capsules liqui-gels d'ibuprofene 200 mg.",
+        }, {
+            "id": 3, "name": "SKINTIMATE GEL RASAGE 198G",
+            "brand": "Skintimate", "barcode": "103",
+            "description": "Gel liquide pour le rasage.",
+        }, {
+            "id": 4, "name": "JJ NET BB TETE O PIEDS 400ML",
+            "brand": "Johnson's", "barcode": "104",
+            "description": "Nettoyant liquide pour bebe.",
+        }]
+        corpus = [(
+            product,
+            search_row(
+                product["name"], product["brand"],
+                product["description"], product["barcode"],
+            ),
+        ) for product in products]
+        question = (
+            "Quelle est la difference entre les comprimes et les "
+            "liqui-gels Advil, et dans quel contexte choisir chacun?"
+        )
+
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            matches = hybrid_client_candidates(
+                question, build_client_query_plan(question, "documented"),
+                limit=20,
+            )
+
+        self.assertEqual(
+            {product["id"] for product in matches},
+            {1, 2},
+        )
+
     def test_full_question_words_do_not_retrieve_unrelated_products(self):
         products = [{
             "id": 1, "name": "BENYLIN SIROP GORGE TOUX 250ML",
@@ -871,7 +913,7 @@ class ClientRagTests(unittest.TestCase):
             )
 
         call = provider.call_args
-        self.assertEqual(call.kwargs["max_tokens"], 2600)
+        self.assertEqual(call.kwargs["max_tokens"], 2200)
         self.assertTrue(call.kwargs["realtime_model"])
         self.assertNotIn("comparisons", call.kwargs["schema"]["properties"])
         self.assertNotIn(
@@ -1370,7 +1412,7 @@ class ClientRagTests(unittest.TestCase):
         payload = json.loads(opener.call_args.args[0].data.decode("utf-8"))
         self.assertEqual(result, {"answer": "ok"})
         self.assertEqual(payload["model"], "kimi-k3")
-        self.assertEqual(payload["reasoning_effort"], "high")
+        self.assertEqual(payload["reasoning_effort"], "low")
         self.assertTrue(payload["stream"])
         self.assertNotIn("thinking", payload)
         available.assert_not_called()

@@ -176,11 +176,16 @@ KIMI_REALTIME_REASONING_EFFORT = (
 )
 if KIMI_REALTIME_REASONING_EFFORT not in {"low", "high", "max"}:
     KIMI_REALTIME_REASONING_EFFORT = "low"
+# Use a fresh key for the synchronous documented path. Some existing Render
+# services retained the former high-effort variable even after render.yaml was
+# changed, making every employee wait more than 40 seconds.
 KIMI_DOCUMENTED_REASONING_EFFORT = (
-    os.environ.get("KIMI_DOCUMENTED_REASONING_EFFORT", "high").strip().lower()
+    os.environ.get(
+        "KIMI_SYNC_DOCUMENTED_REASONING_EFFORT", "low"
+    ).strip().lower()
 )
 if KIMI_DOCUMENTED_REASONING_EFFORT not in {"low", "high", "max"}:
-    KIMI_DOCUMENTED_REASONING_EFFORT = "high"
+    KIMI_DOCUMENTED_REASONING_EFFORT = "low"
 _KIMI_DOCUMENTED_LONG_THINKING = (
     os.environ.get("KIMI_DOCUMENTED_LONG_THINKING", "").strip().lower()
     in {"1", "true", "yes", "on"}
@@ -299,7 +304,10 @@ def _log_ai_usage(provider: str, input_tokens: int, output_tokens: int,
 
 def configured_ai_provider():
     if KIMI_API_KEY:
-        return {"name": "kimi", "label": "Kimi", "model": KIMI_MODEL}
+        return {
+            "name": "kimi", "label": "Kimi", "model": KIMI_MODEL,
+            "documented_reasoning_effort": KIMI_DOCUMENTED_REASONING_EFFORT,
+        }
     if DEEPSEEK_API_KEY:
         return {"name": "deepseek", "label": "DeepSeek", "model": DEEPSEEK_MODEL}
     if GEMINI_API_KEY:
@@ -1778,9 +1786,9 @@ def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=F
         "messages": messages,
     }
     if model.startswith("kimi-k3"):
-        # K3 uses max_completion_tokens and always reasons. Low effort keeps the
-        # conversational mode responsive; documented mode deliberately gets
-        # the stronger reasoning budget.
+        # K3 uses max_completion_tokens and always reasons. Both response modes
+        # stay bounded by their configured effort so an employee receives a
+        # completed answer inside the synchronous service window.
         payload["max_completion_tokens"] = int(max_tokens)
         payload["reasoning_effort"] = (
             KIMI_DOCUMENTED_REASONING_EFFORT
@@ -4833,9 +4841,10 @@ def generate_documented_client_answer(question, query_plan, candidates, document
             "candidates": contexts,
             "documents": document_contexts,
         },
-        # K3's completion budget includes its private reasoning. A 700-token
-        # ceiling often expired before the JSON answer began.
-        max_tokens=2600,
+        # K3's completion budget includes its private reasoning. This leaves
+        # enough room for a useful structured answer without inviting a long
+        # completion that misses the employee-service deadline.
+        max_tokens=2200,
         schema_name="client_documented_answer",
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,
@@ -6275,10 +6284,12 @@ def client_help():
         8 if query_plan.get("intent") in {"headache_relief", "fever_relief"}
         else (
             12 if use_local_documented_summary
-            # Let the documented answerer perform the final semantic filter.
-            # Eight candidates was too narrow for broad store questions and let
-            # early lexical noise displace valid products.
-            else 12 if response_mode == "documented"
+            # Broad "all products" requests keep a representative 12-product
+            # context. Normal questions send only the strongest eight to K3;
+            # every matching card still remains available in the response.
+            else (
+                12 if query_plan.get("wants_all") else 8
+            ) if response_mode == "documented"
             else 10
         )
     )

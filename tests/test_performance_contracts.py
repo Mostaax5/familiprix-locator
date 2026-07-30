@@ -23,6 +23,35 @@ class PerformanceContractTests(unittest.TestCase):
         self.assertIn("threads = 4", gunicorn_config)
         self.assertIn("max_requests = 1000", gunicorn_config)
         self.assertIn("MALLOC_ARENA_MAX", render_config)
+        self.assertIn("value: kimi-k3", render_config)
+        documented_effort = render_config.index(
+            "- key: KIMI_SYNC_DOCUMENTED_REASONING_EFFORT"
+        )
+        self.assertIn(
+            "value: low",
+            render_config[documented_effort:documented_effort + 100],
+        )
+
+    def test_ready_catalogue_releases_a_stale_background_boot_gate(self):
+        import app as app_module
+
+        old_pending = app_module.DB_BOOT_PENDING
+        old_error = app_module.DB_BOOT_ERROR
+        old_config_pending = app_module.app.config.get("DB_BOOT_PENDING")
+        try:
+            app_module.DB_BOOT_PENDING = True
+            app_module.DB_BOOT_ERROR = "stale maintenance wait"
+            app_module.app.config["DB_BOOT_PENDING"] = True
+
+            app_module._mark_database_ready()
+
+            self.assertFalse(app_module.DB_BOOT_PENDING)
+            self.assertFalse(app_module.app.config["DB_BOOT_PENDING"])
+            self.assertEqual(app_module.DB_BOOT_ERROR, "")
+        finally:
+            app_module.DB_BOOT_PENDING = old_pending
+            app_module.DB_BOOT_ERROR = old_error
+            app_module.app.config["DB_BOOT_PENDING"] = old_config_pending
 
     def test_planogram_replacement_is_enabled_by_default(self):
         source = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
