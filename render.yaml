@@ -29,4 +29,4 @@ services:
       - key: KIMI_SYNC_DOCUMENTED_REASONING_EFFORT
         value: low
       - key: AI_DOCUMENTED_REQUEST_TIMEOUT
-        value: "18"
+        value: "15"

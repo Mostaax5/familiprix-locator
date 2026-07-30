@@ -10,6 +10,7 @@ from routes.ai import (
     _outbound_url_allowed,
     _deepseek_json_request,
     _kimi_json_request,
+    _read_kimi_stream,
     build_client_query_plan,
     classify_client_request,
     filter_client_answer_category,
@@ -913,7 +914,7 @@ class ClientRagTests(unittest.TestCase):
             )
 
         call = provider.call_args
-        self.assertEqual(call.kwargs["max_tokens"], 2200)
+        self.assertEqual(call.kwargs["max_tokens"], 1400)
         self.assertTrue(call.kwargs["realtime_model"])
         self.assertNotIn("comparisons", call.kwargs["schema"]["properties"])
         self.assertNotIn(
@@ -1317,6 +1318,81 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(payload["reasoning_effort"], "low")
         self.assertEqual(payload["max_completion_tokens"], 900)
         self.assertNotIn("thinking", payload)
+
+    def test_kimi_stream_returns_when_the_direct_answer_is_complete(self):
+        answer = (
+            "Les comprimes conviennent a un usage courant; les capsules "
+            "peuvent etre plus faciles a avaler selon la personne."
+        )
+        event = {
+            "choices": [{
+                "delta": {
+                    "content": json.dumps(
+                        {"answer": answer}, ensure_ascii=False,
+                    )[:-1],
+                },
+            }],
+        }
+
+        class StreamResponse:
+            fp = None
+
+            def __init__(self):
+                self.lines = iter([
+                    (
+                        "data: "
+                        + json.dumps(event, ensure_ascii=False)
+                        + "\n\n"
+                    ).encode("utf-8"),
+                ])
+
+            def readline(self):
+                return next(self.lines, b"")
+
+        parsed, usage = _read_kimi_stream(
+            StreamResponse(), time.monotonic() + 5,
+        )
+
+        self.assertEqual(parsed, {"_partial_answer": answer})
+        self.assertEqual(usage, {})
+
+    def test_kimi_stream_deadline_includes_connection_time(self):
+        events = []
+        captured = {}
+        response = MagicMock()
+        response.__enter__.return_value = response
+
+        def clock():
+            events.append("clock")
+            return 100.0
+
+        def opener(_request, timeout):
+            events.append("open")
+            self.assertEqual(timeout, 15)
+            return response
+
+        def reader(_response, deadline):
+            events.append("read")
+            captured["deadline"] = deadline
+            return {"answer": "ok"}, {}
+
+        with patch("routes.ai.KIMI_API_KEY", "secret"), \
+             patch("routes.ai.KIMI_DOCUMENTED_MODEL", "kimi-k3"), \
+             patch("routes.ai.time.monotonic", side_effect=clock), \
+             patch("routes.ai._safe_urlopen", side_effect=opener), \
+             patch("routes.ai._read_kimi_stream", side_effect=reader), \
+             patch("routes.ai._log_ai_usage"):
+            result = _kimi_json_request(
+                [{"role": "user", "content": "question"}],
+                max_tokens=500,
+                quality_mode=True,
+                timeout_seconds=15,
+                realtime_model=True,
+            )
+
+        self.assertEqual(result, {"answer": "ok"})
+        self.assertEqual(events, ["clock", "open", "read"])
+        self.assertEqual(captured["deadline"], 115.0)
 
     def test_documented_context_keeps_unverified_description_as_flagged_evidence(self):
         context = _compact_documented_product_context({

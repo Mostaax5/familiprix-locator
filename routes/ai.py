@@ -1678,7 +1678,17 @@ def _read_kimi_stream(response, deadline):
     usage = {}
     total_bytes = 0
     while time.monotonic() < deadline:
-        raw_line = response.readline()
+        remaining = max(0.05, deadline - time.monotonic())
+        try:
+            response_socket = getattr(
+                getattr(getattr(response, "fp", None), "raw", None),
+                "_sock", None,
+            )
+            if response_socket is not None:
+                response_socket.settimeout(remaining)
+            raw_line = response.readline()
+        except (OSError, TimeoutError):
+            break
         if not raw_line:
             break
         total_bytes += len(raw_line)
@@ -1702,6 +1712,15 @@ def _read_kimi_stream(response, deadline):
         content = delta.get("content")
         if content:
             content_parts.append(str(content))
+            # ``answer`` is the first structured field. As soon as its complete
+            # JSON string arrives, close the stream and let the deterministic
+            # layer add cards, sources, key points and safety notices. Waiting
+            # for K3 to generate those duplicate sections added 20-30 seconds.
+            partial_answer = _partial_json_answer(
+                "".join(content_parts)
+            )
+            if len(partial_answer) >= 45:
+                return {"_partial_answer": partial_answer}, usage
     raw_text = "".join(content_parts)
     parsed = _parse_chat_json(raw_text)
     if parsed is not None:
@@ -1848,10 +1867,11 @@ def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=F
                 },
                 method="POST",
             )
+        request_deadline = time.monotonic() + timeout
         with _safe_urlopen(request_obj, timeout=timeout) as response:
             if stream_response:
                 parsed, usage = _read_kimi_stream(
-                    response, time.monotonic() + timeout
+                    response, request_deadline
                 )
                 if parsed is None:
                     _set_ai_error(
@@ -4844,7 +4864,7 @@ def generate_documented_client_answer(question, query_plan, candidates, document
         # K3's completion budget includes its private reasoning. This leaves
         # enough room for a useful structured answer without inviting a long
         # completion that misses the employee-service deadline.
-        max_tokens=2200,
+        max_tokens=1400,
         schema_name="client_documented_answer",
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,
