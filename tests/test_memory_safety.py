@@ -2,7 +2,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from flask import Flask
 
@@ -11,6 +11,33 @@ from routes import ai, products
 
 
 class MemorySafetyTests(unittest.TestCase):
+    def test_boot_warmup_builds_product_corpus_once(self):
+        original_cache = dict(products._PROD_CACHE)
+        try:
+            products._PROD_CACHE.update(rows=[], generation=-1)
+            fake_db = MagicMock()
+            with patch.object(products, "connect_db", return_value=fake_db), \
+                 patch.object(
+                     products, "_product_corpus_fast_ready", return_value=False,
+                 ), patch.object(
+                     products, "_products_corpus", return_value=[({}, {})],
+                 ) as build, patch.object(
+                     products, "memory_intensive_task",
+                 ) as memory_task, patch.object(
+                     products, "release_unused_memory",
+                 ):
+                memory_task.return_value.__enter__.return_value = None
+                memory_task.return_value.__exit__.return_value = False
+                self.assertEqual(products.warm_product_search_cache(), 1)
+
+            build.assert_called_once_with(
+                fake_db, allow_identifier_stale=True,
+            )
+            fake_db.close.assert_called_once_with()
+        finally:
+            products._PROD_CACHE.clear()
+            products._PROD_CACHE.update(original_cache)
+
     def test_warm_product_corpus_never_waits_for_background_memory_task(self):
         original_cache = dict(products._PROD_CACHE)
         warm_rows = [({"id": 1, "name": "Advil"}, {"_name": "advil"})]

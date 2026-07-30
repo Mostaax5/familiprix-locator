@@ -19,6 +19,7 @@ from security import auth_bp, install_security, internal_request_headers
 from routes.products import (
     products_bp, first_column, schedule_backfill_missing,
     schedule_initial_product_quality_audit, schedule_reference_metadata_sync,
+    product_search_cache_ready, warm_product_search_cache,
 )
 from routes.layout import layout_bp
 from routes.ai import ai_bp, configured_ai_provider, reference_count, maybe_resume_enrichment
@@ -311,8 +312,14 @@ def get_system_info():
         # Do not leave enrichment and diagnostics disabled behind a stale flag.
         _mark_database_ready()
         _start_persistence_services(background=True)
-    if schema_status["ready"] and not DB_BOOT_PENDING:
-        # Never resume background enrichment on top of startup migrations.
+    if (
+        schema_status["ready"]
+        and not DB_BOOT_PENDING
+        and product_search_cache_ready()
+    ):
+        # Never let background enrichment compete with the cold employee-search
+        # index. The post-boot worker builds it first; later health requests only
+        # resume maintenance after search is ready.
         maybe_resume_enrichment()
         maybe_resume_regulatory_enrichment()
     duplicate_slots = db.execute(
@@ -466,8 +473,22 @@ def _start_persistence_services(*, background=False):
         _PERSISTENCE_SERVICES_STARTED = True
 
     def worker():
+        try:
+            _restore_from_gist_if_empty()
+        except Exception as exc:  # noqa: BLE001 - continue with shared DB
+            print(
+                f"[BOOT] Service catalogue "
+                f"_restore_from_gist_if_empty impossible: {exc}"
+            )
+        try:
+            warmed_count = warm_product_search_cache()
+            print(
+                f"[BOOT] Index de recherche pret: "
+                f"{warmed_count} emplacements."
+            )
+        except Exception as exc:  # noqa: BLE001 - later requests can retry
+            print(f"[BOOT] Prechauffage de la recherche impossible: {exc}")
         tasks = (
-            _restore_from_gist_if_empty,
             schedule_reference_metadata_sync,
             schedule_initial_product_quality_audit,
             schedule_backfill_missing,
@@ -484,7 +505,8 @@ def _start_persistence_services(*, background=False):
                 schedule_regulatory_enrichment_after()
             except Exception as exc:  # noqa: BLE001
                 print(f"[BOOT] Synchronisation reglementaire impossible: {exc}")
-        maybe_resume_enrichment()
+        if product_search_cache_ready():
+            maybe_resume_enrichment()
 
     if background:
         threading.Thread(

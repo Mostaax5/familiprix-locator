@@ -264,6 +264,56 @@ class ClientRagTests(unittest.TestCase):
             {1, 2},
         )
 
+    def test_form_comparison_excludes_unrequested_contextual_variants(self):
+        products = [{
+            "id": 1, "name": "ADVIL 200MG CO100",
+            "brand": "Advil", "barcode": "101",
+            "description": "Comprimes d'ibuprofene 200 mg.",
+        }, {
+            "id": 2, "name": "ADVIL 200MG LIQ/GEL CA40",
+            "brand": "Advil", "barcode": "102",
+            "description": "Capsules liqui-gels d'ibuprofene 200 mg.",
+        }, {
+            "id": 3, "name": "ADVIL ENF 100MG RAISIN 100ML",
+            "brand": "Advil", "barcode": "103",
+            "description": "Suspension orale pour enfants.",
+        }, {
+            "id": 4, "name": "ADVIL GTTS FRUITS 24ML",
+            "brand": "Advil", "barcode": "104",
+            "description": "Gouttes pour nourrissons.",
+        }, {
+            "id": 5, "name": "ADVIL RHUME SINUS CA18",
+            "brand": "Advil", "barcode": "105",
+            "description": "Comprimes combines contre le rhume et les sinus.",
+        }, {
+            "id": 6, "name": "ADVIL NUIT CA20",
+            "brand": "Advil", "barcode": "106",
+            "description": "Comprimes de nuit.",
+        }]
+        corpus = [(
+            product,
+            search_row(
+                product["name"], product["brand"],
+                product["description"], product["barcode"],
+            ),
+        ) for product in products]
+        question = (
+            "Quelle est la difference entre les comprimes Advil et les "
+            "Liqui-Gels, et dans quel contexte choisir chaque forme?"
+        )
+
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            matches = hybrid_client_candidates(
+                question, build_client_query_plan(question, "documented"),
+                limit=20,
+            )
+
+        self.assertEqual(
+            {product["id"] for product in matches},
+            {1, 2},
+        )
+
     def test_full_question_words_do_not_retrieve_unrelated_products(self):
         products = [{
             "id": 1, "name": "BENYLIN SIROP GORGE TOUX 250ML",

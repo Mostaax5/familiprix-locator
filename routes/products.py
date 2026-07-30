@@ -1116,6 +1116,33 @@ def _employee_product_corpus(db):
         return _products_corpus(db, allow_identifier_stale=True)
 
 
+def product_search_cache_ready():
+    """Return whether employee search can answer without a cold corpus build."""
+    # _employee_product_corpus deliberately serves an immutable warm snapshot
+    # while a metadata refresh runs in the background. That path is still ready
+    # for employees even when its generation is momentarily stale.
+    return bool(_PROD_CACHE.get("rows"))
+
+
+def warm_product_search_cache():
+    """Build the shared employee-search corpus before maintenance starts."""
+    if _product_corpus_fast_ready():
+        return len(_PROD_CACHE.get("rows") or [])
+    db = None
+    try:
+        db = connect_db()
+        with memory_intensive_task("product_corpus_warm", priority=True):
+            rows = _products_corpus(db, allow_identifier_stale=True)
+        return len(rows)
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+        release_unused_memory()
+
+
 def _schedule_product_corpus_refresh():
     """Refresh an invalidated search corpus without blocking employee requests."""
     global _PROD_REFRESH_RUNNING
@@ -1307,6 +1334,41 @@ def _is_fever_request(query):
     return bool(set(norm.split()).intersection({"fievre", "fever", "febrile"}))
 
 
+def _is_dosage_form_comparison(query):
+    """Recognize comparisons between explicit product forms."""
+    norm = normalize_search_text(query)
+    tokens = set(norm.split())
+    padded = f" {norm} "
+    requested_groups = set()
+    if tokens.intersection({
+        "comprime", "comprimes", "tablet", "tablets", "caplet", "caplets",
+    }):
+        requested_groups.add("tablet")
+    if any(marker in padded for marker in (
+        " liqui gel ", " liqui gels ", " liquigel ", " liquigels ",
+    )):
+        requested_groups.add("liqui_gel")
+    if tokens.intersection({
+        "capsule", "capsules", "gelule", "gelules",
+    }):
+        requested_groups.add("capsule")
+    if tokens.intersection({
+        "liquide", "liquides", "suspension", "sirop", "sirops",
+        "goutte", "gouttes", "drops",
+    }):
+        requested_groups.add("liquid")
+    if tokens.intersection({"gomme", "gommes", "gummy", "gummies"}):
+        requested_groups.add("gummy")
+    comparison_requested = (
+        bool(tokens.intersection({
+            "difference", "differences", "compare", "comparer",
+            "comparaison", "versus", "choisir",
+        }))
+        or " vs " in padded
+    )
+    return comparison_requested and len(requested_groups) >= 2
+
+
 def _headache_relief_named_product(value, normalized=False):
     """Require the sellable product's name to identify a pain-relief family.
 
@@ -1410,6 +1472,40 @@ def client_excluded_concept_terms(query):
             "tete br dent", "tete dent",
             "rince bouche", "r bouche", "bain bouche", "mouthwash",
         )))
+    # A comparison of base dosage forms is a different question from a survey
+    # of every age, symptom, night, and combination variant. Broad "all types"
+    # requests deliberately keep those contextual products.
+    wants_all = bool(tokens.intersection({
+        "all", "tout", "tous", "toute", "toutes",
+    }))
+    if _is_dosage_form_comparison(norm) and not wants_all:
+        if not tokens.intersection({
+            "enf", "enfant", "enfants", "jr", "junior", "bebe",
+            "nourrisson", "children", "kids", "pediatrique",
+        }):
+            groups.append(_compile_client_concept_group((
+                "enf", "enfant", "jr", "junior", "bebe", "nourrisson",
+                "children", "kids", "pediat", "gtts", "susp oral",
+            )))
+        if not tokens.intersection({
+            "rhume", "sinus", "grippe", "cold", "flu", "congestion",
+        }):
+            groups.append(_compile_client_concept_group((
+                "rhume", "rh sin", "sinus", "grippe", "cold", "flu",
+                "decong", "mucus", "toux",
+            )))
+        if not tokens.intersection({
+            "nuit", "night", "pm", "sommeil", "dormir",
+        }):
+            groups.append(_compile_client_concept_group((
+                "nuit", "night", "pm", "sommeil", "aid somm",
+            )))
+        if not tokens.intersection({
+            "combine", "combinaison", "acetaminophene", "acet",
+        }):
+            groups.append(_compile_client_concept_group((
+                "plus acet", "acet ibup", "ibup acet",
+            )))
     if _is_headache_request(norm) or _is_fever_request(norm):
         groups.append(_compile_client_concept_group((
             "brosse dent", "br dent", "tete br dent", "tete o pied", "head to toe",
