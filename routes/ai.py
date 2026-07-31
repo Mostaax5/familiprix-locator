@@ -1,9 +1,10 @@
 import json
+import hashlib
 import os
 import re
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from concurrent.futures import (
     ThreadPoolExecutor, TimeoutError as FutureTimeoutError, as_completed,
 )
@@ -15,12 +16,14 @@ from flask import Blueprint, request, jsonify, Response, g, current_app
 from database import connect_db, get_db
 from auth import require_editor, utc_now_iso, side_display_label
 from memory_guard import memory_intensive_task, release_unused_memory
+from observability import record_ai_answer
 from product_data import (
     assess_metadata_candidate,
     classify_source,
     gtin_identity_key,
     gtin_check_digit_valid,
     normalize_text,
+    record_reference_evidence,
     upsert_reference_identifier,
     upsert_reference_candidate,
 )
@@ -263,6 +266,10 @@ _DOCUMENTED_AI_EXECUTOR = ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="documented-ai",
 )
 _DOCUMENTED_AI_GATE = threading.Lock()
+_DOCUMENTED_ANSWER_CACHE = OrderedDict()
+_DOCUMENTED_ANSWER_CACHE_LOCK = threading.Lock()
+_DOCUMENTED_ANSWER_CACHE_MAX = 96
+_DOCUMENTED_ANSWER_CACHE_TTL_SECONDS = 30 * 60
 try:
     _AI_QUERY_PLAN_TIMEOUT_SECONDS = min(
         7, max(3, int(os.environ.get("AI_QUERY_PLAN_TIMEOUT", "5")))
@@ -999,10 +1006,10 @@ def parse_familiprix_product_page(html, url, barcode, barcode_candidates=None,
 
 
 def lookup_familiprix_product(barcode, barcode_candidates=None, product_code="",
-                              direct_only=False):
+                              direct_only=False, search_only=False):
     barcode_candidates = barcode_candidates or build_barcode_candidates(barcode)
     clean_product_code = normalized_digits(product_code)
-    if clean_product_code and len(clean_product_code) <= 18:
+    if not search_only and clean_product_code and len(clean_product_code) <= 18:
         # Familiprix product URLs accept the exact 18-digit internal code and
         # redirect to the canonical page. This avoids four search-page requests
         # for the normal planogram path.
@@ -2907,6 +2914,12 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "automatiquement ce document au produit. "
     "Ne déclare jamais deux produits thérapeutiquement équivalents, interchangeables ou sûrs "
     "comme substituts. "
+    "Chaque document précise source_class, trust_level et medical_claims_allowed. Pour une "
+    "affirmation médicale, utilise en priorité official_regulator, pharmacist_approved ou "
+    "professional_guideline. Une source avec medical_claims_allowed=false peut seulement aider "
+    "à identifier un produit ou son emplacement; elle ne prouve jamais une indication, une dose, "
+    "une interaction, une contre-indication ou un conseil de traitement. Lorsqu'une source "
+    "officielle pertinente est fournie, toute conclusion médicale doit la citer. "
     "Pour une demande médicale, "
     "ne pose pas de diagnostic, ne remplace pas l'étiquette et oriente vers le pharmacien en "
     "cas de grossesse, bébé, interaction, allergie, symptômes graves ou persistants, difficulté "
@@ -3552,6 +3565,10 @@ def retrieve_client_documentation(products, query_plan=None, include_live_regula
             str(product.get("client_id", "") or "") for product in products
             if product.get("client_id")
         ],
+        "verification_status": "verified_inventory",
+        "source_class": "store_inventory",
+        "trust_level": 60,
+        "medical_claims_allowed": False,
     }]
     documents.extend(_client_intent_documents(query_plan))
     if include_live_regulatory:
@@ -3627,9 +3644,15 @@ def retrieve_client_documentation(products, query_plan=None, include_live_regula
                 )[:1800],
                 "candidate_ids": [candidate_id] if candidate_id else [],
                 "verification_status": status,
+                "source_class": "unverified_catalogue",
+                "trust_level": 30,
+                "medical_claims_allowed": False,
             })
         for (source, source_url), facts in grouped.items():
             source_index += 1
+            source_text = normalize_text(f"{source} {source_url}")
+            pharmacist_approved = "pharmacist" in source_text or "pharmacien" in source_text
+            source_type, source_priority = classify_source(source, source_url)
             documents.append({
                 "source_id": f"catalog:{source_index}",
                 "title": f"Fiche vérifiée - {name}",
@@ -3637,7 +3660,53 @@ def retrieve_client_documentation(products, query_plan=None, include_live_regula
                 "url": source_url if source_url.startswith("https://") else "",
                 "evidence": ". ".join(facts)[:1800],
                 "candidate_ids": [candidate_id] if candidate_id else [],
+                "verification_status": "verified",
+                "source_class": (
+                    "pharmacist_approved" if pharmacist_approved
+                    else "official_regulator" if source_type == "health_canada"
+                    else "verified_product_record"
+                ),
+                "trust_level": (
+                    95 if pharmacist_approved
+                    else 100 if source_type == "health_canada"
+                    else min(90, max(70, int(source_priority or 0)))
+                ),
+                "medical_claims_allowed": bool(
+                    pharmacist_approved
+                    or source_type == "health_canada"
+                ),
             })
+    for document in documents:
+        publisher_text = normalize_text(" ".join((
+            str(document.get("publisher", "") or ""),
+            str(document.get("source_id", "") or ""),
+        )))
+        if "sante canada" in publisher_text or "health canada" in publisher_text:
+            document.update(
+                source_class="official_regulator",
+                trust_level=100,
+                medical_claims_allowed=True,
+                verification_status=document.get(
+                    "verification_status", "verified"
+                ),
+            )
+        elif any(name in publisher_text for name in (
+            "gouvernement du quebec", "association dentaire canadienne",
+            "nhs foundation trust",
+        )):
+            document.update(
+                source_class="professional_guideline",
+                trust_level=90,
+                medical_claims_allowed=True,
+                verification_status=document.get(
+                    "verification_status", "verified"
+                ),
+            )
+        else:
+            document.setdefault("source_class", "catalogue_context")
+            document.setdefault("trust_level", 50)
+            document.setdefault("medical_claims_allowed", False)
+            document.setdefault("verification_status", "unverified")
     return documents[:15]
 
 
@@ -4952,7 +5021,9 @@ def _compact_documented_history(history):
     } for item in normalize_client_history(history, max_messages=4)]
 
 
-def _documented_answer_covers_request(result, query_plan, candidates):
+def _documented_answer_covers_request(
+    result, query_plan, candidates, documents=None,
+):
     """Reject catalogue summaries that do not answer the requested dimensions."""
     from routes.products import normalize_search_text
 
@@ -5004,6 +5075,20 @@ def _documented_answer_covers_request(result, query_plan, candidates):
         or "par rapport" in normalized_answer
     ):
         return False
+    if query_plan.get("medical"):
+        trusted_medical_ids = {
+            str(document.get("source_id", "") or "")
+            for document in documents or []
+            if document.get("medical_claims_allowed")
+            and int(document.get("trust_level", 0) or 0) >= 80
+        }
+        if trusted_medical_ids:
+            cited_ids = set(result.get("source_ids") or [])
+            for point in result.get("key_points", []):
+                if isinstance(point, dict):
+                    cited_ids.update(point.get("source_ids") or [])
+            if not cited_ids.intersection(trusted_medical_ids):
+                return False
     return True
 
 
@@ -5031,6 +5116,13 @@ def _generate_documented_client_answer_sync(
         "verification_status": str(
             document.get("verification_status", "") or ""
         )[:60],
+        "source_class": str(
+            document.get("source_class", "") or ""
+        )[:60],
+        "trust_level": int(document.get("trust_level", 0) or 0),
+        "medical_claims_allowed": bool(
+            document.get("medical_claims_allowed", False)
+        ),
     } for document in documents[:12]]
     compact_plan = {
         key: query_plan.get(key)
@@ -5074,7 +5166,9 @@ def _generate_documented_client_answer_sync(
     result = normalize_documented_client_answer(
         parsed, [product.get("client_id", "") for product in candidates], documents
     )
-    if not _documented_answer_covers_request(result, query_plan, candidates):
+    if not _documented_answer_covers_request(
+        result, query_plan, candidates, documents,
+    ):
         return grounded_documented_fallback(
             query_plan, candidates, documents, degraded=False,
         )
@@ -5117,6 +5211,80 @@ def _generate_documented_client_answer_sync(
     return result
 
 
+def _documented_answer_cache_key(
+    question, query_plan, candidates, documents, history=None,
+    selected_text="", focus_product_id="",
+):
+    evidence = {
+        "model": KIMI_DOCUMENTED_MODEL,
+        "question": re.sub(r"\s+", " ", str(question or "")).strip().lower(),
+        "selected_text": str(selected_text or "").strip(),
+        "focus_product_id": str(focus_product_id or ""),
+        "history": _compact_documented_history(history),
+        "plan": {
+            key: query_plan.get(key)
+            for key in (
+                "intent", "corrected_query", "wants_all", "needs_comparison",
+                "medical", "keywords", "must_include", "exclude",
+            )
+        },
+        "products": [
+            _compact_documented_product_context(product)
+            for product in candidates
+        ],
+        "documents": [{
+            "source_id": str(document.get("source_id", "") or ""),
+            "verification_status": str(
+                document.get("verification_status", "") or ""
+            ),
+            "evidence": str(document.get("evidence", "") or "")[:1800],
+        } for document in documents],
+    }
+    return hashlib.sha256(
+        json.dumps(
+            evidence, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _documented_answer_cache_get(key):
+    now = time.time()
+    with _DOCUMENTED_ANSWER_CACHE_LOCK:
+        expired = [
+            cache_key for cache_key, entry in _DOCUMENTED_ANSWER_CACHE.items()
+            if now - float(entry.get("created_at", 0) or 0)
+            > _DOCUMENTED_ANSWER_CACHE_TTL_SECONDS
+        ]
+        for cache_key in expired:
+            _DOCUMENTED_ANSWER_CACHE.pop(cache_key, None)
+        entry = _DOCUMENTED_ANSWER_CACHE.pop(key, None)
+        if not entry:
+            return None
+        _DOCUMENTED_ANSWER_CACHE[key] = entry
+        result = json.loads(json.dumps(entry["result"], ensure_ascii=False))
+    result["_cache_hit"] = True
+    return result
+
+
+def _documented_answer_cache_set(key, result):
+    if (
+        not isinstance(result, dict)
+        or result.get("degraded")
+        or len(str(result.get("answer", "") or "").strip()) < 45
+    ):
+        return
+    stored = json.loads(json.dumps(result, ensure_ascii=False))
+    stored.pop("_cache_hit", None)
+    with _DOCUMENTED_ANSWER_CACHE_LOCK:
+        _DOCUMENTED_ANSWER_CACHE.pop(key, None)
+        _DOCUMENTED_ANSWER_CACHE[key] = {
+            "created_at": time.time(), "result": stored,
+        }
+        while len(_DOCUMENTED_ANSWER_CACHE) > _DOCUMENTED_ANSWER_CACHE_MAX:
+            _DOCUMENTED_ANSWER_CACHE.popitem(last=False)
+
+
 def generate_documented_client_answer(
     question, query_plan, candidates, documents, history=None,
     selected_text="", focus_product_id="",
@@ -5128,6 +5296,13 @@ def generate_documented_client_answer(
     request thread far beyond the employee-facing deadline. A single process-
     wide worker prevents queued AI calls and leaves product search responsive.
     """
+    cache_key = _documented_answer_cache_key(
+        question, query_plan, candidates, documents, history,
+        selected_text=selected_text, focus_product_id=focus_product_id,
+    )
+    cached = _documented_answer_cache_get(cache_key)
+    if cached:
+        return cached
     if not _DOCUMENTED_AI_GATE.acquire(blocking=False):
         _set_ai_error(
             "Une reponse documentee est deja en preparation; "
@@ -5149,7 +5324,11 @@ def generate_documented_client_answer(
 
     future = _DOCUMENTED_AI_EXECUTOR.submit(task)
     try:
-        return future.result(timeout=_DOCUMENTED_AI_HARD_TIMEOUT_SECONDS)
+        result = future.result(timeout=_DOCUMENTED_AI_HARD_TIMEOUT_SECONDS)
+        _documented_answer_cache_set(cache_key, result)
+        if isinstance(result, dict):
+            result["_cache_hit"] = False
+        return result
     except FutureTimeoutError:
         # cancel() handles the rare not-yet-started case. A running network call
         # retains the one AI slot until its own stream deadline closes it.
@@ -5777,12 +5956,201 @@ _AUTO_CATALOG_ENRICH = os.environ.get(
     "AUTO_CATALOG_ENRICH", "1"
 ).strip().lower() in {"1", "true", "yes", "on"}
 _CATALOG_ENRICH_LOCK = threading.Lock()
-_CATALOG_ENRICH_VERSION = "familiprix_exact_v3"
+_CATALOG_ENRICH_VERSION = "trusted_sources_v4"
 _CATALOG_ENRICH_DONE_STATUSES = (
     _CATALOG_ENRICH_VERSION,
-    "reviewed_online_v3",
-    "no_match_v3",
+    "reviewed_online_v4",
+    "provisional_v4",
+    "no_match_v4",
 )
+_CATALOG_PROVISIONAL_PREFILL_STATUS = "provisional_prefill_v4"
+_CATALOG_INCOMPLETE_SQL = (
+    "(TRIM(COALESCE(description,''))='' "
+    "OR LENGTH(TRIM(COALESCE(description,''))) < 55 "
+    "OR TRIM(COALESCE(image_url,''))='' "
+    f"OR enrich_status='{_CATALOG_PROVISIONAL_PREFILL_STATUS}')"
+)
+
+
+def structured_catalog_description(product):
+    """Describe only facts already attached to this exact catalogue package.
+
+    This is the final fallback after exact online sources miss. It deliberately
+    does not infer purpose, ingredients, compatibility, or medical use.
+    """
+    item = dict(product or {})
+    name = re.sub(r"\s+", " ", str(item.get("name", "") or "")).strip(" .")
+    if len(name) < 3:
+        return ""
+    brand = re.sub(r"\s+", " ", str(item.get("brand", "") or "")).strip(" .")
+    normalized_name = normalize_text(name)
+    facts = []
+
+    def add_fact(label, *fields):
+        values = []
+        for field in fields:
+            value = re.sub(
+                r"\s+", " ", str(item.get(field, "") or "")
+            ).strip(" .")
+            if (
+                value and normalize_text(value) not in normalized_name
+                and value not in values
+            ):
+                values.append(value)
+        if values:
+            facts.append(f"{label}: {' '.join(values)}")
+
+    if brand and normalize_text(brand) not in normalized_name:
+        facts.append(f"Marque: {brand}")
+    add_fact("Format", "package_size", "package_unit")
+    add_fact("Variante", "variant")
+    add_fact("Saveur ou parfum", "flavour")
+    add_fact("Couleur", "colour")
+    add_fact("Concentration", "strength")
+    add_fact("Forme", "dosage_form")
+    add_fact("Fabricant", "manufacturer")
+    add_fact("Catégorie", "category")
+    add_fact("Compatibilité", "compatibility")
+    if facts:
+        return f"{name}. " + ". ".join(facts[:7]) + "."
+    return (
+        f"Produit du catalogue identifié sous le nom exact « {name} ». "
+        "Les caractéristiques détaillées restent à confirmer sur l’emballage."
+    )
+
+
+def _apply_provisional_catalog_description(db, row, placed_products, now):
+    """Publish a non-medical fallback while preserving its review status."""
+    description = structured_catalog_description(row)
+    if len(description) < 55:
+        return False
+    barcode = str(row.get("barcode", "") or "").strip()
+    key = gtin_identity_key(barcode)
+    if not barcode or not key:
+        return False
+    verified = db.execute(
+        """SELECT 1 FROM product_reference_evidence
+           WHERE gtin_key=? AND field_name='description' AND active=1
+             AND verification_status='verified' LIMIT 1""",
+        (key,),
+    ).fetchone()
+    if verified:
+        return False
+    current = str(row.get("description", "") or "").strip()
+    if len(current) >= len(description):
+        return False
+    source = "Structured product identity fallback"
+    record_reference_evidence(
+        db, barcode, "description", description,
+        source=source, source_record_id=(
+            str(row.get("product_code", "") or "").strip() or barcode
+        ),
+        match_method="deterministic_catalog_fields",
+        confidence=0.6, verification_status="requires_review",
+        imported_at=now, active=False,
+    )
+    db.execute(
+        """UPDATE product_reference
+           SET description=?, updated_at=?
+           WHERE barcode=? AND LENGTH(TRIM(COALESCE(description,''))) < 55""",
+        (description, now, barcode),
+    )
+    reference = {
+        **dict(row),
+        "barcode": barcode,
+        "description": description,
+        "source": source,
+        "source_url": "",
+    }
+    from routes.products import update_product_metadata_from_reference
+    for product in placed_products.values():
+        update_product_metadata_from_reference(
+            db, product, reference, now=now, match_method="exact_gtin",
+        )
+    return True
+
+
+def _placed_products_for_reference_rows(db, reference_rows):
+    """Load only shelf products sharing an exact GTIN with this small batch."""
+    placed_by_barcode = {}
+    batch_keys = list(dict.fromkeys(
+        gtin_identity_key(row.get("barcode", "")) for row in reference_rows
+        if gtin_identity_key(row.get("barcode", ""))
+    ))
+    batch_barcodes = list(dict.fromkeys(
+        str(row.get("barcode", "") or "").strip() for row in reference_rows
+        if str(row.get("barcode", "") or "").strip()
+    ))
+    filters = []
+    params = []
+    if batch_keys:
+        filters.append(
+            "gtin_key IN (" + ",".join("?" for _ in batch_keys) + ")"
+        )
+        params.extend(batch_keys)
+    if batch_barcodes:
+        filters.append(
+            "barcode IN (" + ",".join("?" for _ in batch_barcodes) + ")"
+        )
+        params.extend(batch_barcodes)
+    if not filters:
+        return placed_by_barcode
+    query = (
+        "SELECT id, name, barcode, brand, description, image_url, product_code "
+        "FROM products WHERE " + " OR ".join(filters)
+    )
+    for product_row in db.execute(query, tuple(params)):
+        product = dict(product_row)
+        key = gtin_identity_key(product.get("barcode", ""))
+        if key:
+            placed_by_barcode.setdefault(key, {})[product["id"]] = product
+    return placed_by_barcode
+
+
+def _prefill_provisional_catalog_descriptions(db):
+    """Fill sparse descriptions locally before slower exact-source lookups.
+
+    The generated text contains only fields already attached to the same GTIN.
+    It remains explicitly unverified and queued for exact-source replacement.
+    """
+    rows = [dict(row) for row in db.execute(
+        """SELECT barcode, name, brand, description, image_url, product_code,
+                  package_size, package_unit, variant, flavour, colour,
+                  strength, dosage_form, manufacturer, category,
+                  ingredients, compatibility, purpose, route_of_administration
+           FROM product_reference
+           WHERE LENGTH(TRIM(COALESCE(description,''))) < 55
+             AND TRIM(COALESCE(name,'')) <> ''
+             AND TRIM(COALESCE(barcode,'')) <> ''
+           ORDER BY CASE WHEN EXISTS (
+             SELECT 1 FROM products p
+             WHERE p.gtin_key=product_reference.gtin_key
+           ) THEN 0 ELSE 1 END, barcode"""
+    )]
+    updated = 0
+    for start in range(0, len(rows), 100):
+        batch = rows[start:start + 100]
+        placed_by_barcode = _placed_products_for_reference_rows(db, batch)
+        now = utc_now_iso()
+        for row in batch:
+            key = gtin_identity_key(row.get("barcode", ""))
+            if not _apply_provisional_catalog_description(
+                db, row, placed_by_barcode.get(key, {}), now,
+            ):
+                continue
+            db.execute(
+                """UPDATE product_reference
+                   SET enrich_status=?, updated_at=?
+                   WHERE barcode=?""",
+                (
+                    _CATALOG_PROVISIONAL_PREFILL_STATUS,
+                    now,
+                    str(row.get("barcode", "") or "").strip(),
+                ),
+            )
+            updated += 1
+        db.commit()
+    return updated
 
 
 def _enrich_marker_path():
@@ -5844,59 +6212,49 @@ def _catalog_enrich_worker():
                         wait_for_cleanup=True, background=True,
                         skip_familiprix=True,
                     )
+                if not online:
+                    # The direct product-code URL is fastest, but older catalogue
+                    # rows occasionally use a code that no longer redirects.
+                    # The slower Familiprix search remains exact because the
+                    # resulting page must contain this UPC or product code.
+                    online = lookup_familiprix_product(
+                        barcode,
+                        build_barcode_candidates(barcode),
+                        product_code=r.get("product_code", ""),
+                        search_only=True,
+                    )
             return r, online
         except Exception:
             return r, None
 
-    def _placed_products_by_barcode(db, reference_rows):
-        """Load only the shelf products touched by one completed network batch."""
-        placed_by_barcode = {}
-        batch_keys = list(dict.fromkeys(
-            gtin_identity_key(row.get("barcode", "")) for row in reference_rows
-            if gtin_identity_key(row.get("barcode", ""))
-        ))
-        batch_barcodes = list(dict.fromkeys(
-            str(row.get("barcode", "") or "").strip() for row in reference_rows
-            if str(row.get("barcode", "") or "").strip()
-        ))
-        placed_filters = []
-        placed_params = []
-        if batch_keys:
-            placed_filters.append(
-                "gtin_key IN (" + ",".join("?" for _ in batch_keys) + ")"
-            )
-            placed_params.extend(batch_keys)
-        if batch_barcodes:
-            placed_filters.append(
-                "barcode IN (" + ",".join("?" for _ in batch_barcodes) + ")"
-            )
-            placed_params.extend(batch_barcodes)
-        if not placed_filters:
-            return placed_by_barcode
-        placed_query = (
-            "SELECT id, name, barcode, brand, description, image_url, product_code "
-            "FROM products WHERE " + " OR ".join(placed_filters)
-        )
-        for product_row in db.execute(placed_query, tuple(placed_params)):
-            product = dict(product_row)
-            key = gtin_identity_key(product.get("barcode", ""))
-            if key:
-                placed_by_barcode.setdefault(key, {})[product["id"]] = product
-        return placed_by_barcode
-
     attempts_without_progress = 0
+    prefill_attempted = False
     try:
         while attempts_without_progress < 5 and _CATALOG_ENRICH["running"]:
             db = None
             made_progress = False
             try:
                 db = connect_db()
+                if not prefill_attempted:
+                    prefill_attempted = True
+                    provisional_count = _prefill_provisional_catalog_descriptions(
+                        db
+                    )
+                    if provisional_count:
+                        _CATALOG_ENRICH["descriptions"] += provisional_count
+                        bump_reference_cache()
+                        invalidate_product_search_cache()
+                        print(
+                            "[Enrich] descriptions provisoires disponibles: "
+                            f"{provisional_count}."
+                        )
                 status_placeholders = ",".join(
                     "?" for _ in _CATALOG_ENRICH_DONE_STATUSES
                 )
                 remaining_row = db.execute(
                     "SELECT COUNT(*) AS n FROM product_reference "
                     f"WHERE TRIM(COALESCE(enrich_status,'')) NOT IN ({status_placeholders}) "
+                    f"AND {_CATALOG_INCOMPLETE_SQL} "
                     "AND TRIM(COALESCE(name,'')) <> '' "
                     "AND TRIM(COALESCE(barcode,'')) <> ''",
                     _CATALOG_ENRICH_DONE_STATUSES,
@@ -5907,8 +6265,13 @@ def _catalog_enrich_worker():
                 )
                 rows = [dict(r) for r in db.execute(
                     "SELECT barcode, name, brand, description, image_url, product_code "
+                    ", enrich_status "
+                    ", package_size, package_unit, variant, flavour, colour "
+                    ", strength, dosage_form, manufacturer, category "
+                    ", ingredients, compatibility, purpose, route_of_administration "
                     "FROM product_reference "
                     f"WHERE TRIM(COALESCE(enrich_status,'')) NOT IN ({status_placeholders}) "
+                    f"AND {_CATALOG_INCOMPLETE_SQL} "
                     "AND TRIM(COALESCE(name,'')) <> '' "
                     "AND TRIM(COALESCE(barcode,'')) <> '' "
                     "ORDER BY CASE WHEN EXISTS ("
@@ -5938,7 +6301,7 @@ def _catalog_enrich_worker():
                         if not _CATALOG_ENRICH["running"]:
                             return
                         db = connect_db()
-                        placed_by_barcode = _placed_products_by_barcode(
+                        placed_by_barcode = _placed_products_for_reference_rows(
                             db, [r for r, _online in lookup_results]
                         )
                         for r, online in lookup_results:
@@ -5990,7 +6353,7 @@ def _catalog_enrich_worker():
                                     "UPDATE product_reference SET enrich_status=?, updated_at=? WHERE barcode=?",
                                     (
                                         _CATALOG_ENRICH_VERSION
-                                        if exact_familiprix else "reviewed_online_v3",
+                                        if exact_familiprix else "reviewed_online_v4",
                                         updated_at, bc,
                                     ),
                                 )
@@ -6010,19 +6373,65 @@ def _catalog_enrich_worker():
                                         trigger_type="catalog_enrichment",
                                         employee="system", now=updated_at,
                                     )
+                                provisional_added = False
+                                if len(desc) < 55:
+                                    provisional_added = (
+                                        _apply_provisional_catalog_description(
+                                            db, r,
+                                            placed_by_barcode.get(key, {}),
+                                            updated_at,
+                                        )
+                                    )
+                                if (
+                                    not desc
+                                    and (
+                                        provisional_added
+                                        or r.get("enrich_status")
+                                        == _CATALOG_PROVISIONAL_PREFILL_STATUS
+                                    )
+                                ):
+                                    db.execute(
+                                        """UPDATE product_reference
+                                           SET enrich_status=?
+                                           WHERE barcode=?""",
+                                        ("provisional_v4", bc),
+                                    )
                                 db.commit()
                                 _CATALOG_ENRICH["updated"] += 1
                                 if desc and desc != str(r.get("description", "") or "").strip():
                                     _CATALOG_ENRICH["descriptions"] += 1
+                                elif provisional_added:
+                                    _CATALOG_ENRICH["descriptions"] += 1
                                 if img and img != str(r.get("image_url", "") or "").strip():
                                     _CATALOG_ENRICH["images"] += 1
                             else:
-                                # Tag it so we know it still needs a real description.
+                                updated_at = utc_now_iso()
+                                key = gtin_identity_key(bc)
+                                provisional_added = (
+                                    _apply_provisional_catalog_description(
+                                        db, r,
+                                        placed_by_barcode.get(key, {}),
+                                        updated_at,
+                                    )
+                                )
+                                provisional_available = bool(
+                                    provisional_added
+                                    or r.get("enrich_status")
+                                    == _CATALOG_PROVISIONAL_PREFILL_STATUS
+                                )
                                 db.execute(
-                                    "UPDATE product_reference SET enrich_status='no_match_v3', updated_at=? WHERE barcode=?",
-                                    (utc_now_iso(), bc),
+                                    """UPDATE product_reference
+                                       SET enrich_status=?, updated_at=?
+                                       WHERE barcode=?""",
+                                    (
+                                        "provisional_v4"
+                                        if provisional_available else "no_match_v4",
+                                        updated_at, bc,
+                                    ),
                                 )
                                 db.commit()
+                                if provisional_added:
+                                    _CATALOG_ENRICH["descriptions"] += 1
                                 _CATALOG_ENRICH["skipped"] += 1
                             _CATALOG_ENRICH["done"] += 1
                             made_progress = True
@@ -6058,9 +6467,11 @@ def _catalog_enrich_worker():
 
 
 def _catalog_pending_count(db):
+    placeholders = ",".join("?" for _ in _CATALOG_ENRICH_DONE_STATUSES)
     row = db.execute(
         "SELECT COUNT(*) AS n FROM product_reference "
-        "WHERE TRIM(COALESCE(enrich_status,'')) NOT IN (?,?,?) "
+        f"WHERE TRIM(COALESCE(enrich_status,'')) NOT IN ({placeholders}) "
+        f"AND {_CATALOG_INCOMPLETE_SQL} "
         "AND TRIM(COALESCE(name,'')) <> '' "
         "AND TRIM(COALESCE(barcode,'')) <> ''",
         _CATALOG_ENRICH_DONE_STATUSES,
@@ -6080,6 +6491,10 @@ def _catalog_description_coverage(db):
              SUM(CASE WHEN LOWER(COALESCE(source,'')) LIKE ?
                            AND TRIM(COALESCE(description,''))<>''
                       THEN 1 ELSE 0 END) AS exact_familiprix
+             , SUM(CASE WHEN enrich_status IN (
+                            'provisional_v4', 'provisional_prefill_v4'
+                        )
+                        THEN 1 ELSE 0 END) AS provisional
            FROM product_reference
            WHERE TRIM(COALESCE(name,'')) <> ''""",
         ("%familiprix%",),
@@ -6087,7 +6502,10 @@ def _catalog_description_coverage(db):
     values = dict(row) if row else {}
     return {
         key: int(values.get(key) or 0)
-        for key in ("total", "missing", "thin", "usable", "exact_familiprix")
+        for key in (
+            "total", "missing", "thin", "usable", "exact_familiprix",
+            "provisional",
+        )
     }
 
 
@@ -6406,7 +6824,8 @@ def client_help():
     # Retrieval is immediate and inventory-safe: only mapped store-plan products
     # can become cards. A direct reply stays inside the products from that thread.
     from routes.products import (
-        client_products_by_ids, hybrid_client_candidates, hydrate_candidate_images,
+        classify_client_result_roles, client_products_by_ids,
+        hybrid_client_candidates, hydrate_candidate_images,
         normalize_search_text, public_product_payload,
     )
     candidate_limit = 100 if query_plan.get("wants_all") else 60
@@ -6447,6 +6866,7 @@ def client_help():
                 candidates = filter_client_answer_category(
                     question, candidates
                 )
+    candidates = classify_client_result_roles(candidates, question)
     # Reuse known exact-UPC images now. Unknown-image web lookups are queued
     # only for cards that will actually be displayed.
     hydrate_candidate_images(candidates, queue_missing=False)
@@ -6664,6 +7084,13 @@ def client_help():
                 "url": str(document.get("url", "") or "")[:1600],
                 "summary": str(document.get("evidence", "") or "")[:900],
                 "candidate_ids": document.get("candidate_ids", [])[:16],
+                "source_class": str(
+                    document.get("source_class", "") or ""
+                )[:60],
+                "trust_level": int(document.get("trust_level", 0) or 0),
+                "verification_status": str(
+                    document.get("verification_status", "") or ""
+                )[:60],
             } for document in source_documents[:15]],
         }
     log_ai_interaction(
@@ -6690,14 +7117,14 @@ def client_help():
     )
     mark_stage("response_ready_ms")
     elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-    public_highlighted_products = [
-        public_product_payload(product) for product in highlighted_products
+    public_products = [
+        public_product_payload(product) for product in candidates
     ]
     response_payload = {
         "success": True,
         "response_mode": response_mode,
         "answer": answer,
-        "products": public_highlighted_products,
+        "products": public_products,
         "highlighted_product_ids": verified["selected_product_ids"],
         "query_plan": query_plan,
         "advice": advice,
@@ -6705,11 +7132,19 @@ def client_help():
         "degraded": degraded,
         "warning": warning,
     }
+    record_ai_answer(
+        response_mode, elapsed_ms,
+        degraded=degraded,
+        cache_hit=bool(verified.get("_cache_hit", False)),
+        model=_AI_LAST_MODEL,
+        product_count=len(candidates),
+    )
     if request.headers.get("X-AI-Diagnostics", "") == "1":
         response_payload["ai_diagnostics"] = {
             "model": _AI_LAST_MODEL,
             "error": _AI_LAST_ERROR,
             "stages": diagnostic_stages,
+            "documented_cache_hit": bool(verified.get("_cache_hit", False)),
         }
     return jsonify(response_payload)
 

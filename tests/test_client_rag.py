@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app import app
+from routes import ai as ai_module
 from routes import products as products_module
 from routes.ai import (
     _compact_documented_product_context,
@@ -25,9 +26,11 @@ from routes.ai import (
     parse_familiprix_product_page,
     retrieve_client_documentation,
     select_client_answer_candidates,
+    structured_catalog_description,
     _unconfirmed_identifier_notice,
 )
 from routes.products import (
+    classify_client_result_roles,
     client_excluded_concept_terms,
     client_required_concept_groups,
     find_existing_image_for_barcode,
@@ -64,6 +67,8 @@ class ClientRagTests(unittest.TestCase):
             key=None, rows=[], built_at=0.0,
             generation=-1, state_checked_at=0.0,
         )
+        with ai_module._DOCUMENTED_ANSWER_CACHE_LOCK:
+            ai_module._DOCUMENTED_ANSWER_CACHE.clear()
 
     def test_outbound_lookup_urls_cannot_reach_other_or_insecure_hosts(self):
         base = "https://example.com/catalog"
@@ -74,6 +79,98 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(normalize_url(base, "https://169.254.169.254/latest"), "")
         self.assertEqual(normalize_url(base, "http://example.com/product/123"), "")
         self.assertFalse(_outbound_url_allowed("https://user:pass@example.com/private"))
+
+    def test_structured_description_uses_only_known_package_fields(self):
+        description = structured_catalog_description({
+            "name": "ACME VITAMINE C 500MG CO100",
+            "brand": "Acme",
+            "package_size": "100",
+            "package_unit": "comprimés",
+            "strength": "500 mg",
+            "flavour": "orange",
+        })
+        self.assertIn("ACME VITAMINE C 500MG CO100", description)
+        self.assertIn("Saveur ou parfum: orange", description)
+        self.assertNotIn("prévient", description.lower())
+        self.assertNotIn("traite", description.lower())
+
+    def test_structured_description_marks_sparse_identity_for_confirmation(self):
+        description = structured_catalog_description({
+            "name": "PRODUIT TEST",
+        })
+        self.assertIn("nom exact", description)
+        self.assertIn("confirmer", description)
+
+    def test_electric_toothbrush_results_group_heads_after_brushes(self):
+        products = classify_client_result_roles([
+            {"name": "ORAL-B IO TETE BR/DENTS BLC 4", "in_stock": 1},
+            {"name": "ORAL-B PRO BROSSE A DENTS ELECTRIQUE", "in_stock": 1},
+        ], "brosse à dents électrique")
+        self.assertEqual(
+            [product["result_role"] for product in products],
+            ["primary", "replacement"],
+        )
+        self.assertIn("remplacement", products[1]["result_role_label"].lower())
+
+    def test_explicit_replacement_head_query_promotes_heads(self):
+        products = classify_client_result_roles([
+            {"name": "ORAL-B PRO BROSSE A DENTS ELECTRIQUE", "in_stock": 1},
+            {"name": "ORAL-B TETE DE RECHANGE", "in_stock": 1},
+        ], "tête de rechange Oral-B")
+        self.assertEqual(products[0]["name"], "ORAL-B TETE DE RECHANGE")
+        self.assertEqual(products[0]["result_role"], "primary")
+        self.assertEqual(products[1]["result_role"], "related")
+
+    def test_main_product_is_not_demoted_by_accessories_in_its_description(self):
+        products = classify_client_result_roles([{
+            "name": "ORAL-B PRO BROSSE A DENTS ELECTRIQUE",
+            "category": "Brosse à dents électrique",
+            "description": (
+                "Inclut un chargeur et accepte plusieurs têtes de remplacement."
+            ),
+        }], "brosse à dents électrique")
+        self.assertEqual(products[0]["result_role"], "primary")
+
+    def test_documented_answer_cache_reuses_identical_evidence(self):
+        with ai_module._DOCUMENTED_ANSWER_CACHE_LOCK:
+            ai_module._DOCUMENTED_ANSWER_CACHE.clear()
+        query_plan = build_client_query_plan(
+            "Compare le produit cache test", "documented"
+        )
+        candidates = [{
+            "client_id": "product:cache",
+            "name": "PRODUIT CACHE TEST",
+            "description": "Description exacte du produit.",
+        }]
+        documents = [{
+            "source_id": "catalog:test",
+            "evidence": "Fait exact du catalogue.",
+            "candidate_ids": ["product:cache"],
+        }]
+        generated = {
+            "answer": "Voici une réponse documentée assez complète pour le test.",
+            "selected_product_ids": ["product:cache"],
+            "follow_up_questions": [],
+            "safety_flags": [],
+            "pharmacist_referral": False,
+            "pharmacist_reason": "",
+            "degraded": False,
+        }
+        with patch(
+            "routes.ai._generate_documented_client_answer_sync",
+            return_value=generated,
+        ) as generator:
+            first = generate_documented_client_answer(
+                "Compare le produit cache test",
+                query_plan, candidates, documents,
+            )
+            second = generate_documented_client_answer(
+                "Compare le produit cache test",
+                query_plan, candidates, documents,
+            )
+        self.assertEqual(generator.call_count, 1)
+        self.assertFalse(first["_cache_hit"])
+        self.assertTrue(second["_cache_hit"])
 
     def test_familiprix_lookup_uses_internal_code_and_validates_exact_upc(self):
         product_url = (
@@ -1289,6 +1386,59 @@ class ClientRagTests(unittest.TestCase):
         self.assertIn("health-canada:melatonin-uses", source_ids)
         self.assertIn("health-canada:melatonin-safety", source_ids)
         self.assertIn("health-canada:melatonin-pediatric", source_ids)
+        for document in intent_documents:
+            if document["source_id"].startswith("health-canada:"):
+                self.assertEqual(document["source_class"], "official_regulator")
+                self.assertEqual(document["trust_level"], 100)
+                self.assertTrue(document["medical_claims_allowed"])
+
+    def test_unverified_catalogue_text_cannot_support_medical_claims(self):
+        documents = retrieve_client_documentation([{
+            "id": 1,
+            "client_id": "product:1",
+            "name": "PRODUIT TEST",
+            "description": "Description non vérifiée du catalogue interne.",
+            "description_status": "requires_review",
+        }], {
+            "corrected_query": "Que prendre pour un mal de tête?",
+            "medical": True,
+        }, include_live_regulatory=False)
+        description_document = next(
+            document for document in documents
+            if document["source_id"].startswith("catalog-description:")
+        )
+        self.assertEqual(
+            description_document["source_class"], "unverified_catalogue"
+        )
+        self.assertFalse(description_document["medical_claims_allowed"])
+
+    def test_medical_answer_must_cite_trusted_medical_evidence(self):
+        query_plan = {
+            "corrected_query": "Que prendre pour un mal de tête?",
+            "medical": True,
+            "needs_comparison": False,
+        }
+        result = {
+            "answer": (
+                "Cette réponse donne une recommandation suffisamment longue "
+                "pour répondre à la demande du client."
+            ),
+            "selected_product_ids": ["product:1"],
+            "source_ids": ["store-plan"],
+            "key_points": [],
+        }
+        documents = [{
+            "source_id": "health-canada:headache",
+            "trust_level": 100,
+            "medical_claims_allowed": True,
+        }]
+        self.assertFalse(ai_module._documented_answer_covers_request(
+            result, query_plan, [{"client_id": "product:1"}], documents,
+        ))
+        result["source_ids"] = ["health-canada:headache"]
+        self.assertTrue(ai_module._documented_answer_covers_request(
+            result, query_plan, [{"client_id": "product:1"}], documents,
+        ))
 
     def test_unconfirmed_identifiers_never_attach_regulatory_documents(self):
         products = [{
@@ -1880,7 +2030,7 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(matches, [])
         reference.assert_not_called()
 
-    def test_client_endpoint_returns_only_ai_verified_products(self):
+    def test_client_endpoint_returns_all_matches_and_marks_ai_citations(self):
         candidate = {
             "id": 1, "client_id": "product:1", "name": "Advil", "brand": "Advil",
             "barcode": "111", "aisle": "2", "side": "Gauche", "section": "1",
@@ -1921,7 +2071,10 @@ class ClientRagTests(unittest.TestCase):
         payload = response.get_json()
         self.assertTrue(payload["success"])
         self.assertEqual(payload["response_mode"], "detailed")
-        self.assertEqual([item["client_id"] for item in payload["products"]], ["product:1"])
+        self.assertEqual(
+            [item["client_id"] for item in payload["products"]],
+            ["product:1", "product:2"],
+        )
         self.assertEqual(payload["highlighted_product_ids"], ["product:1"])
         old_planner.assert_not_called()
         verifier.assert_called_once()
@@ -2107,7 +2260,11 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(payload["response_mode"], "detailed")
-        self.assertEqual([item["client_id"] for item in payload["products"]], ["product:1"])
+        self.assertEqual(
+            [item["client_id"] for item in payload["products"]],
+            ["product:1"],
+        )
+        self.assertEqual(payload["highlighted_product_ids"], ["product:1"])
         verifier.assert_called_once()
 
     def test_client_endpoint_forces_uncertain_identifier_warning(self):

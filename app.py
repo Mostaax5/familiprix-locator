@@ -29,6 +29,7 @@ from routes.regulatory import (
     maybe_resume_regulatory_enrichment, regulatory_bp,
     schedule_regulatory_enrichment_after,
 )
+from observability import maybe_log_operational_warning, record_request
 
 
 def _preload_idna_codec():
@@ -90,6 +91,7 @@ if _RENDER_EXTERNAL_URL:
 def _assign_request_id():
     supplied = (request.headers.get("X-Request-ID") or "").strip()
     g.request_id = supplied if re.fullmatch(r"[A-Za-z0-9._-]{8,64}", supplied) else secrets.token_hex(8)
+    g.request_started_at = time.perf_counter()
 
 
 install_security(app)
@@ -248,6 +250,21 @@ def handle_any_error(exc):
 
 @app.after_request
 def add_security_headers(response):
+    try:
+        elapsed_ms = (
+            time.perf_counter()
+            - float(getattr(g, "request_started_at", time.perf_counter()))
+        ) * 1000
+        route = (
+            request.url_rule.rule
+            if request.url_rule is not None else request.path
+        )
+        record_request(
+            request.method, route, response.status_code, elapsed_ms,
+        )
+        maybe_log_operational_warning()
+    except Exception:
+        pass
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("X-XSS-Protection", "0")

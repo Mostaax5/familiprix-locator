@@ -135,18 +135,18 @@ def _save_state(db):
 def _catalogue_items(db):
     items = {}
     queries = (
-        """SELECT barcode, name, brand,
+        ("""SELECT barcode, name, brand,
                   SUBSTR(COALESCE(description,''), 1, 320) AS description,
                   source
            FROM product_reference
-           WHERE TRIM(COALESCE(barcode,''))<>''""",
-        """SELECT barcode, name, brand,
+           WHERE TRIM(COALESCE(barcode,''))<>''""", False),
+        ("""SELECT barcode, name, brand,
                   SUBSTR(COALESCE(description,''), 1, 320) AS description,
                   '' AS source
            FROM products
-           WHERE TRIM(COALESCE(barcode,''))<>''""",
+           WHERE TRIM(COALESCE(barcode,''))<>''""", True),
     )
-    for query in queries:
+    for query, is_placed in queries:
         for row in db.execute(query):
             item = dict(row)
             key = gtin_identity_key(item.get("barcode", ""))
@@ -156,7 +156,9 @@ def _catalogue_items(db):
                 "gtin_key": key,
                 "barcode": str(item.get("barcode", "") or "").strip(),
                 "name": "", "brand": "", "description": "", "source": "",
+                "placed": False,
             })
+            current["placed"] = bool(current["placed"] or is_placed)
             for field in ("name", "brand", "description", "source"):
                 value = str(item.get(field, "") or "").strip()
                 if value and not current[field]:
@@ -488,7 +490,12 @@ def _verify_candidates(db, items, now):
            WHERE verification_status='requires_review'
              AND identifier_type IN ('DIN','NPN','DIN_HM')
              AND match_method='exact_gtin_labeled_source'
-           ORDER BY id LIMIT ?""",
+           ORDER BY CASE WHEN EXISTS (
+                      SELECT 1 FROM products p
+                      WHERE p.gtin_key=product_reference_identifiers.gtin_key
+                    ) THEN 0 ELSE 1 END,
+                    confidence DESC, id
+           LIMIT ?""",
         (_VERIFY_BATCH_LIMIT,),
     ).fetchall()]
     if not rows:
@@ -776,6 +783,12 @@ def _regulatory_worker(force=False):
                 item for key, item in items.items()
                 if key not in already_checked and _likely_regulated(item)
             ]
+            candidates.sort(key=lambda item: (
+                0 if item.get("placed") else 1,
+                0 if str(item.get("source", "") or "").strip() else 1,
+                str(item.get("name", "") or ""),
+                str(item.get("barcode", "") or ""),
+            ))
             batch = candidates[:_ONLINE_BATCH_LIMIT]
             remaining_after_batch = max(0, len(candidates) - len(batch))
             del candidates
@@ -961,9 +974,37 @@ def regulatory_status():
         state["probable_catalog_identifiers"] = int(
             values.get("probable") or 0
         )
+        coverage_rows = db.execute(
+            """SELECT identifier_type, verification_status,
+                      COUNT(DISTINCT product_id) AS product_count
+               FROM product_identifiers
+               WHERE identifier_type IN ('DIN','NPN','DIN_HM')
+               GROUP BY identifier_type, verification_status"""
+        ).fetchall()
+        coverage = {}
+        for coverage_row in coverage_rows:
+            item = dict(coverage_row)
+            coverage.setdefault(
+                str(item.get("identifier_type", "") or ""), {}
+            )[str(item.get("verification_status", "") or "unverified")] = int(
+                item.get("product_count") or 0
+            )
+        state["identifier_coverage"] = coverage
+        pending_row = db.execute(
+            """SELECT COUNT(*) AS n
+               FROM product_reference_identifiers
+               WHERE identifier_type IN ('DIN','NPN','DIN_HM')
+                 AND verification_status='requires_review'
+                 AND match_method='exact_gtin_labeled_source'"""
+        ).fetchone()
+        state["official_verification_queue"] = int(
+            (dict(pending_row).get("n") if pending_row else 0) or 0
+        )
     except Exception:
         state.setdefault("confirmed_catalog_identifiers", 0)
         state.setdefault("probable_catalog_identifiers", 0)
+        state.setdefault("identifier_coverage", {})
+        state.setdefault("official_verification_queue", 0)
     return jsonify({"success": True, **state})
 
 

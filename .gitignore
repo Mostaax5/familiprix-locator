@@ -5,3 +5,5 @@ certs/
 start-local.ps1
 .env
 .venv/
+.pytest_cache/
+pytest-cache-files-*/

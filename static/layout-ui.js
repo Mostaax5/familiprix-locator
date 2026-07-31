@@ -4473,6 +4473,7 @@ async function pollCatalogEnrich() {
       const catalogue = coverage.total
         ? ` · Catalogue : <b>${coverage.usable || 0}</b> descriptions utilisables`
           + ` · ${coverage.thin || 0} courtes · ${coverage.missing || 0} manquantes`
+          + ` · ${coverage.provisional || 0} provisoires à confirmer`
           + ` · ${coverage.exact_familiprix || 0} de source Familiprix exacte`
         : '';
       msg.innerHTML = `${head} ${s.done || 0}/${s.total || 0} (${pct}%)${eta} · `
@@ -4548,7 +4549,7 @@ async function pollRegulatorySync() {
     const phase = REGULATORY_PHASE_LABELS[state.phase] || 'Synchronisation des identifiants';
     if (running) {
       msg.style.color = '#0369a1';
-      msg.textContent = `${phase} · ${Number(state.confirmed_catalog_identifiers || 0)} confirmés · ${Number(state.probable_catalog_identifiers || 0)} utilisables à confirmer`;
+      msg.textContent = `${phase} · ${Number(state.confirmed_catalog_identifiers || 0)} confirmés · ${Number(state.probable_catalog_identifiers || 0)} utilisables à confirmer · ${Number(state.official_verification_queue || 0)} en vérification officielle`;
     } else if (state.status === 'error') {
       msg.style.color = '#b91c1c';
       msg.textContent = `Synchronisation interrompue : ${String(state.error || 'source temporairement indisponible')}`;
@@ -5214,9 +5215,10 @@ async function loadProductQuality(force=false) {
   issueBox.dataset.loading = '1';
   const filter = document.getElementById('productQualityFilter')?.value || '';
   try {
-    const [summaryResult, issuesResult] = await Promise.all([
+    const [summaryResult, issuesResult, operationsResult] = await Promise.all([
       apiFetch('/api/product-quality/summary'),
       apiFetch(`/api/product-quality/issues?status=open&limit=80${filter ? `&type=${encodeURIComponent(filter)}` : ''}`),
+      apiFetch('/api/ops/status'),
     ]);
     if (!summaryResult.res.ok || !issuesResult.res.ok) throw new Error('quality-load');
     const summary = summaryResult.data || {};
@@ -5224,6 +5226,12 @@ async function loadProductQuality(force=false) {
     const openTotal = Object.values(summary.open_issues || {}).reduce((sum, value) => sum + Number(value || 0), 0);
     const audit = summary.audit || {};
     const identifierCoverage = summary.identifier_coverage || {};
+    const operations = operationsResult.res.ok ? (operationsResult.data || {}) : {};
+    const runtime = operations.operations || {};
+    const searchStatus = operations.search || {};
+    const documentedMetrics = runtime.ai?.documented || {};
+    const descriptionCoverage = operations.catalog_enrichment?.coverage || {};
+    const rssMb = runtime.memory?.rss_mb;
     const verifiedIdentifierCount = type => Number(identifierCoverage[type]?.verified || 0);
     if (count) count.textContent = `${openTotal} à vérifier`;
     const progress = audit.running
@@ -5234,7 +5242,13 @@ async function loadProductQuality(force=false) {
       <div><strong>${Number(summary.total_products || 0)}</strong><span>produits dans le plan</span></div>
       <div><strong>${verifiedIdentifierCount('DIN')}</strong><span>DIN vérifiés</span></div>
       <div><strong>${verifiedIdentifierCount('NPN')}</strong><span>NPN vérifiés</span></div>
-      <div><strong>${verifiedIdentifierCount('DIN_HM')}</strong><span>DIN-HM vérifiés</span></div>${progress}`;
+      <div><strong>${verifiedIdentifierCount('DIN_HM')}</strong><span>DIN-HM vérifiés</span></div>
+      <div><strong>${rssMb == null ? '—' : `${Number(rssMb).toFixed(0)} Mo`}</strong><span>mémoire serveur</span></div>
+      <div><strong>${searchStatus.ready ? `${Number(searchStatus.last_build_ms || 0)} ms` : 'Préparation'}</strong><span>construction de l’index</span></div>
+      <div><strong>${documentedMetrics.samples ? `${(Number(documentedMetrics.p95_ms || 0) / 1000).toFixed(1)} s` : '—'}</strong><span>réponses documentées p95</span></div>
+      <div><strong>${Number(documentedMetrics.cache_hits || 0)}</strong><span>réponses documentées instantanées</span></div>
+      <div><strong>${Number(descriptionCoverage.missing || 0)}</strong><span>descriptions manquantes</span></div>
+      <div><strong>${Number(descriptionCoverage.provisional || 0)}</strong><span>descriptions provisoires</span></div>${progress}`;
     renderProductQualityIssues(issues);
     clearTimeout(productQualityPollTimer);
     if (audit.running) productQualityPollTimer = setTimeout(() => loadProductQuality(true), 1800);

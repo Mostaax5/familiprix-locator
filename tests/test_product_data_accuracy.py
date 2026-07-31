@@ -19,7 +19,10 @@ from product_data import (
     upsert_product_identifier,
     upsert_reference_candidate,
 )
-from routes.ai import product_context_for_client_rag
+from routes.ai import (
+    _prefill_provisional_catalog_descriptions,
+    product_context_for_client_rag,
+)
 from routes import products as products_module
 from routes.products import (
     audit_product_data,
@@ -87,6 +90,50 @@ class ProductDataAccuracyTests(unittest.TestCase):
             "Exact package description from the retailer.",
         )
         self.assertEqual(row["image_url"], "https://images.example/exact.jpg")
+
+    def test_local_description_prefill_is_immediate_but_remains_unverified(self):
+        db = self.make_db()
+        barcode = "063848966068"
+        self.insert_product(
+            db, name="ACME VITAMINE C 500MG CO100", barcode=barcode,
+        )
+        upsert_reference_candidate(db, {
+            "barcode": barcode,
+            "name": "ACME VITAMINE C 500MG CO100",
+            "brand": "Acme",
+            "package_size": "100",
+            "package_unit": "comprimés",
+            "strength": "500 mg",
+            "source": "Planogramme",
+        }, imported_at="2026-01-01T00:00:00Z")
+
+        updated = _prefill_provisional_catalog_descriptions(db)
+
+        self.assertEqual(updated, 1)
+        reference = dict(db.execute(
+            """SELECT description, enrich_status FROM product_reference
+               WHERE barcode=?""",
+            (barcode,),
+        ).fetchone())
+        self.assertIn("ACME VITAMINE C", reference["description"])
+        self.assertEqual(
+            reference["enrich_status"], "provisional_prefill_v4"
+        )
+        placed = dict(db.execute(
+            "SELECT description FROM products WHERE barcode=?", (barcode,)
+        ).fetchone())
+        self.assertEqual(placed["description"], reference["description"])
+        evidence = dict(db.execute(
+            """SELECT verification_status, active, match_method
+               FROM product_reference_evidence
+               WHERE gtin_key=? AND field_name='description'""",
+            (gtin_identity_key(barcode),),
+        ).fetchone())
+        self.assertEqual(evidence["verification_status"], "requires_review")
+        self.assertEqual(evidence["active"], 0)
+        self.assertEqual(
+            evidence["match_method"], "deterministic_catalog_fields"
+        )
 
     def test_exact_familiprix_refresh_does_not_overwrite_manual_description(self):
         db = self.make_db()

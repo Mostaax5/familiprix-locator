@@ -6,6 +6,7 @@ import zipfile
 
 from database import DatabaseConnection, init_sqlite_db
 from product_data import (
+    gtin_identity_key,
     sync_reference_identifiers_to_product,
     upsert_reference_identifier,
 )
@@ -19,7 +20,7 @@ from regulatory_data import (
     parse_dpd_extracts,
     verify_regulatory_candidate,
 )
-from routes.regulatory import _seed_catalogue_label_candidates
+from routes.regulatory import _catalogue_items, _seed_catalogue_label_candidates
 from routes.ai import _prefer_lookup_result, product_context_for_client_rag
 from routes.products import (
     _PROD_CACHE,
@@ -299,6 +300,37 @@ class RegulatoryDataTests(unittest.TestCase):
         self.assertEqual(row["identifier_value"], "01234567")
         self.assertEqual(row["verification_status"], "verified")
         self.assertEqual(row["match_method"], "exact_gtin_health_canada_packaging")
+        db.close()
+
+    def test_regulatory_queue_can_prioritize_products_in_the_current_plan(self):
+        db = self.make_db()
+        placed_barcode = "063848966068"
+        catalogue_barcode = "012345678905"
+        placed_key = gtin_identity_key(placed_barcode)
+        catalogue_key = gtin_identity_key(catalogue_barcode)
+        db.execute(
+            """INSERT INTO product_reference
+               (barcode, gtin_key, name, source)
+               VALUES (?, ?, 'Exact drug', 'Familiprix')""",
+            (placed_barcode, placed_key),
+        )
+        db.execute(
+            """INSERT INTO product_reference
+               (barcode, gtin_key, name, source)
+               VALUES (?, ?, 'Catalogue only', 'Familiprix')""",
+            (catalogue_barcode, catalogue_key),
+        )
+        db.execute(
+            """INSERT INTO products
+               (name, barcode, gtin_key, aisle, side, section, shelf, position)
+               VALUES ('Exact drug', ?, ?, '1', 'Gauche', '1', '1', '1')""",
+            (placed_barcode, placed_key),
+        )
+
+        items = _catalogue_items(db)
+
+        self.assertTrue(items[placed_key]["placed"])
+        self.assertFalse(items[catalogue_key]["placed"])
         db.close()
 
     def test_probable_exact_upc_identifier_is_searchable_but_not_ai_fact(self):

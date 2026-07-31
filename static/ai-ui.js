@@ -79,6 +79,9 @@ function clientProductForStorage(product, compact=false) {
     locations: Array.isArray(product.locations) ? product.locations.slice(0, 20) : [],
     is_plano: Number(product.is_plano) ? 1 : 0,
     in_stock: product.in_stock === 0 ? 0 : 1,
+    result_role: String(product.result_role || 'primary'),
+    result_role_label: String(product.result_role_label || ''),
+    result_role_order: Number(product.result_role_order) || 0,
   };
 }
 
@@ -113,6 +116,11 @@ function clientDocumentationForStorage(documentation) {
       summary: String(source?.summary || '').slice(0, 1200),
       candidate_ids: Array.isArray(source?.candidate_ids)
         ? source.candidate_ids.slice(0, 16).map(String) : [],
+      source_class: String(source?.source_class || '').slice(0, 60),
+      trust_level: Number(source?.trust_level) || 0,
+      verification_status: String(
+        source?.verification_status || ''
+      ).slice(0, 60),
     })).filter(source => source.source_id && source.title),
   };
 }
@@ -420,6 +428,15 @@ function renderDocumentedClientDetails(result, exchangeId) {
   const comparisons = Array.isArray(documentation.comparisons) ? documentation.comparisons : [];
   const usefulGuidance = Array.isArray(documentation.useful_guidance) ? documentation.useful_guidance : [];
   const importantChecks = Array.isArray(documentation.important_checks) ? documentation.important_checks : [];
+  const sourceTrustLabel = source => {
+    const sourceClass = String(source?.source_class || '');
+    if (sourceClass === 'official_regulator') return 'Source officielle';
+    if (sourceClass === 'pharmacist_approved') return 'Approuvée par un pharmacien';
+    if (sourceClass === 'professional_guideline') return 'Guide professionnel';
+    if (String(source?.verification_status || '') === 'verified') return 'Fiche vérifiée';
+    if (sourceClass === 'unverified_catalogue') return 'À confirmer';
+    return '';
+  };
 
   const textSection = (title, items) => items.length ? `
     <section class="client-doc-section">
@@ -476,6 +493,7 @@ function renderDocumentedClientDetails(result, exchangeId) {
               ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(source.title || 'Source')}</a>`
               : esc(source.title || 'Source')}</div>
             ${source.publisher ? `<div>${esc(source.publisher)}</div>` : ''}
+            ${sourceTrustLabel(source) ? `<span class="client-doc-source-trust is-${esc(source.source_class || 'catalogue')}">${esc(sourceTrustLabel(source))}</span>` : ''}
             ${source.summary ? `<div class="client-doc-source-summary">${esc(source.summary)}</div>` : ''}
           </div>`;
         }).join('')}</div>
@@ -760,6 +778,8 @@ async function askAboutClientProduct() {
 function clientProductCard(product, index=0) {
   const description = product.usage_notes || product.description || '';
   const productQuote = description ? `${product.name}: ${description}` : '';
+  const role = String(product.result_role || 'primary');
+  const roleLabel = String(product.result_role_label || '');
   return `<article class="client-result-card${product.in_stock === 0 ? ' is-out-of-stock' : ''}" id="${clientProductDomId(product)}" data-client-id="${esc(product.client_id || '')}" onclick="if(!(window.getSelection?.()?.toString()||'').trim())openClientProductDetails(this.dataset.clientId)">
     ${clientProductImage(product, index < 3)}
     <div class="client-result-body">
@@ -767,6 +787,7 @@ function clientProductCard(product, index=0) {
         <span class="client-plan-badge ${product.is_plano ? 'is-plano' : 'is-hors-plano'}">${product.is_plano ? 'PLANO' : 'HORS-PLANO'}</span>
         ${product.in_stock === 0 ? '<span class="client-stock-badge">RUPTURE</span>' : ''}
         ${isHomeBrand(product.brand) ? '<span class="client-home-badge">MARQUE MAISON</span>' : ''}
+        ${role !== 'primary' && roleLabel ? `<span class="client-role-badge is-${esc(role)}">${esc(roleLabel)}</span>` : ''}
       </div>
       <h3>${esc(product.name)}</h3>
       ${product.brand ? `<div class="client-result-brand">${esc(product.brand)}</div>` : ''}
@@ -790,6 +811,33 @@ function renderClientMatches(matches) {
     updateClientHistoryAction();
     return;
   }
+  const roleOrder = ['primary', 'replacement', 'refill', 'accessory', 'related'];
+  const roleLabels = {
+    primary: 'Produits recherchés',
+    replacement: 'Pièces de remplacement',
+    refill: 'Recharges',
+    accessory: 'Accessoires',
+    related: 'Autres correspondances',
+  };
+  const groups = new Map();
+  matches.forEach((product, index) => {
+    const role = roleOrder.includes(product.result_role) ? product.result_role : 'primary';
+    if (!groups.has(role)) groups.set(role, []);
+    groups.get(role).push([product, index]);
+  });
+  const showGroupHeadings = groups.size > 1 || !groups.has('primary');
+  const groupedResults = roleOrder
+    .filter(role => groups.has(role))
+    .map(role => {
+      const entries = groups.get(role);
+      return `<section class="client-result-group is-${esc(role)}">
+        ${showGroupHeadings ? `<div class="client-result-group-heading">
+          <span>${esc(roleLabels[role])}</span>
+          <small>${entries.length}</small>
+        </div>` : ''}
+        <div class="client-results-list">${entries.map(([product, index]) => clientProductCard(product, index)).join('')}</div>
+      </section>`;
+    }).join('');
   target.innerHTML = `
     <section class="client-products-section">
       <div class="client-products-heading">
@@ -799,7 +847,7 @@ function renderClientMatches(matches) {
         </div>
         <span class="client-plan-source">PLAN MAGASIN</span>
       </div>
-      <div class="client-results-list">${matches.map(clientProductCard).join('')}</div>
+      <div class="client-result-groups">${groupedResults}</div>
     </section>
   `;
   target.onmouseup = captureClientTextSelection;
@@ -1215,6 +1263,75 @@ function productMatchesClientConcepts(product, groups, excludedNameTerms=[]) {
   ));
 }
 
+function localClientRequestedRole(question) {
+  const value = ` ${normalizeSearchText(question || '')} `;
+  if (/\b(?:recharge|recharges|refill|refills|remplissage)\b/.test(value) && !/\brechargeabl/.test(value)) return 'refill';
+  if ([
+    ' tete de remplacement ', ' tete de rechange ', ' tete br dent ',
+    ' brossette ', ' replacement head ', ' lame de remplacement ',
+    ' lame de rechange ', ' cartouche de remplacement ',
+    ' filtre de remplacement ', ' replacement part ',
+  ].some(marker => value.includes(marker))) return 'replacement';
+  if ([
+    ' accessoire ', ' accessoires ', ' accessory ', ' accessories ',
+    ' etui ', ' support ', ' socle ', ' chargeur ', ' adaptateur ',
+  ].some(marker => value.includes(marker))) return 'accessory';
+  return '';
+}
+
+function classifyLocalClientProductRoles(products, question) {
+  const requestedRole = localClientRequestedRole(question);
+  const labels = {
+    primary: 'Produits recherchés',
+    replacement: 'Pièces de remplacement',
+    refill: 'Recharges',
+    accessory: 'Accessoires',
+    related: 'Autres correspondances',
+  };
+  const order = {primary: 0, replacement: 1, refill: 2, accessory: 3, related: 4};
+  return products.map((product, index) => {
+    const name = ` ${normalizeSearchText(product.name || '')} `;
+    const identityText = ` ${normalizeSearchText([
+      product.name, product.category,
+    ].join(' '))} `;
+    let role = 'primary';
+    if (/\b(?:recharge|recharges|refill|refills)\b/.test(name) && !/\brechargeabl/.test(name)) {
+      role = 'refill';
+    } else if ([
+      ' tete br dent ', ' tete br dents ', ' tete de brosse ',
+      ' tete de remplacement ',
+      ' tete de rechange ', ' brossette ', ' replacement head ',
+      ' lame de remplacement ', ' lame de rechange ',
+      ' cartouche de remplacement ', ' filtre de remplacement ',
+      ' piece de remplacement ', ' replacement part ',
+    ].some(marker => identityText.includes(marker))) {
+      role = 'replacement';
+    } else if ([
+      ' accessoire ', ' accessory ', ' etui ', ' support ', ' socle ',
+      ' chargeur ', ' adaptateur ', ' capuchon ', ' applicateur ',
+      ' porte brosse ',
+    ].some(marker => identityText.includes(marker))) {
+      role = 'accessory';
+    }
+    if (requestedRole) {
+      if (role === requestedRole) role = 'primary';
+      else if (role === 'primary') role = 'related';
+    }
+    return {
+      index,
+      product: {
+        ...product,
+        result_role: role,
+        result_role_label: labels[role],
+        result_role_order: order[role],
+      },
+    };
+  }).sort((left, right) => (
+    left.product.result_role_order - right.product.result_role_order
+    || left.index - right.index
+  )).map(entry => entry.product);
+}
+
 function localClientMatches(question, limit=60) {
   if (typeof searchProductsFromCache !== 'function' || !allProductsCache.length) return [];
   const requiredConcepts = clientRequiredConceptGroups(question);
@@ -1256,7 +1373,7 @@ function localClientMatches(question, limit=60) {
     grouped.push(product);
     if (grouped.length >= limit) break;
   }
-  return grouped;
+  return classifyLocalClientProductRoles(grouped, question);
 }
 
 function buildFastClientResult(products, elapsedMs=0) {
@@ -1299,9 +1416,10 @@ function prepareClientResult(result) {
     ? prepared.highlighted_product_ids.slice(0, 16).map(String)
     : [];
   if (prepared.response_mode !== 'lookup') {
-    const byId = new Map(products.map(product => [String(product.client_id || ''), product]));
-    products = highlightedIds.map(id => byId.get(id)).filter(Boolean);
-    highlightedIds = products.map(product => String(product.client_id || '')).filter(Boolean);
+    const availableIds = new Set(
+      products.map(product => String(product.client_id || '')).filter(Boolean)
+    );
+    highlightedIds = highlightedIds.filter(id => availableIds.has(id));
   } else {
     products = products.slice(0, CLIENT_FAST_PRODUCT_LIMIT);
     highlightedIds = products.map(product => String(product.client_id || '')).filter(Boolean);
@@ -1442,6 +1560,20 @@ async function runClientRequest(question, options={}) {
   if (status) status.textContent = mode === 'documented'
     ? 'Consultation des fiches produit et des sources disponibles.'
     : 'Analyse de la demande et vérification des produits proposés.';
+  if (!options.followUp) {
+    const previewProducts = localClientMatches(
+      retrievalQuestion, CLIENT_FAST_PRODUCT_LIMIT
+    );
+    if (previewProducts.length) {
+      currentClientMatches = previewProducts;
+      renderClientMatches(currentClientMatches);
+      if (status) {
+        status.textContent = mode === 'documented'
+          ? `${previewProducts.length} produit${previewProducts.length > 1 ? 's' : ''} du plan affiché${previewProducts.length > 1 ? 's' : ''}; préparation de la réponse documentée.`
+          : `${previewProducts.length} produit${previewProducts.length > 1 ? 's' : ''} du plan affiché${previewProducts.length > 1 ? 's' : ''}; analyse de la demande en cours.`;
+      }
+    }
+  }
   const result = await apiGenerateClientHelp({
     question,
     history,

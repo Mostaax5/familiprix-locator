@@ -518,6 +518,8 @@ _PROD_CACHE = {
     "document_frequency": {}, "document_count": 0,
     "average_document_length": 1.0, "statistics_rows_id": 0,
     "catalog_brands": (), "name_lead_frequency": {},
+    "last_build_ms": 0, "last_build_rows": 0,
+    "last_build_rss_mb": None, "last_build_at": 0.0,
 }
 _PROD_LOCK = threading.RLock()
 _PROD_REFRESH_LOCK = threading.Lock()
@@ -958,6 +960,7 @@ def _products_corpus(db, allow_identifier_stale=False):
             generation=generation, state_checked_at=checked_at,
         )
         return _PROD_CACHE["rows"]
+    build_started_at = time.perf_counter()
     aliases_by_product = {}
     verified_by_product = {}
     verified_values_by_product = {}
@@ -1107,6 +1110,12 @@ def _products_corpus(db, allow_identifier_stale=False):
         statistics_rows_id=id(rows),
         catalog_brands=tuple(sorted(catalog_brands)),
         name_lead_frequency=dict(name_lead_frequency),
+        last_build_ms=int(
+            round((time.perf_counter() - build_started_at) * 1000)
+        ),
+        last_build_rows=len(rows),
+        last_build_rss_mb=current_rss_mb(),
+        last_build_at=time.time(),
     )
     del (
         gtin_keys, aliases_by_product, verified_by_product,
@@ -1150,6 +1159,20 @@ def product_search_cache_ready():
     # while a metadata refresh runs in the background. That path is still ready
     # for employees even when its generation is momentarily stale.
     return bool(_PROD_CACHE.get("initialized"))
+
+
+def product_search_cache_status():
+    return {
+        "ready": product_search_cache_ready(),
+        "rows": len(_PROD_CACHE.get("rows") or []),
+        "generation": int(_PROD_CACHE.get("generation", -1) or -1),
+        "metadata_dirty": bool(_PROD_CACHE.get("metadata_dirty")),
+        "refresh_running": bool(_PROD_REFRESH_RUNNING),
+        "last_build_ms": int(_PROD_CACHE.get("last_build_ms", 0) or 0),
+        "last_build_rows": int(_PROD_CACHE.get("last_build_rows", 0) or 0),
+        "last_build_rss_mb": _PROD_CACHE.get("last_build_rss_mb"),
+        "last_build_at": float(_PROD_CACHE.get("last_build_at", 0) or 0),
+    }
 
 
 def warm_product_search_cache():
@@ -1672,6 +1695,96 @@ def product_query_role_adjustment(query, row, electric_request=None):
     if is_replacement:
         return -40
     return 0
+
+
+_RESULT_ROLE_LABELS = {
+    "primary": "Produits recherchés",
+    "replacement": "Pièces de remplacement",
+    "refill": "Recharges",
+    "accessory": "Accessoires",
+    "related": "Autres correspondances",
+}
+_RESULT_ROLE_ORDER = {
+    "primary": 0, "replacement": 1, "refill": 2,
+    "accessory": 3, "related": 4,
+}
+
+
+def _requested_component_role(query):
+    value = f" {normalize_search_text(query)} "
+    if re.search(
+        r"\b(?:recharge|recharges|refill|refills|remplissage)\b", value
+    ) and not re.search(r"\brechargeabl", value):
+        return "refill"
+    if any(marker in value for marker in (
+        " tete de remplacement ", " tete de rechange ",
+        " tete br dent ", " brossette ", " replacement head ",
+        " lame de remplacement ", " lame de rechange ",
+        " cartouche de remplacement ", " filtre de remplacement ",
+        " replacement part ",
+    )):
+        return "replacement"
+    if any(marker in value for marker in (
+        " accessoire ", " accessoires ", " accessory ", " accessories ",
+        " etui ", " support ", " socle ", " chargeur ", " adaptateur ",
+    )):
+        return "accessory"
+    return ""
+
+
+def client_product_result_role(product, query=""):
+    """Return a query-aware merchandising role without hiding valid matches."""
+    item = dict(product or {})
+    identity_text = f" {normalize_search_text(' '.join([
+        str(item.get("name", "") or ""),
+        str(item.get("category", "") or ""),
+    ]))} "
+    name = f" {normalize_search_text(item.get('name', ''))} "
+    requested_role = _requested_component_role(query)
+    role = "primary"
+    if (
+        re.search(r"\b(?:recharge|recharges|refill|refills)\b", name)
+        and not re.search(r"\brechargeabl", name)
+    ):
+        role = "refill"
+    elif any(marker in identity_text for marker in (
+        " tete br dent ", " tete br dents ", " tete de brosse ",
+        " tete de remplacement ",
+        " tete de rechange ", " brossette ", " replacement head ",
+        " lame de remplacement ", " lame de rechange ",
+        " cartouche de remplacement ", " filtre de remplacement ",
+        " piece de remplacement ", " replacement part ",
+    )):
+        role = "replacement"
+    elif any(marker in identity_text for marker in (
+        " accessoire ", " accessory ", " etui ", " support ",
+        " socle ", " chargeur ", " adaptateur ", " capuchon ",
+        " applicateur ", " porte brosse ",
+    )):
+        role = "accessory"
+
+    if requested_role:
+        if role == requested_role:
+            return "primary"
+        if role == "primary":
+            return "related"
+    return role
+
+
+def classify_client_result_roles(products, query=""):
+    classified = []
+    for index, product in enumerate(products or []):
+        item = dict(product or {})
+        role = client_product_result_role(item, query)
+        item["result_role"] = role
+        item["result_role_label"] = _RESULT_ROLE_LABELS[role]
+        item["result_role_order"] = _RESULT_ROLE_ORDER[role]
+        classified.append((index, item))
+    classified.sort(key=lambda entry: (
+        int(entry[1].get("result_role_order", 9)),
+        entry[0],
+    ))
+    return [item for _index, item in classified]
 
 
 def filter_client_request_products(products, query):
@@ -4450,8 +4563,11 @@ def search_products():
             ranked.append((score, item))
     ranked.sort(key=lambda e: (-e[0], 1 if e[1].get("in_stock") == 0 else 0,
                                location_sort_key(e[1])))
+    items = classify_client_result_roles(
+        [item for _, item in ranked[:limit]], query,
+    )
     return jsonify([
-        public_product_payload(item) for _, item in ranked[:limit]
+        public_product_payload(item) for item in items
     ])
 
 
@@ -4469,6 +4585,7 @@ def client_find():
         "must_include": [],
         "exclude": [],
     }, limit=limit)
+    products = classify_client_result_roles(products, query)
     return jsonify([public_product_payload(item) for item in products])
 
 
@@ -5499,6 +5616,43 @@ def product_memory_status():
             _PROD_CACHE.get("metadata_dirty")
         ),
         "payload_version": _PRODUCTS_PAYLOAD_VERSION,
+    })
+
+
+@products_bp.route("/api/ops/status", methods=["GET"])
+def operations_status():
+    _username, error = require_editor()
+    if error:
+        return error
+    from observability import observability_snapshot
+    from routes.ai import (
+        _CATALOG_ENRICH, _DOCUMENTED_ANSWER_CACHE,
+        _DOCUMENTED_ANSWER_CACHE_LOCK, _catalog_description_coverage,
+    )
+    from routes.regulatory import _state_snapshot
+
+    db = get_db()
+    try:
+        description_coverage = _catalog_description_coverage(db)
+    except Exception:
+        description_coverage = {}
+    with _DOCUMENTED_ANSWER_CACHE_LOCK:
+        answer_cache_entries = len(_DOCUMENTED_ANSWER_CACHE)
+    return jsonify({
+        "success": True,
+        "operations": observability_snapshot(),
+        "search": product_search_cache_status(),
+        "catalog_enrichment": {
+            **{
+                key: value for key, value in dict(_CATALOG_ENRICH).items()
+                if key != "started_at"
+            },
+            "coverage": description_coverage,
+        },
+        "regulatory": _state_snapshot(),
+        "documented_answer_cache_entries": answer_cache_entries,
+        "image_retry_rows": len(_IMAGE_FILL_RETRY_AFTER),
+        "product_stream_active": _PRODUCT_STREAM_LOCK.locked(),
     })
 
 
