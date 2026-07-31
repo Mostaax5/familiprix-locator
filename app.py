@@ -519,20 +519,35 @@ def _start_persistence_services(*, background=False):
                 f"[BOOT] Service catalogue "
                 f"_restore_from_gist_if_empty impossible: {exc}"
             )
-        try:
-            warmed_count = warm_product_search_cache()
-            print(
-                f"[BOOT] Index de recherche pret: "
-                f"{warmed_count} emplacements."
-            )
-            payload = warm_product_payload_cache()
-            print(
-                f"[BOOT] Catalogue telephone pret: "
-                f"{payload.get('rows', 0)} produits, "
-                f"{payload.get('gzip_bytes', 0)} octets compresses."
-            )
-        except Exception as exc:  # noqa: BLE001 - later requests can retry
-            print(f"[BOOT] Prechauffage de la recherche impossible: {exc}")
+        warm_attempt = 0
+        while not (
+            product_search_cache_ready() and product_payload_cache_ready()
+        ):
+            warm_attempt += 1
+            try:
+                warmed_count = warm_product_search_cache()
+                print(
+                    f"[BOOT] Index de recherche pret: "
+                    f"{warmed_count} emplacements."
+                )
+                payload = warm_product_payload_cache()
+                print(
+                    f"[BOOT] Catalogue telephone pret: "
+                    f"{payload.get('rows', 0)} produits, "
+                    f"{payload.get('gzip_bytes', 0)} octets compresses."
+                )
+                if not (
+                    product_search_cache_ready()
+                    and product_payload_cache_ready()
+                ):
+                    time.sleep(2)
+            except Exception as exc:  # noqa: BLE001 - retry while unready
+                delay = min(30, 2 ** min(warm_attempt, 5))
+                print(
+                    f"[BOOT] Prechauffage tentative {warm_attempt} "
+                    f"impossible: {exc}; nouvel essai dans {delay}s."
+                )
+                time.sleep(delay)
         tasks = (
             schedule_reference_metadata_sync,
             schedule_initial_product_quality_audit,
