@@ -64,8 +64,14 @@ def search_row(name, brand="", description="", barcode=""):
 class ClientRagTests(unittest.TestCase):
     def setUp(self):
         products_module._PROD_CACHE.update(
-            key=None, rows=[], built_at=0.0,
+            key=None, rows=[], built_at=0.0, database_token=None,
             generation=-1, state_checked_at=0.0,
+            statistics_rows_id=0,
+            token_postings={}, token_prefixes={},
+            name_token_postings={}, name_tokens_by_initial={},
+            mapped_indices_by_key={}, document_in_stock={},
+            representative_indices=(), document_barcodes=(),
+            identifier_postings={}, product_id_to_key={},
         )
         with ai_module._DOCUMENTED_ANSWER_CACHE_LOCK:
             ai_module._DOCUMENTED_ANSWER_CACHE.clear()

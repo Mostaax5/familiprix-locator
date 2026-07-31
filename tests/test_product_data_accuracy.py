@@ -25,8 +25,13 @@ from routes.ai import (
 )
 from routes import products as products_module
 from routes.products import (
+    _indexed_client_search_entries,
+    _indexed_identifier_products,
+    _materialize_mapped_products,
+    _products_corpus,
     audit_product_data,
     build_reference_metadata_index,
+    hybrid_client_candidates,
     reference_metadata_for_barcode,
     row_to_product,
 )
@@ -560,6 +565,120 @@ class ProductDataAccuracyTests(unittest.TestCase):
         self.assertFalse(database_module._query_affects_product_search(
             "UPDATE products SET description=?, image_url=?, quality_checked_at=? WHERE id=?"
         ))
+
+    def test_warm_inverted_index_avoids_full_catalogue_scans(self):
+        db = self.make_db()
+        original_cache = dict(products_module._PROD_CACHE)
+
+        def restore_cache():
+            products_module._PROD_CACHE.clear()
+            products_module._PROD_CACHE.update(original_cache)
+            products_module._PROD_CACHE.update(
+                key=None, rows=[], initialized=False, generation=-1,
+                database_token=None,
+                statistics_rows_id=0, token_postings={}, token_prefixes={},
+                name_token_postings={}, name_tokens_by_initial={},
+                mapped_indices_by_key={}, document_in_stock={},
+                representative_indices=(), document_barcodes=(),
+                identifier_postings={}, product_id_to_key={},
+            )
+
+        self.addCleanup(restore_cache)
+        products_module._PROD_CACHE.update(
+            key=None, rows=[], initialized=False, generation=-1,
+            database_token=None,
+            statistics_rows_id=0, token_postings={}, token_prefixes={},
+            name_token_postings={}, name_tokens_by_initial={},
+            mapped_indices_by_key={}, document_in_stock={},
+            representative_indices=(), document_barcodes=(),
+            identifier_postings={}, product_id_to_key={},
+        )
+        rows = [
+            (
+                f"UNRELATED PRODUCT {index}",
+                f"900000{index:06d}",
+                str(index + 1),
+            )
+            for index in range(2000)
+        ]
+        rows.extend([
+            ("A GAGNON MELAT 5MG GUM 120", "063848966068", "2001"),
+            ("ADVIL 200MG CO100", "012345678905", "2002"),
+            ("ADVIL 200MG CO100", "012345678905", "2003"),
+        ])
+        db.executemany(
+            """INSERT INTO products
+               (name, barcode, aisle, side, section, shelf, position)
+               VALUES (?, ?, '1', 'Gauche', '1', '1', ?)""",
+            rows,
+        )
+        db.commit()
+
+        corpus = _products_corpus(db, allow_identifier_stale=False)
+        melatonin_subset = _indexed_client_search_entries(
+            corpus, literal_terms=["melatonine"],
+        )
+        typo_subset = _indexed_client_search_entries(
+            corpus, literal_terms=["advile"], fuzzy_terms=["advile"],
+        )
+        missing_subset = _indexed_client_search_entries(
+            corpus, literal_terms=["zzzznotfound"],
+            fuzzy_terms=["zzzznotfound"],
+        )
+
+        self.assertLess(len(melatonin_subset), 10)
+        self.assertTrue(any(
+            "MELAT" in item["name"] for item, _row in melatonin_subset
+        ))
+        self.assertLess(len(typo_subset), 10)
+        self.assertTrue(any(
+            item["name"].startswith("ADVIL") for item, _row in typo_subset
+        ))
+        self.assertEqual(missing_subset, [])
+        with patch.object(products_module, "get_db", return_value=db):
+            matches = hybrid_client_candidates(
+                "melatonine",
+                {
+                    "corrected_query": "melatonine",
+                    "search_queries": [],
+                    "keywords": [],
+                    "must_include": [],
+                    "exclude": [],
+                },
+                limit=20,
+            )
+        self.assertEqual(
+            [item["name"] for item in matches],
+            ["A GAGNON MELAT 5MG GUM 120"],
+        )
+        advil = _materialize_mapped_products(
+            corpus, [("barcode", "012345678905")], limit=10,
+        )
+        self.assertEqual(len(advil), 1)
+        self.assertEqual(len(advil[0]["locations"]), 2)
+        advil_product_id = next(
+            item["id"] for item, _row in corpus
+            if item["name"].startswith("ADVIL")
+        )
+        upsert_product_identifier(
+            db, advil_product_id, "DIN", "00559407",
+            source="Health Canada",
+            verification_status="requires_review",
+        )
+        products_module._PROD_CACHE.update(key=None)
+        corpus = _products_corpus(db, allow_identifier_stale=False)
+        din_matches = _indexed_identifier_products(
+            corpus, "00559407", "din", limit=10,
+        )
+        self.assertTrue(din_matches)
+        self.assertTrue(all(
+            item["name"].startswith("ADVIL") for item in din_matches
+        ))
+        self.assertTrue(any(
+            identifier.get("verification_status") == "requires_review"
+            for identifier in din_matches[0].get("_identifiers", [])
+        ))
+        db.close()
 
     def test_quality_summary_reports_identifier_and_field_coverage(self):
         db = self.make_db()

@@ -816,6 +816,7 @@ def _regulatory_worker(force=False):
             from routes.products import (
                 audit_product_data,
                 bump_reference_cache,
+                invalidate_product_search_cache,
                 sync_reference_metadata_to_products,
             )
             _state_update(phase="refresh_product_quality")
@@ -829,6 +830,7 @@ def _regulatory_worker(force=False):
             )
             db.commit()
             bump_reference_cache()
+            invalidate_product_search_cache()
 
         stopped = _STOP_EVENT.is_set()
         remaining = _state_snapshot()["remaining_online"]

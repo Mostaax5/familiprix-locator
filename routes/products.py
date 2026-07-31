@@ -6,6 +6,7 @@ import hashlib
 import math
 import threading
 import unicodedata
+from array import array
 from collections import Counter, deque
 from difflib import SequenceMatcher
 from functools import wraps
@@ -512,6 +513,7 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
 # (every write path stamps modified_at), so no explicit invalidation hooks are needed.
 _PROD_CACHE = {
     "key": None, "rows": [], "built_at": 0.0,
+    "database_token": None,
     "initialized": False,
     "generation": -1, "state_checked_at": 0.0,
     "metadata_dirty": False, "metadata_dirty_at": 0.0,
@@ -520,6 +522,11 @@ _PROD_CACHE = {
     "catalog_brands": (), "name_lead_frequency": {},
     "last_build_ms": 0, "last_build_rows": 0,
     "last_build_rss_mb": None, "last_build_at": 0.0,
+    "token_postings": {}, "token_prefixes": {},
+    "name_token_postings": {}, "name_tokens_by_initial": {},
+    "mapped_indices_by_key": {}, "document_in_stock": {},
+    "representative_indices": (), "document_barcodes": (),
+    "identifier_postings": {}, "product_id_to_key": {},
 }
 _PROD_LOCK = threading.RLock()
 _PROD_REFRESH_LOCK = threading.Lock()
@@ -540,6 +547,25 @@ _PRODUCT_STREAM_CHUNK_BYTES = 256 * 1024
 # Extra devices receive a short retry response instead of occupying another
 # server thread while one bounded stream is already in progress.
 _PRODUCT_STREAM_LOCK = threading.Lock()
+
+
+def _product_cache_database_token(db):
+    """Distinguish isolated SQLite databases while sharing one Postgres cache."""
+    backend = str(getattr(db, "backend", "") or "")
+    if not backend:
+        return None
+    if backend == "sqlite":
+        try:
+            database_row = db.execute("PRAGMA database_list").fetchone()
+            database_path = str(database_row[2] or "").strip()
+        except Exception:
+            database_path = ""
+        if database_path:
+            return (backend, os.path.normcase(os.path.abspath(database_path)))
+        # Each :memory: SQLite connection is a different database. Keep the
+        # connection object itself so Python object-id reuse cannot cross wires.
+        return ("sqlite-memory", getattr(db, "connection", db))
+    return (backend,)
 
 
 def invalidate_product_search_cache():
@@ -901,7 +927,13 @@ def reference_identifier_state_key(db):
 @_serialized_product_corpus
 def _products_corpus(db, allow_identifier_stale=False):
     """All placed products with their pre-normalized search fields: [(item, row)]."""
-    if allow_identifier_stale and _product_corpus_fast_ready():
+    database_token = _product_cache_database_token(db)
+    same_database = _PROD_CACHE.get("database_token") == database_token
+    if (
+        allow_identifier_stale
+        and same_database
+        and _product_corpus_fast_ready()
+    ):
         return _PROD_CACHE["rows"]
     generation = product_search_generation()
     checked_at = time.time()
@@ -938,7 +970,7 @@ def _products_corpus(db, allow_identifier_stale=False):
         products_state_key(db), alias_key, evidence_key, identifier_key,
         reference_identifier_key,
     )
-    if _PROD_CACHE["key"] == key:
+    if same_database and _PROD_CACHE["key"] == key:
         _PROD_CACHE.update(
             initialized=True, generation=generation,
             state_checked_at=checked_at,
@@ -949,7 +981,8 @@ def _products_corpus(db, allow_identifier_stale=False):
     # the recently built corpus while that metadata-only write burst continues.
     previous_key = _PROD_CACHE.get("key")
     if (
-        allow_identifier_stale and _PROD_CACHE["rows"] and previous_key
+        allow_identifier_stale and same_database
+        and _PROD_CACHE["rows"] and previous_key
         # Ignore audit-only quality_checked_at drift. Count, max id, and
         # modified_at still make every real product/plan edit invalidate now.
         and previous_key[0][:3] == key[0][:3]
@@ -1040,6 +1073,13 @@ def _products_corpus(db, allow_identifier_stale=False):
     name_lead_frequency = Counter()
     search_document_keys = set()
     total_document_length = 0
+    token_postings = {}
+    name_token_postings = {}
+    mapped_indices_by_key = {}
+    document_in_stock = {}
+    product_id_to_key = {}
+    representative_indices = array("I")
+    document_barcodes = []
     for product_row in db.execute("SELECT * FROM products"):
         raw_item = dict(product_row)
         product_id = int(raw_item.get("id") or 0)
@@ -1071,15 +1111,42 @@ def _products_corpus(db, allow_identifier_stale=False):
         item["_identifiers"] = identifiers
         item = _compact_search_cache_product(item)
         search_row = _product_search_row(item, aliases, identifiers)
+        row_index = len(rows)
         rows.append((item, search_row))
         document_key = (
             ("barcode", search_row["_bc"])
             if search_row["_bc"]
             else ("name", search_row["_name"], search_row["_brand"])
         )
+        mapped_indices_by_key.setdefault(
+            document_key, array("I")
+        ).append(row_index)
+        if product_id:
+            product_id_to_key[product_id] = document_key
+        document_in_stock[document_key] = bool(
+            document_in_stock.get(document_key) or item.get("in_stock")
+        )
         if document_key not in search_document_keys:
             search_document_keys.add(document_key)
+            representative_indices.append(row_index)
+            if search_row["_bc"]:
+                document_barcodes.append((row_index, search_row["_bc"]))
             tokens = search_row["_hay"].split()
+            for token in set(tokens):
+                if 2 <= len(token) <= 64:
+                    token_postings.setdefault(
+                        token, array("I")
+                    ).append(row_index)
+            indexed_name_tokens = set(
+                tuple(search_row.get("_tokens") or ())
+                + tuple(search_row.get("_brand_tokens") or ())
+                + tuple(search_row.get("_catalog_brand_tokens") or ())
+            )
+            for token in indexed_name_tokens:
+                if 2 <= len(token) <= 64:
+                    name_token_postings.setdefault(
+                        token, array("I")
+                    ).append(row_index)
             catalog_brand = str(
                 search_row.get("_catalog_brand", "") or ""
             ).strip()
@@ -1096,9 +1163,52 @@ def _products_corpus(db, allow_identifier_stale=False):
                 token for token in tokens
                 if any(character.isalpha() for character in token)
             })
+    token_prefixes = {}
+    for token in token_postings:
+        if len(token) >= 4 and token[0].isalpha():
+            token_prefixes.setdefault(token[:4], []).append(token)
+    token_prefixes = {
+        prefix: tuple(values)
+        for prefix, values in token_prefixes.items()
+    }
+    name_tokens_by_initial = {}
+    for token in name_token_postings:
+        if token and token[0].isalpha():
+            name_tokens_by_initial.setdefault(token[0], []).append(token)
+    name_tokens_by_initial = {
+        initial: tuple(values)
+        for initial, values in name_tokens_by_initial.items()
+    }
+    identifier_postings = {}
+
+    def add_identifier_posting(identifier_type, value, row_index):
+        identifier_type = str(identifier_type or "").upper().replace("-", "_")
+        normalized_value = _normalize_identifier_index_value(value)
+        if not identifier_type or not normalized_value:
+            return
+        posting = identifier_postings.setdefault(
+            identifier_type, {}
+        ).setdefault(normalized_value, array("I"))
+        if row_index not in posting:
+            posting.append(row_index)
+
+    # One representative per exact package is sufficient for matching. The
+    # selected package is expanded to every shelf location only after ranking.
+    for row_index in representative_indices:
+        item = rows[int(row_index)][0]
+        add_identifier_posting("UPC", item.get("barcode"), row_index)
+        add_identifier_posting("GTIN", item.get("barcode"), row_index)
+        add_identifier_posting(
+            "FAMILIPRIX_CODE", item.get("product_code"), row_index
+        )
+        for identifier in item.get("_identifiers") or ():
+            add_identifier_posting(
+                identifier.get("type"), identifier.get("value"), row_index
+            )
     document_count = max(1, len(search_document_keys))
     _PROD_CACHE.update(
         key=key, rows=rows, built_at=time.time(), initialized=True,
+        database_token=database_token,
         generation=generation, state_checked_at=checked_at,
         metadata_dirty=False, metadata_dirty_at=0.0,
         document_frequency=dict(document_frequency),
@@ -1110,6 +1220,16 @@ def _products_corpus(db, allow_identifier_stale=False):
         statistics_rows_id=id(rows),
         catalog_brands=tuple(sorted(catalog_brands)),
         name_lead_frequency=dict(name_lead_frequency),
+        token_postings=token_postings,
+        token_prefixes=token_prefixes,
+        name_token_postings=name_token_postings,
+        name_tokens_by_initial=name_tokens_by_initial,
+        mapped_indices_by_key=mapped_indices_by_key,
+        document_in_stock=document_in_stock,
+        representative_indices=representative_indices,
+        document_barcodes=tuple(document_barcodes),
+        identifier_postings=identifier_postings,
+        product_id_to_key=product_id_to_key,
         last_build_ms=int(
             round((time.perf_counter() - build_started_at) * 1000)
         ),
@@ -1122,7 +1242,11 @@ def _products_corpus(db, allow_identifier_stale=False):
         verified_values_by_product, field_sources_by_product,
         identifiers_by_product, reference_identifiers_by_gtin,
         document_frequency, catalog_brands, name_lead_frequency,
-        search_document_keys,
+        search_document_keys, token_postings, token_prefixes,
+        name_token_postings, name_tokens_by_initial,
+        mapped_indices_by_key, document_in_stock,
+        representative_indices, document_barcodes,
+        identifier_postings, product_id_to_key,
     )
     release_unused_memory()
     return rows
@@ -1136,7 +1260,11 @@ def _employee_product_corpus(db):
     and atomically swaps in the new version. Only a genuinely cold process
     performs a synchronous build; Render warms that process before real use.
     """
-    warm_rows = _PROD_CACHE.get("rows")
+    database_token = _product_cache_database_token(db)
+    warm_rows = _PROD_CACHE.get("rows") if (
+        database_token is None
+        or _PROD_CACHE.get("database_token") == database_token
+    ) else None
     if warm_rows:
         if not _product_corpus_fast_ready():
             _schedule_product_corpus_refresh()
@@ -1172,6 +1300,16 @@ def product_search_cache_status():
         "last_build_rows": int(_PROD_CACHE.get("last_build_rows", 0) or 0),
         "last_build_rss_mb": _PROD_CACHE.get("last_build_rss_mb"),
         "last_build_at": float(_PROD_CACHE.get("last_build_at", 0) or 0),
+        "indexed_terms": len(_PROD_CACHE.get("token_postings") or {}),
+        "indexed_products": len(
+            _PROD_CACHE.get("representative_indices") or ()
+        ),
+        "indexed_identifier_values": sum(
+            len(values)
+            for values in (
+                _PROD_CACHE.get("identifier_postings") or {}
+            ).values()
+        ),
     }
 
 
@@ -3509,6 +3647,18 @@ _IDENTIFIER_SEARCH_FIELDS = {
 }
 
 
+def _normalize_identifier_index_value(value):
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return ""
+    if re.fullmatch(r"[\d\s.\-]+", raw_value):
+        return normalized_digits(raw_value)
+    return re.sub(
+        r"[\s\-]+", "",
+        unicodedata.normalize("NFKC", raw_value).upper(),
+    )
+
+
 def _strict_identifier_values(product, field):
     field = str(field or "").strip().lower()
     identifiers = product.get("_identifiers") or product.get("identifiers") or []
@@ -3569,6 +3719,76 @@ def rank_products_by_field(products, query, field, limit=60):
     return items[:limit] if limit else items
 
 
+def _indexed_identifier_products(corpus, query, field, limit=60):
+    """Resolve an explicit identifier from the warm in-memory index.
+
+    ``None`` means no compatible warm index exists and the database fallback
+    should run. An empty list is a definitive no-match for this snapshot.
+    """
+    if (
+        _PROD_CACHE.get("rows") is not corpus
+        or _PROD_CACHE.get("statistics_rows_id") != id(corpus)
+    ):
+        return None
+    postings_by_type = _PROD_CACHE.get("identifier_postings") or {}
+    if not postings_by_type:
+        return None
+    field = str(field or "").strip().lower()
+    if field in {"upc", "gtin"}:
+        allowed_types = {"UPC", "GTIN"}
+    elif field in {"code", "familiprix_code"}:
+        allowed_types = {"FAMILIPRIX_CODE"}
+    elif field in {"identifier", "all_identifiers"}:
+        allowed_types = set(postings_by_type)
+    elif field in _IDENTIFIER_SEARCH_FIELDS:
+        allowed_types = _IDENTIFIER_SEARCH_FIELDS[field]
+    else:
+        return []
+    needle = _normalize_identifier_index_value(query)
+    if not needle:
+        return []
+
+    ranked_indices = {}
+    for identifier_type in allowed_types:
+        for value, row_indices in postings_by_type.get(
+            identifier_type, {}
+        ).items():
+            score = _strict_identifier_score(value, query)
+            if not score:
+                continue
+            for row_index in row_indices:
+                index = int(row_index)
+                ranked_indices[index] = max(
+                    score, ranked_indices.get(index, 0)
+                )
+    if not ranked_indices:
+        return []
+
+    row_limit = min(max(int(limit or 60) * 4, 80), 400)
+    representative_indices = sorted(
+        ranked_indices,
+        key=lambda index: (
+            -ranked_indices[index],
+            location_sort_key(corpus[index][0]),
+        ),
+    )[:row_limit]
+    mapped_indices = _PROD_CACHE.get("mapped_indices_by_key") or {}
+    ranked_rows = []
+    for representative_index in representative_indices:
+        item, row = corpus[representative_index]
+        key = _mapped_product_key(item, row)
+        for row_index in mapped_indices.get(key, (representative_index,)):
+            product = corpus[int(row_index)][0]
+            ranked_rows.append((ranked_indices[representative_index], product))
+    ranked_rows.sort(key=lambda entry: (
+        -entry[0],
+        1 if entry[1].get("in_stock") == 0 else 0,
+        location_sort_key(entry[1]),
+    ))
+    products = [product for _score, product in ranked_rows]
+    return products[:limit] if limit else products
+
+
 def _direct_identifier_products(db, query, field, limit=60):
     """Indexed cold-start path for explicit identifiers.
 
@@ -3592,6 +3812,28 @@ def _direct_identifier_products(db, query, field, limit=60):
     )
     if not needle:
         return []
+    warm_corpus = (
+        _PROD_CACHE.get("rows")
+        if (
+            _PROD_CACHE.get("database_token")
+            == _product_cache_database_token(db)
+            and _product_corpus_fast_ready()
+        )
+        else None
+    )
+    if _PROD_CACHE.get("rows") and warm_corpus is None:
+        _schedule_product_corpus_refresh()
+    if warm_corpus:
+        indexed = _indexed_identifier_products(
+            warm_corpus, query, field, limit=limit
+        )
+        # Metadata synchronization may have added a brand-new candidate since
+        # the last bounded refresh. A cache hit is authoritative; on a miss
+        # while dirty, retain the database fallback for immediate availability.
+        if indexed is not None and (
+            indexed or not _PROD_CACHE.get("metadata_dirty")
+        ):
+            return indexed
     escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     pattern = f"%{escaped}%"
     id_status = _searchable_identifier_status_sql("pi")
@@ -3837,6 +4079,106 @@ def _fuzzy_product_score(row, query_tokens):
     return best
 
 
+def _indexed_client_search_entries(
+    corpus, *, literal_terms=(), intent_terms=(), abbreviations=(),
+    fuzzy_terms=(), digit_terms=(), exact_barcodes=(),
+):
+    """Return a small indexed subset of the warm corpus for client retrieval.
+
+    ``None`` means the index cannot safely narrow this query and the caller
+    should use the complete corpus. An empty list is a confident no-match.
+    """
+    if (
+        _PROD_CACHE.get("rows") is not corpus
+        or _PROD_CACHE.get("statistics_rows_id") != id(corpus)
+    ):
+        return None
+    postings = _PROD_CACHE.get("token_postings") or {}
+    representative_indices = _PROD_CACHE.get("representative_indices") or ()
+    if not postings or not representative_indices:
+        return None
+
+    candidate_indices = set()
+    has_search_signal = False
+    prefixes = _PROD_CACHE.get("token_prefixes") or {}
+
+    def add_normalized_term(raw_term):
+        nonlocal has_search_signal
+        for term in normalize_search_text(raw_term).split():
+            if len(term) < 2:
+                continue
+            has_search_signal = True
+            candidate_indices.update(postings.get(term, ()))
+            if len(term) < 4 or not term[0].isalpha():
+                continue
+            for indexed_token in prefixes.get(term[:4], ()):
+                if (
+                    indexed_token.startswith(term)
+                    or term.startswith(indexed_token)
+                ):
+                    candidate_indices.update(
+                        postings.get(indexed_token, ())
+                    )
+
+    for term in literal_terms:
+        add_normalized_term(term)
+    for term in intent_terms:
+        add_normalized_term(term)
+    for term in abbreviations:
+        add_normalized_term(term)
+
+    normalized_digit_terms = {
+        normalized_digits(term) for term in digit_terms
+        if len(normalized_digits(term)) >= 4
+    }
+    normalized_exact_barcodes = {
+        normalized_digits(value) for value in exact_barcodes
+        if normalized_digits(value)
+    }
+    if normalized_digit_terms or normalized_exact_barcodes:
+        has_search_signal = True
+        for row_index, barcode in (
+            _PROD_CACHE.get("document_barcodes") or ()
+        ):
+            if barcode in normalized_exact_barcodes or any(
+                barcode == digits
+                or barcode.endswith(digits)
+                or digits in barcode
+                for digits in normalized_digit_terms
+            ):
+                candidate_indices.add(int(row_index))
+
+    name_postings = _PROD_CACHE.get("name_token_postings") or {}
+    names_by_initial = _PROD_CACHE.get("name_tokens_by_initial") or {}
+    for raw_term in fuzzy_terms:
+        query_token = normalize_search_text(raw_term)
+        if len(query_token) < 4:
+            continue
+        has_search_signal = True
+        variants = [query_token]
+        if len(query_token) >= 6 and query_token[0] in {"d", "l"}:
+            variants.append(query_token[1:])
+        for variant in variants:
+            if not variant:
+                continue
+            for product_token in names_by_initial.get(variant[0], ()):
+                if len(product_token) < 4:
+                    continue
+                if SequenceMatcher(None, variant, product_token).ratio() < 0.78:
+                    continue
+                candidate_indices.update(
+                    name_postings.get(product_token, ())
+                )
+
+    if not has_search_signal:
+        return None
+    return [
+        corpus[row_index]
+        for row_index in sorted(candidate_indices)
+        if 0 <= int(row_index) < len(corpus)
+    ]
+
+
 def _normalized_token_count(text, token):
     """Count a normalized token without allocating ``text.split()``."""
     if not text or not token:
@@ -3988,7 +4330,10 @@ def _explicit_catalogue_identity(question, corpus, document_count):
     normalized_query = normalize_search_text(question)
     if not normalized_query:
         return (), ()
-    if _PROD_CACHE.get("statistics_rows_id") == id(corpus):
+    if (
+        _PROD_CACHE.get("rows") is corpus
+        and _PROD_CACHE.get("statistics_rows_id") == id(corpus)
+    ):
         catalog_brands = set(_PROD_CACHE.get("catalog_brands") or ())
         name_lead_frequency = (
             _PROD_CACHE.get("name_lead_frequency") or {}
@@ -4074,10 +4419,8 @@ def _materialize_mapped_products(corpus, ordered_keys, limit=100):
     ordered = list(dict.fromkeys(ordered_keys))[:max(1, min(int(limit), 100))]
     wanted = set(ordered)
     products_by_key = {}
-    for item, row in corpus:
-        key = _mapped_product_key(item, row)
-        if key not in wanted:
-            continue
+
+    def add_product_row(key, item):
         product = products_by_key.get(key)
         location = _client_location(item)
         if product is None:
@@ -4086,29 +4429,75 @@ def _materialize_mapped_products(corpus, ordered_keys, limit=100):
             product["catalog_only"] = False
             product["locations"] = [location]
             products_by_key[key] = product
-            continue
+            return
         if location not in product["locations"]:
             product["locations"].append(location)
         if not product.get("image_url") and item.get("image_url"):
             product["image_url"] = item.get("image_url")
         product["in_stock"] = 1 if product.get("in_stock") or item.get("in_stock") else 0
         product["is_plano"] = 1 if product.get("is_plano") or item.get("is_plano") else 0
+
+    cached_indices = (
+        _PROD_CACHE.get("mapped_indices_by_key") or {}
+        if (
+            _PROD_CACHE.get("rows") is corpus
+            and _PROD_CACHE.get("statistics_rows_id") == id(corpus)
+        )
+        else {}
+    )
+    if cached_indices:
+        for key in ordered:
+            for row_index in cached_indices.get(key, ()):
+                if 0 <= int(row_index) < len(corpus):
+                    add_product_row(key, corpus[int(row_index)][0])
+    else:
+        for item, row in corpus:
+            key = _mapped_product_key(item, row)
+            if key in wanted:
+                add_product_row(key, item)
     return [products_by_key[key] for key in ordered if key in products_by_key]
 
 
 def client_products_by_ids(candidate_ids, limit=60):
     """Reload trusted mapped products selected in an earlier client turn."""
-    wanted = {str(value or "").strip() for value in candidate_ids or []}
-    if not wanted:
+    requested = list(dict.fromkeys(
+        str(value or "").strip()
+        for value in candidate_ids or []
+        if str(value or "").strip()
+    ))
+    if not requested:
         return []
     corpus = _employee_product_corpus(get_db())
     ordered_keys = []
-    for item, row in corpus:
-        if _client_candidate_id(item) not in wanted:
-            continue
-        key = _mapped_product_key(item, row)
-        if key not in ordered_keys:
-            ordered_keys.append(key)
+    product_id_to_key = (
+        _PROD_CACHE.get("product_id_to_key") or {}
+        if (
+            _PROD_CACHE.get("rows") is corpus
+            and _PROD_CACHE.get("statistics_rows_id") == id(corpus)
+        )
+        else {}
+    )
+    unresolved = set(requested)
+    if product_id_to_key:
+        for candidate_id in requested:
+            match = re.fullmatch(r"product:(\d+)", candidate_id)
+            if not match:
+                continue
+            key = product_id_to_key.get(int(match.group(1)))
+            if key is not None and key not in ordered_keys:
+                ordered_keys.append(key)
+                unresolved.discard(candidate_id)
+    if unresolved:
+        for item, row in corpus:
+            candidate_id = _client_candidate_id(item)
+            if candidate_id not in unresolved:
+                continue
+            key = _mapped_product_key(item, row)
+            if key not in ordered_keys:
+                ordered_keys.append(key)
+            unresolved.discard(candidate_id)
+            if not unresolved:
+                break
     return _materialize_mapped_products(corpus, ordered_keys, limit=limit)
 
 
@@ -4178,7 +4567,8 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
     # query. This removes a full-store tokenization pass from every search.
     retrieval_token_set = set(retrieval_tokens)
     if (
-        _PROD_CACHE.get("statistics_rows_id") == id(corpus)
+        _PROD_CACHE.get("rows") is corpus
+        and _PROD_CACHE.get("statistics_rows_id") == id(corpus)
         and _PROD_CACHE.get("document_frequency") is not None
     ):
         document_frequency = _PROD_CACHE.get("document_frequency") or {}
@@ -4224,13 +4614,44 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         if 8 <= len(digits) <= 14:
             upc_digits.update(normalized_digits(c) for c in build_barcode_candidates(digits))
 
+    indexed_entries = _indexed_client_search_entries(
+        corpus,
+        literal_terms=retrieval_tokens,
+        intent_terms=[
+            term
+            for _nq, _dq, _qtokens, terms, _abbrevs in prepared_queries
+            for term in terms
+        ],
+        abbreviations=[
+            abbreviation
+            for _nq, _dq, _qtokens, _terms, abbreviations in prepared_queries
+            for abbreviation in abbreviations
+        ],
+        fuzzy_terms=fuzzy_tokens,
+        digit_terms=[
+            digits for _nq, digits, _qtokens, _terms, _abbrevs
+            in prepared_queries if digits
+        ],
+        exact_barcodes=upc_digits,
+    )
+    search_entries = corpus if indexed_entries is None else indexed_entries
+    cached_stock = (
+        _PROD_CACHE.get("document_in_stock") or {}
+        if (
+            _PROD_CACHE.get("rows") is corpus
+            and _PROD_CACHE.get("statistics_rows_id") == id(corpus)
+        )
+        else {}
+    )
     scored = {}
     seen_documents = set()
-    for item, row in corpus:
+    for item, row in search_entries:
         key = _mapped_product_key(item, row)
         if key in seen_documents:
             existing = scored.get(key)
-            if existing and item.get("in_stock"):
+            if existing and (
+                cached_stock.get(key) or item.get("in_stock")
+            ):
                 existing["in_stock"] = 1
             continue
         seen_documents.add(key)
@@ -4301,7 +4722,9 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         if score >= 90:
             scored[key] = {
                 "score": score,
-                "in_stock": 1 if item.get("in_stock") else 0,
+                "in_stock": 1 if (
+                    cached_stock.get(key) or item.get("in_stock")
+                ) else 0,
                 "name": normalize_search_text(item.get("name", "")),
             }
 
@@ -4540,8 +4963,52 @@ def search_products():
     excluded_concepts = client_excluded_concept_terms(query)
     analgesic_name_required = _is_headache_request(query) or _is_fever_request(query)
     electric_request = _is_electric_toothbrush_request(query)
+    document_frequency = (
+        _PROD_CACHE.get("document_frequency") or {}
+        if (
+            _PROD_CACHE.get("rows") is corpus
+            and _PROD_CACHE.get("statistics_rows_id") == id(corpus)
+        )
+        else {}
+    )
+    fuzzy_terms = [
+        token for token in qtokens
+        if (
+            len(token) >= 4
+            and document_frequency.get(token, 0) == 0
+            and any(character.isalpha() for character in token)
+        )
+    ]
+    exact_barcodes = set()
+    if 8 <= len(dq) <= 14:
+        exact_barcodes.update(
+            normalized_digits(candidate)
+            for candidate in build_barcode_candidates(dq)
+        )
+    indexed_entries = _indexed_client_search_entries(
+        corpus,
+        literal_terms=qtokens,
+        intent_terms=intent_terms,
+        abbreviations=abbrevs,
+        fuzzy_terms=fuzzy_terms,
+        digit_terms=[dq] if dq else (),
+        exact_barcodes=exact_barcodes,
+    )
+    search_entries = corpus
+    if indexed_entries is not None:
+        candidate_keys = {
+            _mapped_product_key(item, row)
+            for item, row in indexed_entries
+        }
+        mapped_indices = _PROD_CACHE.get("mapped_indices_by_key") or {}
+        search_entries = [
+            corpus[int(row_index)]
+            for key in candidate_keys
+            for row_index in mapped_indices.get(key, ())
+            if 0 <= int(row_index) < len(corpus)
+        ]
     ranked = []
-    for item, row in corpus:
+    for item, row in search_entries:
         if analgesic_name_required and not _headache_relief_named_product(
             f"{row.get('_name', '')} {row.get('_brand', '')}",
             normalized=True,
