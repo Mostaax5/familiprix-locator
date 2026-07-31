@@ -75,6 +75,7 @@ class ClientRagTests(unittest.TestCase):
         )
         with ai_module._DOCUMENTED_ANSWER_CACHE_LOCK:
             ai_module._DOCUMENTED_ANSWER_CACHE.clear()
+            ai_module._DOCUMENTED_JOBS.clear()
 
     def test_outbound_lookup_urls_cannot_reach_other_or_insecure_hosts(self):
         base = "https://example.com/catalog"
@@ -1158,9 +1159,80 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertLess(elapsed, 0.06)
         self.assertTrue(result["degraded"])
+        self.assertTrue(result["_ai_pending"])
+        self.assertTrue(result["_documented_job_id"])
         self.assertIn("product:1", result["selected_product_ids"])
         # Let the bounded worker release its one request slot.
         time.sleep(0.1)
+
+    def test_documented_background_answer_becomes_pollable_and_cached(self):
+        question = "Compare le produit asynchrone unique"
+        query_plan = build_client_query_plan(question, "documented")
+        candidates = [{
+            "client_id": "product:async",
+            "name": "PRODUIT ASYNCHRONE",
+            "description": "Description exacte et suffisamment précise.",
+        }]
+        documents = [{
+            "source_id": "catalog:async",
+            "evidence": "Fiche exacte du produit asynchrone.",
+            "candidate_ids": ["product:async"],
+        }]
+        generated = {
+            "answer": (
+                "Réponse approfondie terminée avec les différences "
+                "exactement documentées pour ce produit."
+            ),
+            "selected_product_ids": ["product:async"],
+            "follow_up_questions": [],
+            "safety_flags": [],
+            "pharmacist_referral": False,
+            "pharmacist_reason": "",
+            "key_points": [],
+            "comparisons": [],
+            "useful_guidance": [],
+            "important_checks": [],
+            "source_ids": ["catalog:async"],
+            "degraded": False,
+            "warning": "",
+        }
+
+        def slightly_slow_answer(*_args, **_kwargs):
+            time.sleep(0.08)
+            return dict(generated)
+
+        with patch(
+            "routes.ai._DOCUMENTED_AI_HARD_TIMEOUT_SECONDS", 0.005,
+        ), patch(
+            "routes.ai._generate_documented_client_answer_sync",
+            side_effect=slightly_slow_answer,
+        ) as generator:
+            immediate = generate_documented_client_answer(
+                question, query_plan, candidates, documents,
+            )
+            self.assertTrue(immediate["_ai_pending"])
+            job_id = immediate["_documented_job_id"]
+            with app.test_client() as client:
+                pending_response = client.get(
+                    f"/api/client/help/documented/{job_id}"
+                )
+            self.assertEqual(pending_response.status_code, 202)
+            time.sleep(0.12)
+            job = ai_module._documented_job_status(job_id)
+            with app.test_client() as client:
+                ready_response = client.get(
+                    f"/api/client/help/documented/{job_id}"
+                )
+            cached = generate_documented_client_answer(
+                question, query_plan, candidates, documents,
+            )
+
+        self.assertEqual(generator.call_count, 1)
+        self.assertEqual(job["status"], "ready")
+        self.assertEqual(job["result"]["answer"], generated["answer"])
+        self.assertEqual(ready_response.status_code, 200)
+        self.assertTrue(ready_response.get_json()["ready"])
+        self.assertTrue(cached["_cache_hit"])
 
     def test_documented_headache_fallback_remains_useful_when_ai_times_out(self):
         products = [{

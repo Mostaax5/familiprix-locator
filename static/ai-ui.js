@@ -518,7 +518,9 @@ function renderLatestAssistantDetails(result, exchangeId, includeActions=true) {
   const links = highlighted.map(product => clientProductLink(product, '', exchangeId)).join('<span class="client-link-sep"> · </span>');
   return `
     ${renderClientResponseMode(result)}
-    ${result?.degraded ? `<div class="msg info client-ai-fallback">${esc(result.warning || 'Réponse de secours fondée sur les données disponibles.')}</div>` : ''}
+    ${result?.ai_pending
+      ? '<div class="msg info client-ai-fallback">Réponse immédiate affichée. Approfondissement en cours.</div>'
+      : (result?.degraded ? `<div class="msg info client-ai-fallback">${esc(result.warning || 'Réponse de secours fondée sur les données disponibles.')}</div>` : '')}
     ${result?.response_mode === 'documented' ? '<div class="client-doc-heading">À dire au client</div>' : ''}
     <div class="client-chat-answer">${renderQuotableClientAnswer(result?.answer || advice.summary || '', products, exchangeId)}</div>
     ${links ? `<div class="client-answer-products"><span>Produits cités :</span> ${links}</div>` : ''}
@@ -1491,6 +1493,112 @@ function updateClientExchangeResult(exchangeId, rawResult) {
   persistClientDraft();
 }
 
+function mergeDocumentedClientUpgrade(baseResult, upgrade, elapsedMs=0) {
+  const base = prepareClientResult(baseResult);
+  const finalResult = upgrade && typeof upgrade === 'object' ? upgrade : {};
+  const selectedIds = Array.isArray(finalResult.selected_product_ids)
+    ? finalResult.selected_product_ids.slice(0, 16).map(String) : [];
+  const selectedSet = new Set(selectedIds);
+  const documentation = base.advice?.documentation || {};
+  const allSources = Array.isArray(documentation.sources)
+    ? documentation.sources : [];
+  const usedSourceIds = new Set(
+    Array.isArray(finalResult.source_ids)
+      ? finalResult.source_ids.map(String) : []
+  );
+  let sources = usedSourceIds.size
+    ? allSources.filter(source => (
+      String(source?.source_id || '') === 'store-plan'
+      || usedSourceIds.has(String(source?.source_id || ''))
+    ))
+    : allSources;
+  if (sources.length === 1 && allSources.length > 1) sources = allSources;
+  const selectedProducts = base.products.filter(product => (
+    selectedSet.has(String(product.client_id || ''))
+  ));
+  return prepareClientResult({
+    ...base,
+    answer: String(finalResult.answer || base.answer || ''),
+    degraded: false,
+    warning: '',
+    ai_pending: false,
+    documented_job_id: '',
+    elapsed_ms: Math.max(
+      Number(base.elapsed_ms) || 0,
+      Number(elapsedMs) || 0
+    ),
+    highlighted_product_ids: selectedIds,
+    advice: {
+      ...base.advice,
+      summary: String(finalResult.answer || base.answer || ''),
+      recommended_product_names: selectedProducts.map(product => product.name),
+      recommended_products: selectedProducts.map(product => ({
+        candidate_id: product.client_id,
+        name: product.name,
+        brand: product.brand || '',
+        barcode: product.barcode || '',
+      })),
+      follow_up_questions: Array.isArray(finalResult.follow_up_questions)
+        ? finalResult.follow_up_questions : [],
+      safety_flags: Array.isArray(finalResult.safety_flags)
+        ? finalResult.safety_flags : [],
+      pharmacist_referral: Boolean(finalResult.pharmacist_referral),
+      pharmacist_reason: String(finalResult.pharmacist_reason || ''),
+      documentation: {
+        ...documentation,
+        key_points: Array.isArray(finalResult.key_points)
+          ? finalResult.key_points : [],
+        comparisons: Array.isArray(finalResult.comparisons)
+          ? finalResult.comparisons : [],
+        useful_guidance: Array.isArray(finalResult.useful_guidance)
+          ? finalResult.useful_guidance : [],
+        important_checks: Array.isArray(finalResult.important_checks)
+          ? finalResult.important_checks : [],
+        sources,
+      },
+    },
+  });
+}
+
+async function pollDocumentedClientUpgrade(jobId, exchangeId) {
+  if (
+    typeof apiGetDocumentedClientHelp !== 'function'
+    || !jobId || !exchangeId
+  ) return;
+  const delays = [1800, 2200, 2500, 2800, 3200, 3600, 4000];
+  for (const delay of delays) {
+    await new Promise(resolve => window.setTimeout(resolve, delay));
+    if (!findClientAssistantMessage(exchangeId)) return;
+    const response = await apiGetDocumentedClientHelp(jobId);
+    if (response?.ready && response.result) {
+      const assistant = findClientAssistantMessage(exchangeId);
+      if (!assistant?.result) return;
+      updateClientExchangeResult(
+        exchangeId,
+        mergeDocumentedClientUpgrade(
+          assistant.result, response.result, response.elapsed_ms
+        )
+      );
+      const status = document.getElementById('clientHelpStatus');
+      if (status && _clientVisibleExchangeId === exchangeId) {
+        status.textContent = 'Réponse documentée approfondie terminée.';
+      }
+      return;
+    }
+    if (response?.failed) {
+      const status = document.getElementById('clientHelpStatus');
+      if (status && _clientVisibleExchangeId === exchangeId) {
+        status.textContent = 'Réponse documentée immédiate conservée.';
+      }
+      return;
+    }
+  }
+  const status = document.getElementById('clientHelpStatus');
+  if (status && _clientVisibleExchangeId === exchangeId) {
+    status.textContent = 'Réponse documentée immédiate conservée.';
+  }
+}
+
 async function runClientRequest(question, options={}) {
   question = String(question || '').trim();
   const status = document.getElementById('clientHelpStatus');
@@ -1597,13 +1705,22 @@ async function runClientRequest(question, options={}) {
     return;
   }
   const prepared = prepareClientResult(result);
-  appendClientExchange(question, prepared, mode, requestId);
+  const exchangeId = appendClientExchange(
+    question, prepared, mode, requestId
+  );
   if (status) {
     const timing = result.elapsed_ms ? ` en ${(result.elapsed_ms / 1000).toFixed(1)} s` : '';
     const responseLabel = mode === 'documented' ? 'Réponse documentée' : 'Réponse avec IA';
-    status.textContent = result.degraded
+    status.textContent = result.ai_pending
+      ? `Réponse documentée immédiate${timing}; approfondissement en cours.`
+      : result.degraded
       ? `Réponse de secours${timing} : ${prepared.products.length} produit${prepared.products.length > 1 ? 's' : ''} du plan conservé${prepared.products.length > 1 ? 's' : ''}.`
       : `${responseLabel}${timing} : ${prepared.products.length} produit${prepared.products.length > 1 ? 's' : ''} vérifié${prepared.products.length > 1 ? 's' : ''}.`;
+  }
+  if (result.ai_pending && result.documented_job_id) {
+    void pollDocumentedClientUpgrade(
+      result.documented_job_id, exchangeId
+    );
   }
 }
 

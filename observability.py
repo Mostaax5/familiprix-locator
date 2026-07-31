@@ -54,13 +54,14 @@ def record_request(method, route, status_code, elapsed_ms):
 
 
 def record_ai_answer(mode, elapsed_ms, *, degraded=False, cache_hit=False,
-                     model="", product_count=0):
+                     pending=False, model="", product_count=0):
     with _LOCK:
         _AI_SAMPLES.append({
             "mode": str(mode or "")[:24],
             "elapsed_ms": max(0, int(elapsed_ms or 0)),
             "degraded": bool(degraded),
             "cache_hit": bool(cache_hit),
+            "pending": bool(pending),
             "model": str(model or "")[:80],
             "product_count": max(0, int(product_count or 0)),
             "recorded_at": time.time(),
@@ -103,6 +104,9 @@ def observability_snapshot():
             "p99_ms": _percentile(latencies, 0.99),
             "degraded": sum(1 for sample in matching if sample["degraded"]),
             "cache_hits": sum(1 for sample in matching if sample["cache_hit"]),
+            "pending": sum(
+                1 for sample in matching if sample.get("pending")
+            ),
             "last_model": next((
                 sample["model"] for sample in reversed(matching)
                 if sample["model"]

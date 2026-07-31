@@ -309,6 +309,26 @@ async function apiGenerateClientHelp(payload, signal) {
   }
 }
 
+async function apiGetDocumentedClientHelp(jobId) {
+  const cleanJobId = String(jobId || '').trim();
+  if (!/^[A-Za-z0-9_-]{20,64}$/.test(cleanJobId)) {
+    return {success: false, ready: false, failed: true};
+  }
+  try {
+    const {res, data} = await apiFetch(
+      `/api/client/help/documented/${encodeURIComponent(cleanJobId)}`
+    );
+    if (res.status === 202) {
+      return {success: true, ready: false, failed: false};
+    }
+    return res.ok
+      ? data
+      : {success: false, ready: false, failed: res.status === 404};
+  } catch (_) {
+    return {success: false, ready: false, failed: false};
+  }
+}
+
 async function apiGetProductImages(ids) {
   const cleanIds = [...new Set((ids || []).map(Number).filter(id => Number.isInteger(id) && id > 0))].slice(0, 100);
   if (!cleanIds.length) return {images: {}};

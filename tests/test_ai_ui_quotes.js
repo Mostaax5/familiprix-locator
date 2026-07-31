@@ -91,6 +91,7 @@ vm.runInContext(`${source}\n;globalThis.__quoteTest = {
   productMatchesClientConcepts,
   buildFastClientResult,
   prepareClientResult,
+  mergeDocumentedClientUpgrade,
   clientResultForStorage,
   renderDocumentedClientDetails,
   getClientSearchStateForStorage,
@@ -256,6 +257,39 @@ const storedLegacyFallback = context.__quoteTest.clientResultForStorage({
 });
 assert.ok(!storedLegacyFallback.warning.includes("DeepSeek"));
 assert.ok(storedLegacyFallback.warning.includes("réponse détaillée"));
+
+const upgradedDocumented = context.__quoteTest.mergeDocumentedClientUpgrade(
+  {
+    ...documentedResult,
+    degraded: true,
+    ai_pending: true,
+    documented_job_id: 'pending-job',
+  },
+  {
+    answer: 'Réponse approfondie finale.',
+    selected_product_ids: ['product:42'],
+    follow_up_questions: ['Quel format préférez-vous?'],
+    safety_flags: ['Vérifier l’étiquette.'],
+    pharmacist_referral: false,
+    pharmacist_reason: '',
+    key_points: [{
+      heading: 'Point final', detail: 'Détail final.',
+      source_ids: ['health-canada:12'],
+    }],
+    comparisons: [],
+    useful_guidance: [],
+    important_checks: [],
+    source_ids: ['health-canada:12'],
+  },
+  4200,
+);
+assert.strictEqual(upgradedDocumented.answer, 'Réponse approfondie finale.');
+assert.strictEqual(upgradedDocumented.degraded, false);
+assert.strictEqual(upgradedDocumented.ai_pending, false);
+assert.strictEqual(
+  upgradedDocumented.advice.documentation.key_points[0].heading,
+  'Point final',
+);
 
 const headacheGroups = context.__quoteTest.clientRequiredConceptGroups(
   'Jai male a la tete que prendre'

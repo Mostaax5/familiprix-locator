@@ -2,6 +2,7 @@ import json
 import hashlib
 import os
 import re
+import secrets
 import threading
 import time
 from collections import OrderedDict, defaultdict
@@ -259,9 +260,19 @@ try:
     )
 except (TypeError, ValueError):
     _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = 18
-_DOCUMENTED_AI_HARD_TIMEOUT_SECONDS = min(
-    13, _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS
-)
+try:
+    # Employees receive a complete grounded answer after this short foreground
+    # window. K3 keeps reasoning in the bounded background worker and upgrades
+    # that same answer card when its structured response is ready.
+    _DOCUMENTED_AI_HARD_TIMEOUT_SECONDS = min(
+        3.0,
+        max(
+            0.5,
+            float(os.environ.get("AI_DOCUMENTED_FOREGROUND_WAIT", "1.25")),
+        ),
+    )
+except (TypeError, ValueError):
+    _DOCUMENTED_AI_HARD_TIMEOUT_SECONDS = 1.25
 _DOCUMENTED_AI_EXECUTOR = ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="documented-ai",
 )
@@ -270,6 +281,9 @@ _DOCUMENTED_ANSWER_CACHE = OrderedDict()
 _DOCUMENTED_ANSWER_CACHE_LOCK = threading.Lock()
 _DOCUMENTED_ANSWER_CACHE_MAX = 96
 _DOCUMENTED_ANSWER_CACHE_TTL_SECONDS = 30 * 60
+_DOCUMENTED_JOBS = OrderedDict()
+_DOCUMENTED_JOB_MAX = 32
+_DOCUMENTED_JOB_TTL_SECONDS = 10 * 60
 try:
     _AI_QUERY_PLAN_TIMEOUT_SECONDS = min(
         7, max(3, int(os.environ.get("AI_QUERY_PLAN_TIMEOUT", "5")))
@@ -5268,14 +5282,12 @@ def _documented_answer_cache_get(key):
 
 
 def _documented_answer_cache_set(key, result):
-    if (
-        not isinstance(result, dict)
-        or result.get("degraded")
-        or len(str(result.get("answer", "") or "").strip()) < 45
-    ):
+    if not _documented_answer_is_cacheable(result):
         return
     stored = json.loads(json.dumps(result, ensure_ascii=False))
     stored.pop("_cache_hit", None)
+    stored.pop("_ai_pending", None)
+    stored.pop("_documented_job_id", None)
     with _DOCUMENTED_ANSWER_CACHE_LOCK:
         _DOCUMENTED_ANSWER_CACHE.pop(key, None)
         _DOCUMENTED_ANSWER_CACHE[key] = {
@@ -5283,6 +5295,89 @@ def _documented_answer_cache_set(key, result):
         }
         while len(_DOCUMENTED_ANSWER_CACHE) > _DOCUMENTED_ANSWER_CACHE_MAX:
             _DOCUMENTED_ANSWER_CACHE.popitem(last=False)
+
+
+def _documented_answer_is_cacheable(result):
+    return not (
+        not isinstance(result, dict)
+        or result.get("degraded")
+        or len(str(result.get("answer", "") or "").strip()) < 45
+    )
+
+
+def _documented_jobs_cleanup_locked(now=None):
+    now = float(now or time.time())
+    expired = [
+        job_id for job_id, entry in _DOCUMENTED_JOBS.items()
+        if now - float(entry.get("created_at", 0) or 0)
+        > _DOCUMENTED_JOB_TTL_SECONDS
+    ]
+    for job_id in expired:
+        _DOCUMENTED_JOBS.pop(job_id, None)
+    while len(_DOCUMENTED_JOBS) > _DOCUMENTED_JOB_MAX:
+        _DOCUMENTED_JOBS.popitem(last=False)
+
+
+def _documented_job_create():
+    job_id = secrets.token_urlsafe(24)
+    with _DOCUMENTED_ANSWER_CACHE_LOCK:
+        _documented_jobs_cleanup_locked()
+        _DOCUMENTED_JOBS[job_id] = {
+            "created_at": time.time(),
+            "status": "pending",
+            "result": None,
+            "elapsed_ms": 0,
+        }
+    return job_id
+
+
+def _documented_job_finish(job_id, result, elapsed_ms):
+    public_result = None
+    if _documented_answer_is_cacheable(result):
+        public_result = {
+            "answer": str(result.get("answer", "") or ""),
+            "selected_product_ids": list(
+                result.get("selected_product_ids") or []
+            )[:16],
+            "follow_up_questions": list(
+                result.get("follow_up_questions") or []
+            )[:4],
+            "safety_flags": list(result.get("safety_flags") or [])[:5],
+            "pharmacist_referral": bool(
+                result.get("pharmacist_referral", False)
+            ),
+            "pharmacist_reason": str(
+                result.get("pharmacist_reason", "") or ""
+            )[:1200],
+            "key_points": list(result.get("key_points") or [])[:6],
+            "comparisons": list(result.get("comparisons") or [])[:8],
+            "useful_guidance": list(
+                result.get("useful_guidance") or []
+            )[:6],
+            "important_checks": list(
+                result.get("important_checks") or []
+            )[:6],
+            "source_ids": list(result.get("source_ids") or [])[:16],
+        }
+    with _DOCUMENTED_ANSWER_CACHE_LOCK:
+        entry = _DOCUMENTED_JOBS.get(job_id)
+        if entry is None:
+            return
+        entry["status"] = "ready" if public_result else "failed"
+        entry["result"] = public_result
+        entry["elapsed_ms"] = max(0, int(elapsed_ms or 0))
+        _DOCUMENTED_JOBS.move_to_end(job_id)
+        _documented_jobs_cleanup_locked()
+
+
+def _documented_job_status(job_id):
+    with _DOCUMENTED_ANSWER_CACHE_LOCK:
+        _documented_jobs_cleanup_locked()
+        entry = _DOCUMENTED_JOBS.get(str(job_id or ""))
+        if not entry:
+            return None
+        _DOCUMENTED_JOBS.move_to_end(str(job_id))
+        return json.loads(json.dumps(entry, ensure_ascii=False))
 
 
 def generate_documented_client_answer(
@@ -5322,7 +5417,33 @@ def generate_documented_client_answer(
         finally:
             _DOCUMENTED_AI_GATE.release()
 
+    job_id = _documented_job_create()
+    job_started_at = time.perf_counter()
     future = _DOCUMENTED_AI_EXECUTOR.submit(task)
+
+    def finish_background(completed_future):
+        try:
+            completed_result = completed_future.result()
+        except Exception:
+            completed_result = None
+        elapsed_ms = int(
+            (time.perf_counter() - job_started_at) * 1000
+        )
+        if completed_result:
+            _documented_answer_cache_set(cache_key, completed_result)
+        _documented_job_finish(job_id, completed_result, elapsed_ms)
+        record_ai_answer(
+            "documented_background", elapsed_ms,
+            degraded=not _documented_answer_is_cacheable(
+                completed_result
+            ),
+            model=KIMI_DOCUMENTED_MODEL,
+            product_count=len(
+                (completed_result or {}).get("selected_product_ids") or []
+            ),
+        )
+
+    future.add_done_callback(finish_background)
     try:
         result = future.result(timeout=_DOCUMENTED_AI_HARD_TIMEOUT_SECONDS)
         _documented_answer_cache_set(cache_key, result)
@@ -5330,16 +5451,20 @@ def generate_documented_client_answer(
             result["_cache_hit"] = False
         return result
     except FutureTimeoutError:
-        # cancel() handles the rare not-yet-started case. A running network call
-        # retains the one AI slot until its own stream deadline closes it.
-        future.cancel()
         _set_ai_error(
-            "La reponse Kimi depasse le delai de service; "
-            "la reponse locale a ete utilisee."
+            "La reponse approfondie continue en arriere-plan; "
+            "la reponse documentee immediate a ete utilisee."
         )
-        return grounded_documented_fallback(
+        fallback = grounded_documented_fallback(
             query_plan, candidates, documents, degraded=True,
         )
+        fallback["warning"] = (
+            "Réponse immédiate fondée sur les données et sources disponibles; "
+            "l'analyse approfondie continue en arrière-plan."
+        )
+        fallback["_ai_pending"] = True
+        fallback["_documented_job_id"] = job_id
+        return fallback
 
 
 def generate_client_help_payload_deepseek(question, products):
@@ -7064,14 +7189,17 @@ def client_help():
         "pharmacist_reason": verified["pharmacist_reason"],
     }
     if response_mode == "documented":
-        used_source_ids = set(verified.get("source_ids", []))
-        source_documents = [
-            document for document in documents
-            if document.get("source_id") == "store-plan"
-            or document.get("source_id") in used_source_ids
-        ]
-        if len(source_documents) == 1 and len(documents) > 1:
+        if verified.get("_ai_pending"):
             source_documents = documents
+        else:
+            used_source_ids = set(verified.get("source_ids", []))
+            source_documents = [
+                document for document in documents
+                if document.get("source_id") == "store-plan"
+                or document.get("source_id") in used_source_ids
+            ]
+            if len(source_documents) == 1 and len(documents) > 1:
+                source_documents = documents
         advice["documentation"] = {
             "key_points": verified.get("key_points", []),
             "comparisons": verified.get("comparisons", []),
@@ -7132,10 +7260,20 @@ def client_help():
         "degraded": degraded,
         "warning": warning,
     }
+    if response_mode == "documented":
+        response_payload["ai_pending"] = bool(
+            verified.get("_ai_pending", False)
+        )
+        response_payload["documented_job_id"] = str(
+            verified.get("_documented_job_id", "") or ""
+        )
     record_ai_answer(
         response_mode, elapsed_ms,
-        degraded=degraded,
+        degraded=(
+            degraded and not verified.get("_ai_pending", False)
+        ),
         cache_hit=bool(verified.get("_cache_hit", False)),
+        pending=bool(verified.get("_ai_pending", False)),
         model=_AI_LAST_MODEL,
         product_count=len(candidates),
     )
@@ -7147,6 +7285,39 @@ def client_help():
             "documented_cache_hit": bool(verified.get("_cache_hit", False)),
         }
     return jsonify(response_payload)
+
+
+@ai_bp.route("/api/client/help/documented/<job_id>", methods=["GET"])
+def documented_client_help_status(job_id):
+    """Return a completed background K3 upgrade without rerunning retrieval."""
+    job_id = str(job_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{20,64}", job_id):
+        return jsonify({
+            "success": False, "error": "Réponse documentée invalide.",
+        }), 400
+    entry = _documented_job_status(job_id)
+    if entry is None:
+        return jsonify({
+            "success": False,
+            "ready": False,
+            "error": "Cette réponse documentée n'est plus disponible.",
+        }), 404
+    status = str(entry.get("status", "") or "")
+    if status == "pending":
+        return jsonify({
+            "success": True, "ready": False, "failed": False,
+        }), 202
+    if status != "ready" or not entry.get("result"):
+        return jsonify({
+            "success": True, "ready": False, "failed": True,
+        })
+    return jsonify({
+        "success": True,
+        "ready": True,
+        "failed": False,
+        "elapsed_ms": int(entry.get("elapsed_ms", 0) or 0),
+        "result": entry["result"],
+    })
 
 
 @ai_bp.route("/api/ai/feedback", methods=["POST"])
