@@ -20,8 +20,10 @@ from routes.products import (
     products_bp, first_column, schedule_backfill_missing,
     schedule_initial_product_quality_audit, schedule_reference_metadata_sync,
     product_payload_cache_ready, product_search_cache_ready,
+    reference_search_cache_ready,
     release_optional_product_caches_if_needed,
     warm_product_payload_cache, warm_product_search_cache,
+    warm_reference_search_cache,
 )
 from routes.layout import layout_bp
 from routes.ai import ai_bp, configured_ai_provider, reference_count, maybe_resume_enrichment
@@ -198,20 +200,22 @@ def healthz():
 @app.route("/readyz")
 def readyz():
     """Tell Render when this revision is ready for employee traffic."""
-    if not DB_BOOT_PENDING and not (
-        product_search_cache_ready() and product_payload_cache_ready()
-    ):
+    warmup = catalogue_warmup_status()
+    if not DB_BOOT_PENDING and warmup.get("stage") != "ready":
         ensure_catalogue_warmup_started()
+        warmup = catalogue_warmup_status()
     ready = bool(
         not DB_BOOT_PENDING
         and product_search_cache_ready()
         and product_payload_cache_ready()
+        and warmup.get("stage") == "ready"
     )
     return jsonify({
         "ok": ready,
         "search_ready": product_search_cache_ready(),
         "product_payload_ready": product_payload_cache_ready(),
-        "catalogue_warmup": catalogue_warmup_status(),
+        "reference_search_ready": reference_search_cache_ready(),
+        "catalogue_warmup": warmup,
     }), (200 if ready else 503)
 
 
@@ -360,6 +364,8 @@ def get_system_info():
         schema_status["ready"]
         and not DB_BOOT_PENDING
         and product_search_cache_ready()
+        and product_payload_cache_ready()
+        and catalogue_warmup_status().get("stage") == "ready"
     ):
         # Never let background enrichment compete with the cold employee-search
         # index. The post-boot worker builds it first; later health requests only
@@ -519,29 +525,42 @@ def catalogue_warmup_status():
 def _catalogue_warmup_worker():
     try:
         while not (
-            product_search_cache_ready() and product_payload_cache_ready()
+            product_search_cache_ready()
+            and product_payload_cache_ready()
+            and reference_search_cache_ready()
         ):
             with _CATALOGUE_WARMUP_LOCK:
                 _CATALOGUE_WARMUP["attempts"] += 1
                 attempt = int(_CATALOGUE_WARMUP["attempts"])
                 _CATALOGUE_WARMUP["stage"] = "search_index"
             try:
-                warmed_count = warm_product_search_cache()
-                print(
-                    f"[BOOT] Index de recherche pret: "
-                    f"{warmed_count} emplacements."
-                )
-                with _CATALOGUE_WARMUP_LOCK:
-                    _CATALOGUE_WARMUP["stage"] = "product_payload"
-                payload = warm_product_payload_cache()
-                print(
-                    f"[BOOT] Catalogue telephone pret: "
-                    f"{payload.get('rows', 0)} produits, "
-                    f"{payload.get('gzip_bytes', 0)} octets compresses."
-                )
+                if not product_search_cache_ready():
+                    warmed_count = warm_product_search_cache()
+                    print(
+                        f"[BOOT] Index de recherche pret: "
+                        f"{warmed_count} emplacements."
+                    )
+                if not product_payload_cache_ready():
+                    with _CATALOGUE_WARMUP_LOCK:
+                        _CATALOGUE_WARMUP["stage"] = "product_payload"
+                    payload = warm_product_payload_cache()
+                    print(
+                        f"[BOOT] Catalogue telephone pret: "
+                        f"{payload.get('rows', 0)} produits, "
+                        f"{payload.get('gzip_bytes', 0)} octets compresses."
+                    )
+                if not reference_search_cache_ready():
+                    with _CATALOGUE_WARMUP_LOCK:
+                        _CATALOGUE_WARMUP["stage"] = "reference_index"
+                    reference_rows = warm_reference_search_cache()
+                    print(
+                        f"[BOOT] Index catalogue pret: "
+                        f"{reference_rows} produits de reference."
+                    )
                 if not (
                     product_search_cache_ready()
                     and product_payload_cache_ready()
+                    and reference_search_cache_ready()
                 ):
                     time.sleep(2)
             except Exception as exc:  # noqa: BLE001 - retry while unready
@@ -567,9 +586,13 @@ def _catalogue_warmup_worker():
 
 def ensure_catalogue_warmup_started():
     """Start or recover warm-up from the real Gunicorn request process."""
-    if product_search_cache_ready() and product_payload_cache_ready():
-        return False
     with _CATALOGUE_WARMUP_LOCK:
+        if (
+            product_search_cache_ready()
+            and product_payload_cache_ready()
+            and _CATALOGUE_WARMUP["stage"] == "ready"
+        ):
+            return False
         if _CATALOGUE_WARMUP["active"]:
             return False
         _CATALOGUE_WARMUP.update(
@@ -614,9 +637,7 @@ def _start_persistence_services(*, background=False):
                 f"_restore_from_gist_if_empty impossible: {exc}"
             )
         ensure_catalogue_warmup_started()
-        while not (
-            product_search_cache_ready() and product_payload_cache_ready()
-        ):
+        while catalogue_warmup_status().get("stage") != "ready":
             time.sleep(1)
             ensure_catalogue_warmup_started()
         tasks = (

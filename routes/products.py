@@ -282,14 +282,20 @@ def _abbreviation_hit(name_norm, abbrevs):
 # full re-download + re-normalization of the whole catalogue every 90 seconds and
 # made a random search pay 10-20s on Render's small CPU ("forever to load").
 _REF_GEN = 0
-_REF_CACHE = {"gen": -1, "key": None, "rows": [], "built_at": 0.0}
+_REF_CACHE = {
+    "gen": -1, "key": None, "rows": [], "built_at": 0.0,
+    "initialized": False,
+}
 _REF_LOCK = threading.Lock()
 # Never rebuild more often than this. The enrichment stamps updated_at on EVERY
 # row it processes, so during a run the state key changes every few seconds —
 # rebuilding the ~9k-row corpus per search allocated 40-60 MB each time and ran
 # the 512 MB instance out of memory. Serving a ≤2-minute-stale catalogue during
 # a write burst is invisible to users; the memory spike was not.
-_REF_MIN_REBUILD_S = 120.0
+_REF_MIN_REBUILD_S = max(
+    300.0,
+    float(os.environ.get("REFERENCE_INDEX_REFRESH_SECONDS", "1800") or 1800),
+)
 
 
 def bump_reference_cache():
@@ -327,12 +333,12 @@ def _reference_corpus(db):
     key = (_REF_GEN, _reference_state_key(db))
 
     def _fresh_enough():
-        if _REF_CACHE["key"] == key and _REF_CACHE["rows"]:
+        if _REF_CACHE["key"] == key and _REF_CACHE.get("initialized"):
             return True
         # Rate-limit ONLY background write-drift (same generation): enrichment
         # stamps rows continuously. An explicit import bumps _REF_GEN and always
         # rebuilds immediately, so freshly imported products search instantly.
-        same_gen = bool(_REF_CACHE["rows"]) and _REF_CACHE["key"] is not None \
+        same_gen = bool(_REF_CACHE.get("initialized")) and _REF_CACHE["key"] is not None \
             and _REF_CACHE["key"][0] == _REF_GEN
         return same_gen and time.time() - _REF_CACHE["built_at"] < _REF_MIN_REBUILD_S
 
@@ -346,7 +352,9 @@ def _reference_corpus(db):
         # This index is optional and rebuildable. Drop the stale list before
         # allocating its replacement so an enrichment update cannot retain two
         # copies of the 9k-product catalogue at once.
-        _REF_CACHE.update(key=None, rows=[], built_at=0.0)
+        _REF_CACHE.update(
+            key=None, rows=[], built_at=0.0, initialized=False,
+        )
         release_unused_memory()
         rows = []
         verified_by_key = {}
@@ -423,8 +431,41 @@ def _reference_corpus(db):
             # search form stays in memory; full metadata is hydrated for the top
             # results from PostgreSQL after ranking.
             d.clear()
-        _REF_CACHE.update(key=key, rows=rows, built_at=time.time())
+        _REF_CACHE.update(
+            key=key, rows=rows, built_at=time.time(), initialized=True,
+        )
     return rows
+
+
+def reference_search_cache_ready(db=None):
+    rows = _REF_CACHE.get("rows") or []
+    key = _REF_CACHE.get("key")
+    if not _REF_CACHE.get("initialized") or not key or key[0] != _REF_GEN:
+        return False
+    if time.time() - float(_REF_CACHE.get("built_at", 0) or 0) < _REF_MIN_REBUILD_S:
+        return True
+    if db is None:
+        return False
+    return key == (_REF_GEN, _reference_state_key(db))
+
+
+def warm_reference_search_cache():
+    """Prepare the compact all-planogram index before employee searches."""
+    if reference_search_cache_ready():
+        return len(_REF_CACHE.get("rows") or [])
+    db = None
+    try:
+        db = connect_db()
+        with memory_intensive_task("reference_index_warm", priority=True):
+            rows = _reference_corpus(db)
+        return len(rows)
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+        release_unused_memory()
 
 
 def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
@@ -3548,7 +3589,9 @@ def release_optional_product_caches():
     """
     with _REF_LOCK:
         reference_rows = len(_REF_CACHE.get("rows") or [])
-        _REF_CACHE.update(gen=-1, key=None, rows=[], built_at=0.0)
+        _REF_CACHE.update(
+            gen=-1, key=None, rows=[], built_at=0.0, initialized=False,
+        )
 
     now = time.time()
     with _IMAGE_FILL_STATE_LOCK:
@@ -5240,10 +5283,15 @@ def reference_search():
     db = get_db()
     placed = {normalized_digits(r["barcode"]) for r in
               db.execute("SELECT barcode FROM products WHERE TRIM(COALESCE(barcode,'')) <> ''").fetchall()}
-    with memory_intensive_task("reference_search", priority=True):
+    if reference_search_cache_ready(db):
         results = rank_reference_for_query(
             query, limit=limit, exclude_barcodes=placed, field=field
         )
+    else:
+        with memory_intensive_task("reference_search", priority=True):
+            results = rank_reference_for_query(
+                query, limit=limit, exclude_barcodes=placed, field=field
+            )
     return jsonify(results)
 
 

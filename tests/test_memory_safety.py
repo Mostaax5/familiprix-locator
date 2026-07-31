@@ -457,6 +457,28 @@ class MemorySafetyTests(unittest.TestCase):
             products._REF_CACHE.clear()
             products._REF_CACHE.update(original_reference)
 
+    def test_warm_reference_search_never_waits_for_enrichment_gate(self):
+        app = Flask(__name__)
+        fake_db = MagicMock()
+        fake_db.execute.return_value.fetchall.return_value = []
+        with app.test_request_context(
+            "/api/products/reference-search?q=melatonine",
+        ), patch.object(
+            products, "get_db", return_value=fake_db,
+        ), patch.object(
+            products, "reference_search_cache_ready", return_value=True,
+        ), patch.object(
+            products, "rank_reference_for_query", return_value=[],
+        ) as rank, patch.object(
+            products, "memory_intensive_task",
+            side_effect=AssertionError("warm search must not enter heavy gate"),
+        ):
+            response = products.reference_search()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), [])
+        rank.assert_called_once()
+
     def test_bm25_token_counter_does_not_match_substrings(self):
         haystack = "advil confort advil ibuprofene"
         self.assertEqual(products._normalized_token_count(haystack, "advil"), 2)

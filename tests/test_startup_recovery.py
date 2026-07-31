@@ -7,7 +7,7 @@ import app as app_module
 class StartupRecoveryTests(unittest.TestCase):
     def test_catalogue_warmup_recovers_after_transient_failure(self):
         original_state = app_module.catalogue_warmup_status()
-        ready = {"search": False, "payload": False}
+        ready = {"search": False, "payload": False, "reference": False}
         attempts = {"search": 0}
 
         def warm_search():
@@ -20,6 +20,10 @@ class StartupRecoveryTests(unittest.TestCase):
         def warm_payload():
             ready["payload"] = True
             return {"rows": 5521, "gzip_bytes": 1853096}
+
+        def warm_reference():
+            ready["reference"] = True
+            return 9418
 
         try:
             with app_module._CATALOGUE_WARMUP_LOCK:
@@ -34,11 +38,17 @@ class StartupRecoveryTests(unittest.TestCase):
                 app_module, "product_payload_cache_ready",
                 side_effect=lambda: ready["payload"],
             ), patch.object(
+                app_module, "reference_search_cache_ready",
+                side_effect=lambda: ready["reference"],
+            ), patch.object(
                 app_module, "warm_product_search_cache",
                 side_effect=warm_search,
             ), patch.object(
                 app_module, "warm_product_payload_cache",
                 side_effect=warm_payload,
+            ), patch.object(
+                app_module, "warm_reference_search_cache",
+                side_effect=warm_reference,
             ), patch.object(app_module.time, "sleep") as sleep:
                 app_module._catalogue_warmup_worker()
 
