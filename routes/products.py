@@ -476,7 +476,6 @@ def warm_reference_search_cache():
                 db.close()
             except Exception:
                 pass
-        release_unused_memory()
 
 
 def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
@@ -1406,7 +1405,6 @@ def warm_product_search_cache():
                 db.close()
             except Exception:
                 pass
-        release_unused_memory()
 
 
 def _schedule_product_corpus_refresh():
@@ -1676,7 +1674,6 @@ def warm_product_payload_cache(*, blocking=True):
             raise RuntimeError("Le catalogue produits n'est pas initialise.")
         with memory_intensive_task("product_payload_warm", priority=True):
             status = _build_product_payload_files(corpus, target_key)
-        release_unused_memory()
         return status
     finally:
         if db is not None:

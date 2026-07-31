@@ -200,10 +200,10 @@ def healthz():
 @app.route("/readyz")
 def readyz():
     """Tell Render when this revision is ready for employee traffic."""
-    warmup = catalogue_warmup_status()
+    warmup = reconcile_catalogue_warmup_state()
     if not DB_BOOT_PENDING and warmup.get("stage") != "ready":
         ensure_catalogue_warmup_started()
-        warmup = catalogue_warmup_status()
+        warmup = reconcile_catalogue_warmup_state()
     ready = bool(
         not DB_BOOT_PENDING
         and product_search_cache_ready()
@@ -365,7 +365,7 @@ def get_system_info():
         and not DB_BOOT_PENDING
         and product_search_cache_ready()
         and product_payload_cache_ready()
-        and catalogue_warmup_status().get("stage") == "ready"
+        and reconcile_catalogue_warmup_state().get("stage") == "ready"
     ):
         # Never let background enrichment compete with the cold employee-search
         # index. The post-boot worker builds it first; later health requests only
@@ -408,7 +408,7 @@ def get_system_info():
         "version": os.environ.get("RENDER_GIT_COMMIT", "")[:7],
         "self_keepalive": _SELF_KEEPALIVE_ACTIVE,
         "catalogue_schema": schema_status,
-        "catalogue_warmup": catalogue_warmup_status(),
+        "catalogue_warmup": reconcile_catalogue_warmup_state(),
         "database_boot_pending": bool(DB_BOOT_PENDING),
         "database_boot_error": bool(DB_BOOT_ERROR),
     })
@@ -519,6 +519,22 @@ _CATALOGUE_WARMUP = {
 
 def catalogue_warmup_status():
     with _CATALOGUE_WARMUP_LOCK:
+        return dict(_CATALOGUE_WARMUP)
+
+
+def reconcile_catalogue_warmup_state():
+    """Publish ready when all immutable caches exist, even if cleanup lingers."""
+    if not (
+        product_search_cache_ready()
+        and product_payload_cache_ready()
+        and reference_search_cache_ready()
+    ):
+        return catalogue_warmup_status()
+    with _CATALOGUE_WARMUP_LOCK:
+        if _CATALOGUE_WARMUP["stage"] != "ready":
+            _CATALOGUE_WARMUP.update(
+                stage="ready", last_error="", ready_at=time.time(),
+            )
         return dict(_CATALOGUE_WARMUP)
 
 

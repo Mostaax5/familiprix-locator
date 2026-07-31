@@ -64,6 +64,30 @@ class StartupRecoveryTests(unittest.TestCase):
                 app_module._CATALOGUE_WARMUP.clear()
                 app_module._CATALOGUE_WARMUP.update(original_state)
 
+    def test_completed_caches_override_a_lingering_cleanup_stage(self):
+        original_state = app_module.catalogue_warmup_status()
+        try:
+            with app_module._CATALOGUE_WARMUP_LOCK:
+                app_module._CATALOGUE_WARMUP.update(
+                    active=True, stage="search_index", attempts=1,
+                    last_error="", started_at=1.0, ready_at=0.0,
+                )
+            with patch.object(
+                app_module, "product_search_cache_ready", return_value=True,
+            ), patch.object(
+                app_module, "product_payload_cache_ready", return_value=True,
+            ), patch.object(
+                app_module, "reference_search_cache_ready", return_value=True,
+            ):
+                status = app_module.reconcile_catalogue_warmup_state()
+
+            self.assertEqual(status["stage"], "ready")
+            self.assertGreater(status["ready_at"], 0)
+        finally:
+            with app_module._CATALOGUE_WARMUP_LOCK:
+                app_module._CATALOGUE_WARMUP.clear()
+                app_module._CATALOGUE_WARMUP.update(original_state)
+
 
 if __name__ == "__main__":
     unittest.main()
