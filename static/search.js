@@ -161,6 +161,21 @@ function productConceptCoverage(product, matchers) {
   }, 0);
 }
 
+function productNameConceptCoverage(product, matchers) {
+  if (!matchers.length) return 0;
+  const fields = productSearchFields(product);
+  const identity = `${fields.name} ${fields.brand}`.trim();
+  return matchers.reduce((count, matcher) => {
+    if (matcher.pattern.test(identity)) return count + 1;
+    const abbreviatedName = fields.nameTokens.some(actual => (
+      actual.length >= 5
+      && matcher.expected.length >= 4
+      && matcher.expected.startsWith(actual)
+    ));
+    return count + (abbreviatedName ? 1 : 0);
+  }, 0);
+}
+
 function isElectricToothbrushRequest(query) {
   const tokens = new Set(normalizeSearchText(query).split(' ').filter(Boolean));
   const electric = [...tokens].some(token => token.startsWith('elect') || token === 'elec');
@@ -239,6 +254,32 @@ function productMatchesHighPrecisionQuery(product, query) {
       || /(?:^| )(?:ca|co) ?\d+(?: |$)/.test(productName)
     )
   )) return false;
+
+  const mosquitoRepellent = [
+    'moustique', 'moustiques', 'mosquito', 'mosquitoes',
+    'insectifuge', 'repulsif', 'repulsive', 'repellent',
+  ].some(token => tokens.has(token))
+    && [
+      'anti', 'chasse', 'deet', 'eviter', 'insectifuge', 'prevenir',
+      'prevention', 'proteger', 'repulsif', 'repulsive', 'repellent',
+      'spray', 'vaporisateur',
+    ].some(token => tokens.has(token))
+    && ![
+      'piqure', 'piqures', 'bite', 'bites', 'demangeaison',
+      'demangeaisons', 'apres', 'after',
+    ].some(token => tokens.has(token));
+  if (mosquitoRepellent) {
+    const brand = normalizeSearchText(product?.brand || '');
+    const identity = normalizeSearchText([
+      product?.name, product?.brand, product?.category, product?.purpose,
+      product?.official_name_fr, product?.official_name_en,
+    ].filter(Boolean).join(' '));
+    const afterBite = /(?:^| )(?:after ?bite|apres ?piq\w*|piq\w*|demang\w*|soul\w*)(?: |$)/.test(productName);
+    const prevention = /(?:^| )(?:deet|insectifug\w*|repuls\w*|repellent\w*|chasse ?moust\w*|anti ?moust\w*|moust\w*)(?: |$)/.test(identity)
+      || ['off', 'watkins'].includes(brand);
+    if (afterBite && !/(?:chasse ?moust|insectifug|repuls|repellent|deet)/.test(productName)) return false;
+    if (!prevention) return false;
+  }
 
   if (isElectricToothbrushRequest(normalized)) {
     if (!(
@@ -475,6 +516,9 @@ function searchProductsFromCache(query, limit=40, minScore=0, predicate=null) {
     const conceptHits = applyConceptScope
       ? productConceptCoverage(product, conceptMatchers)
       : 0;
+    const nameConceptHits = applyConceptScope
+      ? productNameConceptCoverage(product, conceptMatchers)
+      : 0;
     if (conceptHits) {
       bestScore += Math.min(360, conceptHits * 180);
       if (conceptMatchers.length > 1 && conceptHits === conceptMatchers.length) {
@@ -483,14 +527,16 @@ function searchProductsFromCache(query, limit=40, minScore=0, predicate=null) {
     }
     bestScore += productQueryRoleAdjustment(product, query);
     if (bestScore > 0 && bestScore >= minScore) {
-      ranked.push({score: bestScore, conceptHits, product});
+      ranked.push({score: bestScore, conceptHits, nameConceptHits, product});
     }
   }
   // A generic-only match is not a product answer. Unknown words and misspellings
   // go to the server's fuzzy/AI interpretation instead of flashing unrelated
   // cards on the phone while that authoritative result is loading.
   const scoped = applyConceptScope
-    ? ranked.filter(item => item.conceptHits > 0)
+    ? ranked.some(item => item.nameConceptHits > 0)
+      ? ranked.filter(item => item.nameConceptHits > 0)
+      : ranked.filter(item => item.conceptHits > 0)
     : ranked;
   // Tiebreak: in-stock before ruptures, then by name.
   const outOf = p => (p.in_stock === 0 ? 1 : 0);

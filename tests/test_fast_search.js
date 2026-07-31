@@ -239,7 +239,12 @@ const antiperspirant = {
   description: 'Antisudorifique en vaporisateur', search_terms: '', usage_notes: '',
   alternative_suggestions: '', barcode: '111111111116', in_stock: 1,
 };
-products.push(bathFoam, antiperspirant);
+const afterBite = {
+  id: 17006, name: 'AFTER BITE G/TRAIT 20G', brand: 'After Bite',
+  description: 'Traitement des piqures de moustiques', search_terms: '', usage_notes: '',
+  alternative_suggestions: '', barcode: '111111111117', in_stock: 1,
+};
+products.push(bathFoam, antiperspirant, afterBite);
 assert.deepStrictEqual(
   Array.from(
     context.window.AppSearch.searchProductsFromCache('spray anti moustique', 40),
@@ -249,6 +254,13 @@ assert.deepStrictEqual(
   'an absent requested object must not fall back to bath foam or antiperspirant products'
 );
 products.push(cranberryCapsules, coffeeCapsules, mosquitoSpray, hairSpray);
+const contaminatedCranberrySupplement = {
+  id: 17007, name: 'WEBBER VIT D3 1000UI GEL90', brand: 'Webber',
+  description: 'Produit de la famille des supplements de canneberge',
+  search_terms: '', usage_notes: '', alternative_suggestions: '',
+  barcode: '111111111118', in_stock: 1,
+};
+products.push(contaminatedCranberrySupplement);
 assert.deepStrictEqual(
   Array.from(
     context.window.AppSearch.searchProductsFromCache('capsules de canneberge', 40),

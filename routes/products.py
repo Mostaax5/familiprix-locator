@@ -1830,6 +1830,25 @@ def _is_oral_charcoal_request(query):
     return asks_charcoal and asks_oral_form
 
 
+def _is_mosquito_repellent_request(query):
+    norm = normalize_search_text(query)
+    tokens = set(norm.split())
+    mentions_mosquito = bool(tokens.intersection({
+        "moustique", "moustiques", "mosquito", "mosquitoes",
+        "insectifuge", "repulsif", "repulsive", "repellent",
+    }))
+    asks_treatment = bool(tokens.intersection({
+        "piqure", "piqures", "bite", "bites", "demangeaison",
+        "demangeaisons", "apres", "after",
+    }))
+    asks_prevention = bool(tokens.intersection({
+        "anti", "chasse", "deet", "eviter", "insectifuge", "prevenir",
+        "prevention", "proteger", "repulsif", "repulsive", "repellent",
+        "spray", "vaporisateur",
+    }))
+    return mentions_mosquito and asks_prevention and not asks_treatment
+
+
 def client_required_concept_groups(query):
     """Required semantic groups for a few high-risk spoken requests.
 
@@ -2053,6 +2072,16 @@ def row_matches_client_concepts(row, groups, excluded_name_terms=()):
 _CHARCOAL_PRODUCT_NAME_PATTERN = re.compile(
     r"(?<![a-z0-9])(?:charbon|charcoal|charb|chb)(?![a-z0-9])"
 )
+_MOSQUITO_REPELLENT_EVIDENCE_PATTERN = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"deet|insectifug[a-z0-9]*|repuls[a-z0-9]*|repellent[a-z0-9]*|"
+    r"chasse ?moust[a-z0-9]*|anti ?moust[a-z0-9]*|moust[a-z0-9]*"
+    r")(?![a-z0-9])"
+)
+_AFTER_BITE_PRODUCT_PATTERN = re.compile(
+    r"(?<![a-z0-9])(?:after ?bite|apres ?piq[a-z0-9]*|piq[a-z0-9]*|"
+    r"demang[a-z0-9]*|soul[a-z0-9]*)(?![a-z0-9])"
+)
 
 
 def row_matches_client_identity_constraints(row, query):
@@ -2063,13 +2092,34 @@ def row_matches_client_identity_constraints(row, query):
     carry the sellable package/form markers (for example ``CHARB ... CA75``),
     so this final gate is unaffected by a stale or overly broad enrichment.
     """
-    if not _is_oral_charcoal_request(query):
-        return True
     name = normalize_search_text(row.get("_name", ""))
-    return bool(
+    if _is_oral_charcoal_request(query) and not (
         _CHARCOAL_PRODUCT_NAME_PATTERN.search(name)
         and _ORAL_DOSAGE_PRODUCT_PATTERN.search(name)
-    )
+    ):
+        return False
+    if _is_mosquito_repellent_request(query):
+        identity = " ".join((
+            name,
+            normalize_search_text(row.get("_brand", "")),
+            normalize_search_text(row.get("_catalog_brand", "")),
+            normalize_search_text(row.get("_identity_hay", "")),
+        ))
+        brands = set(" ".join((
+            normalize_search_text(row.get("_brand", "")),
+            normalize_search_text(row.get("_catalog_brand", "")),
+        )).split())
+        if (
+            _AFTER_BITE_PRODUCT_PATTERN.search(name)
+            and not re.search(r"chasse ?moust|insectifug|repuls|repellent|deet", name)
+        ):
+            return False
+        if (
+            not _MOSQUITO_REPELLENT_EVIDENCE_PATTERN.search(identity)
+            and not brands.intersection({"off", "watkins"})
+        ):
+            return False
+    return True
 
 
 def product_matches_client_request(product, query):
@@ -2205,7 +2255,10 @@ def filter_client_request_products(products, query):
     """Filter loaded products with one compiled set of request constraints."""
     required = client_required_concept_groups(query)
     excluded = client_excluded_concept_terms(query)
-    identity_constrained = _is_oral_charcoal_request(query)
+    identity_constrained = (
+        _is_oral_charcoal_request(query)
+        or _is_mosquito_repellent_request(query)
+    )
     if not required and not excluded and not identity_constrained:
         return list(products)
     filtered = []
@@ -4732,6 +4785,27 @@ def _row_matches_query_anchor(row, anchor_tokens, identity_only=False):
     )
 
 
+def _row_matches_query_name_anchor(row, anchor_tokens):
+    if not anchor_tokens:
+        return True
+    source_tokens = " ".join((
+        str(row.get("_name", "") or ""),
+        str(row.get("_brand", "") or ""),
+        str(row.get("_catalog_brand", "") or ""),
+    )).split()
+    return any(
+        any(
+            _search_token_matches(
+                actual,
+                expected,
+                tuple(SEARCH_ABBREVIATIONS.get(expected, ())),
+            )
+            for actual in source_tokens
+        )
+        for expected in anchor_tokens
+    )
+
+
 def _row_matches_query_phrase(row, phrase):
     tokens = list(dict.fromkeys(tokenize_search_query(phrase)))
     return bool(tokens) and all(
@@ -5265,6 +5339,9 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         strong_anchor_match = _row_matches_query_anchor(
             row, anchor_tokens, identity_only=True,
         )
+        name_anchor_match = _row_matches_query_name_anchor(
+            row, anchor_tokens,
+        )
         evidence_anchor_match = strong_anchor_match or _row_matches_query_anchor(
             row, anchor_tokens,
         )
@@ -5343,6 +5420,8 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
                     cached_stock.get(key) or item.get("in_stock")
                 ) else 0,
                 "name": normalize_search_text(item.get("name", "")),
+                "name_anchor_match": name_anchor_match,
+                "strong_anchor_match": strong_anchor_match,
                 "anchor_match": evidence_anchor_match,
             }
 
@@ -5358,9 +5437,16 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
             evidence.get("anchor_match") for evidence in scored.values()
         )
     ):
+        preferred_anchor = (
+            "name_anchor_match"
+            if any(evidence.get("name_anchor_match") for evidence in scored.values())
+            else "strong_anchor_match"
+            if any(evidence.get("strong_anchor_match") for evidence in scored.values())
+            else "anchor_match"
+        )
         scored = {
             key: evidence for key, evidence in scored.items()
-            if evidence.get("anchor_match")
+            if evidence.get(preferred_anchor)
         }
     ranked_keys = sorted(scored, key=lambda key: (
         -scored[key]["score"],
@@ -5608,6 +5694,7 @@ def search_products():
         if score > 0:
             ranked.append((
                 score,
+                _row_matches_query_name_anchor(row, anchor_tokens),
                 _row_matches_query_anchor(row, anchor_tokens),
                 item,
             ))
@@ -5615,13 +5702,14 @@ def search_products():
         anchor_tokens
         and not intent_terms
         and not electric_request
-        and any(anchor_match for _score, anchor_match, _item in ranked)
+        and any(anchor_match for _score, _name_match, anchor_match, _item in ranked)
     ):
-        ranked = [entry for entry in ranked if entry[1]]
-    ranked.sort(key=lambda e: (-e[0], 1 if e[2].get("in_stock") == 0 else 0,
-                               location_sort_key(e[2])))
+        anchor_index = 1 if any(entry[1] for entry in ranked) else 2
+        ranked = [entry for entry in ranked if entry[anchor_index]]
+    ranked.sort(key=lambda e: (-e[0], 1 if e[3].get("in_stock") == 0 else 0,
+                               location_sort_key(e[3])))
     items = classify_client_result_roles(
-        [item for _score, _anchor_match, item in ranked[:limit]], query,
+        [item for _score, _name_match, _anchor_match, item in ranked[:limit]], query,
     )
     if client_candidates_need_semantic_retry(query, items):
         items = []

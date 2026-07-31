@@ -1007,13 +1007,18 @@ class ClientRagTests(unittest.TestCase):
             "brand": "Dove", "barcode": "102",
             "description": "Antisudorifique en vaporisateur.",
         }
+        after_bite = {
+            "id": 3, "name": "AFTER BITE G/TRAIT 20G",
+            "brand": "After Bite", "barcode": "103",
+            "description": "Traitement des piqures de moustiques.",
+        }
         corpus = [(
             product,
             search_row(
                 product["name"], product["brand"],
                 product["description"], product["barcode"],
             ),
-        ) for product in (bath_foam, antiperspirant)]
+        ) for product in (bath_foam, antiperspirant, after_bite)]
 
         with patch("routes.products.get_db", return_value=object()), \
              patch("routes.products._products_corpus", return_value=corpus):
@@ -1073,6 +1078,10 @@ class ClientRagTests(unittest.TestCase):
             "id": 6, "name": "SPRAY COIFFANT 200ML",
             "brand": "Test", "barcode": "106",
             "description": "Fixatif en vaporisateur.",
+        }, {
+            "id": 7, "name": "WEBBER VIT D3 1000UI GEL90",
+            "brand": "Webber", "barcode": "107",
+            "description": "Produit de la famille des supplements de canneberge.",
         }]
         corpus = [(
             product,
