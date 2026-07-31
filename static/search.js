@@ -95,6 +95,7 @@ const SEARCH_ABBREVIATIONS = {
   maquillage:['maq','maquill'], coloration:['color','col'], biberon:['bib'],
   serviette:['serv'], serviettes:['serv'], tampon:['tamp'], tampons:['tamp'],
   transparent:['transp'], transparente:['transp'],
+  charbon:['charb'], charcoal:['charb'],
 };
 
 const ELECTRIC_TOOTHBRUSH_EXPANSIONS = [
@@ -182,6 +183,21 @@ function productMatchesHighPrecisionQuery(product, query) {
   if (transparentDressing && !(
     searchConceptMatches(hay, ['transparent', 'transparente', 'transp', 'opsite', 'tegaderm'])
     && searchConceptMatches(hay, ['pansement', 'pans', 'diach', 'bandage', 'band aid', 'opsite', 'tegaderm'])
+  )) return false;
+
+  const oralCharcoal = ['charbon', 'charcoal', 'charb'].some(token => tokens.has(token))
+    && [
+      'pilule', 'pilules', 'capsule', 'capsules', 'gelule', 'gelules',
+      'comprime', 'comprimes', 'tablet', 'tablets', 'caplet', 'caplets',
+    ].some(token => tokens.has(token));
+  if (oralCharcoal && !(
+    searchConceptMatches(hay, ['charb', 'charcoal'])
+    && (
+      searchConceptMatches(hay, [
+        'pilule', 'capsule', 'caps', 'gelule', 'comprime', 'tablet', 'caplet',
+      ])
+      || /(?:^| )(?:ca|co) ?\d+(?: |$)/.test(hay)
+    )
   )) return false;
 
   if (isElectricToothbrushRequest(normalized)) {

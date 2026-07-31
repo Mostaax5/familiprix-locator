@@ -176,4 +176,29 @@ assert.deepStrictEqual(
   'spoken cotton-ball searches must reject chocolates and cotton swabs'
 );
 
+const biomedicCharcoal = {
+  id: 16000, name: 'BIOMEDIC CHARB ACT 225MG CA75', brand: 'Biomedic',
+  description: 'Capsules de charbon active', search_terms: '', usage_notes: '',
+  alternative_suggestions: '', barcode: '063848908532', in_stock: 1,
+};
+const pillCrusher = {
+  id: 16001, name: 'BIOMEDIC ECRASE COUPE PILULE 1', brand: 'Biomedic',
+  description: 'Broyeur de comprimes', search_terms: '', usage_notes: '',
+  alternative_suggestions: '', barcode: '063848960677', in_stock: 1,
+};
+const charcoalToothpaste = {
+  id: 16002, name: 'CREST 3DW CHARBON FLUOR 135ML', brand: 'Crest',
+  description: 'Dentifrice au charbon', search_terms: '', usage_notes: '',
+  alternative_suggestions: '', barcode: '030772053836', in_stock: 1,
+};
+products.push(biomedicCharcoal, pillCrusher, charcoalToothpaste);
+assert.deepStrictEqual(
+  Array.from(
+    context.window.AppSearch.searchProductsFromCache('pilule de charbon', 40),
+    product => product.id
+  ),
+  [biomedicCharcoal.id],
+  'charcoal-pill searches must keep the exact capsule and reject pill tools and toothpaste'
+);
+
 console.log(`fast search tests passed (${elapsed.toFixed(1)} ms for 12k products)`);

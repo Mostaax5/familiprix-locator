@@ -900,6 +900,69 @@ class ClientRagTests(unittest.TestCase):
             ["PERSONNEL OUATE BOULES 100"],
         )
 
+    def test_charcoal_pill_lookup_keeps_exact_store_products_only(self):
+        biomedic = {
+            "id": 1, "name": "BIOMEDIC CHARB ACT 225MG CA75",
+            "brand": "Biomedic", "barcode": "063848908532",
+            "description": "Capsules de charbon active",
+        }
+        leo = {
+            "id": 2, "name": "LEO DESILETS CHARBON ACT CA 75",
+            "brand": "Leo Desilets", "barcode": "622049105074",
+            "description": "Capsules de charbon active",
+        }
+        unrelated = [
+            {
+                "id": 3, "name": "BIOMEDIC ECRASE COUPE PILULE 1",
+                "brand": "Biomedic", "barcode": "063848960677",
+                "description": "Broyeur de comprimes avec contenant.",
+            },
+            {
+                "id": 4, "name": "CARTER PETITES PILULES LAX 25",
+                "brand": "Carter", "barcode": "400",
+                "description": "Laxatif en pilules.",
+            },
+            {
+                "id": 5, "name": "CREST 3DW CHARBON FLUOR 135ML",
+                "brand": "Crest", "barcode": "500",
+                "description": "Dentifrice au charbon.",
+            },
+            {
+                "id": 6, "name": "BIORE NETT CHARB PORES 200ML",
+                "brand": "Biore", "barcode": "600",
+                "description": "Nettoyant facial au charbon.",
+            },
+        ]
+        corpus = [(
+            product,
+            search_row(
+                product["name"], product.get("brand", ""),
+                product.get("description", ""), product["barcode"],
+            ),
+        ) for product in [biomedic, leo, *unrelated]]
+
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            with app.test_client() as client:
+                client_response = client.get(
+                    "/api/client/find?q=pilule%20de%20charbon"
+                )
+                employee_response = client.get(
+                    "/api/products/search?q=pilule%20de%20charbon"
+                )
+
+        expected = {
+            "BIOMEDIC CHARB ACT 225MG CA75",
+            "LEO DESILETS CHARBON ACT CA 75",
+        }
+        self.assertEqual(client_response.status_code, 200)
+        self.assertEqual(
+            {item["name"] for item in client_response.get_json()}, expected,
+        )
+        self.assertEqual(
+            {item["name"] for item in employee_response.get_json()}, expected,
+        )
+
     def test_product_can_reuse_reference_catalogue_image_by_upc(self):
         class Result:
             def __init__(self, row=None, rows=None):

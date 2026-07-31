@@ -243,6 +243,7 @@ SEARCH_ABBREVIATIONS = {
     "serviette": ["serv"], "serviettes": ["serv"],
     "tampon": ["tamp"], "tampons": ["tamp"],
     "transparent": ["transp"], "transparente": ["transp"],
+    "charbon": ["charb"], "charcoal": ["charb"],
 }
 
 ELECTRIC_TOOTHBRUSH_EXPANSIONS = (
@@ -1802,6 +1803,30 @@ def _is_electric_toothbrush_request(query):
     return electric and brush and tooth
 
 
+_ORAL_DOSAGE_PRODUCT_PATTERN = re.compile(
+    r"(?<![a-z0-9])(?:"
+    r"pilule[a-z0-9]*|capsule[a-z0-9]*|caps[a-z0-9]*|"
+    r"gelule[a-z0-9]*|comprime[a-z0-9]*|tablet[a-z0-9]*|"
+    r"caplet[a-z0-9]*|ca ?[0-9]+|co ?[0-9]+"
+    r")(?![a-z0-9])"
+)
+
+
+def _is_oral_charcoal_request(query):
+    """Recognize a charcoal pill/capsule request without treating every
+    charcoal cosmetic, toothpaste, or cleanser as the requested product."""
+    norm = normalize_search_text(query)
+    tokens = set(norm.split())
+    asks_charcoal = bool(tokens.intersection({
+        "charbon", "charcoal", "charb",
+    }))
+    asks_oral_form = bool(tokens.intersection({
+        "pilule", "pilules", "capsule", "capsules", "gelule", "gelules",
+        "comprime", "comprimes", "tablet", "tablets", "caplet", "caplets",
+    }))
+    return asks_charcoal and asks_oral_form
+
+
 def client_required_concept_groups(query):
     """Required semantic groups for a few high-risk spoken requests.
 
@@ -1842,6 +1867,11 @@ def client_required_concept_groups(query):
             ("electrique", "electric", "elec", "pile", "sonicare", "philips one",
              "tete br dent"),
         ])
+    if _is_oral_charcoal_request(norm):
+        groups.extend([
+            _compile_client_concept_group(("charb", "charcoal")),
+            _ORAL_DOSAGE_PRODUCT_PATTERN,
+        ])
     toothpaste_request = bool(
         tokens.intersection({"dentifrice", "dentifrices", "toothpaste"})
         or "pate a dents" in norm
@@ -1852,7 +1882,10 @@ def client_required_concept_groups(query):
             "dentifrice", "dentifrices", "toothpaste", "pate dent",
             "sensodyne", "pronamel", "parodontax",
         ))
-    return tuple(_compile_client_concept_group(group) for group in groups)
+    return tuple(
+        group if hasattr(group, "search") else _compile_client_concept_group(group)
+        for group in groups
+    )
 
 
 def client_excluded_concept_terms(query):
@@ -4511,6 +4544,40 @@ def _search_corpus_statistics(corpus):
     )
 
 
+_GENERIC_QUERY_ANCHOR_TOKENS = frozenset({
+    "caplet", "caplets", "capsule", "capsules", "comprime", "comprimes",
+    "gelule", "gelules", "pill", "pills", "pilule", "pilules",
+    "tablet", "tablets",
+})
+
+
+def _query_token_document_frequency(token, document_frequency):
+    """Return evidence for a query token, including known shelf abbreviations.
+
+    A literal-only frequency made ``pilule de charbon`` anchor on ``pilule``:
+    ``charbon`` appeared absent even though products named ``CHARB`` existed.
+    The warm prefix index lets us recognize that abbreviated evidence without
+    scanning the catalogue or allocating another per-request index.
+    """
+    candidates = {token, *SEARCH_ABBREVIATIONS.get(token, ())}
+    prefixes = _PROD_CACHE.get("token_prefixes") or {}
+    for candidate in tuple(candidates):
+        if len(candidate) < 4 or not candidate[0].isalpha():
+            continue
+        for indexed_token in prefixes.get(candidate[:4], ()):
+            if (
+                indexed_token.startswith(candidate)
+                or candidate.startswith(indexed_token)
+            ):
+                candidates.add(indexed_token)
+    frequencies = [
+        int(document_frequency.get(candidate, 0) or 0)
+        for candidate in candidates
+        if int(document_frequency.get(candidate, 0) or 0) > 0
+    ]
+    return min(frequencies, default=0)
+
+
 def _client_query_anchor_tokens(query, document_frequency, document_count):
     """Return the rarest literal concepts from the employee's full request.
 
@@ -4519,9 +4586,20 @@ def _client_query_anchor_tokens(query, document_frequency, document_count):
     turning a throat request into back-pain results. Unknown words are omitted
     so misspellings can still use the fuzzy matcher.
     """
+    query_tokens = list(dict.fromkeys(tokenize_search_query(query)))
+    specific_tokens = [
+        token for token in query_tokens
+        if token not in _GENERIC_QUERY_ANCHOR_TOKENS
+    ]
+    # Dosage-form words identify how a product is presented, not what it is.
+    # Keep them useful when they are the entire query, but never let one replace
+    # a more specific concept such as charbon, melatonine, or gingembre.
+    anchor_candidates = specific_tokens or query_tokens
     known = []
-    for token in dict.fromkeys(tokenize_search_query(query)):
-        frequency = int(document_frequency.get(token, 0) or 0)
+    for token in anchor_candidates:
+        frequency = _query_token_document_frequency(
+            token, document_frequency,
+        )
         if frequency > 0:
             known.append((frequency, token))
     if not known:
