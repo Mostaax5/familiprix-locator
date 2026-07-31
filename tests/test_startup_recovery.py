@@ -21,10 +21,6 @@ class StartupRecoveryTests(unittest.TestCase):
             ready["payload"] = True
             return {"rows": 5521, "gzip_bytes": 1853096}
 
-        def warm_reference():
-            ready["reference"] = True
-            return 9418
-
         try:
             with app_module._CATALOGUE_WARMUP_LOCK:
                 app_module._CATALOGUE_WARMUP.update(
@@ -47,9 +43,8 @@ class StartupRecoveryTests(unittest.TestCase):
                 app_module, "warm_product_payload_cache",
                 side_effect=warm_payload,
             ), patch.object(
-                app_module, "warm_reference_search_cache",
-                side_effect=warm_reference,
-            ), patch.object(app_module.time, "sleep") as sleep:
+                app_module.time, "sleep",
+            ) as sleep:
                 app_module._catalogue_warmup_worker()
 
             status = app_module.catalogue_warmup_status()

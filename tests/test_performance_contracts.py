@@ -12,10 +12,34 @@ class PerformanceContractTests(unittest.TestCase):
         self.assertIn("healthCheckPath: /readyz", render_config)
         self.assertIn('@app.route("/healthz")', app_source)
         self.assertIn('@app.route("/readyz")', app_source)
+        health_start = app_source.index("def healthz")
+        ready_decorator = app_source.index('@app.route("/readyz")', health_start)
+        self.assertIn("return readyz()", app_source[health_start:ready_decorator])
         ready_start = app_source.index("def readyz")
         ready_route = app_source[ready_start:ready_start + 450]
         self.assertIn("product_search_cache_ready()", ready_route)
         self.assertNotIn("get_db()", ready_route)
+        warmup_start = app_source.index("def _catalogue_warmup_worker")
+        warmup_end = app_source.index("def ensure_catalogue_warmup_started")
+        warmup = app_source[warmup_start:warmup_end]
+        self.assertNotIn("warm_reference_search_cache()", warmup)
+
+    def test_warm_employee_search_does_not_open_postgresql(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        routes = (ROOT / "routes" / "products.py").read_text(encoding="utf-8")
+        schema_guard = app_source[
+            app_source.index("def _ensure_product_schema_before_catalogue_request"):
+            app_source.index("def _asset_version")
+        ]
+        self.assertIn('"products.search_products"', schema_guard)
+        search_start = routes.index("def search_products():")
+        search_end = routes.index("def client_find():", search_start)
+        self.assertNotIn("get_db()", routes[search_start:search_end])
+        self.assertIn("_indexed_identifier_products(", routes[search_start:search_end])
+        image_start = routes.index("def hydrate_candidate_images")
+        image_end = routes.index("def integrity_conflict_message", image_start)
+        self.assertNotIn("get_db()", routes[image_start:image_end])
+        self.assertIn("schedule_image_fill(unresolved)", routes[image_start:image_end])
 
     def test_render_runtime_and_port_are_explicit(self):
         render_config = (ROOT / "render.yaml").read_text(encoding="utf-8")

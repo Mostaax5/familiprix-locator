@@ -1332,7 +1332,7 @@ def _products_corpus(db, allow_identifier_stale=False):
     return rows
 
 
-def _employee_product_corpus(db):
+def _employee_product_corpus(db=None):
     """Always return a warm corpus without waiting for catalogue maintenance.
 
     A plan edit invalidates the generation immediately, but the previous
@@ -1340,6 +1340,21 @@ def _employee_product_corpus(db):
     and atomically swaps in the new version. Only a genuinely cold process
     performs a synchronous build; Render warms that process before real use.
     """
+    if db is None:
+        warm_rows = _PROD_CACHE.get("rows") or []
+        if warm_rows and _PROD_CACHE.get("initialized"):
+            if not _product_corpus_fast_ready():
+                _schedule_product_corpus_refresh()
+            elif (
+                _PROD_CACHE.get("metadata_dirty")
+                and time.time() - float(_PROD_CACHE.get("built_at", 0) or 0)
+                >= _PROD_IDENTIFIER_DRIFT_TTL_S
+            ):
+                rss_mb = current_rss_mb()
+                if rss_mb is None or rss_mb <= _PROD_METADATA_REFRESH_MAX_RSS_MB:
+                    _schedule_product_corpus_refresh()
+            return warm_rows
+        db = get_db()
     database_token = _product_cache_database_token(db)
     warm_rows = _PROD_CACHE.get("rows") if (
         database_token is None
@@ -3708,18 +3723,27 @@ _MEMORY_PRESSURE_CHECK_LOCK = threading.Lock()
 _MEMORY_PRESSURE_LAST_CHECK = 0.0
 
 
-def release_optional_product_caches():
+def release_optional_product_caches(*, blocking=True):
     """Drop rebuildable catalogue state before a rare high-memory operation.
 
     The placed-product corpus stays warm because every employee search depends
     on it. The reference corpus can be rebuilt from PostgreSQL, so releasing it
     before PDF/catalogue work creates useful headroom without losing any data.
     """
-    with _REF_LOCK:
+    reference_lock_acquired = _REF_LOCK.acquire(blocking=blocking)
+    if not reference_lock_acquired:
+        return {
+            "reference_rows": 0,
+            "expired_image_retries": 0,
+            "reference_busy": True,
+        }
+    try:
         reference_rows = len(_REF_CACHE.get("rows") or [])
         _REF_CACHE.update(
             gen=-1, key=None, rows=[], built_at=0.0, initialized=False,
         )
+    finally:
+        _REF_LOCK.release()
 
     now = time.time()
     with _IMAGE_FILL_STATE_LOCK:
@@ -3744,6 +3768,7 @@ def release_optional_product_caches():
     return {
         "reference_rows": reference_rows,
         "expired_image_retries": len(expired),
+        "reference_busy": False,
     }
 
 
@@ -3762,7 +3787,16 @@ def release_optional_product_caches_if_needed():
         rss_before = current_rss_mb()
         if rss_before is None or rss_before < _MEMORY_PRESSURE_RSS_MB:
             return None
-        released = release_optional_product_caches()
+        # A reference-index build may be doing the exact work this cleanup is
+        # meant to avoid. Never make an employee request wait for that lock;
+        # the next five-second check can reclaim it after the builder exits.
+        released = release_optional_product_caches(blocking=False)
+        if released.get("reference_busy"):
+            return {
+                **released,
+                "rss_before_mb": rss_before,
+                "rss_after_mb": rss_before,
+            }
         rss_after = current_rss_mb()
         print(
             f"[Memoire] pression {rss_before} MB; "
@@ -3956,9 +3990,13 @@ def schedule_image_fill(barcodes, priority=True):
 
 
 def hydrate_candidate_images(products, queue_missing=True, queue_limit=12):
-    """Attach any already-known UPC image to mapped Client results immediately,
-    then optionally queue a small visible subset for background lookup."""
-    db = get_db()
+    """Queue missing card images without adding database latency to search.
+
+    The immutable employee corpus already includes the best exact-UPC image
+    known when it was built. Newer image writes are exposed by the lightweight
+    image polling endpoints, so re-querying PostgreSQL here only delayed every
+    answer and duplicated metadata in memory.
+    """
     missing = [
         product for product in products
         if not str(product.get("image_url", "") or "").strip()
@@ -3966,41 +4004,13 @@ def hydrate_candidate_images(products, queue_missing=True, queue_limit=12):
     ]
     if not missing:
         return products
-
-    barcodes = [product.get("barcode", "") for product in missing]
-    image_by_barcode = {}
-    for row in _rows_for_barcodes(
-        db, "products", "barcode, image_url, image_status", barcodes
-    ):
-        item = dict(row)
-        image_url = safe_http_url(item.get("image_url", ""))
-        if not image_url:
-            continue
-        key = gtin_identity_key(item.get("barcode", ""))
-        if key:
-            image_by_barcode.setdefault(key, image_url)
-    references = build_reference_metadata_index(db, barcodes)
-    for barcode in barcodes:
-        reference = reference_metadata_for_barcode(references, barcode)
-        image_url = safe_http_url(reference.get("image_url", ""))
-        key = gtin_identity_key(barcode)
-        if key and image_url:
-            image_by_barcode.setdefault(key, image_url)
-
-    for product in missing:
-        barcode = str(product.get("barcode", "") or "").strip()
-        image_url = ""
-        image_url = image_by_barcode.get(gtin_identity_key(barcode), "")
-        if image_url:
-            product["image_url"] = image_url
     # A detailed question can retrieve dozens of candidates but only a handful
     # become visible cards. Do not start dozens of online scrapers before the AI
     # has selected those cards; that was another per-search Render memory spike.
     if queue_missing:
-        unresolved = [
-            product.get("barcode", "") for product in missing
-            if not str(product.get("image_url", "") or "").strip()
-        ][:max(0, min(int(queue_limit), 40))]
+        unresolved = [product.get("barcode", "") for product in missing][
+            :max(0, min(int(queue_limit), 40))
+        ]
         schedule_image_fill(unresolved)
     return products
 
@@ -5140,7 +5150,7 @@ def client_products_by_ids(candidate_ids, limit=60):
     ))
     if not requested:
         return []
-    corpus = _employee_product_corpus(get_db())
+    corpus = _employee_product_corpus()
     ordered_keys = []
     product_id_to_key = (
         _PROD_CACHE.get("product_id_to_key") or {}
@@ -5183,8 +5193,7 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
     UPC matching. Only ``products`` rows are searched: ``product_reference`` may
     enrich metadata/images, but can never become store inventory in Client search.
     """
-    db = get_db()
-    corpus = _employee_product_corpus(db)
+    corpus = _employee_product_corpus()
     required_concepts = client_required_concept_groups(question)
     excluded_concepts = client_excluded_concept_terms(question)
     analgesic_name_required = (
@@ -5595,13 +5604,17 @@ def search_products():
         return jsonify([])
     field = (request.args.get("field") or "").strip().lower()
     limit = min(max(clamp_non_negative_int(request.args.get("limit", "60"), 60), 1), 120)
-    db = get_db()
+    corpus = _employee_product_corpus()
     if field and field != "name":
-        items = _direct_identifier_products(db, query, field, limit=limit)
+        items = _indexed_identifier_products(
+            corpus, query, field, limit=limit,
+        )
+        if items is None:
+            items = rank_products_by_field(
+                [item for item, _row in corpus], query, field, limit=limit,
+            )
         return jsonify([public_product_payload(item) for item in items])
-    corpus = _employee_product_corpus(
-        db
-    )  # enrichment writes cannot force a full rebuild per employee query
+    # Enrichment writes cannot force a full rebuild per employee query.
     if field:
         items = rank_products_by_field(
             [item for item, _ in corpus], query, field, limit=limit

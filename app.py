@@ -23,7 +23,6 @@ from routes.products import (
     reference_search_cache_ready,
     release_optional_product_caches_if_needed,
     warm_product_payload_cache, warm_product_search_cache,
-    warm_reference_search_cache,
 )
 from routes.layout import layout_bp
 from routes.ai import ai_bp, configured_ai_provider, reference_count, maybe_resume_enrichment
@@ -152,6 +151,23 @@ _PRODUCT_DATA_BLUEPRINTS = {
 def _ensure_product_schema_before_catalogue_request():
     if request.blueprint not in _PRODUCT_DATA_BLUEPRINTS:
         return None
+    # The warmed employee-search corpus was built only after the schema became
+    # usable. Serving these read paths from that immutable snapshot must not pay
+    # for a new PostgreSQL TLS connection on every keystroke or client question.
+    cached_search_request = (
+        request.endpoint in {
+            "products.client_find",
+            "products.search_products",
+            "ai.client_help",
+        }
+    )
+    if cached_search_request and product_search_cache_ready():
+        return None
+    if (
+        request.endpoint == "products.get_products"
+        and product_payload_cache_ready()
+    ):
+        return None
     try:
         ensure_product_data_ready(get_db())
     except Exception:
@@ -194,7 +210,10 @@ def index():
 
 @app.route("/healthz")
 def healthz():
-    return jsonify({"ok": True})
+    # Some older Render services retain /healthz in their dashboard even when
+    # render.yaml now names /readyz. Mirror readiness here so either setting
+    # keeps the previous revision online until employee search is warm.
+    return readyz()
 
 
 @app.route("/readyz")
@@ -523,11 +542,15 @@ def catalogue_warmup_status():
 
 
 def reconcile_catalogue_warmup_state():
-    """Publish ready when all immutable caches exist, even if cleanup lingers."""
+    """Publish ready as soon as employee-facing store data is memory-resident.
+
+    The larger reference catalogue is secondary, lazy, and rebuildable. Making
+    it a boot requirement caused the worker to allocate it under memory pressure
+    even though Client answers must use placed store products only.
+    """
     if not (
         product_search_cache_ready()
         and product_payload_cache_ready()
-        and reference_search_cache_ready()
     ):
         return catalogue_warmup_status()
     with _CATALOGUE_WARMUP_LOCK:
@@ -543,7 +566,6 @@ def _catalogue_warmup_worker():
         while not (
             product_search_cache_ready()
             and product_payload_cache_ready()
-            and reference_search_cache_ready()
         ):
             with _CATALOGUE_WARMUP_LOCK:
                 _CATALOGUE_WARMUP["attempts"] += 1
@@ -565,18 +587,9 @@ def _catalogue_warmup_worker():
                         f"{payload.get('rows', 0)} produits, "
                         f"{payload.get('gzip_bytes', 0)} octets compresses."
                     )
-                if not reference_search_cache_ready():
-                    with _CATALOGUE_WARMUP_LOCK:
-                        _CATALOGUE_WARMUP["stage"] = "reference_index"
-                    reference_rows = warm_reference_search_cache()
-                    print(
-                        f"[BOOT] Index catalogue pret: "
-                        f"{reference_rows} produits de reference."
-                    )
                 if not (
                     product_search_cache_ready()
                     and product_payload_cache_ready()
-                    and reference_search_cache_ready()
                 ):
                     time.sleep(2)
             except Exception as exc:  # noqa: BLE001 - retry while unready

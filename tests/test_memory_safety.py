@@ -62,6 +62,27 @@ class MemorySafetyTests(unittest.TestCase):
             products._PROD_CACHE.clear()
             products._PROD_CACHE.update(original_cache)
 
+    def test_warm_employee_search_never_opens_a_database_connection(self):
+        original_cache = dict(products._PROD_CACHE)
+        warm_rows = [({"id": 1, "name": "Advil"}, {"_name": "advil"})]
+        try:
+            products._PROD_CACHE.update(
+                rows=warm_rows,
+                initialized=True,
+                generation=12,
+                state_checked_at=time.time(),
+            )
+            with patch.object(
+                products, "product_search_generation", return_value=12,
+            ), patch.object(
+                products, "get_db",
+                side_effect=AssertionError("warm search opened PostgreSQL"),
+            ):
+                self.assertIs(products._employee_product_corpus(), warm_rows)
+        finally:
+            products._PROD_CACHE.clear()
+            products._PROD_CACHE.update(original_cache)
+
     def test_media_updates_do_not_expire_the_warm_search_corpus(self):
         original_cache = dict(products._PROD_CACHE)
         warm_rows = [({"id": 1, "name": "Advil"}, {"_name": "advil"})]
@@ -409,6 +430,31 @@ class MemorySafetyTests(unittest.TestCase):
             self.assertEqual(result["rss_before_mb"], 350.0)
             self.assertEqual(products._REF_CACHE["rows"], [])
             self.assertIs(products._PROD_CACHE.get("rows"), warm_products)
+        finally:
+            products._REF_CACHE.clear()
+            products._REF_CACHE.update(original_reference)
+            products._MEMORY_PRESSURE_LAST_CHECK = original_check
+
+    def test_memory_pressure_never_waits_for_reference_index_builder(self):
+        original_reference = dict(products._REF_CACHE)
+        original_check = products._MEMORY_PRESSURE_LAST_CHECK
+        try:
+            products._REF_CACHE.update(
+                key=("catalogue",), rows=[{"barcode": "1"}],
+                built_at=time.time(), initialized=True,
+            )
+            products._MEMORY_PRESSURE_LAST_CHECK = 0.0
+            with products._REF_LOCK, patch.object(
+                products, "current_rss_mb", return_value=350.0,
+            ), patch.object(
+                products, "release_unused_memory",
+                side_effect=AssertionError("busy cleanup must be skipped"),
+            ):
+                result = products.release_optional_product_caches_if_needed()
+
+            self.assertTrue(result["reference_busy"])
+            self.assertEqual(result["rss_before_mb"], 350.0)
+            self.assertEqual(products._REF_CACHE["rows"], [{"barcode": "1"}])
         finally:
             products._REF_CACHE.clear()
             products._REF_CACHE.update(original_reference)
