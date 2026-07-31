@@ -4520,7 +4520,7 @@ def _fuzzy_product_score(row, query_tokens):
 
 def _indexed_client_search_entries(
     corpus, *, literal_terms=(), intent_terms=(), abbreviations=(),
-    fuzzy_terms=(), digit_terms=(), exact_barcodes=(),
+    fuzzy_terms=(), digit_terms=(), exact_barcodes=(), anchor_terms=(),
 ):
     """Return a small indexed subset of the warm corpus for client retrieval.
 
@@ -4608,6 +4608,38 @@ def _indexed_client_search_entries(
                 candidate_indices.update(
                     name_postings.get(product_token, ())
                 )
+
+    # Generic words and semantic expansions are intentionally recall-oriented,
+    # but their union can contain most of a large store. Intersect that union
+    # with the rare distinguishing concept in the inverted index before any
+    # product descriptions are read. Prefer product-name evidence whenever it
+    # exists; only fall back to descriptions when the planogram name is too
+    # abbreviated to carry the concept.
+    if anchor_terms:
+        anchor_indices = set()
+        name_anchor_indices = set()
+        for raw_term in anchor_terms:
+            for term in normalize_search_text(raw_term).split():
+                if len(term) < 2:
+                    continue
+                compatible = {term, *SEARCH_ABBREVIATIONS.get(term, ())}
+                for candidate in tuple(compatible):
+                    if len(candidate) < 4 or not candidate[0].isalpha():
+                        continue
+                    for indexed_token in prefixes.get(candidate[:4], ()):
+                        if (
+                            indexed_token.startswith(candidate)
+                            or candidate.startswith(indexed_token)
+                        ):
+                            compatible.add(indexed_token)
+                for candidate in compatible:
+                    anchor_indices.update(postings.get(candidate, ()))
+                    name_anchor_indices.update(
+                        name_postings.get(candidate, ())
+                    )
+        preferred_anchor_indices = name_anchor_indices or anchor_indices
+        if preferred_anchor_indices:
+            candidate_indices.intersection_update(preferred_anchor_indices)
 
     if not has_search_signal:
         return None
@@ -5307,6 +5339,15 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         if 8 <= len(digits) <= 14:
             upc_digits.update(normalized_digits(c) for c in build_barcode_candidates(digits))
 
+    electric_focus_terms = []
+    if electric_request:
+        electric_focus_terms = ["elec", "pile", "sonicare", "philips"]
+        request_tokens = set(tokenize_search_query(question))
+        if request_tokens.intersection({
+            "brossette", "brossettes", "rechange", "rechanges", "recharge",
+            "recharges", "tete", "tetes",
+        }):
+            electric_focus_terms.extend(["tete", "rech"])
     indexed_entries = _indexed_client_search_entries(
         corpus,
         literal_terms=retrieval_tokens,
@@ -5326,6 +5367,11 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
             in prepared_queries if digits
         ],
         exact_barcodes=upc_digits,
+        anchor_terms=(
+            electric_focus_terms
+            if electric_request else anchor_tokens
+            if anchor_tokens and not has_semantic_expansion else ()
+        ),
     )
     search_entries = corpus if indexed_entries is None else indexed_entries
     cached_stock = (
@@ -5686,6 +5732,11 @@ def search_products():
         fuzzy_terms=fuzzy_terms,
         digit_terms=[dq] if dq else (),
         exact_barcodes=exact_barcodes,
+        anchor_terms=(
+            ["elec", "pile", "sonicare", "philips"]
+            if electric_request else anchor_tokens
+            if anchor_tokens and not intent_terms else ()
+        ),
     )
     search_entries = corpus
     if indexed_entries is not None:

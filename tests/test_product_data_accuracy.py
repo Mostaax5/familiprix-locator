@@ -614,12 +614,22 @@ class ProductDataAccuracyTests(unittest.TestCase):
             ("A GAGNON MELAT 5MG GUM 120", "063848966068", "2001"),
             ("ADVIL 200MG CO100", "012345678905", "2002"),
             ("ADVIL 200MG CO100", "012345678905", "2003"),
+            ("OFF CHASSE MOUST VAPO 142G", "062600000001", "2004"),
+            ("AFTER BITE G/TRAIT 20G", "062600000002", "2005"),
         ])
         db.executemany(
             """INSERT INTO products
                (name, barcode, aisle, side, section, shelf, position)
                VALUES (?, ?, '1', 'Gauche', '1', '1', ?)""",
             rows,
+        )
+        db.execute(
+            "UPDATE products SET description='Spray anti generique.' "
+            "WHERE name LIKE 'UNRELATED PRODUCT %'"
+        )
+        db.execute(
+            "UPDATE products SET description='Traitement des piqures de moustiques.' "
+            "WHERE name='AFTER BITE G/TRAIT 20G'"
         )
         db.commit()
 
@@ -634,6 +644,13 @@ class ProductDataAccuracyTests(unittest.TestCase):
             corpus, literal_terms=["zzzznotfound"],
             fuzzy_terms=["zzzznotfound"],
         )
+        broad_mosquito_subset = _indexed_client_search_entries(
+            corpus, literal_terms=["spray", "anti", "moustique"],
+        )
+        focused_mosquito_subset = _indexed_client_search_entries(
+            corpus, literal_terms=["spray", "anti", "moustique"],
+            anchor_terms=["moustique"],
+        )
 
         self.assertLess(len(melatonin_subset), 10)
         self.assertTrue(any(
@@ -644,6 +661,11 @@ class ProductDataAccuracyTests(unittest.TestCase):
             item["name"].startswith("ADVIL") for item, _row in typo_subset
         ))
         self.assertEqual(missing_subset, [])
+        self.assertGreater(len(broad_mosquito_subset), 1000)
+        self.assertEqual(
+            [item["name"] for item, _row in focused_mosquito_subset],
+            ["OFF CHASSE MOUST VAPO 142G"],
+        )
         with patch.object(products_module, "get_db", return_value=db):
             matches = hybrid_client_candidates(
                 "melatonine",
