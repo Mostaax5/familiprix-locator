@@ -1413,7 +1413,8 @@ def _build_client_candidates(question, limit=35):
     All matching runs on the pre-normalized in-memory corpora — milliseconds."""
     from routes.products import (_products_corpus, _reference_corpus, _fast_reference_score,
                                  normalize_search_text, normalized_digits, tokenize_search_query,
-                                 intent_expansion_terms, abbreviation_terms, build_barcode_candidates)
+                                 intent_expansion_terms, abbreviation_terms, build_barcode_candidates,
+                                 materialize_reference_rows)
     db = get_db()
     out, seen_keys, seen_bc = [], set(), set()
 
@@ -1426,13 +1427,6 @@ def _build_client_candidates(question, limit=35):
             seen_bc.add(bc)
         out.append(item)
 
-    def ref_to_item(row):
-        return {"barcode": row["barcode"], "name": row["name"], "brand": row["brand"],
-                "description": row["description"], "product_code": row["product_code"],
-                "regulatory_identifiers": row.get("regulatory_identifiers", []),
-                "_identifiers": row.get("_identifiers", []),
-                "catalog_only": True, "in_stock": 1}
-
     # 1) Exact UPC(s) named in the question — pinned first.
     upc_digits = set()
     for run in re.findall(r"\d[\d\s\-]{6,18}\d", question):
@@ -1444,9 +1438,12 @@ def _build_client_candidates(question, limit=35):
         for item, prow in _products_corpus(db):
             if prow["_bc"] and prow["_bc"] in upc_digits:
                 add(item, prow["_bc"])
-        for row in _reference_corpus(db):
-            if row["_bc"] and row["_bc"] in upc_digits:
-                add(ref_to_item(row), row["_bc"])
+        exact_reference_rows = [
+            row for row in _reference_corpus(db)
+            if row["_bc"] and row["_bc"] in upc_digits
+        ]
+        for item in materialize_reference_rows(db, exact_reference_rows):
+            add(item, normalized_digits(item.get("barcode", "")))
 
     # 2) Ranked text search — same scorer and noise floor as the Client tab.
     nq = normalize_search_text(question)
@@ -1463,11 +1460,25 @@ def _build_client_candidates(question, limit=35):
         for row in _reference_corpus(db):
             s = _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs)
             if s >= 100:
-                scored.append((s, 1, ref_to_item(row), row["_bc"]))
+                scored.append((s, 1, row, row["_bc"]))
         scored.sort(key=lambda x: (-x[0], x[1], str(x[2].get("name", "")).lower()))
-    for _, _, item, bc in scored:
+    # Full catalogue metadata stays in PostgreSQL. Hydrate only the small ranked
+    # window that can actually reach the model context.
+    ranked_window = scored[:max(limit * 3, limit)]
+    reference_items = materialize_reference_rows(
+        db, [item for _, kind, item, _ in ranked_window if kind == 1],
+    )
+    reference_by_barcode = {
+        normalized_digits(item.get("barcode", "")): item
+        for item in reference_items
+    }
+    for _, kind, item, bc in ranked_window:
         if len(out) >= limit:
             break
+        if kind == 1:
+            item = reference_by_barcode.get(bc)
+            if not item:
+                continue
         add(item, bc)
     return out[:limit]
 

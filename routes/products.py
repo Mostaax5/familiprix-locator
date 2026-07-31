@@ -1,9 +1,11 @@
 import re
 import os
 import json
+import gzip
 import time
 import hashlib
 import math
+import tempfile
 import threading
 import unicodedata
 from array import array
@@ -11,7 +13,7 @@ from collections import Counter, deque
 from difflib import SequenceMatcher
 from functools import wraps
 from urllib.parse import urlsplit
-from flask import Blueprint, Response, jsonify, request, stream_with_context
+from flask import Blueprint, jsonify, request, send_file
 from database import (
     connect_db,
     get_db,
@@ -341,21 +343,27 @@ def _reference_corpus(db):
     with _REF_LOCK:
         if _fresh_enough():
             return _REF_CACHE["rows"]
+        # This index is optional and rebuildable. Drop the stale list before
+        # allocating its replacement so an enrichment update cannot retain two
+        # copies of the 9k-product catalogue at once.
+        _REF_CACHE.update(key=None, rows=[], built_at=0.0)
+        release_unused_memory()
         rows = []
         verified_by_key = {}
         identifiers_by_key = {}
         for evidence_row in db.execute(
             """SELECT gtin_key, field_name, field_value
                FROM product_reference_evidence
-               WHERE active=1 AND verification_status='verified'"""
+               WHERE active=1 AND verification_status='verified'
+                 AND field_name IN ('name','brand')"""
         ):
             evidence = dict(evidence_row)
             verified_by_key.setdefault(evidence["gtin_key"], {})[
                 evidence["field_name"]
             ] = evidence["field_value"]
         for identifier_row in db.execute(
-            f"""SELECT gtin_key, identifier_type, identifier_value, authority,
-                      source, source_url, verification_status, match_method, confidence
+            f"""SELECT gtin_key, identifier_type, identifier_value,
+                      verification_status
                FROM product_reference_identifiers
                WHERE {_searchable_identifier_status_sql()}
                ORDER BY CASE WHEN verification_status='verified' THEN 0 ELSE 1 END,
@@ -365,12 +373,7 @@ def _reference_corpus(db):
             identifiers_by_key.setdefault(identifier["gtin_key"], []).append({
                 "type": identifier.get("identifier_type", ""),
                 "value": identifier.get("identifier_value", ""),
-                "authority": identifier.get("authority", ""),
-                "source": identifier.get("source", ""),
-                "source_url": identifier.get("source_url", ""),
                 "verification_status": identifier.get("verification_status", ""),
-                "match_method": identifier.get("match_method", ""),
-                "confidence": identifier.get("confidence", 0),
             })
         for r in db.execute(
             """SELECT barcode, name, brand, description, product_code,
@@ -386,31 +389,21 @@ def _reference_corpus(db):
             official_name = verified.get("name", "") or (
                 d.get("name", "") if store_identity else ""
             )
-            verified_brand = verified.get("brand", "")
-            # Descriptions remain useful employee-facing catalogue context even
-            # before a manager has reviewed their evidence.  Keep the status
-            # explicit instead of making an existing description disappear.
+            verified_brand = verified.get("brand", "") or (
+                d.get("brand", "") if store_identity else ""
+            )
             available_description = (
-                verified.get("description", "")
-                or str(d.get("description", "") or "").strip()
+                str(d.get("description", "") or "").strip()
             )
             gtin_key = gtin_identity_key(d.get("barcode", ""))
             identifiers = identifiers_by_key.get(gtin_key, [])
             name = normalize_search_text(official_name)
             brand = normalize_search_text(verified_brand)
             desc = normalize_search_text(available_description)
-            identity_hay = " ".join([
-                name, brand, normalize_search_text(verified.get("description", "")),
-            ])
+            identity_hay = " ".join([name, brand])
             rows.append({
                 "barcode": d.get("barcode", ""), "name": official_name,
-                "brand": verified_brand, "description": available_description,
-                "description_status": (
-                    "verified" if verified.get("description", "") else "unverified"
-                ),
-                "description_available_unverified": bool(
-                    available_description and not verified.get("description", "")
-                ),
+                "brand": verified_brand,
                 "product_code": verified.get("product_code", "") or (
                     d.get("product_code", "") if store_identity else ""
                 ),
@@ -426,6 +419,10 @@ def _reference_corpus(db):
                 "_tokens": tuple(name.split()),
                 "_brand_tokens": tuple(brand.split()),
             })
+            # The raw description can be several kilobytes. Only its normalized
+            # search form stays in memory; full metadata is hydrated for the top
+            # results from PostgreSQL after ranking.
+            d.clear()
         _REF_CACHE.update(key=key, rows=rows, built_at=time.time())
     return rows
 
@@ -538,16 +535,26 @@ _PROD_IDENTIFIER_DRIFT_TTL_S = max(
 )
 _PROD_METADATA_REFRESH_MAX_RSS_MB = max(
     128.0,
-    float(os.environ.get("PRODUCT_METADATA_REFRESH_MAX_RSS_MB", "260") or 260),
+    float(os.environ.get("PRODUCT_METADATA_REFRESH_MAX_RSS_MB", "220") or 220),
 )
-_PRODUCTS_PAYLOAD_VERSION = "compact-stream-v4"
-_PRODUCT_STREAM_CHUNK_BYTES = 256 * 1024
-# A phone bootstrap is several megabytes before compression. Gunicorn has four
-# request threads, so allowing all four to serialize and gzip the catalogue at
-# once can multiply the process RSS enough to trigger Render's memory restart.
-# Extra devices receive a short retry response instead of occupying another
-# server thread while one bounded stream is already in progress.
+_PRODUCTS_PAYLOAD_VERSION = "disk-gzip-v1"
+_PRODUCT_PAYLOAD_CHUNK_BYTES = 64 * 1024
+# Build the phone bootstrap once, on disk, then let WSGI stream the file. The
+# previous route rebuilt and compressed ~8.8 MB of JSON on every refresh; glibc
+# retained part of those temporary arenas and repeated opens steadily raised RSS.
 _PRODUCT_STREAM_LOCK = threading.Lock()
+_PRODUCT_PAYLOAD_LOCK = threading.RLock()
+_PRODUCT_PAYLOAD_STATE = {
+    "key": None,
+    "etag": "",
+    "raw_path": "",
+    "gzip_path": "",
+    "rows": 0,
+    "raw_bytes": 0,
+    "gzip_bytes": 0,
+    "built_at": 0.0,
+    "build_ms": 0,
+}
 
 
 def _product_cache_database_token(db):
@@ -1366,7 +1373,10 @@ def _schedule_product_corpus_refresh():
 
             db = connect_db()
             with memory_intensive_task("product_corpus_refresh"):
+                release_optional_product_caches()
                 _products_corpus(db, allow_identifier_stale=False)
+            release_unused_memory()
+            warm_product_payload_cache()
         except Exception as exc:
             print(f"[Recherche] actualisation de l'index impossible: {exc}")
         finally:
@@ -1486,6 +1496,143 @@ def bootstrap_product_payload(item):
     if other_identifiers:
         payload["identifiers"] = other_identifiers
     return payload
+
+
+def _product_payload_target_key():
+    rows = _PROD_CACHE.get("rows") or []
+    if not _PROD_CACHE.get("initialized"):
+        return None
+    return (
+        _PRODUCTS_PAYLOAD_VERSION,
+        int(_PROD_CACHE.get("generation", -1) or -1),
+        float(_PROD_CACHE.get("built_at", 0) or 0),
+        len(rows),
+    )
+
+
+def product_payload_cache_ready():
+    target_key = _product_payload_target_key()
+    with _PRODUCT_PAYLOAD_LOCK:
+        return bool(
+            target_key
+            and _PRODUCT_PAYLOAD_STATE.get("key") == target_key
+            and os.path.isfile(_PRODUCT_PAYLOAD_STATE.get("raw_path", ""))
+            and os.path.isfile(_PRODUCT_PAYLOAD_STATE.get("gzip_path", ""))
+        )
+
+
+def product_payload_cache_status():
+    with _PRODUCT_PAYLOAD_LOCK:
+        return {
+            "ready": product_payload_cache_ready(),
+            "rows": int(_PRODUCT_PAYLOAD_STATE.get("rows", 0) or 0),
+            "raw_bytes": int(_PRODUCT_PAYLOAD_STATE.get("raw_bytes", 0) or 0),
+            "gzip_bytes": int(_PRODUCT_PAYLOAD_STATE.get("gzip_bytes", 0) or 0),
+            "build_ms": int(_PRODUCT_PAYLOAD_STATE.get("build_ms", 0) or 0),
+            "built_at": float(_PRODUCT_PAYLOAD_STATE.get("built_at", 0) or 0),
+        }
+
+
+def _build_product_payload_files(corpus, target_key):
+    """Serialize one bounded snapshot to files instead of once per request."""
+    started_at = time.perf_counter()
+    payload_dir = os.path.join(tempfile.gettempdir(), "familiprix-locator")
+    os.makedirs(payload_dir, exist_ok=True)
+    stem = f"products-{os.getpid()}"
+    raw_path = os.path.join(payload_dir, f"{stem}.json")
+    gzip_path = os.path.join(payload_dir, f"{stem}.json.gz")
+    nonce = f"{threading.get_ident()}-{time.time_ns()}"
+    raw_temp = f"{raw_path}.{nonce}.tmp"
+    gzip_temp = f"{gzip_path}.{nonce}.tmp"
+    products = sorted(corpus, key=lambda entry: location_sort_key(entry[0]))
+    buffer = bytearray()
+    first = True
+
+    def append_piece(piece, raw_file, gzip_file):
+        buffer.extend(piece)
+        if len(buffer) >= _PRODUCT_PAYLOAD_CHUNK_BYTES:
+            raw_file.write(buffer)
+            gzip_file.write(buffer)
+            buffer.clear()
+
+    try:
+        with open(raw_temp, "wb") as raw_file, open(gzip_temp, "wb") as compressed_file:
+            with gzip.GzipFile(
+                filename="",
+                mode="wb",
+                fileobj=compressed_file,
+                compresslevel=4,
+                mtime=0,
+            ) as gzip_file:
+                append_piece(b"[", raw_file, gzip_file)
+                for item, _search_row in products:
+                    encoded = json.dumps(
+                        bootstrap_product_payload(item),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    if not first:
+                        append_piece(b",", raw_file, gzip_file)
+                    append_piece(encoded, raw_file, gzip_file)
+                    first = False
+                append_piece(b"]", raw_file, gzip_file)
+                if buffer:
+                    raw_file.write(buffer)
+                    gzip_file.write(buffer)
+                    buffer.clear()
+        os.replace(gzip_temp, gzip_path)
+        os.replace(raw_temp, raw_path)
+        etag = hashlib.sha256(repr(target_key).encode("utf-8")).hexdigest()
+        with _PRODUCT_PAYLOAD_LOCK:
+            _PRODUCT_PAYLOAD_STATE.update(
+                key=target_key,
+                etag=etag,
+                raw_path=raw_path,
+                gzip_path=gzip_path,
+                rows=len(products),
+                raw_bytes=os.path.getsize(raw_path),
+                gzip_bytes=os.path.getsize(gzip_path),
+                built_at=time.time(),
+                build_ms=int(round((time.perf_counter() - started_at) * 1000)),
+            )
+    finally:
+        products.clear()
+        buffer.clear()
+        for temporary_path in (raw_temp, gzip_temp):
+            try:
+                if os.path.exists(temporary_path):
+                    os.remove(temporary_path)
+            except OSError:
+                pass
+    return product_payload_cache_status()
+
+
+def warm_product_payload_cache(*, blocking=True):
+    """Build the current phone payload once; return None when another build owns it."""
+    if product_payload_cache_ready():
+        return product_payload_cache_status()
+    if not _PRODUCT_STREAM_LOCK.acquire(blocking=blocking):
+        return None
+    db = None
+    try:
+        if product_payload_cache_ready():
+            return product_payload_cache_status()
+        db = connect_db()
+        corpus = _employee_product_corpus(db)
+        target_key = _product_payload_target_key()
+        if not target_key:
+            raise RuntimeError("Le catalogue produits n'est pas initialise.")
+        with memory_intensive_task("product_payload_warm", priority=True):
+            status = _build_product_payload_files(corpus, target_key)
+        release_unused_memory()
+        return status
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+        _PRODUCT_STREAM_LOCK.release()
 
 
 def intent_expansion_terms(query):
@@ -2440,6 +2587,59 @@ def reference_metadata_for_barcode(reference_index, barcode):
     return {}
 
 
+def materialize_reference_rows(db, rows):
+    """Hydrate only ranked catalogue hits with full descriptions and evidence."""
+    selected = [row for row in (rows or []) if row]
+    if not selected:
+        return []
+    barcodes = [row.get("barcode", "") for row in selected]
+    metadata_by_barcode = build_reference_metadata_index(db, barcodes)
+    keys = [gtin_identity_key(barcode) for barcode in barcodes]
+    identifiers_by_key = _reference_identifiers_by_gtin(db, keys)
+    products = []
+    for row in selected:
+        barcode = str(row.get("barcode", "") or "")
+        key = gtin_identity_key(barcode)
+        metadata = reference_metadata_for_barcode(
+            metadata_by_barcode, barcode,
+        )
+        identifiers = identifiers_by_key.get(key, [])
+        if not identifiers:
+            identifiers = row.get("_identifiers", [])
+        unverified_fields = set(metadata.get("_unverified_fields") or [])
+        description = str(metadata.get("description", "") or "").strip()
+        products.append({
+            "barcode": barcode,
+            "name": str(metadata.get("name", "") or row.get("name", "") or "").strip(),
+            "brand": str(metadata.get("brand", "") or row.get("brand", "") or "").strip(),
+            "description": description,
+            "description_status": (
+                "unverified" if "description" in unverified_fields else "verified"
+            ) if description else "missing",
+            "description_available_unverified": bool(
+                description and "description" in unverified_fields
+            ),
+            "image_url": str(metadata.get("image_url", "") or "").strip(),
+            "image_status": (
+                "unverified" if "image_url" in unverified_fields else "verified"
+            ) if metadata.get("image_url") else "missing",
+            "image_available_unverified": bool(
+                metadata.get("image_url") and "image_url" in unverified_fields
+            ),
+            "product_code": str(
+                metadata.get("product_code", "")
+                or row.get("product_code", "")
+                or ""
+            ).strip(),
+            "identifiers": _public_product_identifiers(identifiers),
+            "regulatory_identifiers": _public_regulatory_identifiers(identifiers),
+            "_identifiers": identifiers,
+            "catalog_only": True,
+            "in_stock": 1,
+        })
+    return products
+
+
 def merge_reference_metadata(product, reference):
     """Fill blank product metadata from its UPC reference without overwriting edits."""
     merged = dict(product or {})
@@ -3331,6 +3531,12 @@ _IMAGE_FILL_ACTIVE = False
 _IMAGE_MISS_RETRY_SECONDS = 15 * 60
 _IMAGE_ERROR_RETRY_SECONDS = 30
 _IMAGE_FILL_MAX_PENDING = 24
+_MEMORY_PRESSURE_RSS_MB = max(
+    256.0,
+    float(os.environ.get("MEMORY_PRESSURE_RSS_MB", "320") or 320),
+)
+_MEMORY_PRESSURE_CHECK_LOCK = threading.Lock()
+_MEMORY_PRESSURE_LAST_CHECK = 0.0
 
 
 def release_optional_product_caches():
@@ -3368,6 +3574,37 @@ def release_optional_product_caches():
         "reference_rows": reference_rows,
         "expired_image_retries": len(expired),
     }
+
+
+def release_optional_product_caches_if_needed():
+    """Create headroom before Render reaches its hard 512 MB process limit."""
+    global _MEMORY_PRESSURE_LAST_CHECK
+    now = time.monotonic()
+    if now - _MEMORY_PRESSURE_LAST_CHECK < 5.0:
+        return None
+    if not _MEMORY_PRESSURE_CHECK_LOCK.acquire(blocking=False):
+        return None
+    try:
+        if now - _MEMORY_PRESSURE_LAST_CHECK < 5.0:
+            return None
+        _MEMORY_PRESSURE_LAST_CHECK = now
+        rss_before = current_rss_mb()
+        if rss_before is None or rss_before < _MEMORY_PRESSURE_RSS_MB:
+            return None
+        released = release_optional_product_caches()
+        rss_after = current_rss_mb()
+        print(
+            f"[Memoire] pression {rss_before} MB; "
+            f"{released.get('reference_rows', 0)} references liberees; "
+            f"RSS apres nettoyage: {rss_after} MB."
+        )
+        return {
+            **released,
+            "rss_before_mb": rss_before,
+            "rss_after_mb": rss_after,
+        }
+    finally:
+        _MEMORY_PRESSURE_CHECK_LOCK.release()
 
 
 def persist_image_for_barcode(db, barcode, image_url, now=None, source="", source_url="", candidate=None):
@@ -4050,28 +4287,7 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None, field=""):
             ranked.append((score, row))
     ranked.sort(key=lambda x: (-x[0], x[1]["_name"]))
     rows = [row for _, row in ranked[:limit]]
-    metadata_by_barcode = build_reference_metadata_index(
-        db, [row.get("barcode", "") for row in rows]
-    )
-    return [{
-        "barcode": row["barcode"],
-        "name": row["name"],
-        "brand": row["brand"],
-        "description": row["description"],
-        "image_url": str(
-            metadata_by_barcode.get(normalized_digits(row.get("barcode", "")), {}).get("image_url", "")
-            or ""
-        ).strip(),
-        "product_code": row["product_code"],
-        "identifiers": _public_product_identifiers(
-            row.get("_identifiers", [])
-        ),
-        "regulatory_identifiers": _public_regulatory_identifiers(
-            row.get("_identifiers", [])
-        ),
-        "catalog_only": True,
-        "in_stock": 1,
-    } for row in rows]
+    return materialize_reference_rows(db, rows)
 
 
 def _fuzzy_product_score(row, query_tokens):
@@ -4765,111 +4981,46 @@ def hybrid_client_candidates(question, query_plan, limit=60):
 
 @products_bp.route("/api/products", methods=["GET"])
 def get_products():
-    """Full catalog for the phones' local cache. ETag'd on the products state key:
-    when nothing changed since the phone's last fetch it gets an instant 304 and
-    reuses its stored copy — this endpoint is fetched at every app open and tab
-    switch, and used to re-serialize ~1 MB of JSON every time."""
-    db = get_db()
-    # During background enrichment the warm cache is intentionally published
-    # at a bounded cadence. Keep its ETag stable too, otherwise every phone
-    # downloads the same multi-megabyte payload after each metadata row update.
-    if _product_corpus_fast_ready() and _PROD_CACHE.get("key"):
-        etag_state = _PROD_CACHE["key"]
-    else:
-        etag_state = (
-            products_state_key(db),
-            product_identifier_state_key(db),
-            reference_identifier_state_key(db),
-        )
-    etag = hashlib.sha256(repr((
-        _PRODUCTS_PAYLOAD_VERSION, etag_state,
-    )).encode()).hexdigest()
-    if client_etag_matches(etag):
-        return "", 304
-    if not _PRODUCT_STREAM_LOCK.acquire(blocking=False):
+    """Serve the prebuilt phone catalogue without per-request JSON/gzip arenas."""
+    if not product_payload_cache_ready():
+        status = warm_product_payload_cache(blocking=False)
+        if status is None:
+            response = jsonify({
+                "success": False,
+                "retry": True,
+                "error": "Le catalogue est deja en cours de preparation.",
+            })
+            response.status_code = 503
+            response.headers["Retry-After"] = "1"
+            return response
+    with _PRODUCT_PAYLOAD_LOCK:
+        state = dict(_PRODUCT_PAYLOAD_STATE)
+    etag = str(state.get("etag", "") or "")
+    if not etag or not state.get("raw_path") or not state.get("gzip_path"):
         response = jsonify({
             "success": False,
             "retry": True,
-            "error": "Le catalogue est deja en cours de chargement.",
+            "error": "Le catalogue est en cours de preparation.",
         })
         response.status_code = 503
-        response.headers["Retry-After"] = "2"
+        response.headers["Retry-After"] = "1"
         return response
-
-    release_state = {"done": False}
-    release_lock = threading.Lock()
-
-    def release_stream_slot():
-        with release_lock:
-            if release_state["done"]:
-                return
-            release_state["done"] = True
-            _PRODUCT_STREAM_LOCK.release()
-
-    def generate():
-        products = []
-        stream_db = None
-        # Keep the high-memory gate for the complete JSON/compression stream,
-        # not only the database read. This prevents a PDF parse, catalogue job,
-        # or second bootstrap from stacking its peak on this response.
-        with memory_intensive_task("product_bootstrap", priority=True):
-            first = True
-            chunks = ["["]
-            chunk_size = 1
-            try:
-                # Flask closes the request-scoped connection before it starts
-                # iterating a streamed response. Give the stream one explicit
-                # connection and close it in the same generator lifecycle.
-                stream_db = connect_db()
-                if _product_corpus_fast_ready():
-                    corpus = _employee_product_corpus(stream_db)
-                else:
-                    corpus = _products_corpus(
-                        stream_db, allow_identifier_stale=False,
-                    )
-                products = sorted(
-                    corpus, key=lambda entry: location_sort_key(entry[0]),
-                )
-                for item, _search_row in products:
-                    encoded = json.dumps(
-                        bootstrap_product_payload(item),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    )
-                    piece = encoded if first else f",{encoded}"
-                    first = False
-                    chunks.append(piece)
-                    chunk_size += len(piece)
-                    if chunk_size >= _PRODUCT_STREAM_CHUNK_BYTES:
-                        yield "".join(chunks)
-                        chunks = []
-                        chunk_size = 0
-                chunks.append("]")
-                yield "".join(chunks)
-            finally:
-                if stream_db is not None:
-                    try:
-                        stream_db.close()
-                    except Exception:
-                        pass
-                products.clear()
-                chunks.clear()
-                release_stream_slot()
-                release_unused_memory()
-
-    response = Response(
-        stream_with_context(generate()),
+    if client_etag_matches(etag):
+        return "", 304
+    accepts_gzip = "gzip" in str(
+        request.headers.get("Accept-Encoding", "") or ""
+    ).lower()
+    response = send_file(
+        state["gzip_path"] if accepts_gzip else state["raw_path"],
         mimetype="application/json",
+        conditional=False,
+        max_age=0,
     )
     response.set_etag(etag, weak=True)
-    # WSGI can close a response before entering its generator (client disconnect,
-    # conditional middleware, etc.). Release the single-flight slot in that case,
-    # and trim once more after Flask-Compress has released its gzip buffers.
-    def close_product_stream():
-        release_stream_slot()
-        release_unused_memory()
-
-    response.call_on_close(close_product_stream)
+    response.headers["Cache-Control"] = "private, no-cache"
+    response.headers["Vary"] = "Accept-Encoding"
+    if accepts_gzip:
+        response.headers["Content-Encoding"] = "gzip"
     return response
 
 
@@ -6104,6 +6255,7 @@ def product_memory_status():
             _PROD_CACHE.get("metadata_dirty")
         ),
         "payload_version": _PRODUCTS_PAYLOAD_VERSION,
+        "product_payload": product_payload_cache_status(),
     })
 
 
@@ -6130,6 +6282,7 @@ def operations_status():
         "success": True,
         "operations": observability_snapshot(),
         "search": product_search_cache_status(),
+        "product_payload": product_payload_cache_status(),
         "catalog_enrichment": {
             **{
                 key: value for key, value in dict(_CATALOG_ENRICH).items()

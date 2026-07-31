@@ -19,7 +19,9 @@ from security import auth_bp, install_security, internal_request_headers
 from routes.products import (
     products_bp, first_column, schedule_backfill_missing,
     schedule_initial_product_quality_audit, schedule_reference_metadata_sync,
-    product_search_cache_ready, warm_product_search_cache,
+    product_payload_cache_ready, product_search_cache_ready,
+    release_optional_product_caches_if_needed,
+    warm_product_payload_cache, warm_product_search_cache,
 )
 from routes.layout import layout_bp
 from routes.ai import ai_bp, configured_ai_provider, reference_count, maybe_resume_enrichment
@@ -92,6 +94,11 @@ def _assign_request_id():
     supplied = (request.headers.get("X-Request-ID") or "").strip()
     g.request_id = supplied if re.fullmatch(r"[A-Za-z0-9._-]{8,64}", supplied) else secrets.token_hex(8)
     g.request_started_at = time.perf_counter()
+    try:
+        release_optional_product_caches_if_needed()
+    except Exception:
+        # Memory telemetry must never make an employee request fail.
+        pass
 
 
 install_security(app)
@@ -194,10 +201,12 @@ def readyz():
     ready = bool(
         not DB_BOOT_PENDING
         and product_search_cache_ready()
+        and product_payload_cache_ready()
     )
     return jsonify({
         "ok": ready,
         "search_ready": product_search_cache_ready(),
+        "product_payload_ready": product_payload_cache_ready(),
     }), (200 if ready else 503)
 
 
@@ -515,6 +524,12 @@ def _start_persistence_services(*, background=False):
             print(
                 f"[BOOT] Index de recherche pret: "
                 f"{warmed_count} emplacements."
+            )
+            payload = warm_product_payload_cache()
+            print(
+                f"[BOOT] Catalogue telephone pret: "
+                f"{payload.get('rows', 0)} produits, "
+                f"{payload.get('gzip_bytes', 0)} octets compresses."
             )
         except Exception as exc:  # noqa: BLE001 - later requests can retry
             print(f"[BOOT] Prechauffage de la recherche impossible: {exc}")

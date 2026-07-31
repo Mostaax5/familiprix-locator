@@ -1,3 +1,5 @@
+import gzip
+import os
 import threading
 import time
 import unittest
@@ -279,87 +281,88 @@ class MemorySafetyTests(unittest.TestCase):
         products._PRODUCT_STREAM_LOCK.acquire()
         try:
             with app.test_request_context("/api/products"), patch.object(
-                products, "get_db", return_value=object(),
-            ), patch.object(
-                products, "products_state_key", return_value=(1,),
-            ), patch.object(
-                products, "product_identifier_state_key", return_value=(2,),
-            ), patch.object(
-                products, "reference_identifier_state_key", return_value=(3,),
-            ), patch.object(
-                products, "client_etag_matches", return_value=False,
+                products, "product_payload_cache_ready", return_value=False,
             ):
                 response = products.get_products()
         finally:
             products._PRODUCT_STREAM_LOCK.release()
 
         self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.headers["Retry-After"], "2")
+        self.assertEqual(response.headers["Retry-After"], "1")
         self.assertTrue(response.get_json()["retry"])
 
-    def test_unstarted_product_stream_releases_its_single_flight_slot(self):
+    def test_product_bootstrap_is_built_once_then_served_from_disk(self):
         app = Flask(__name__)
-        self.assertFalse(products._PRODUCT_STREAM_LOCK.locked())
-        with app.test_request_context("/api/products"), patch.object(
-            products, "get_db", return_value=object(),
-        ), patch.object(
-            products, "products_state_key", return_value=(1,),
-        ), patch.object(
-            products, "product_identifier_state_key", return_value=(2,),
-        ), patch.object(
-            products, "reference_identifier_state_key", return_value=(3,),
-        ), patch.object(
-            products, "client_etag_matches", return_value=False,
-        ), patch.object(
-            products, "release_unused_memory",
-        ):
-            response = products.get_products()
-            self.assertTrue(products._PRODUCT_STREAM_LOCK.locked())
-            response.close()
-
-        self.assertFalse(products._PRODUCT_STREAM_LOCK.locked())
-
-    def test_product_stream_uses_and_closes_its_own_database_connection(self):
-        app = Flask(__name__)
-
-        class StreamDatabase:
-            closed = False
-
-            def close(self):
-                self.closed = True
-
-        stream_db = StreamDatabase()
+        original_cache = dict(products._PROD_CACHE)
+        original_payload = dict(products._PRODUCT_PAYLOAD_STATE)
+        generated_paths = []
         item = {
             "id": 1, "name": "Advil", "barcode": "1", "product_code": "",
             "aisle": "1", "side": "A", "section": "1", "shelf": "1",
             "position": "1", "facings": 1, "is_plano": 1, "in_stock": 1,
             "linked_position": "", "flipped_label": 0,
         }
-        with app.test_request_context("/api/products"), patch.object(
-            products, "get_db", return_value=object(),
-        ), patch.object(
-            products, "connect_db", return_value=stream_db,
-        ), patch.object(
-            products, "_products_corpus",
-            return_value=[(item, {"_name": "advil"})],
-        ), patch.object(
-            products, "products_state_key", return_value=(1,),
-        ), patch.object(
-            products, "product_identifier_state_key", return_value=(2,),
-        ), patch.object(
-            products, "reference_identifier_state_key", return_value=(3,),
-        ), patch.object(
-            products, "client_etag_matches", return_value=False,
-        ), patch.object(
-            products, "release_unused_memory",
-        ):
-            response = products.get_products()
-            body = b"".join(response.iter_encoded())
-            response.close()
-
-        self.assertIn(b'"name":"Advil"', body)
-        self.assertTrue(stream_db.closed)
+        corpus = [(item, {"_name": "advil"})]
+        fake_db = MagicMock()
         self.assertFalse(products._PRODUCT_STREAM_LOCK.locked())
+        try:
+            products._PROD_CACHE.update(
+                rows=corpus, generation=99, built_at=123.0, initialized=True,
+            )
+            products._PRODUCT_PAYLOAD_STATE.update(
+                key=None, raw_path="", gzip_path="", etag="",
+            )
+            with patch.object(
+                products, "connect_db", return_value=fake_db,
+            ) as connect, patch.object(
+                products, "_employee_product_corpus", return_value=corpus,
+            ), patch.object(products, "release_unused_memory"):
+                status = products.warm_product_payload_cache()
+                generated_paths = [
+                    products._PRODUCT_PAYLOAD_STATE["raw_path"],
+                    products._PRODUCT_PAYLOAD_STATE["gzip_path"],
+                ]
+                self.assertEqual(status["rows"], 1)
+
+                with app.test_request_context(
+                    "/api/products", headers={"Accept-Encoding": "gzip"},
+                ):
+                    first_response = products.get_products()
+                    first_response.direct_passthrough = False
+                    first_body = first_response.get_data()
+                    first_response.close()
+
+                with patch.object(
+                    products.json, "dumps",
+                    side_effect=AssertionError("must not serialize again"),
+                ), app.test_request_context(
+                    "/api/products", headers={"Accept-Encoding": "gzip"},
+                ):
+                    second_response = products.get_products()
+                    second_response.direct_passthrough = False
+                    second_body = second_response.get_data()
+                    second_response.close()
+
+            self.assertIn(b'"name":"Advil"', gzip.decompress(first_body))
+            self.assertEqual(first_body, second_body)
+            connect.assert_called_once_with()
+            fake_db.close.assert_called_once_with()
+            self.assertFalse(products._PRODUCT_STREAM_LOCK.locked())
+        finally:
+            products._PROD_CACHE.clear()
+            products._PROD_CACHE.update(original_cache)
+            products._PRODUCT_PAYLOAD_STATE.clear()
+            products._PRODUCT_PAYLOAD_STATE.update(original_payload)
+            old_paths = {
+                original_payload.get("raw_path"),
+                original_payload.get("gzip_path"),
+            }
+            for path in generated_paths:
+                if path and path not in old_paths:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
 
     def test_optional_reference_cache_can_be_released_before_pdf_work(self):
         original_reference = dict(products._REF_CACHE)
@@ -386,6 +389,73 @@ class MemorySafetyTests(unittest.TestCase):
             products._REF_CACHE.update(original_reference)
             products._IMAGE_FILL_RETRY_AFTER.clear()
             products._IMAGE_FILL_RETRY_AFTER.update(original_retries)
+
+    def test_memory_pressure_guard_releases_only_rebuildable_state(self):
+        original_reference = dict(products._REF_CACHE)
+        original_check = products._MEMORY_PRESSURE_LAST_CHECK
+        warm_products = products._PROD_CACHE.get("rows")
+        try:
+            products._REF_CACHE.update(
+                key=("catalogue",), rows=[{"barcode": "1"}],
+                built_at=time.time(),
+            )
+            products._MEMORY_PRESSURE_LAST_CHECK = 0.0
+            with patch.object(
+                products, "current_rss_mb", side_effect=[350.0, 245.0],
+            ), patch.object(products, "release_unused_memory"):
+                result = products.release_optional_product_caches_if_needed()
+
+            self.assertEqual(result["reference_rows"], 1)
+            self.assertEqual(result["rss_before_mb"], 350.0)
+            self.assertEqual(products._REF_CACHE["rows"], [])
+            self.assertIs(products._PROD_CACHE.get("rows"), warm_products)
+        finally:
+            products._REF_CACHE.clear()
+            products._REF_CACHE.update(original_reference)
+            products._MEMORY_PRESSURE_LAST_CHECK = original_check
+
+    def test_reference_index_drops_full_metadata_but_keeps_it_searchable(self):
+        original_reference = dict(products._REF_CACHE)
+
+        class ReferenceDatabase:
+            def execute(self, query, _params=()):
+                if "FROM product_reference_evidence" in query:
+                    return []
+                if "FROM product_reference_identifiers" in query:
+                    return [{
+                        "gtin_key": "gtin:00062600142320",
+                        "identifier_type": "DIN",
+                        "identifier_value": "00559407",
+                        "verification_status": "requires_review",
+                    }]
+                if "FROM product_reference" in query:
+                    return [{
+                        "barcode": "062600142320",
+                        "name": "TYLENOL 500MG CO100",
+                        "brand": "Tylenol",
+                        "description": "Acetaminophene pour le soulagement de la douleur.",
+                        "product_code": "664375",
+                        "store_presence_status": "planogram_imported",
+                        "source": "Familiprix",
+                        "source_url": "https://example.test/product",
+                    }]
+                raise AssertionError(query)
+
+        try:
+            products._REF_CACHE.update(key=None, rows=[], built_at=0.0)
+            with patch.object(
+                products, "_reference_state_key", return_value=(1,),
+            ), patch.object(products, "release_unused_memory"):
+                rows = products._reference_corpus(ReferenceDatabase())
+
+            self.assertEqual(len(rows), 1)
+            self.assertNotIn("description", rows[0])
+            self.assertIn("acetaminophene", rows[0]["_hay"])
+            self.assertNotIn("source", rows[0]["_identifiers"][0])
+            self.assertEqual(rows[0]["_identifiers"][0]["value"], "00559407")
+        finally:
+            products._REF_CACHE.clear()
+            products._REF_CACHE.update(original_reference)
 
     def test_bm25_token_counter_does_not_match_substrings(self):
         haystack = "advil confort advil ibuprofene"
