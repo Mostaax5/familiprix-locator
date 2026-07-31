@@ -39,6 +39,7 @@ from product_data import (
     field_evidence_for_value,
     gtin_check_digit_valid,
     gtin_identity_key,
+    normalize_identifier,
     record_field_evidence,
     record_reference_evidence,
     sync_reference_identifiers_to_product,
@@ -610,10 +611,16 @@ def _searchable_identifier_status_sql(alias=""):
     """
     prefix = f"{alias}." if alias else ""
     return f"""(
-        {prefix}verification_status IN ('verified','requires_review')
-        OR (
-            {prefix}verification_status='rejected'
-            AND {prefix}identifier_type IN ('DIN','NPN','DIN_HM')
+        (
+            {prefix}verification_status IN ('verified','requires_review')
+            OR (
+                {prefix}verification_status='rejected'
+                AND {prefix}identifier_type IN ('DIN','NPN','DIN_HM')
+            )
+        )
+        AND NOT (
+            {prefix}identifier_type IN ('DIN','NPN','DIN_HM')
+            AND REPLACE(COALESCE({prefix}normalized_value,''), '0', '')=''
         )
     )"""
 
@@ -645,6 +652,10 @@ def _merge_identifier_records(*groups):
                 str(identifier.get("authority", "") or "").strip(),
             )
             if not key[0] or not key[1]:
+                continue
+            if key[0] in {"DIN", "NPN", "DIN_HM"} and not normalize_identifier(
+                key[0], key[1], key[2]
+            ):
                 continue
             current = merged.get(key)
             candidate_rank = (
@@ -766,6 +777,11 @@ def _public_product_identifiers(identifiers):
         value = str(raw.get("value", "") or "").strip()
         if identifier_type not in IDENTIFIER_TYPES or not value:
             continue
+        if (
+            identifier_type in {"DIN", "NPN", "DIN_HM"}
+            and not normalize_identifier(identifier_type, value)
+        ):
+            continue
         key = (identifier_type, value, str(raw.get("authority", "") or ""))
         if key in seen:
             continue
@@ -795,6 +811,8 @@ def _public_regulatory_identifiers(identifiers):
         identifier_type = str(raw.get("type", "") or "").upper()
         value = str(raw.get("value", "") or "").strip()
         if identifier_type not in {"DIN", "NPN", "DIN_HM"} or not value:
+            continue
+        if not normalize_identifier(identifier_type, value):
             continue
         key = (identifier_type, value)
         if key in seen:

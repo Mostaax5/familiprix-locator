@@ -15,6 +15,7 @@ from product_data import (
     assess_metadata_candidate,
     exact_gtin_variants,
     gtin_identity_key,
+    normalize_identifier,
     record_reference_evidence,
     upsert_product_identifier,
     upsert_reference_candidate,
@@ -64,6 +65,14 @@ class ProductDataAccuracyTests(unittest.TestCase):
         self.assertNotEqual(
             gtin_identity_key("00063848966068"),
             gtin_identity_key("63848966068"),
+        )
+
+    def test_all_zero_regulatory_placeholders_are_not_identifiers(self):
+        self.assertEqual(normalize_identifier("DIN", "00000000"), "")
+        self.assertEqual(normalize_identifier("NPN", "0000-0000"), "")
+        self.assertEqual(normalize_identifier("DIN-HM", "00000000"), "")
+        self.assertEqual(
+            normalize_identifier("DIN", "00559407"), "00559407"
         )
 
     def test_exact_familiprix_page_replaces_lower_quality_description(self):

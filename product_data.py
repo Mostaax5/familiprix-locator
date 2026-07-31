@@ -189,7 +189,10 @@ def normalize_identifier(identifier_type, value, authority="") -> str:
         return gtin_identity_key(raw)
     if identifier_type in {"DIN", "NPN", "DIN_HM"}:
         digits = text_digits(raw)
-        return digits if len(digits) == 8 else ""
+        # Retail pages sometimes publish 00000000 as a template placeholder.
+        # It is not a regulatory identifier and must never become searchable
+        # evidence, even with an "unconfirmed" label.
+        return digits if len(digits) == 8 and set(digits) != {"0"} else ""
     normalized = unicodedata.normalize("NFKC", raw).upper()
     normalized = re.sub(r"[\s\-]+", "", normalized)
     if identifier_type in AUTHORITY_REQUIRED_TYPES and not str(authority or "").strip():
