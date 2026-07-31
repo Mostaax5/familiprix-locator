@@ -198,6 +198,10 @@ def healthz():
 @app.route("/readyz")
 def readyz():
     """Tell Render when this revision is ready for employee traffic."""
+    if not DB_BOOT_PENDING and not (
+        product_search_cache_ready() and product_payload_cache_ready()
+    ):
+        ensure_catalogue_warmup_started()
     ready = bool(
         not DB_BOOT_PENDING
         and product_search_cache_ready()
@@ -207,6 +211,7 @@ def readyz():
         "ok": ready,
         "search_ready": product_search_cache_ready(),
         "product_payload_ready": product_payload_cache_ready(),
+        "catalogue_warmup": catalogue_warmup_status(),
     }), (200 if ready else 503)
 
 
@@ -397,6 +402,7 @@ def get_system_info():
         "version": os.environ.get("RENDER_GIT_COMMIT", "")[:7],
         "self_keepalive": _SELF_KEEPALIVE_ACTIVE,
         "catalogue_schema": schema_status,
+        "catalogue_warmup": catalogue_warmup_status(),
         "database_boot_pending": bool(DB_BOOT_PENDING),
         "database_boot_error": bool(DB_BOOT_ERROR),
     })
@@ -494,6 +500,94 @@ def _start_self_keepalive():
 
 _PERSISTENCE_SERVICES_LOCK = threading.Lock()
 _PERSISTENCE_SERVICES_STARTED = False
+_CATALOGUE_WARMUP_LOCK = threading.Lock()
+_CATALOGUE_WARMUP = {
+    "active": False,
+    "stage": "idle",
+    "attempts": 0,
+    "last_error": "",
+    "started_at": 0.0,
+    "ready_at": 0.0,
+}
+
+
+def catalogue_warmup_status():
+    with _CATALOGUE_WARMUP_LOCK:
+        return dict(_CATALOGUE_WARMUP)
+
+
+def _catalogue_warmup_worker():
+    try:
+        while not (
+            product_search_cache_ready() and product_payload_cache_ready()
+        ):
+            with _CATALOGUE_WARMUP_LOCK:
+                _CATALOGUE_WARMUP["attempts"] += 1
+                attempt = int(_CATALOGUE_WARMUP["attempts"])
+                _CATALOGUE_WARMUP["stage"] = "search_index"
+            try:
+                warmed_count = warm_product_search_cache()
+                print(
+                    f"[BOOT] Index de recherche pret: "
+                    f"{warmed_count} emplacements."
+                )
+                with _CATALOGUE_WARMUP_LOCK:
+                    _CATALOGUE_WARMUP["stage"] = "product_payload"
+                payload = warm_product_payload_cache()
+                print(
+                    f"[BOOT] Catalogue telephone pret: "
+                    f"{payload.get('rows', 0)} produits, "
+                    f"{payload.get('gzip_bytes', 0)} octets compresses."
+                )
+                if not (
+                    product_search_cache_ready()
+                    and product_payload_cache_ready()
+                ):
+                    time.sleep(2)
+            except Exception as exc:  # noqa: BLE001 - retry while unready
+                delay = min(30, 2 ** min(attempt, 5))
+                with _CATALOGUE_WARMUP_LOCK:
+                    _CATALOGUE_WARMUP.update(
+                        stage="backoff",
+                        last_error=f"{type(exc).__name__}: {exc}"[:300],
+                    )
+                print(
+                    f"[BOOT] Prechauffage tentative {attempt} "
+                    f"impossible: {exc}; nouvel essai dans {delay}s."
+                )
+                time.sleep(delay)
+        with _CATALOGUE_WARMUP_LOCK:
+            _CATALOGUE_WARMUP.update(
+                stage="ready", last_error="", ready_at=time.time(),
+            )
+    finally:
+        with _CATALOGUE_WARMUP_LOCK:
+            _CATALOGUE_WARMUP["active"] = False
+
+
+def ensure_catalogue_warmup_started():
+    """Start or recover warm-up from the real Gunicorn request process."""
+    if product_search_cache_ready() and product_payload_cache_ready():
+        return False
+    with _CATALOGUE_WARMUP_LOCK:
+        if _CATALOGUE_WARMUP["active"]:
+            return False
+        _CATALOGUE_WARMUP.update(
+            active=True,
+            stage="starting",
+            started_at=time.time(),
+        )
+    try:
+        threading.Thread(
+            target=_catalogue_warmup_worker,
+            daemon=True,
+            name="catalogue-warmup",
+        ).start()
+    except Exception:
+        with _CATALOGUE_WARMUP_LOCK:
+            _CATALOGUE_WARMUP["active"] = False
+        raise
+    return True
 
 
 def _mark_database_ready():
@@ -519,35 +613,12 @@ def _start_persistence_services(*, background=False):
                 f"[BOOT] Service catalogue "
                 f"_restore_from_gist_if_empty impossible: {exc}"
             )
-        warm_attempt = 0
+        ensure_catalogue_warmup_started()
         while not (
             product_search_cache_ready() and product_payload_cache_ready()
         ):
-            warm_attempt += 1
-            try:
-                warmed_count = warm_product_search_cache()
-                print(
-                    f"[BOOT] Index de recherche pret: "
-                    f"{warmed_count} emplacements."
-                )
-                payload = warm_product_payload_cache()
-                print(
-                    f"[BOOT] Catalogue telephone pret: "
-                    f"{payload.get('rows', 0)} produits, "
-                    f"{payload.get('gzip_bytes', 0)} octets compresses."
-                )
-                if not (
-                    product_search_cache_ready()
-                    and product_payload_cache_ready()
-                ):
-                    time.sleep(2)
-            except Exception as exc:  # noqa: BLE001 - retry while unready
-                delay = min(30, 2 ** min(warm_attempt, 5))
-                print(
-                    f"[BOOT] Prechauffage tentative {warm_attempt} "
-                    f"impossible: {exc}; nouvel essai dans {delay}s."
-                )
-                time.sleep(delay)
+            time.sleep(1)
+            ensure_catalogue_warmup_started()
         tasks = (
             schedule_reference_metadata_sync,
             schedule_initial_product_quality_audit,
