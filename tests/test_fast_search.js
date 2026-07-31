@@ -201,4 +201,42 @@ assert.deepStrictEqual(
   'charcoal-pill searches must keep the exact capsule and reject pill tools and toothpaste'
 );
 
+const cranberryCapsules = {
+  id: 17000, name: 'WEBBER CANNEB 10000MG CA90', brand: 'Webber',
+  description: 'Capsules de canneberge', search_terms: '', usage_notes: '',
+  alternative_suggestions: '', barcode: '111111111111', in_stock: 1,
+};
+const coffeeCapsules = {
+  id: 17001, name: 'CAFE CAPSULE INTENSE 10', brand: 'Test',
+  description: 'Capsules de cafe', search_terms: '', usage_notes: '',
+  alternative_suggestions: '', barcode: '111111111112', in_stock: 1,
+};
+const mosquitoSpray = {
+  id: 17002, name: 'OFF CHASSE MOUST VAPO 142G', brand: 'Off',
+  description: 'Vaporisateur chasse-moustiques', search_terms: '', usage_notes: '',
+  alternative_suggestions: '', barcode: '111111111113', in_stock: 1,
+};
+const hairSpray = {
+  id: 17003, name: 'SPRAY COIFFANT 200ML', brand: 'Test',
+  description: 'Fixatif en vaporisateur', search_terms: '', usage_notes: '',
+  alternative_suggestions: '', barcode: '111111111114', in_stock: 1,
+};
+products.push(cranberryCapsules, coffeeCapsules, mosquitoSpray, hairSpray);
+assert.deepStrictEqual(
+  Array.from(
+    context.window.AppSearch.searchProductsFromCache('capsules de canneberge', 40),
+    product => product.id
+  ),
+  [cranberryCapsules.id],
+  'a specific ingredient must outrank and remove unrelated products sharing only the dosage form'
+);
+assert.deepStrictEqual(
+  Array.from(
+    context.window.AppSearch.searchProductsFromCache('spray anti moustique', 40),
+    product => product.id
+  ),
+  [mosquitoSpray.id],
+  'a requested use must remove unrelated products sharing only the spray format'
+);
+
 console.log(`fast search tests passed (${elapsed.toFixed(1)} ms for 12k products)`);

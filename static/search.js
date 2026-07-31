@@ -102,6 +102,17 @@ const ELECTRIC_TOOTHBRUSH_EXPANSIONS = [
   'elec', 'pile', 'sonicare', 'philips one', 'tete br dent',
 ];
 
+const GENERIC_QUERY_ANCHOR_TOKENS = new Set([
+  'accessoire','accessoires','anti','brosse','brosses','caplet','caplets',
+  'capsule','capsules','comprime','comprimes','creme','cremes','gel','gels',
+  'gelule','gelules','huile','huiles','lait','liq','liqui','liquide','liquides',
+  'nettoyant','nettoyants','pansement','pansements','pill','pills','pilule',
+  'pilules','produit','produits','recharge','recharges','savon','savons',
+  'shampoing','shampooing','sirop','sirops','solution','solutions','spray',
+  'supplement','supplements','tablet','tablets','vaporisateur','vaporisateurs',
+  'vitamine','vitamines',
+]);
+
 function abbreviationTerms(query) {
   const terms = [], seen = new Set();
   for (const token of tokenizeSearchQuery(query)) {
@@ -120,6 +131,34 @@ function abbreviationHit(nameNorm, abbrevs) {
     }
   }
   return false;
+}
+
+function distinguishingQueryMatchers(query) {
+  const tokens = [...new Set(tokenizeSearchQuery(query))];
+  const specific = tokens.filter(token => !GENERIC_QUERY_ANCHOR_TOKENS.has(token));
+  const selected = specific.length ? specific : tokens;
+  return selected.map(expected => {
+    const variants = [...new Set([expected, ...(SEARCH_ABBREVIATIONS[expected] || [])])];
+    const escaped = variants.map(value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    return {
+      expected,
+      pattern: new RegExp(`(?:^| )(?:${escaped.join('|')})[a-z0-9]*(?: |$)`),
+    };
+  });
+}
+
+function productConceptCoverage(product, matchers) {
+  if (!matchers.length) return 0;
+  const fields = productSearchFields(product);
+  return matchers.reduce((count, matcher) => {
+    if (matcher.pattern.test(fields.haystack)) return count + 1;
+    const abbreviatedName = fields.nameTokens.some(actual => (
+      actual.length >= 4
+      && matcher.expected.length >= 4
+      && matcher.expected.startsWith(actual)
+    ));
+    return count + (abbreviatedName ? 1 : 0);
+  }, 0);
 }
 
 function isElectricToothbrushRequest(query) {
@@ -412,6 +451,10 @@ function searchProductsFromCache(query, limit=40, minScore=0, predicate=null) {
   const variants = querySearchVariants(query);
   const intentTerms = intentExpansionTerms(query);
   const abbrevs = abbreviationTerms(query);
+  const conceptMatchers = distinguishingQueryMatchers(query);
+  const applyConceptScope = conceptMatchers.length > 0
+    && intentTerms.length === 0
+    && !isElectricToothbrushRequest(query);
   if (!variants.length && !intentTerms.length) return [];
   const ranked = [];
   for (const product of allProductsCache) {
@@ -428,15 +471,32 @@ function searchProductsFromCache(query, limit=40, minScore=0, predicate=null) {
     if (abbrevs.length && abbreviationHit(productSearchFields(product).name, abbrevs)) {
       bestScore = Math.max(bestScore, 430);   // full word matched an abbreviated name
     }
+    const conceptHits = applyConceptScope
+      ? productConceptCoverage(product, conceptMatchers)
+      : 0;
+    if (conceptHits) {
+      bestScore += Math.min(360, conceptHits * 180);
+      if (conceptMatchers.length > 1 && conceptHits === conceptMatchers.length) {
+        bestScore += 80;
+      }
+    }
     bestScore += productQueryRoleAdjustment(product, query);
-    if (bestScore > 0 && bestScore >= minScore) ranked.push({score: bestScore, product});
+    if (bestScore > 0 && bestScore >= minScore) {
+      ranked.push({score: bestScore, conceptHits, product});
+    }
   }
+  // When at least one product covers the distinguishing concept, generic-only
+  // matches are noise. If none covers it, retain the broad fallback so an
+  // unknown synonym or spelling never turns into a false empty result.
+  const scoped = applyConceptScope && ranked.some(item => item.conceptHits > 0)
+    ? ranked.filter(item => item.conceptHits > 0)
+    : ranked;
   // Tiebreak: in-stock before ruptures, then by name.
   const outOf = p => (p.in_stock === 0 ? 1 : 0);
-  ranked.sort((a, b) => (b.score - a.score)
+  scoped.sort((a, b) => (b.score - a.score)
     || (outOf(a.product) - outOf(b.product))
     || String(a.product.name || '').localeCompare(String(b.product.name || '')));
-  return ranked.slice(0, limit).map(item => item.product);
+  return scoped.slice(0, limit).map(item => item.product);
 }
 
 // Search strictly on the Familiprix/pharmacy code — never on barcode or name —

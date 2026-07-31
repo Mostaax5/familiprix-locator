@@ -2808,6 +2808,27 @@ def filter_client_answer_category(question, candidates):
     return focused or list(candidates)
 
 
+def _answer_denies_available_inventory(answer):
+    """Detect an answer that says nothing exists while products are selected."""
+    from routes.products import normalize_search_text
+
+    normalized = normalize_search_text(answer)
+    if not normalized:
+        return False
+    direct_markers = (
+        "je n ai trouve aucun", "nous n avons trouve aucun",
+        "nous n avons aucun", "aucun produit", "aucune option",
+        "pas de produit correspondant", "pas de produit en rayon",
+        "no matching product", "could not find any", "did not find any",
+    )
+    if any(marker in normalized for marker in direct_markers):
+        return True
+    return bool(re.search(
+        r"\baucun(?:e)?\b.{0,90}\b(?:article|capsule|comprime|option|produit)\b",
+        normalized,
+    ))
+
+
 def generate_verified_client_answer(question, query_plan, candidates, history=None,
                                     selected_text="", focus_product_id=""):
     contexts = [product_context_for_client_rag(product) for product in candidates]
@@ -5391,6 +5412,32 @@ def _documented_job_status(job_id):
         return json.loads(json.dumps(entry, ensure_ascii=False))
 
 
+def _guard_documented_inventory_contradiction(
+    result, query_plan, candidates, documents,
+):
+    if not isinstance(result, dict) or not candidates:
+        return result
+    selected_ids = set(result.get("selected_product_ids") or ())
+    selected_exists = any(
+        str(product.get("client_id", "") or "") in selected_ids
+        for product in candidates
+    )
+    if not _answer_denies_available_inventory(result.get("answer", "")):
+        return result
+    from routes.products import client_candidates_need_semantic_retry
+
+    if not selected_exists and client_candidates_need_semantic_retry(
+        str(query_plan.get("corrected_query", "") or ""), candidates,
+    ):
+        return result
+    # A model cannot both select grounded store products and tell the employee
+    # that none exist. Replace that internally contradictory result before it is
+    # cached or exposed by the asynchronous documented-answer endpoint.
+    return grounded_documented_fallback(
+        query_plan, candidates, documents, degraded=False,
+    )
+
+
 def generate_documented_client_answer(
     question, query_plan, candidates, documents, history=None,
     selected_text="", focus_product_id="",
@@ -5420,10 +5467,13 @@ def generate_documented_client_answer(
 
     def task():
         try:
-            return _generate_documented_client_answer_sync(
+            result = _generate_documented_client_answer_sync(
                 question, query_plan, candidates, documents, history,
                 selected_text=selected_text,
                 focus_product_id=focus_product_id,
+            )
+            return _guard_documented_inventory_contradiction(
+                result, query_plan, candidates, documents,
             )
         finally:
             _DOCUMENTED_AI_GATE.release()
@@ -6961,7 +7011,8 @@ def client_help():
     # can become cards. A direct reply stays inside the products from that thread.
     from routes.products import (
         classify_client_result_roles, client_products_by_ids,
-        hybrid_client_candidates, hydrate_candidate_images,
+        client_candidates_need_semantic_retry, hybrid_client_candidates,
+        hydrate_candidate_images,
         normalize_search_text, public_product_payload,
     )
     candidate_limit = 100 if query_plan.get("wants_all") else 60
@@ -6982,11 +7033,15 @@ def client_help():
         candidates = hybrid_client_candidates(retrieval_question, query_plan, limit=candidate_limit)
     if response_mode != "lookup":
         candidates = filter_client_answer_category(question, candidates)
-        # Most searches stay on the millisecond local path. When that path has
-        # no usable result, let K3 interpret the complete sentence, then retry
-        # retrieval with its bilingual keywords instead of answering from an
-        # empty or guessed product list.
-        if not candidates and not follow_up:
+        # Most searches stay on the millisecond local path. An irrelevant list
+        # is not success, however: when candidates do not cover the employee's
+        # distinguishing concepts, let K3 interpret the complete sentence and
+        # retry with bilingual catalogue terms before composing the answer.
+        needs_semantic_retry = (
+            not follow_up
+            and client_candidates_need_semantic_retry(question, candidates)
+        )
+        if needs_semantic_retry:
             if not ai_rate_checked and not _check_ai_rate_limit():
                 return jsonify({
                     "success": False,
@@ -6995,13 +7050,15 @@ def client_help():
             ai_rate_checked = True
             semantic_plan = generate_client_query_plan(question, history)
             if semantic_plan:
-                query_plan = semantic_plan
-                candidates = hybrid_client_candidates(
-                    question, query_plan, limit=candidate_limit
+                semantic_candidates = hybrid_client_candidates(
+                    question, semantic_plan, limit=candidate_limit
                 )
-                candidates = filter_client_answer_category(
-                    question, candidates
+                semantic_candidates = filter_client_answer_category(
+                    question, semantic_candidates
                 )
+                if semantic_candidates:
+                    query_plan = semantic_plan
+                    candidates = semantic_candidates
     candidates = classify_client_result_roles(candidates, question)
     # Reuse known exact-UPC images now. Unknown-image web lookups are queued
     # only for cards that will actually be displayed.
@@ -7154,6 +7211,11 @@ def client_help():
     if not verified:
         return jsonify({"success": False,
                         "error": _AI_LAST_ERROR or "Impossible de préparer la réponse pour le moment."}), 502
+
+    if response_mode != "documented":
+        verified = _guard_documented_inventory_contradiction(
+            verified, query_plan, answer_candidates, documents,
+        )
 
     degraded = bool(verified.get("degraded", False))
     warning = str(verified.get("warning", "") or "").strip()

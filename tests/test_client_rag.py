@@ -9,6 +9,7 @@ from routes import products as products_module
 from routes.ai import (
     _compact_documented_product_context,
     _description_excerpt_for_ai,
+    _guard_documented_inventory_contradiction,
     _outbound_url_allowed,
     _deepseek_json_request,
     _kimi_json_request,
@@ -31,6 +32,7 @@ from routes.ai import (
 )
 from routes.products import (
     classify_client_result_roles,
+    client_candidates_need_semantic_retry,
     client_excluded_concept_terms,
     client_required_concept_groups,
     find_existing_image_for_barcode,
@@ -962,6 +964,111 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(
             {item["name"] for item in employee_response.get_json()}, expected,
         )
+
+    def test_distinguishing_concepts_outrank_generic_forms_across_categories(self):
+        products = [{
+            "id": 1, "name": "WEBBER CANNEB 10000MG CA90",
+            "brand": "Webber", "barcode": "101",
+            "description": "Capsules de canneberge.",
+        }, {
+            "id": 2, "name": "CAFE CAPSULE INTENSE 10",
+            "brand": "Test", "barcode": "102",
+            "description": "Capsules de cafe.",
+        }, {
+            "id": 3, "name": "DICLOFENAC GEL TOPIQUE 100G",
+            "brand": "Test", "barcode": "103",
+            "description": "Gel topique au diclofenac.",
+        }, {
+            "id": 4, "name": "GEL COIFFANT TENUE FORTE 100G",
+            "brand": "Test", "barcode": "104",
+            "description": "Gel pour les cheveux.",
+        }, {
+            "id": 5, "name": "OFF CHASSE MOUST VAPO 142G",
+            "brand": "Off", "barcode": "105",
+            "description": "Vaporisateur chasse-moustiques.",
+        }, {
+            "id": 6, "name": "SPRAY COIFFANT 200ML",
+            "brand": "Test", "barcode": "106",
+            "description": "Fixatif en vaporisateur.",
+        }]
+        corpus = [(
+            product,
+            search_row(
+                product["name"], product["brand"],
+                product["description"], product["barcode"],
+            ),
+        ) for product in products]
+        cases = [
+            ("capsules de canneberge", 1),
+            ("gel de diclofenac", 3),
+            ("spray anti moustique", 5),
+        ]
+
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            for query, expected_id in cases:
+                with self.subTest(query=query):
+                    matches = hybrid_client_candidates(
+                        query, build_client_query_plan(query, "documented"),
+                        limit=20,
+                    )
+                    self.assertTrue(matches)
+                    self.assertEqual(matches[0]["id"], expected_id)
+
+    def test_candidate_quality_rejects_generic_word_only_results(self):
+        pill_crusher = {
+            "id": 1, "name": "BIOMEDIC ECRASE COUPE PILULE 1",
+            "brand": "Biomedic", "barcode": "101",
+            "description": "Broyeur de comprimes.",
+        }
+        charcoal = {
+            "id": 2, "name": "BIOMEDIC CHARB ACT 225MG CA75",
+            "brand": "Biomedic", "barcode": "102",
+            "description": "Capsules de charbon active.",
+        }
+        transparent_cup = {
+            "id": 3, "name": "TASSE TRANSPARENTE 1",
+            "brand": "Test", "barcode": "103",
+            "description": "Tasse en plastique transparent.",
+        }
+
+        self.assertTrue(client_candidates_need_semantic_retry(
+            "pilule de charbon", [pill_crusher],
+        ))
+        self.assertFalse(client_candidates_need_semantic_retry(
+            "pilule de charbon", [charcoal],
+        ))
+        self.assertTrue(client_candidates_need_semantic_retry(
+            "objet transparent pour proteger une blessure", [transparent_cup],
+        ))
+
+    def test_documented_contradiction_is_replaced_with_grounded_inventory(self):
+        candidate = {
+            "id": 1, "client_id": "product:1",
+            "name": "BIOMEDIC CHARB ACT 225MG CA75",
+            "brand": "Biomedic", "barcode": "063848908532",
+            "description": "Capsules de charbon active.",
+            "aisle": "1", "side": "B", "section": "8",
+            "shelf": "2", "position": "15",
+        }
+        contradictory = {
+            "answer": "Je n'ai trouve aucune capsule de charbon dans le magasin.",
+            "selected_product_ids": ["product:1"],
+            "follow_up_questions": [], "safety_flags": [],
+            "pharmacist_referral": False, "pharmacist_reason": "",
+            "key_points": [], "comparisons": [], "useful_guidance": [],
+            "important_checks": [], "source_ids": ["store-plan"],
+        }
+        plan = build_client_query_plan("pilule de charbon", "documented")
+        guarded = _guard_documented_inventory_contradiction(
+            contradictory, plan, [candidate], [{
+                "source_id": "store-plan", "candidate_ids": ["product:1"],
+            }],
+        )
+
+        self.assertNotIn("aucune capsule", guarded["answer"].lower())
+        self.assertEqual(guarded["selected_product_ids"], ["product:1"])
+        self.assertIn(candidate["name"], guarded["answer"])
 
     def test_product_can_reuse_reference_catalogue_image_by_upc(self):
         class Result:
@@ -2354,6 +2461,76 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(retrieval.call_count, 2)
         planner.assert_called_once()
         rate_limit.assert_called_once()
+
+    def test_kimi_replans_when_nonempty_candidates_miss_the_real_object(self):
+        unrelated = {
+            "id": 1, "client_id": "product:1",
+            "name": "TASSE TRANSPARENTE 1", "brand": "Test",
+            "description": "Tasse en plastique transparent.",
+            "barcode": "111", "aisle": "4", "side": "A",
+            "section": "1", "shelf": "2", "position": "1",
+        }
+        dressing = {
+            "id": 2, "client_id": "product:2",
+            "name": "PARAMEDIC PANS TRANSP 5CMX1M", "brand": "Paramedic",
+            "description": "Pansement transparent pour proteger une blessure.",
+            "barcode": "222", "aisle": "2", "side": "B",
+            "section": "6", "shelf": "4", "position": "3",
+        }
+        semantic_plan = {
+            "intent": "transparent_wound_dressing",
+            "corrected_query": "pansement transparent pour blessure",
+            "search_queries": ["pansement transparent", "film pour plaie"],
+            "keywords": ["pansement", "transparent", "blessure", "plaie"],
+            "must_include": ["pansement transparent"],
+            "exclude": ["tasse"], "wants_all": False,
+            "needs_comparison": False, "answer_language": "fr",
+            "medical": True,
+        }
+        documented = {
+            "answer": "Le pansement transparent est dans le plan du magasin.",
+            "selected_product_ids": ["product:2"],
+            "follow_up_questions": [], "safety_flags": [],
+            "pharmacist_referral": False, "pharmacist_reason": "",
+            "key_points": [], "comparisons": [], "useful_guidance": [],
+            "important_checks": [], "source_ids": ["store-plan"],
+        }
+        with patch(
+            "routes.ai.configured_ai_provider",
+            return_value={"name": "kimi", "label": "Kimi", "model": "kimi-k3"},
+        ), patch(
+            "routes.ai._check_ai_rate_limit", return_value=True,
+        ), patch(
+            "routes.products.hybrid_client_candidates",
+            side_effect=[[unrelated], [dressing]],
+        ) as retrieval, patch(
+            "routes.ai.generate_client_query_plan", return_value=semantic_plan,
+        ) as planner, patch(
+            "routes.products.hydrate_candidate_images",
+        ), patch(
+            "routes.ai.retrieve_client_documentation", return_value=[{
+                "source_id": "store-plan", "title": "Plan actuel",
+                "publisher": "Familiprix Locator", "url": "",
+                "evidence": dressing["name"],
+                "candidate_ids": ["product:2"],
+            }],
+        ), patch(
+            "routes.ai.generate_documented_client_answer",
+            return_value=documented,
+        ), patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": "objet transparent pour proteger une blessure",
+                    "mode": "documented",
+                })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["client_id"] for item in response.get_json()["products"]],
+            ["product:2"],
+        )
+        self.assertEqual(retrieval.call_count, 2)
+        planner.assert_called_once()
 
     def test_simple_product_lookup_does_not_call_ai(self):
         candidate = {

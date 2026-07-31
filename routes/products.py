@@ -91,8 +91,8 @@ def product_payload_error(data):
     return None
 
 SEARCH_STOPWORDS = {
-    "a", "an", "and", "au", "aux", "avec", "ce", "ces", "cette", "client", "comme",
-    "dans", "de", "des", "du", "en", "et", "for", "how", "i", "il", "ils", "je",
+    "a", "an", "and", "au", "aux", "avec", "ce", "ces", "cette", "chacun", "chacune",
+    "client", "comme", "dans", "de", "des", "du", "en", "entre", "et", "for", "how", "i", "il", "ils", "je",
     "la", "le", "les", "mais", "me", "moi", "mon", "my", "nous", "of", "on", "or", "ou", "par", "pas",
     "pour", "que", "qui", "sans", "si", "son", "sur", "the", "to", "un", "une",
     "with", "without", "y",
@@ -905,8 +905,11 @@ def _product_search_row(item, aliases=(), identifiers=()):
     name = normalize_search_text(item.get("name", ""))
     brand = normalize_search_text(verified("brand"))
     catalog_brand = normalize_search_text(item.get("brand", ""))
+    verified_aliases = " ".join(
+        normalize_search_text(alias) for alias in aliases
+    )
     verified_semantics = " ".join([
-        name, brand,
+        name, brand, verified_aliases,
         normalize_search_text(verified("description")),
         normalize_search_text(verified("official_name_fr")),
         normalize_search_text(verified("official_name_en")),
@@ -928,7 +931,6 @@ def _product_search_row(item, aliases=(), identifiers=()):
         # evidence rather than identity and therefore receive less semantic
         # weight than verified fields.
         normalize_search_text(item.get("description", "")),
-        " ".join(normalize_search_text(alias) for alias in aliases),
         " ".join(
             normalize_search_text(identifier.get("value", ""))
             for identifier in identifiers
@@ -4545,9 +4547,15 @@ def _search_corpus_statistics(corpus):
 
 
 _GENERIC_QUERY_ANCHOR_TOKENS = frozenset({
-    "caplet", "caplets", "capsule", "capsules", "comprime", "comprimes",
-    "gelule", "gelules", "pill", "pills", "pilule", "pilules",
-    "tablet", "tablets",
+    "accessoire", "accessoires", "brosse", "brosses", "caplet", "caplets",
+    "capsule", "capsules", "comprime", "comprimes", "creme", "cremes",
+    "gel", "gels", "gelule", "gelules", "huile", "huiles", "lait", "liq",
+    "liqui", "liquide", "liquides", "nettoyant", "nettoyants", "pansement",
+    "pansements", "pill", "pills", "pilule", "pilules", "produit",
+    "produits", "recharge", "recharges", "savon", "savons", "shampoing",
+    "shampooing", "sirop", "sirops", "solution", "solutions", "spray",
+    "supplement", "supplements", "tablet", "tablets", "vaporisateur",
+    "vaporisateurs", "vitamine", "vitamines",
 })
 
 
@@ -4564,7 +4572,16 @@ def _query_token_document_frequency(token, document_frequency):
     for candidate in tuple(candidates):
         if len(candidate) < 4 or not candidate[0].isalpha():
             continue
-        for indexed_token in prefixes.get(candidate[:4], ()):
+        compatible_tokens = prefixes.get(candidate[:4], ())
+        if not compatible_tokens:
+            # Cold/test corpora do not have the warm prefix table. This path is
+            # rare and bounded to one first-four-character bucket in practice;
+            # production requests use the prebuilt map above.
+            compatible_tokens = (
+                indexed_token for indexed_token in document_frequency
+                if indexed_token.startswith(candidate[:4])
+            )
+        for indexed_token in compatible_tokens:
             if (
                 indexed_token.startswith(candidate)
                 or candidate.startswith(indexed_token)
@@ -4614,27 +4631,129 @@ def _client_query_anchor_tokens(query, document_frequency, document_count):
     )[:4]
 
 
-def _row_matches_query_anchor(row, anchor_tokens):
-    if not anchor_tokens:
+def _search_token_matches(actual, expected, abbreviations=()):
+    if actual == expected or actual in abbreviations:
         return True
-    identity_tokens = str(
-        row.get("_identity_hay", row.get("_hay", "")) or ""
-    ).split()
-    for expected in anchor_tokens:
-        abbreviations = set(SEARCH_ABBREVIATIONS.get(expected, ()))
-        for actual in identity_tokens:
-            if actual == expected or actual in abbreviations:
-                return True
-            if (
-                len(actual) >= 4
-                and len(expected) >= 4
-                and (
-                    actual.startswith(expected)
-                    or expected.startswith(actual)
-                )
-            ):
-                return True
-    return False
+    if any(
+        actual == abbreviation
+        or (
+            actual.startswith(abbreviation)
+            and actual[len(abbreviation):].isdigit()
+        )
+        for abbreviation in abbreviations
+    ):
+        return True
+    return bool(
+        len(actual) >= 4
+        and len(expected) >= 4
+        and (
+            actual.startswith(expected)
+            or expected.startswith(actual)
+        )
+    )
+
+
+def _row_matches_query_token(row, expected, identity_only=False, fuzzy=False):
+    expected = normalize_search_text(expected)
+    if not expected or " " in expected:
+        return False
+    abbreviations = tuple(SEARCH_ABBREVIATIONS.get(expected, ()))
+    source = str(
+        row.get("_identity_hay", "")
+        if identity_only else row.get("_hay", "")
+    )
+    for actual in source.split():
+        if _search_token_matches(actual, expected, abbreviations):
+            return True
+    if not fuzzy or len(expected) < 4:
+        return False
+    name_tokens = tuple(row.get("_tokens") or ()) + tuple(
+        row.get("_brand_tokens") or ()
+    ) + tuple(row.get("_catalog_brand_tokens") or ())
+    variants = [expected]
+    if len(expected) >= 6 and expected[0] in {"d", "l"}:
+        variants.append(expected[1:])
+    return any(
+        len(actual) >= 4
+        and variant[0] == actual[0]
+        and SequenceMatcher(None, variant, actual).ratio() >= 0.78
+        for variant in variants
+        for actual in name_tokens
+    )
+
+
+def _row_matches_query_anchor(row, anchor_tokens, identity_only=False):
+    return not anchor_tokens or any(
+        _row_matches_query_token(
+            row, expected, identity_only=identity_only,
+        )
+        for expected in anchor_tokens
+    )
+
+
+def _row_matches_query_phrase(row, phrase):
+    tokens = list(dict.fromkeys(tokenize_search_query(phrase)))
+    return bool(tokens) and all(
+        _row_matches_query_token(row, token, fuzzy=True)
+        for token in tokens
+    )
+
+
+def client_candidates_need_semantic_retry(query, candidates):
+    """True when local retrieval has products but lacks evidence for the request.
+
+    This catches the dangerous middle state that used to look successful to the
+    route: a generic word found several products, so AI planning was skipped even
+    though the actual object or constraint was absent from every candidate.
+    """
+    if not candidates:
+        return True
+    rows = [
+        _product_search_row(
+            product,
+            product.get("_search_aliases") or (),
+            product.get("_identifiers") or (),
+        )
+        for product in candidates[:24]
+    ]
+    document_frequency = _PROD_CACHE.get("document_frequency") or {}
+    document_count = max(
+        1, int(_PROD_CACHE.get("document_count", 0) or 0),
+    )
+    anchors = _client_query_anchor_tokens(
+        query, document_frequency, document_count,
+    )
+    if anchors and not any(
+        _row_matches_query_anchor(row, anchors) for row in rows
+    ):
+        return True
+
+    specific_tokens = [
+        token for token in dict.fromkeys(tokenize_search_query(query))
+        if token not in _GENERIC_QUERY_ANCHOR_TOKENS
+    ]
+    if not specific_tokens:
+        return False
+    unmatched = [
+        token for token in specific_tokens
+        if not any(
+            _row_matches_query_token(row, token, fuzzy=True)
+            for row in rows
+        )
+    ]
+    if not unmatched:
+        return False
+
+    # Known symptom-to-category expansion is already a semantic interpretation.
+    # If at least one candidate carries that evidence, another AI planning call
+    # would add latency without improving recall.
+    intent_terms = intent_expansion_terms(query)
+    if intent_terms and any(
+        any(normalize_search_text(term) in row.get("_hay", "") for term in intent_terms)
+        for row in rows
+    ):
+        return False
+    return True
 
 
 def _client_candidate_id(item, catalog_only=False):
@@ -4950,15 +5069,9 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
     explicit_brands, explicit_name_leads = _explicit_catalogue_identity(
         identity_question, corpus, doc_count,
     )
-    anchor_tokens = ()
-    if (
-        not required_concepts
-        and not explicit_brands
-        and not explicit_name_leads
-    ):
-        anchor_tokens = _client_query_anchor_tokens(
-            question, document_frequency, doc_count
-        )
+    anchor_tokens = _client_query_anchor_tokens(
+        question, document_frequency, doc_count
+    )
     # Fuzzy edit-distance work is needed only for words absent from the store
     # vocabulary. Exact catalogue words already have stronger deterministic
     # scores, so comparing them against every product wastes most search CPU.
@@ -5027,18 +5140,20 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         ):
             continue
         exact_upc = bool(upc_digits and row["_bc"] in upc_digits)
-        if (
-            not exact_upc
-            and not _row_matches_explicit_identity(
-                row, explicit_brands, explicit_name_leads,
-            )
-        ):
+        explicit_identity_match = _row_matches_explicit_identity(
+            row, explicit_brands, explicit_name_leads,
+        )
+        # An exact catalogue brand phrase is an explicit employee constraint.
+        # Name-lead inference remains soft because a common first word can be
+        # mistaken for a brand, but a real named brand must not leak neighbours.
+        if not exact_upc and explicit_brands and not explicit_identity_match:
             continue
-        if (
-            not exact_upc
-            and not _row_matches_query_anchor(row, anchor_tokens)
-        ):
-            continue
+        strong_anchor_match = _row_matches_query_anchor(
+            row, anchor_tokens, identity_only=True,
+        )
+        evidence_anchor_match = strong_anchor_match or _row_matches_query_anchor(
+            row, anchor_tokens,
+        )
         if not row_matches_client_concepts(row, required_concepts, excluded_concepts):
             continue
         lexical = 0
@@ -5071,14 +5186,34 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
                     * evidence_weight
                 )
 
-        must_hits = sum(1 for value in normalized_must_include if value in hay)
+        must_hits = sum(
+            1 for value in normalized_must_include
+            if _row_matches_query_phrase(row, value)
+        )
+        must_adjustment = (
+            min(220, must_hits * 55)
+            - min(180, (len(normalized_must_include) - must_hits) * 45)
+            if normalized_must_include else 0
+        )
+        anchor_adjustment = 0
+        if anchor_tokens:
+            anchor_adjustment = (
+                260 if strong_anchor_match
+                else 150 if evidence_anchor_match
+                else 0 if required_concepts
+                else -180
+            )
+        identity_adjustment = 0
+        if explicit_brands or explicit_name_leads:
+            identity_adjustment = 260 if explicit_identity_match else -180
         exclusion_penalty = 260 if any(value in hay for value in exclude) else 0
         score = (
             max(lexical, fuzzy)
             + min(260, int(bm25 * 34))
-            + (must_hits * 35)
+            + must_adjustment
+            + anchor_adjustment
+            + identity_adjustment
             - exclusion_penalty
-            + (240 if explicit_brands or explicit_name_leads else 0)
             + product_query_role_adjustment(
                 question, row, electric_request=electric_request,
             )
