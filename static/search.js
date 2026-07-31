@@ -153,7 +153,7 @@ function productConceptCoverage(product, matchers) {
   return matchers.reduce((count, matcher) => {
     if (matcher.pattern.test(fields.haystack)) return count + 1;
     const abbreviatedName = fields.nameTokens.some(actual => (
-      actual.length >= 4
+      actual.length >= 5
       && matcher.expected.length >= 4
       && matcher.expected.startsWith(actual)
     ));
@@ -196,6 +196,7 @@ function productMatchesHighPrecisionQuery(product, query) {
   const normalized = normalizeSearchText(query);
   const tokens = new Set(normalized.split(/\s+/).filter(Boolean));
   const hay = productSearchText(product);
+  const productName = normalizeSearchText(product?.name || '');
   const name = `${product?.name || ''} ${product?.brand || ''}`;
   const headache = (
     ['headache', 'migraine', 'cephalee'].some(token => tokens.has(token))
@@ -230,12 +231,12 @@ function productMatchesHighPrecisionQuery(product, query) {
       'comprime', 'comprimes', 'tablet', 'tablets', 'caplet', 'caplets',
     ].some(token => tokens.has(token));
   if (oralCharcoal && !(
-    searchConceptMatches(hay, ['charb', 'charcoal'])
+    searchConceptMatches(productName, ['charb', 'charcoal'])
     && (
-      searchConceptMatches(hay, [
+      searchConceptMatches(productName, [
         'pilule', 'capsule', 'caps', 'gelule', 'comprime', 'tablet', 'caplet',
       ])
-      || /(?:^| )(?:ca|co) ?\d+(?: |$)/.test(hay)
+      || /(?:^| )(?:ca|co) ?\d+(?: |$)/.test(productName)
     )
   )) return false;
 
@@ -359,7 +360,7 @@ function scoreProductForQuery(product, query) {
     // Planogram names are abbreviated: a name token that PREFIXES the query word
     // is that word abbreviated ('MELAT' ⊂ 'melatonine'). Mirror of the server rule.
     for (const tok of f.nameTokens) {
-      if (tok.length >= 4 && loweredQuery.startsWith(tok)) { score += 440; break; }
+      if (tok.length >= 5 && loweredQuery.startsWith(tok)) { score += 440; break; }
     }
   }
   if (loweredQuery === brand) score += 300;
@@ -485,10 +486,10 @@ function searchProductsFromCache(query, limit=40, minScore=0, predicate=null) {
       ranked.push({score: bestScore, conceptHits, product});
     }
   }
-  // When at least one product covers the distinguishing concept, generic-only
-  // matches are noise. If none covers it, retain the broad fallback so an
-  // unknown synonym or spelling never turns into a false empty result.
-  const scoped = applyConceptScope && ranked.some(item => item.conceptHits > 0)
+  // A generic-only match is not a product answer. Unknown words and misspellings
+  // go to the server's fuzzy/AI interpretation instead of flashing unrelated
+  // cards on the phone while that authoritative result is loading.
+  const scoped = applyConceptScope
     ? ranked.filter(item => item.conceptHits > 0)
     : ranked;
   // Tiebreak: in-stock before ruptures, then by name.

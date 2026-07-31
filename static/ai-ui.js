@@ -1644,11 +1644,13 @@ async function runClientRequest(question, options={}) {
       _clientRagController = null;
       if (status) status.textContent = `Recherche rapide : ${localProducts.length} produit${localProducts.length > 1 ? 's' : ''} affiché${localProducts.length > 1 ? 's' : ''}.`;
       void serverPromise.then(serverProducts => {
-        if (requestId !== _clientRequestSequence || !serverProducts.length) return;
+        if (requestId !== _clientRequestSequence) return;
         updateClientExchangeResult(
           exchangeId, buildFastClientResult(serverProducts, Date.now() - startedAt)
         );
-        if (status) status.textContent = `Recherche rapide : ${serverProducts.length} produit${serverProducts.length > 1 ? 's' : ''} trouvé${serverProducts.length > 1 ? 's' : ''} dans le plan.`;
+        if (status) status.textContent = serverProducts.length
+          ? `Recherche rapide : ${serverProducts.length} produit${serverProducts.length > 1 ? 's' : ''} trouvé${serverProducts.length > 1 ? 's' : ''} dans le plan.`
+          : 'Aucun produit correspondant trouvé dans le plan. Utilisez « Avec IA » ou « Documenté » pour interpréter autrement la demande.';
       });
       return;
     }

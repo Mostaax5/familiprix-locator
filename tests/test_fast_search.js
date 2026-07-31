@@ -191,7 +191,15 @@ const charcoalToothpaste = {
   description: 'Dentifrice au charbon', search_terms: '', usage_notes: '',
   alternative_suggestions: '', barcode: '030772053836', in_stock: 1,
 };
-products.push(biomedicCharcoal, pillCrusher, charcoalToothpaste);
+const contaminatedCharcoalCosmetic = {
+  id: 16003, name: 'LOREAL MEN NETT CHARBON 100ML', brand: 'Loreal',
+  description: 'Capsules de charbon active', search_terms: '', usage_notes: '',
+  alternative_suggestions: '', barcode: '030772053837', in_stock: 1,
+};
+products.push(
+  biomedicCharcoal, pillCrusher, charcoalToothpaste,
+  contaminatedCharcoalCosmetic
+);
 assert.deepStrictEqual(
   Array.from(
     context.window.AppSearch.searchProductsFromCache('pilule de charbon', 40),
@@ -221,6 +229,25 @@ const hairSpray = {
   description: 'Fixatif en vaporisateur', search_terms: '', usage_notes: '',
   alternative_suggestions: '', barcode: '111111111114', in_stock: 1,
 };
+const bathFoam = {
+  id: 17004, name: 'ATTITUDE B/L B/MOUS 473ML', brand: 'Attitude',
+  description: 'Bain moussant', search_terms: '', usage_notes: '',
+  alternative_suggestions: '', barcode: '111111111115', in_stock: 1,
+};
+const antiperspirant = {
+  id: 17005, name: 'DOVE MEN ANTI VAPO 107G', brand: 'Dove',
+  description: 'Antisudorifique en vaporisateur', search_terms: '', usage_notes: '',
+  alternative_suggestions: '', barcode: '111111111116', in_stock: 1,
+};
+products.push(bathFoam, antiperspirant);
+assert.deepStrictEqual(
+  Array.from(
+    context.window.AppSearch.searchProductsFromCache('spray anti moustique', 40),
+    product => product.id
+  ),
+  [],
+  'an absent requested object must not fall back to bath foam or antiperspirant products'
+);
 products.push(cranberryCapsules, coffeeCapsules, mosquitoSpray, hairSpray);
 assert.deepStrictEqual(
   Array.from(

@@ -92,7 +92,7 @@ def product_payload_error(data):
 
 SEARCH_STOPWORDS = {
     "a", "an", "and", "au", "aux", "avec", "ce", "ces", "cette", "chacun", "chacune",
-    "client", "comme", "dans", "de", "des", "du", "en", "entre", "et", "for", "how", "i", "il", "ils", "je",
+    "ai", "client", "comme", "dans", "de", "des", "du", "en", "entre", "et", "for", "how", "i", "il", "ils", "jai", "je",
     "la", "le", "les", "mais", "me", "moi", "mon", "my", "nous", "of", "on", "or", "ou", "par", "pas",
     "pour", "que", "qui", "sans", "si", "son", "sur", "the", "to", "un", "une",
     "with", "without", "y",
@@ -507,9 +507,10 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
         elif name_score < 460:
             # Planogram names are abbreviated: a name token that PREFIXES the query
             # word is that word abbreviated ('MELAT' ⊂ 'melatonine', 'VITAM' ⊂
-            # 'vitamines'). ≥4 chars so tiny tokens ('co') never false-match.
+            # 'vitamines'). Five characters avoids ambiguous shelf fragments
+            # such as ``MOUS`` matching both mousse and moustique.
             for tok in toks:
-                if len(tok) >= 4 and t.startswith(tok):
+                if len(tok) >= 5 and t.startswith(tok):
                     name_score = 460
                     break
     score += name_score
@@ -533,7 +534,7 @@ def _fast_reference_score(row, nq, dq, qtokens, intent_terms, abbrevs):
                 # Same abbreviated-name rule as above: 'dormir' expands to
                 # 'melatonine', which must reach a product named 'MELAT …'.
                 for tok in toks:
-                    if len(tok) >= 4 and t.startswith(tok):
+                    if len(tok) >= 5 and t.startswith(tok):
                         ib = 300
                         break
             if ib >= 300:
@@ -2049,12 +2050,38 @@ def row_matches_client_concepts(row, groups, excluded_name_terms=()):
     return True
 
 
+_CHARCOAL_PRODUCT_NAME_PATTERN = re.compile(
+    r"(?<![a-z0-9])(?:charbon|charcoal|charb|chb)(?![a-z0-9])"
+)
+
+
+def row_matches_client_identity_constraints(row, query):
+    """Require high-risk product identity evidence in structured name data.
+
+    Descriptions and imported aliases remain useful retrieval evidence, but they
+    cannot prove that a cosmetic is an oral charcoal package. Planogram names
+    carry the sellable package/form markers (for example ``CHARB ... CA75``),
+    so this final gate is unaffected by a stale or overly broad enrichment.
+    """
+    if not _is_oral_charcoal_request(query):
+        return True
+    name = normalize_search_text(row.get("_name", ""))
+    return bool(
+        _CHARCOAL_PRODUCT_NAME_PATTERN.search(name)
+        and _ORAL_DOSAGE_PRODUCT_PATTERN.search(name)
+    )
+
+
 def product_matches_client_request(product, query):
     """Apply the same high-precision concept rules to an already loaded product."""
-    return row_matches_client_concepts(
-        _product_search_row(product),
-        client_required_concept_groups(query),
-        client_excluded_concept_terms(query),
+    row = _product_search_row(product)
+    return (
+        row_matches_client_concepts(
+            row,
+            client_required_concept_groups(query),
+            client_excluded_concept_terms(query),
+        )
+        and row_matches_client_identity_constraints(row, query)
     )
 
 
@@ -2178,12 +2205,17 @@ def filter_client_request_products(products, query):
     """Filter loaded products with one compiled set of request constraints."""
     required = client_required_concept_groups(query)
     excluded = client_excluded_concept_terms(query)
-    if not required and not excluded:
+    identity_constrained = _is_oral_charcoal_request(query)
+    if not required and not excluded and not identity_constrained:
         return list(products)
-    filtered = [
-        product for product in products
-        if row_matches_client_concepts(_product_search_row(product), required, excluded)
-    ]
+    filtered = []
+    for product in products:
+        row = _product_search_row(product)
+        if (
+            row_matches_client_concepts(row, required, excluded)
+            and row_matches_client_identity_constraints(row, query)
+        ):
+            filtered.append(product)
     if _is_headache_request(query) or _is_fever_request(query):
         named = [
             product for product in filtered
@@ -3957,6 +3989,8 @@ def rank_products_for_query(products, query, limit=60):
             row, required_concepts, excluded_concepts,
         ):
             continue
+        if not row_matches_client_identity_constraints(row, query):
+            continue
         score = (
             _fast_reference_score(
                 row, nq, dq, qtokens, intent_terms, abbrevs,
@@ -4353,6 +4387,8 @@ def rank_reference_for_query(query, limit=40, exclude_barcodes=None, field=""):
                 row, required_concepts, excluded_concepts,
             ):
                 continue
+            if not row_matches_client_identity_constraints(row, query):
+                continue
         score = (
             max(
                 (_strict_identifier_score(value, query)
@@ -4547,7 +4583,7 @@ def _search_corpus_statistics(corpus):
 
 
 _GENERIC_QUERY_ANCHOR_TOKENS = frozenset({
-    "accessoire", "accessoires", "brosse", "brosses", "caplet", "caplets",
+    "accessoire", "accessoires", "anti", "brosse", "brosses", "caplet", "caplets",
     "capsule", "capsules", "comprime", "comprimes", "creme", "cremes",
     "gel", "gels", "gelule", "gelules", "huile", "huiles", "lait", "liq",
     "liqui", "liquide", "liquides", "nettoyant", "nettoyants", "pansement",
@@ -4584,7 +4620,10 @@ def _query_token_document_frequency(token, document_frequency):
         for indexed_token in compatible_tokens:
             if (
                 indexed_token.startswith(candidate)
-                or candidate.startswith(indexed_token)
+                or (
+                    len(indexed_token) >= 5
+                    and candidate.startswith(indexed_token)
+                )
             ):
                 candidates.add(indexed_token)
     frequencies = [
@@ -4644,11 +4683,13 @@ def _search_token_matches(actual, expected, abbreviations=()):
     ):
         return True
     return bool(
-        len(actual) >= 4
-        and len(expected) >= 4
-        and (
-            actual.startswith(expected)
-            or expected.startswith(actual)
+        (
+            len(expected) >= 4
+            and actual.startswith(expected)
+        )
+        or (
+            len(actual) >= 5
+            and expected.startswith(actual)
         )
     )
 
@@ -4708,6 +4749,40 @@ def client_candidates_need_semantic_retry(query, candidates):
     """
     if not candidates:
         return True
+    query_codes = {
+        normalized_digits(match)
+        for match in re.findall(r"\d[\d\s-]{2,18}\d", str(query or ""))
+        if len(normalized_digits(match)) >= 4
+    }
+    if query_codes:
+        for product in candidates:
+            raw_values = [
+                product.get("barcode", ""), product.get("product_code", ""),
+            ]
+            for key in ("_identifiers", "identifiers", "regulatory_identifiers"):
+                for identifier in product.get(key) or ():
+                    if isinstance(identifier, dict):
+                        raw_values.append(
+                            identifier.get("value", identifier.get("identifier", ""))
+                        )
+            candidate_codes = {
+                normalized_digits(value) for value in raw_values
+                if len(normalized_digits(value)) >= 4
+            }
+            if any(
+                query_code == candidate_code
+                or (
+                    len(query_code) <= 6
+                    and candidate_code.endswith(query_code)
+                )
+                for query_code in query_codes
+                for candidate_code in candidate_codes
+            ):
+                return False
+    if normalized_digits(query) and not any(
+        character.isalpha() for character in normalize_search_text(query)
+    ):
+        return False
     rows = [
         _product_search_row(
             product,
@@ -4754,6 +4829,45 @@ def client_candidates_need_semantic_retry(query, candidates):
     ):
         return False
     return True
+
+
+def client_candidates_satisfy_query_plan(query_plan, candidates):
+    """Validate AI-expanded retrieval before product cards reach an employee.
+
+    The model may suggest useful bilingual catalogue terms, but a product still
+    needs matching store evidence. ``must_include`` is treated literally here:
+    every informative phrase must be represented by at least one candidate.
+    """
+    if not candidates:
+        return False
+    rows = [
+        _product_search_row(
+            product,
+            product.get("_search_aliases") or (),
+            product.get("_identifiers") or (),
+        )
+        for product in candidates[:30]
+    ]
+    required_phrases = []
+    for value in query_plan.get("must_include") or ():
+        phrase = normalize_search_text(value)
+        if not phrase:
+            continue
+        informative = [
+            token for token in tokenize_search_query(phrase)
+            if token not in _GENERIC_QUERY_ANCHOR_TOKENS
+        ]
+        if informative:
+            required_phrases.append(phrase)
+    if required_phrases:
+        return all(
+            any(_row_matches_query_phrase(row, phrase) for row in rows)
+            for phrase in required_phrases
+        )
+    corrected = str(query_plan.get("corrected_query", "") or "").strip()
+    return bool(corrected) and not client_candidates_need_semantic_retry(
+        corrected, candidates,
+    )
 
 
 def _client_candidate_id(item, catalog_only=False):
@@ -5156,6 +5270,8 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         )
         if not row_matches_client_concepts(row, required_concepts, excluded_concepts):
             continue
+        if not row_matches_client_identity_constraints(row, question):
+            continue
         lexical = 0
         for nq, dq, qtokens, intent_terms, abbrevs in prepared_queries:
             lexical = max(lexical, _fast_reference_score(
@@ -5227,8 +5343,25 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
                     cached_stock.get(key) or item.get("in_stock")
                 ) else 0,
                 "name": normalize_search_text(item.get("name", "")),
+                "anchor_match": evidence_anchor_match,
             }
 
+    # Once the store has evidence for the distinguishing concept, products
+    # matching only a generic form word (gel, spray, capsule, etc.) are noise.
+    # Keep the broad set only when no local product covers the concept, so the
+    # semantic retry can interpret an unknown synonym or spelling.
+    if (
+        anchor_tokens
+        and not has_semantic_expansion
+        and not electric_request
+        and any(
+            evidence.get("anchor_match") for evidence in scored.values()
+        )
+    ):
+        scored = {
+            key: evidence for key, evidence in scored.items()
+            if evidence.get("anchor_match")
+        }
     ranked_keys = sorted(scored, key=lambda key: (
         -scored[key]["score"],
         1 if scored[key]["in_stock"] == 0 else 0,
@@ -5407,6 +5540,14 @@ def search_products():
         )
         else {}
     )
+    document_count = max(
+        1,
+        int(_PROD_CACHE.get("document_count", 0) or 0)
+        if document_frequency else len(corpus),
+    )
+    anchor_tokens = _client_query_anchor_tokens(
+        query, document_frequency, document_count,
+    )
     fuzzy_terms = [
         token for token in qtokens
         if (
@@ -5454,6 +5595,8 @@ def search_products():
             row, required_concepts, excluded_concepts,
         ):
             continue
+        if not row_matches_client_identity_constraints(row, query):
+            continue
         score = (
             _fast_reference_score(
                 row, nq, dq, qtokens, intent_terms, abbrevs,
@@ -5463,12 +5606,25 @@ def search_products():
             )
         )
         if score > 0:
-            ranked.append((score, item))
-    ranked.sort(key=lambda e: (-e[0], 1 if e[1].get("in_stock") == 0 else 0,
-                               location_sort_key(e[1])))
+            ranked.append((
+                score,
+                _row_matches_query_anchor(row, anchor_tokens),
+                item,
+            ))
+    if (
+        anchor_tokens
+        and not intent_terms
+        and not electric_request
+        and any(anchor_match for _score, anchor_match, _item in ranked)
+    ):
+        ranked = [entry for entry in ranked if entry[1]]
+    ranked.sort(key=lambda e: (-e[0], 1 if e[2].get("in_stock") == 0 else 0,
+                               location_sort_key(e[2])))
     items = classify_client_result_roles(
-        [item for _, item in ranked[:limit]], query,
+        [item for _score, _anchor_match, item in ranked[:limit]], query,
     )
+    if client_candidates_need_semantic_retry(query, items):
+        items = []
     return jsonify([
         public_product_payload(item) for item in items
     ])
@@ -5488,6 +5644,8 @@ def client_find():
         "must_include": [],
         "exclude": [],
     }, limit=limit)
+    if client_candidates_need_semantic_retry(query, products):
+        products = []
     products = classify_client_result_roles(products, query)
     return jsonify([public_product_payload(item) for item in products])
 

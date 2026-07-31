@@ -64,8 +64,8 @@ const cursor = {
 };
 
 const SEARCH_STOPWORDS = new Set([
-  'a','an','and','au','aux','avec','ce','ces','cette','chacun','chacune','client','comme',
-  'dans','de','des','du','en','entre','et','for','how','i','il','ils','je',
+  'a','ai','an','and','au','aux','avec','ce','ces','cette','chacun','chacune','client','comme',
+  'dans','de','des','du','en','entre','et','for','how','i','il','ils','jai','je',
   'la','le','les','mais','me','moi','mon','my','nous','of','on','or','ou','par','pas',
   'pour','que','qui','sans','si','son','sur','the','to','un','une',
   'with','without','y',

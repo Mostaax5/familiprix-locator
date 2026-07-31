@@ -965,6 +965,89 @@ class ClientRagTests(unittest.TestCase):
             {item["name"] for item in employee_response.get_json()}, expected,
         )
 
+    def test_charcoal_identity_ignores_contaminated_cosmetic_enrichment(self):
+        charcoal = {
+            "id": 1, "name": "BIOMEDIC CHARB ACT 225MG CA75",
+            "brand": "Biomedic", "barcode": "101",
+            "description": "Capsules de charbon active.",
+        }
+        cosmetic = {
+            "id": 2, "name": "LOREAL MEN NETT CHARBON 100ML",
+            "brand": "Loreal", "barcode": "102",
+            # Simulates a stale alias/description attached by enrichment.
+            "description": "Capsules de charbon active.",
+        }
+        corpus = [(
+            product,
+            search_row(
+                product["name"], product["brand"],
+                product["description"], product["barcode"],
+            ),
+        ) for product in (charcoal, cosmetic)]
+
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            with app.test_client() as client:
+                response = client.get("/api/client/find?q=pilule%20de%20charbon")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["name"] for item in response.get_json()],
+            ["BIOMEDIC CHARB ACT 225MG CA75"],
+        )
+
+    def test_ambiguous_four_letter_shelf_fragment_is_not_a_product_concept(self):
+        bath_foam = {
+            "id": 1, "name": "ATTITUDE B/L B/MOUS 473ML",
+            "brand": "Attitude", "barcode": "101",
+            "description": "Bain moussant.",
+        }
+        antiperspirant = {
+            "id": 2, "name": "DOVE MEN ANTI VAPO 107G",
+            "brand": "Dove", "barcode": "102",
+            "description": "Antisudorifique en vaporisateur.",
+        }
+        corpus = [(
+            product,
+            search_row(
+                product["name"], product["brand"],
+                product["description"], product["barcode"],
+            ),
+        ) for product in (bath_foam, antiperspirant)]
+
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            with app.test_client() as client:
+                fast = client.get("/api/client/find?q=spray%20anti%20moustique")
+                search = client.get("/api/products/search?q=spray%20anti%20moustique")
+
+        self.assertEqual(fast.get_json(), [])
+        self.assertEqual(search.get_json(), [])
+
+    def test_five_letter_planogram_abbreviation_still_finds_requested_object(self):
+        repellent = {
+            "id": 1, "name": "OFF CHASSE MOUST VAPO 142G",
+            "brand": "Off", "barcode": "101",
+            "description": "Vaporisateur chasse-moustiques.",
+        }
+        corpus = [(
+            repellent,
+            search_row(
+                repellent["name"], repellent["brand"],
+                repellent["description"], repellent["barcode"],
+            ),
+        )]
+
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            with app.test_client() as client:
+                response = client.get("/api/client/find?q=spray%20anti%20moustique")
+
+        self.assertEqual(
+            [item["name"] for item in response.get_json()],
+            ["OFF CHASSE MOUST VAPO 142G"],
+        )
+
     def test_distinguishing_concepts_outrank_generic_forms_across_categories(self):
         products = [{
             "id": 1, "name": "WEBBER CANNEB 10000MG CA90",
@@ -1012,8 +1095,9 @@ class ClientRagTests(unittest.TestCase):
                         query, build_client_query_plan(query, "documented"),
                         limit=20,
                     )
-                    self.assertTrue(matches)
-                    self.assertEqual(matches[0]["id"], expected_id)
+                    self.assertEqual(
+                        [product["id"] for product in matches], [expected_id],
+                    )
 
     def test_candidate_quality_rejects_generic_word_only_results(self):
         pill_crusher = {
@@ -2531,6 +2615,60 @@ class ClientRagTests(unittest.TestCase):
         )
         self.assertEqual(retrieval.call_count, 2)
         planner.assert_called_once()
+
+    def test_semantic_retry_clears_unrelated_cards_when_object_is_absent(self):
+        unrelated = {
+            "id": 1, "client_id": "product:1",
+            "name": "DOVE MEN ANTI VAPO 107G", "brand": "Dove",
+            "description": "Antisudorifique en vaporisateur.",
+            "barcode": "111", "aisle": "4", "side": "A",
+            "section": "1", "shelf": "2", "position": "1",
+        }
+        semantic_plan = {
+            "intent": "insect_repellent",
+            "corrected_query": "vaporisateur chasse moustiques",
+            "search_queries": ["chasse moustiques", "insectifuge"],
+            "keywords": ["moustiques", "insectifuge"],
+            "must_include": ["moustiques"],
+            "exclude": ["antisudorifique"],
+            "wants_all": False, "needs_comparison": False,
+            "answer_language": "fr", "medical": False,
+        }
+        documented = {
+            "answer": "Aucun chasse-moustiques n'est localise dans le plan actuel.",
+            "selected_product_ids": [], "follow_up_questions": [],
+            "safety_flags": [], "pharmacist_referral": False,
+            "pharmacist_reason": "", "key_points": [], "comparisons": [],
+            "useful_guidance": [], "important_checks": [],
+            "source_ids": ["store-plan"],
+        }
+        with patch(
+            "routes.ai.configured_ai_provider",
+            return_value={"name": "kimi", "label": "Kimi", "model": "kimi-k3"},
+        ), patch(
+            "routes.ai._check_ai_rate_limit", return_value=True,
+        ), patch(
+            "routes.products.hybrid_client_candidates",
+            side_effect=[[unrelated], []],
+        ) as retrieval, patch(
+            "routes.ai.generate_client_query_plan", return_value=semantic_plan,
+        ), patch(
+            "routes.products.hydrate_candidate_images",
+        ), patch(
+            "routes.ai.retrieve_client_documentation", return_value=[],
+        ), patch(
+            "routes.ai.generate_documented_client_answer",
+            return_value=documented,
+        ), patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": "spray anti moustique",
+                    "mode": "documented",
+                })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["products"], [])
+        self.assertEqual(retrieval.call_count, 2)
 
     def test_simple_product_lookup_does_not_call_ai(self):
         candidate = {

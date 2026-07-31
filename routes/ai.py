@@ -7011,7 +7011,8 @@ def client_help():
     # can become cards. A direct reply stays inside the products from that thread.
     from routes.products import (
         classify_client_result_roles, client_products_by_ids,
-        client_candidates_need_semantic_retry, hybrid_client_candidates,
+        client_candidates_need_semantic_retry,
+        client_candidates_satisfy_query_plan, hybrid_client_candidates,
         hydrate_candidate_images,
         normalize_search_text, public_product_payload,
     )
@@ -7031,6 +7032,11 @@ def client_help():
                     retrieval_question, response_mode
                 )
         candidates = hybrid_client_candidates(retrieval_question, query_plan, limit=candidate_limit)
+    if (
+        response_mode == "lookup"
+        and client_candidates_need_semantic_retry(question, candidates)
+    ):
+        candidates = []
     if response_mode != "lookup":
         candidates = filter_client_answer_category(question, candidates)
         # Most searches stay on the millisecond local path. An irrelevant list
@@ -7049,6 +7055,7 @@ def client_help():
                 }), 429
             ai_rate_checked = True
             semantic_plan = generate_client_query_plan(question, history)
+            retry_resolved = False
             if semantic_plan:
                 semantic_candidates = hybrid_client_candidates(
                     question, semantic_plan, limit=candidate_limit
@@ -7056,9 +7063,17 @@ def client_help():
                 semantic_candidates = filter_client_answer_category(
                     question, semantic_candidates
                 )
-                if semantic_candidates:
+                if client_candidates_satisfy_query_plan(
+                    semantic_plan, semantic_candidates,
+                ):
                     query_plan = semantic_plan
                     candidates = semantic_candidates
+                    retry_resolved = True
+            if not retry_resolved:
+                # Empty is safer and more useful than unrelated cards. The AI
+                # can still answer the question and state that no grounded store
+                # product matched the interpreted request.
+                candidates = []
     candidates = classify_client_result_roles(candidates, question)
     # Reuse known exact-UPC images now. Unknown-image web lookups are queued
     # only for cards that will actually be displayed.
