@@ -57,6 +57,7 @@ _PUBLIC_API_GET_PATHS = {
 _PUBLIC_API_GET_PREFIXES = (
     "/api/products/barcode/",
     "/api/products/lookup/",
+    "/api/client/help/documented/",
 )
 _PUBLIC_API_POST_PATHS = {
     "/api/client/help",

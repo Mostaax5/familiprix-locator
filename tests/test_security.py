@@ -149,6 +149,15 @@ class SecurityBoundaryTests(unittest.TestCase):
             layouts = self.client.get("/api/layout/aisles", base_url="https://localhost")
         self.assertEqual(layouts.status_code, 200)
 
+        documented_poll = self.client.get(
+            "/api/client/help/documented/aaaaaaaaaaaaaaaaaaaaaaaa",
+            base_url="https://localhost",
+        )
+        self.assertEqual(documented_poll.status_code, 404)
+        self.assertNotEqual(
+            documented_poll.get_json().get("code"), "authentication_required"
+        )
+
         same_origin = self.client.post(
             "/api/client/help",
             json={},
