@@ -3832,26 +3832,29 @@ def _direct_identifier_products(db, query, field, limit=60):
         return []
     warm_corpus = (
         _PROD_CACHE.get("rows")
-        if (
-            _PROD_CACHE.get("database_token")
-            == _product_cache_database_token(db)
-            and _product_corpus_fast_ready()
-        )
+        if _PROD_CACHE.get("database_token")
+        == _product_cache_database_token(db)
         else None
     )
-    if _PROD_CACHE.get("rows") and warm_corpus is None:
-        _schedule_product_corpus_refresh()
     if warm_corpus:
         indexed = _indexed_identifier_products(
             warm_corpus, query, field, limit=limit
         )
-        # Metadata synchronization may have added a brand-new candidate since
-        # the last bounded refresh. A cache hit is authoritative; on a miss
-        # while dirty, retain the database fallback for immediate availability.
-        if indexed is not None and (
-            indexed or not _PROD_CACHE.get("metadata_dirty")
-        ):
+        # An existing indexed hit remains immediately useful while a bounded
+        # refresh runs. On a stale miss, retain the database fallback so a
+        # product imported seconds ago is still found before the refresh ends.
+        if indexed:
             return indexed
+        if (
+            indexed is not None
+            and _product_corpus_fast_ready()
+            and not _PROD_CACHE.get("metadata_dirty")
+        ):
+            return []
+    if _PROD_CACHE.get("rows") and (
+        warm_corpus is None or not _product_corpus_fast_ready()
+    ):
+        _schedule_product_corpus_refresh()
     escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     pattern = f"%{escaped}%"
     id_status = _searchable_identifier_status_sql("pi")
