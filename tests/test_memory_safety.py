@@ -479,6 +479,27 @@ class MemorySafetyTests(unittest.TestCase):
         self.assertEqual(response.get_json(), [])
         rank.assert_called_once()
 
+    def test_warm_reference_corpus_skips_catalogue_wide_state_queries(self):
+        original_reference = dict(products._REF_CACHE)
+        try:
+            cached_rows = [{"barcode": "062600142320"}]
+            products._REF_CACHE.update(
+                key=(products._REF_GEN, ("state",)),
+                rows=cached_rows,
+                built_at=time.time(),
+                initialized=True,
+            )
+            with patch.object(
+                products, "_reference_state_key",
+                side_effect=AssertionError("warm index must not query counts"),
+            ):
+                self.assertIs(
+                    products._reference_corpus(object()), cached_rows,
+                )
+        finally:
+            products._REF_CACHE.clear()
+            products._REF_CACHE.update(original_reference)
+
     def test_bm25_token_counter_does_not_match_substrings(self):
         haystack = "advil confort advil ibuprofene"
         self.assertEqual(products._normalized_token_count(haystack, "advil"), 2)

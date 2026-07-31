@@ -330,6 +330,17 @@ def _reference_state_key(db):
 
 
 def _reference_corpus(db):
+    # The common employee-search path must not run three catalogue-wide COUNT /
+    # MAX queries. Explicit imports bump _REF_GEN; background metadata drift is
+    # deliberately reconciled only at the bounded refresh interval.
+    if (
+        _REF_CACHE.get("initialized")
+        and _REF_CACHE.get("key")
+        and _REF_CACHE["key"][0] == _REF_GEN
+        and time.time() - float(_REF_CACHE.get("built_at", 0) or 0)
+        < _REF_MIN_REBUILD_S
+    ):
+        return _REF_CACHE["rows"]
     key = (_REF_GEN, _reference_state_key(db))
 
     def _fresh_enough():
@@ -5281,8 +5292,20 @@ def reference_search():
     limit = min(max(clamp_non_negative_int(request.args.get("limit", "40"), 40), 1), 80)
     field = (request.args.get("field") or "").strip().lower()
     db = get_db()
-    placed = {normalized_digits(r["barcode"]) for r in
-              db.execute("SELECT barcode FROM products WHERE TRIM(COALESCE(barcode,'')) <> ''").fetchall()}
+    if _PROD_CACHE.get("initialized"):
+        placed = {
+            barcode for _row_index, barcode
+            in (_PROD_CACHE.get("document_barcodes") or ())
+            if barcode
+        }
+    else:
+        placed = {
+            normalized_digits(r["barcode"])
+            for r in db.execute(
+                "SELECT barcode FROM products "
+                "WHERE TRIM(COALESCE(barcode,'')) <> ''"
+            ).fetchall()
+        }
     if reference_search_cache_ready(db):
         results = rank_reference_for_query(
             query, limit=limit, exclude_barcodes=placed, field=field
