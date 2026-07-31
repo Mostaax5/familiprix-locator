@@ -423,13 +423,45 @@ class MemorySafetyTests(unittest.TestCase):
             products._MEMORY_PRESSURE_LAST_CHECK = 0.0
             with patch.object(
                 products, "current_rss_mb", side_effect=[350.0, 245.0],
-            ), patch.object(products, "release_unused_memory"):
+            ), patch.object(
+                products, "release_unused_memory",
+            ) as full_collection, patch.object(
+                products, "trim_unused_memory",
+            ) as trim:
                 result = products.release_optional_product_caches_if_needed()
 
             self.assertEqual(result["reference_rows"], 1)
             self.assertEqual(result["rss_before_mb"], 350.0)
             self.assertEqual(products._REF_CACHE["rows"], [])
             self.assertIs(products._PROD_CACHE.get("rows"), warm_products)
+            full_collection.assert_not_called()
+            trim.assert_called_once_with()
+        finally:
+            products._REF_CACHE.clear()
+            products._REF_CACHE.update(original_reference)
+            products._MEMORY_PRESSURE_LAST_CHECK = original_check
+
+    def test_memory_pressure_does_not_collect_when_only_core_index_remains(self):
+        original_reference = dict(products._REF_CACHE)
+        original_check = products._MEMORY_PRESSURE_LAST_CHECK
+        try:
+            products._REF_CACHE.update(
+                key=None, rows=[], built_at=0.0, initialized=False,
+            )
+            products._MEMORY_PRESSURE_LAST_CHECK = 0.0
+            with patch.object(
+                products, "current_rss_mb", return_value=350.0,
+            ), patch.object(
+                products, "release_unused_memory",
+                side_effect=AssertionError("core search must not trigger full GC"),
+            ), patch.object(
+                products, "trim_unused_memory",
+                side_effect=AssertionError("nothing was released to trim"),
+            ):
+                result = products.release_optional_product_caches_if_needed()
+
+            self.assertEqual(result["reference_rows"], 0)
+            self.assertEqual(result["rss_after_mb"], 350.0)
         finally:
             products._REF_CACHE.clear()
             products._REF_CACHE.update(original_reference)

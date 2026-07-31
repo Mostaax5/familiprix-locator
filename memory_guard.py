@@ -97,9 +97,8 @@ def memory_snapshot():
         }
 
 
-def release_unused_memory():
-    """Collect Python objects and return free glibc arenas to Render when possible."""
-    gc.collect()
+def trim_unused_memory():
+    """Return already-free glibc arenas without a stop-the-world GC pass."""
     if os.name != "posix":
         return
     try:
@@ -108,3 +107,9 @@ def release_unused_memory():
             malloc_trim(0)
     except (AttributeError, OSError):
         pass
+
+
+def release_unused_memory():
+    """Collect Python objects and return free glibc arenas to Render when possible."""
+    gc.collect()
+    trim_unused_memory()

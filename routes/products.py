@@ -27,6 +27,7 @@ from memory_guard import (
     memory_intensive_task,
     memory_snapshot,
     release_unused_memory,
+    trim_unused_memory,
 )
 from product_data import (
     FIELD_NAMES,
@@ -3723,7 +3724,7 @@ _MEMORY_PRESSURE_CHECK_LOCK = threading.Lock()
 _MEMORY_PRESSURE_LAST_CHECK = 0.0
 
 
-def release_optional_product_caches(*, blocking=True):
+def release_optional_product_caches(*, blocking=True, compact=True):
     """Drop rebuildable catalogue state before a rare high-memory operation.
 
     The placed-product corpus stays warm because every employee search depends
@@ -3764,7 +3765,8 @@ def release_optional_product_caches(*, blocking=True):
             _IMAGE_FILL_RETRY_AFTER.clear()
             _IMAGE_FILL_RETRY_AFTER.update(keep)
 
-    release_unused_memory()
+    if compact:
+        release_unused_memory()
     return {
         "reference_rows": reference_rows,
         "expired_image_retries": len(expired),
@@ -3790,13 +3792,28 @@ def release_optional_product_caches_if_needed():
         # A reference-index build may be doing the exact work this cleanup is
         # meant to avoid. Never make an employee request wait for that lock;
         # the next five-second check can reclaim it after the builder exits.
-        released = release_optional_product_caches(blocking=False)
+        released = release_optional_product_caches(
+            blocking=False, compact=False,
+        )
         if released.get("reference_busy"):
             return {
                 **released,
                 "rss_before_mb": rss_before,
                 "rss_after_mb": rss_before,
             }
+        if not released.get("reference_rows"):
+            # The placed-product cache is intentional baseline memory. A full
+            # gc.collect() here used to pause an otherwise millisecond search
+            # for several seconds every five seconds without freeing anything.
+            return {
+                **released,
+                "rss_before_mb": rss_before,
+                "rss_after_mb": rss_before,
+            }
+        # Clearing an acyclic reference index releases its rows immediately via
+        # refcounts. malloc_trim can return those arenas without traversing the
+        # entire live catalogue as gc.collect() would do on the request thread.
+        trim_unused_memory()
         rss_after = current_rss_mb()
         print(
             f"[Memoire] pression {rss_before} MB; "
