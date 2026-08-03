@@ -344,6 +344,43 @@ class SecurityBoundaryTests(unittest.TestCase):
                 protected = self.client.get("/api/export", base_url="https://localhost")
         self.assertEqual(protected.status_code, 200)
 
+    def test_database_export_streams_a_complete_restorable_payload(self):
+        self.db.execute(
+            "INSERT INTO products "
+            "(name, barcode, aisle, side, section, shelf, position) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("Backup product", "001234567890", "3", "Gauche", "1", "2", "4"),
+        )
+        self.db.execute(
+            "INSERT INTO product_reference (barcode, name) VALUES (?, ?)",
+            ("001234567890", "Backup reference"),
+        )
+        self.db.commit()
+        self.login()
+
+        with patch("routes.import_export.get_db", return_value=self.db):
+            response = self.client.get(
+                "/api/export", base_url="https://localhost"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["export_version"], 2)
+        self.assertEqual(payload["products"][0]["name"], "Backup product")
+        self.assertEqual(
+            payload["product_data"]["product_reference"][0]["name"],
+            "Backup reference",
+        )
+        self.assertEqual(
+            set(payload["product_data"]),
+            {
+                "product_reference", "product_reference_evidence",
+                "product_reference_identifiers", "product_identifiers",
+                "product_field_evidence", "product_data_issues",
+                "product_aliases", "product_relationships",
+            },
+        )
+
     def test_security_headers_are_present_without_leaking_error_details(self):
         response = self.client.get("/", base_url="https://localhost")
         self.assertEqual(response.headers.get("X-Frame-Options"), "DENY")

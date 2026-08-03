@@ -28,7 +28,7 @@ from product_data import (
     upsert_reference_candidate,
 )
 from product_backup import (
-    build_product_data_backup,
+    PRODUCT_DATA_TABLE_COLUMNS,
     restore_product_backup_row,
     restore_product_data_backup,
 )
@@ -165,29 +165,55 @@ def export_database():
 
 def _export_database_locked():
     db = get_db()
-    products = [dict(p) for p in db.execute("SELECT * FROM products ORDER BY aisle, side, section, shelf, position").fetchall()]
-    layouts  = [dict(r) for r in db.execute("SELECT * FROM aisle_layouts ORDER BY aisle").fetchall()]
-    payload  = {
-        "export_version": 2,
-        "exported_at": utc_now_iso(),
-        "products": products,
-        "aisle_layouts": layouts,
-        "product_data": build_product_data_backup(db),
-    }
     filename = f"familiprix-backup-{utc_now_iso()[:10]}.json"
     fd, path = tempfile.mkstemp(prefix="familiprix-backup-", suffix=".json")
+
+    def write_rows(output, query):
+        output.write("[")
+        first = True
+        for row in db.execute(query):
+            if not first:
+                output.write(",")
+            json.dump(
+                dict(row), output, ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            first = False
+        output.write("]")
+
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as output:
-            json.dump(payload, output, ensure_ascii=False, separators=(",", ":"))
+            output.write('{"export_version":2,"exported_at":')
+            json.dump(utc_now_iso(), output, ensure_ascii=False)
+            output.write(',"products":')
+            write_rows(
+                output,
+                "SELECT * FROM products "
+                "ORDER BY aisle, side, section, shelf, position",
+            )
+            output.write(',"aisle_layouts":')
+            write_rows(
+                output,
+                "SELECT * FROM aisle_layouts ORDER BY aisle",
+            )
+            output.write(',"product_data":{')
+            for index, table in enumerate(PRODUCT_DATA_TABLE_COLUMNS):
+                if index:
+                    output.write(",")
+                json.dump(table, output, ensure_ascii=False)
+                output.write(":")
+                order_column = "barcode" if table == "product_reference" else "id"
+                write_rows(
+                    output,
+                    f"SELECT * FROM {table} ORDER BY {order_column}",
+                )
+            output.write("}}")
     except Exception:
         try:
             os.remove(path)
         except OSError:
             pass
         raise
-    products.clear()
-    layouts.clear()
-    payload.clear()
     release_unused_memory()
     cleanup_state = {"done": False}
     cleanup_lock = threading.Lock()
