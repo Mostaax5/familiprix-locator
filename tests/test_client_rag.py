@@ -101,6 +101,15 @@ class ClientRagTests(unittest.TestCase):
             normalize_search_text("B\u00d8RN \u00c6sir"), "born aesir",
         )
 
+    def test_local_query_plan_does_not_search_conversation_words_separately(self):
+        question = (
+            "Quels types de melatonine avons-nous, quelles differences et "
+            "comment choisir entre les formats?"
+        )
+        plan = build_client_query_plan(question, "detailed")
+        self.assertEqual(plan["search_queries"], [question])
+        self.assertEqual(plan["keywords"], [])
+
     def test_structured_description_uses_only_known_package_fields(self):
         description = structured_catalog_description({
             "name": "ACME VITAMINE C 500MG CO100",

@@ -2373,11 +2373,9 @@ def build_client_query_plan(question, mode="lookup"):
     """Fast deterministic plan used by retrieval; AI no longer blocks search."""
     from routes.products import (
         client_request_intent, intent_expansion_terms, normalize_search_text,
-        tokenize_search_query,
     )
 
     normalized = normalize_search_text(question)
-    tokens = tokenize_search_query(question)
     padded = f" {normalized} "
     specific_intent = client_request_intent(question)
     comparison_markers = ("difference", "compare", "comparaison", "versus", " vs ", " ou ")
@@ -2389,7 +2387,12 @@ def build_client_query_plan(question, mode="lookup"):
         ),
         "corrected_query": question,
         "search_queries": [question],
-        "keywords": tokens[:20],
+        # The complete question is already searched once. Splitting a local
+        # deterministic plan into standalone words such as "comment",
+        # "choisir" and "formats" multiplies scoring work and broadens results.
+        # Semantic-planner keywords are still accepted later when local recall
+        # is genuinely weak.
+        "keywords": [],
         "must_include": [],
         "exclude": [],
         "wants_all": wants_all,
