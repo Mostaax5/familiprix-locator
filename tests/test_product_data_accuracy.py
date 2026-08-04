@@ -465,6 +465,41 @@ class ProductDataAccuracyTests(unittest.TestCase):
         self.assertIn("12345678", search_row["_hay"])
         db.close()
 
+    def test_cold_corpus_keeps_probable_reference_identifiers_searchable(self):
+        db = self.make_db()
+        barcode = "063848966068"
+        product_id = self.insert_product(
+            db, name="ACETAMINOPHENE 500MG", barcode=barcode,
+        )
+        gtin_key = gtin_identity_key(barcode)
+        db.execute(
+            "UPDATE products SET gtin_key=? WHERE id=?",
+            (gtin_key, product_id),
+        )
+        db.execute(
+            """INSERT INTO product_reference_identifiers
+               (gtin_key, barcode, identifier_type, identifier_value, normalized_value,
+                source, confidence, verification_status)
+               VALUES (?, ?, 'DIN', '00559407', '00559407',
+                       'Health Canada candidate', 0.8, 'requires_review')""",
+            (gtin_key, barcode),
+        )
+        products_module._PROD_CACHE.update(
+            key=None, rows=[], initialized=False, database_token=None,
+        )
+
+        corpus = _products_corpus(db, allow_identifier_stale=False)
+        matches = _indexed_identifier_products(
+            corpus, "00559407", "din", limit=10,
+        )
+
+        self.assertEqual([item["id"] for item in matches], [product_id])
+        self.assertEqual(
+            matches[0]["_identifiers"][-1]["verification_status"],
+            "requires_review",
+        )
+        db.close()
+
     def test_backup_restores_provenance_with_remapped_product_ids(self):
         source = self.make_db()
         first = self.insert_product(source, name="Exact package 50", position="1")

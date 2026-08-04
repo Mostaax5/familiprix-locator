@@ -841,6 +841,31 @@ def _reference_identifiers_by_gtin(db, gtin_keys):
     return identifiers
 
 
+def _placed_reference_identifiers_by_gtin(db):
+    """Load identifiers for every placed GTIN in one database round trip."""
+    identifiers = {}
+    for row in db.execute(
+        f"""SELECT r.gtin_key, r.identifier_type, r.identifier_value,
+                   r.authority, r.source, r.source_url,
+                   r.verification_status, r.match_method, r.confidence
+            FROM product_reference_identifiers r
+            JOIN (
+                SELECT DISTINCT gtin_key
+                FROM products
+                WHERE TRIM(COALESCE(gtin_key, '')) <> ''
+            ) placed ON placed.gtin_key=r.gtin_key
+            WHERE {_searchable_identifier_status_sql('r')}
+            ORDER BY r.gtin_key,
+                     CASE WHEN r.verification_status='verified' THEN 0 ELSE 1 END,
+                     r.confidence DESC, r.id"""
+    ):
+        item = dict(row)
+        identifiers.setdefault(
+            str(item.get("gtin_key", "") or ""), []
+        ).append(_identifier_record(item))
+    return identifiers
+
+
 def _attach_identifier_metadata(db, items):
     """Attach durable candidates even when a placement row was just replaced."""
     products = [item for item in (items or []) if item]
@@ -1169,14 +1194,34 @@ def _products_corpus(db, allow_identifier_stale=False):
         verified_by_product = {}
         field_sources_by_product = {}
         identifiers_by_product = {}
-    gtin_keys = {
-        str(dict(row).get("gtin_key", "") or "").strip()
-        or gtin_identity_key(dict(row).get("barcode", ""))
+    gtin_rows = [
+        dict(row)
         for row in db.execute("SELECT gtin_key, barcode FROM products")
+    ]
+    gtin_keys = {
+        str(row.get("gtin_key", "") or "").strip()
+        or gtin_identity_key(row.get("barcode", ""))
+        for row in gtin_rows
     }
-    reference_identifiers_by_gtin = _reference_identifiers_by_gtin(
-        db, gtin_keys
+    reference_identifiers_by_gtin = (
+        _placed_reference_identifiers_by_gtin(db)
     )
+    # Old rows created before gtin_key existed remain supported without making
+    # every modern startup pay for many 300-key database requests.
+    derived_only_keys = {
+        gtin_identity_key(row.get("barcode", ""))
+        for row in gtin_rows
+        if not str(row.get("gtin_key", "") or "").strip()
+        and gtin_identity_key(row.get("barcode", ""))
+    }
+    if derived_only_keys:
+        legacy_identifiers = _reference_identifiers_by_gtin(
+            db, derived_only_keys
+        )
+        for gtin_key, values in legacy_identifiers.items():
+            reference_identifiers_by_gtin.setdefault(
+                gtin_key, []
+            ).extend(values)
     rows = []
     document_frequency = Counter()
     catalog_brands = set()
