@@ -701,6 +701,29 @@ def _verified_current_product_field_sources(db):
         f"WHEN '{field}' THEN p.{field}" for field in fields
     ) + " ELSE '' END"
     placeholders = ",".join("?" for _field in fields)
+    if getattr(db, "backend", "") == "postgres":
+        # ``active`` is the current winner maintained by
+        # record_field_evidence(). Aggregate fields sharing provenance in SQL so
+        # a cold worker receives roughly 5k compact rows instead of ~48k rows
+        # carrying the same Familiprix URL repeatedly.
+        return db.execute(
+            f"""
+            SELECT e.product_id,
+                   STRING_AGG(e.field_name, ',' ORDER BY e.field_name) AS field_names,
+                   e.source, e.source_url,
+                   MAX(e.last_verified_at) AS last_verified_at
+            FROM product_field_evidence e
+            JOIN products p ON p.id=e.product_id
+            WHERE e.active=1
+              AND e.verification_status='verified'
+              AND e.field_name IN ({placeholders})
+              AND TRIM(COALESCE(e.field_value, '')) =
+                  TRIM(COALESCE({case_expression}, ''))
+            GROUP BY e.product_id, e.source, e.source_url
+            ORDER BY e.product_id
+            """,
+            fields,
+        )
     return db.execute(
         f"""
         WITH ranked AS (
@@ -972,40 +995,48 @@ def _product_search_row(item, aliases=(), identifiers=()):
     def verified(field):
         return item.get(field, "") if field in verified_fields else ""
 
-    name = normalize_search_text(item.get("name", ""))
-    brand = normalize_search_text(verified("brand"))
-    catalog_brand = normalize_search_text(item.get("brand", ""))
-    verified_aliases = " ".join(
-        normalize_search_text(alias) for alias in aliases
+    raw_name = str(item.get("name", "") or "")
+    raw_verified_brand = str(verified("brand") or "")
+    raw_catalog_brand = str(item.get("brand", "") or "")
+    name = normalize_search_text(raw_name)
+    brand = normalize_search_text(raw_verified_brand)
+    catalog_brand = (
+        brand
+        if raw_catalog_brand == raw_verified_brand
+        else normalize_search_text(raw_catalog_brand)
     )
-    verified_semantics = " ".join([
-        name, brand, verified_aliases,
-        normalize_search_text(verified("description")),
-        normalize_search_text(verified("official_name_fr")),
-        normalize_search_text(verified("official_name_en")),
-        normalize_search_text(verified("category")),
-        normalize_search_text(verified("variant")),
-        normalize_search_text(verified("flavour")),
-        normalize_search_text(verified("colour")),
-        normalize_search_text(verified("strength")),
-        normalize_search_text(verified("dosage_form")),
-        normalize_search_text(verified("manufacturer")),
-        normalize_search_text(verified("ingredients")),
-        normalize_search_text(verified("compatibility")),
-        normalize_search_text(verified("purpose")),
-        normalize_search_text(verified("route_of_administration")),
-    ])
-    hay = " ".join([
-        verified_semantics,
-        # Available unverified descriptions remain searchable, but they are
-        # evidence rather than identity and therefore receive less semantic
-        # weight than verified fields.
-        normalize_search_text(item.get("description", "")),
-        " ".join(
-            normalize_search_text(identifier.get("value", ""))
-            for identifier in identifiers
-        ),
-    ])
+
+    # Normalize the complete evidence document once. The former implementation
+    # normalized 20 fields independently for every product, including blanks,
+    # and then normalized a verified description a second time. On Render's
+    # small CPU that repeated Unicode work dominated cold startup.
+    semantic_values = [
+        raw_name, raw_verified_brand,
+        *(str(alias or "") for alias in aliases),
+        *(str(verified(field) or "") for field in (
+            "description", "official_name_fr", "official_name_en",
+            "category", "variant", "flavour", "colour", "strength",
+            "dosage_form", "manufacturer", "ingredients",
+            "compatibility", "purpose", "route_of_administration",
+        )),
+    ]
+    verified_semantics = normalize_search_text(
+        " ".join(value for value in semantic_values if value)
+    )
+    hay_parts = [verified_semantics]
+    # Available unverified descriptions remain searchable, but they are
+    # evidence rather than identity and therefore receive less semantic weight
+    # than verified fields. A verified description is already present above.
+    if "description" not in verified_fields:
+        hay_parts.append(normalize_search_text(item.get("description", "")))
+    identifier_text = " ".join(
+        str(identifier.get("value", "") or "")
+        for identifier in identifiers
+        if identifier.get("value")
+    )
+    if identifier_text:
+        hay_parts.append(normalize_search_text(identifier_text))
+    hay = " ".join(part for part in hay_parts if part)
     return {
         "_bc": normalized_digits(item.get("barcode", "")),
         "_name": name,
@@ -1167,18 +1198,31 @@ def _products_corpus(db, allow_identifier_stale=False):
         finish_build_stage("aliases")
         for evidence_row in _verified_current_product_field_sources(db):
             evidence = dict(evidence_row)
-            verified_by_product.setdefault(int(evidence["product_id"]), set()).add(
-                str(evidence.get("field_name", "") or "")
-            )
-            field_sources_by_product.setdefault(
-                int(evidence["product_id"]), {}
-            )[str(evidence.get("field_name", "") or "")] = {
+            product_id = int(evidence["product_id"])
+            field_names = [
+                field.strip()
+                for field in str(
+                    evidence.get("field_names")
+                    or evidence.get("field_name", "")
+                    or ""
+                ).split(",")
+                if field.strip() in FIELD_NAMES
+            ]
+            provenance = {
                 "source": str(evidence.get("source", "") or ""),
                 "source_url": safe_http_url(evidence.get("source_url", "")),
                 "last_verified_at": str(
                     evidence.get("last_verified_at", "") or ""
                 ),
             }
+            verified_by_product.setdefault(product_id, set()).update(
+                field_names
+            )
+            product_sources = field_sources_by_product.setdefault(
+                product_id, {}
+            )
+            for field_name in field_names:
+                product_sources[field_name] = provenance
         finish_build_stage("verified_evidence")
         for identifier_row in db.execute(
             f"""SELECT product_id, identifier_type, identifier_value, authority,
@@ -1237,7 +1281,7 @@ def _products_corpus(db, allow_identifier_stale=False):
             ).extend(values)
     finish_build_stage("reference_identifiers")
     rows = []
-    document_frequency = Counter()
+    document_frequency = {}
     catalog_brands = set()
     name_lead_frequency = Counter()
     search_document_keys = set()
@@ -1298,11 +1342,13 @@ def _products_corpus(db, allow_identifier_stale=False):
             if search_row["_bc"]:
                 document_barcodes.append((row_index, search_row["_bc"]))
             tokens = search_row["_hay"].split()
-            for token in set(tokens):
-                if 2 <= len(token) <= 64:
-                    token_postings.setdefault(
-                        token, array("I")
-                    ).append(row_index)
+            indexed_tokens = {
+                token for token in tokens if 2 <= len(token) <= 64
+            }
+            for token in indexed_tokens:
+                token_postings.setdefault(
+                    token, array("I")
+                ).append(row_index)
             indexed_name_tokens = set(
                 tuple(search_row.get("_tokens") or ())
                 + tuple(search_row.get("_brand_tokens") or ())
@@ -1325,10 +1371,14 @@ def _products_corpus(db, allow_identifier_stale=False):
             if name_tokens:
                 name_lead_frequency[str(name_tokens[0])] += 1
             total_document_length += max(1, len(tokens))
-            document_frequency.update({
-                token for token in tokens
-                if any(character.isalpha() for character in token)
-            })
+    # Each posting contains one entry per package, so its length is already the
+    # document frequency. Deriving this once from 35k posting keys avoids
+    # counting roughly a million description tokens a second time.
+    document_frequency = {
+        token: len(indices)
+        for token, indices in token_postings.items()
+        if not token.isdigit()
+    }
     finish_build_stage("product_rows_and_terms")
     token_prefixes = {}
     for token in token_postings:
@@ -2419,12 +2469,20 @@ _SEARCH_SPECIAL_LATIN = str.maketrans({
     "œ": "oe", "æ": "ae", "ø": "o", "ł": "l", "đ": "d",
     "ð": "d", "þ": "th", "ħ": "h", "µ": "u", "μ": "u",
 })
+_SEARCH_SPECIAL_LATIN_CHARS = tuple("œæøłđðþħµμ")
 _SEARCH_NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 
 def normalize_search_text(value):
     """Normalize catalogue text without a Python loop over every character."""
-    text = str(value or "").casefold().translate(_SEARCH_SPECIAL_LATIN)
+    text = str(value or "")
+    if not text:
+        return ""
+    if text.isascii():
+        return _SEARCH_NON_ALNUM.sub(" ", text.lower()).strip()
+    text = text.casefold()
+    if any(character in text for character in _SEARCH_SPECIAL_LATIN_CHARS):
+        text = text.translate(_SEARCH_SPECIAL_LATIN)
     # NFKD separates French accents; ASCII encoding removes only the combining
     # marks. Both operations run in C and are far faster than testing every
     # description character with unicodedata.combining in Python.
