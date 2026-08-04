@@ -35,6 +35,7 @@ from routes.products import (
     client_candidates_need_semantic_retry,
     client_excluded_concept_terms,
     client_required_concept_groups,
+    filter_client_request_products,
     find_existing_image_for_barcode,
     hybrid_client_candidates,
     normalize_search_text,
@@ -131,6 +132,42 @@ class ClientRagTests(unittest.TestCase):
             ["primary", "replacement"],
         )
         self.assertIn("remplacement", products[1]["result_role_label"].lower())
+
+    def test_abbreviated_replacement_brushes_are_not_main_toothbrushes(self):
+        products = classify_client_result_roles([{
+            "name": "SONICARE BR/DENTS HX3681/03 1",
+        }, {
+            "name": "SONICARE RECH BROS HX9023/64 3",
+        }, {
+            "name": "PHILIPS SONI RECH HX6012/77 2",
+        }], "brosse a dents electrique")
+        self.assertEqual(
+            [product["result_role"] for product in products],
+            ["primary", "replacement", "replacement"],
+        )
+
+    def test_fast_inventory_filter_honours_rechargeable_without_heads(self):
+        products = [{
+            "name": "SONICARE BR/DENTS HX3681/03 1",
+            "description": "Brosse a dents electrique rechargeable avec USB.",
+            "_verified_fields": ["description"],
+        }, {
+            "name": "ORAL-B P100 BR/DENTS ELEC NR 1",
+            "description": "Brosse a dents a pile.",
+            "_verified_fields": ["description"],
+        }, {
+            "name": "SONICARE RECH BROS HX9023/64 3",
+            "description": "Tetes de rechange pour brosse rechargeable.",
+            "_verified_fields": ["description"],
+        }]
+        filtered = filter_client_request_products(
+            products,
+            "brosse a dents electrique rechargeable, pas des tetes de remplacement",
+        )
+        self.assertEqual(
+            [product["name"] for product in filtered],
+            ["SONICARE BR/DENTS HX3681/03 1"],
+        )
 
     def test_explicit_replacement_head_query_promotes_heads(self):
         products = classify_client_result_roles([

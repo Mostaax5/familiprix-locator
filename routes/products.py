@@ -2310,6 +2310,19 @@ def row_matches_client_identity_constraints(row, query):
             and not brands.intersection({"off", "watkins"})
         ):
             return False
+    query_tokens = set(tokenize_search_query(query))
+    if (
+        _is_electric_toothbrush_request(query)
+        and query_tokens.intersection({
+            "rechargeable", "rechargeables", "recharger",
+        })
+    ):
+        identity = f" {normalize_search_text(row.get('_identity_hay', ''))} "
+        if any(marker in identity for marker in (
+            " brosse a dents a pile ", " brosse a dent a pile ",
+            " brosse a pile ", " battery powered toothbrush ",
+        )):
+            return False
     return True
 
 
@@ -2406,6 +2419,7 @@ def client_product_result_role(product, query=""):
         " tete br dent ", " tete br dents ", " tete de brosse ",
         " tete de remplacement ",
         " tete de rechange ", " brossette ", " replacement head ",
+        " rech bros ", " recharge bros ", " soni rech ",
         " lame de remplacement ", " lame de rechange ",
         " cartouche de remplacement ", " filtre de remplacement ",
         " piece de remplacement ", " replacement part ",
@@ -2442,6 +2456,15 @@ def classify_client_result_roles(products, query=""):
     return [item for _index, item in classified]
 
 
+def _client_query_excludes_replacements(query):
+    normalized_query = f" {normalize_search_text(query)} "
+    return any(marker in normalized_query for marker in (
+        " pas de tete ", " pas des tetes ", " sans tete ", " sans tetes ",
+        " not replacement head ", " no replacement head ",
+        " without replacement head ",
+    ))
+
+
 def filter_client_request_products(products, query):
     """Filter loaded products with one compiled set of request constraints."""
     required = client_required_concept_groups(query)
@@ -2460,13 +2483,7 @@ def filter_client_request_products(products, query):
             and row_matches_client_identity_constraints(row, query)
         ):
             filtered.append(product)
-    normalized_query = f" {normalize_search_text(query)} "
-    excludes_replacements = any(marker in normalized_query for marker in (
-        " pas de tete ", " pas des tetes ", " sans tete ", " sans tetes ",
-        " not replacement head ", " no replacement head ",
-        " without replacement head ",
-    ))
-    if excludes_replacements:
+    if _client_query_excludes_replacements(query):
         filtered = [
             product for product in filtered
             if client_product_result_role(product, query) != "replacement"
@@ -5752,7 +5769,18 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         1 if scored[key]["in_stock"] == 0 else 0,
         scored[key]["name"],
     ))
-    return _materialize_mapped_products(corpus, ranked_keys, limit=limit)
+    # Materialize a little beyond the requested limit so explicit exclusions
+    # (for example "pas des tetes de remplacement") do not leave an avoidable
+    # gap after accessories are removed.
+    products = _materialize_mapped_products(
+        corpus, ranked_keys, limit=min(200, max(limit, limit * 2)),
+    )
+    if _client_query_excludes_replacements(question):
+        products = [
+            product for product in products
+            if client_product_result_role(product, question) != "replacement"
+        ]
+    return products[:limit]
 
 
 def hybrid_client_candidates(question, query_plan, limit=60):
