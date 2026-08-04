@@ -574,6 +574,7 @@ _PROD_CACHE = {
     "catalog_brands": (), "name_lead_frequency": {},
     "last_build_ms": 0, "last_build_rows": 0,
     "last_build_rss_mb": None, "last_build_at": 0.0,
+    "last_build_stages_ms": {},
     "token_postings": {}, "token_prefixes": {},
     "name_token_postings": {}, "name_tokens_by_initial": {},
     "mapped_indices_by_key": {}, "document_in_stock": {},
@@ -1142,6 +1143,15 @@ def _products_corpus(db, allow_identifier_stale=False):
         )
         return _PROD_CACHE["rows"]
     build_started_at = time.perf_counter()
+    stage_started_at = build_started_at
+    build_stages_ms = {}
+
+    def finish_build_stage(name):
+        nonlocal stage_started_at
+        now = time.perf_counter()
+        build_stages_ms[name] = int(round((now - stage_started_at) * 1000))
+        stage_started_at = now
+
     aliases_by_product = {}
     verified_by_product = {}
     field_sources_by_product = {}
@@ -1154,6 +1164,7 @@ def _products_corpus(db, allow_identifier_stale=False):
             aliases_by_product.setdefault(int(alias["product_id"]), []).append(
                 str(alias.get("alias_value", "") or "")
             )
+        finish_build_stage("aliases")
         for evidence_row in _verified_current_product_field_sources(db):
             evidence = dict(evidence_row)
             verified_by_product.setdefault(int(evidence["product_id"]), set()).add(
@@ -1168,6 +1179,7 @@ def _products_corpus(db, allow_identifier_stale=False):
                     evidence.get("last_verified_at", "") or ""
                 ),
             }
+        finish_build_stage("verified_evidence")
         for identifier_row in db.execute(
             f"""SELECT product_id, identifier_type, identifier_value, authority,
                       source, source_url, verification_status, match_method, confidence
@@ -1189,6 +1201,7 @@ def _products_corpus(db, allow_identifier_stale=False):
                 "match_method": identifier.get("match_method", ""),
                 "confidence": identifier.get("confidence", 0),
             })
+        finish_build_stage("product_identifiers")
     except Exception:
         aliases_by_product = {}
         verified_by_product = {}
@@ -1222,6 +1235,7 @@ def _products_corpus(db, allow_identifier_stale=False):
             reference_identifiers_by_gtin.setdefault(
                 gtin_key, []
             ).extend(values)
+    finish_build_stage("reference_identifiers")
     rows = []
     document_frequency = Counter()
     catalog_brands = set()
@@ -1315,6 +1329,7 @@ def _products_corpus(db, allow_identifier_stale=False):
                 token for token in tokens
                 if any(character.isalpha() for character in token)
             })
+    finish_build_stage("product_rows_and_terms")
     token_prefixes = {}
     for token in token_postings:
         if len(token) >= 4 and token[0].isalpha():
@@ -1331,6 +1346,7 @@ def _products_corpus(db, allow_identifier_stale=False):
         initial: tuple(values)
         for initial, values in name_tokens_by_initial.items()
     }
+    finish_build_stage("term_indexes")
     identifier_postings = {}
 
     def add_identifier_posting(identifier_type, value, row_index):
@@ -1357,6 +1373,7 @@ def _products_corpus(db, allow_identifier_stale=False):
             add_identifier_posting(
                 identifier.get("type"), identifier.get("value"), row_index
             )
+    finish_build_stage("identifier_index")
     document_count = max(1, len(search_document_keys))
     _PROD_CACHE.update(
         key=key, rows=rows, built_at=time.time(), initialized=True,
@@ -1388,6 +1405,7 @@ def _products_corpus(db, allow_identifier_stale=False):
         last_build_rows=len(rows),
         last_build_rss_mb=current_rss_mb(),
         last_build_at=time.time(),
+        last_build_stages_ms=dict(build_stages_ms),
     )
     del (
         gtin_keys, aliases_by_product, verified_by_product,
@@ -1466,6 +1484,9 @@ def product_search_cache_status():
         "last_build_ms": int(_PROD_CACHE.get("last_build_ms", 0) or 0),
         "last_build_rows": int(_PROD_CACHE.get("last_build_rows", 0) or 0),
         "last_build_rss_mb": _PROD_CACHE.get("last_build_rss_mb"),
+        "last_build_stages_ms": dict(
+            _PROD_CACHE.get("last_build_stages_ms") or {}
+        ),
         "last_build_at": float(_PROD_CACHE.get("last_build_at", 0) or 0),
         "indexed_terms": len(_PROD_CACHE.get("token_postings") or {}),
         "indexed_products": len(
