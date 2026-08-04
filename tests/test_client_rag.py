@@ -3160,6 +3160,47 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(response.get_json()["answer"], documented["answer"])
         generator.assert_called_once()
 
+    def test_realtime_empty_stream_uses_grounded_products_instead_of_false_empty(self):
+        candidates = [{
+            "id": 1, "client_id": "product:1",
+            "name": "BIOMEDIC MELATON 5MG CO100",
+            "description": "Melatonine 5 mg, comprimes.",
+            "barcode": "1001", "aisle": "2", "side": "A",
+            "section": "3", "shelf": "2", "position": "1",
+        }]
+        empty_stream = {
+            "answer": "", "selected_product_ids": [],
+            "follow_up_questions": [], "safety_flags": [],
+            "pharmacist_referral": False, "pharmacist_reason": "",
+        }
+        with patch(
+            "routes.products.hybrid_client_candidates", return_value=candidates,
+        ), patch(
+            "routes.products.hydrate_candidate_images",
+        ), patch(
+            "routes.ai.generate_verified_client_answer",
+            return_value=empty_stream,
+        ), patch(
+            "routes.ai.configured_ai_provider",
+            return_value={"name": "kimi", "label": "Kimi", "model": "kimi-k2.6"},
+        ), patch(
+            "routes.ai._check_ai_rate_limit", return_value=True,
+        ), patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": "Quels types de melatonine avons-nous et comment choisir?",
+                    "mode": "ai",
+                })
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["degraded"])
+        self.assertIn("Pour choisir une", payload["answer"])
+        self.assertEqual(
+            [product["name"] for product in payload["products"]],
+            ["BIOMEDIC MELATON 5MG CO100"],
+        )
+
     def test_documented_form_comparison_skips_ai_delay(self):
         candidates = [{
             "id": 1, "client_id": "product:1",

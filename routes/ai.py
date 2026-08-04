@@ -2924,7 +2924,7 @@ def generate_verified_client_answer(question, query_plan, candidates, history=No
         schema=_CLIENT_VERIFICATION_SCHEMA,
         question_preview=question,
         realtime_model=True,
-        timeout_seconds=8,
+        timeout_seconds=10,
     )
     if not isinstance(parsed, dict):
         return None
@@ -7267,6 +7267,23 @@ def client_help():
         else:
             return jsonify({"success": False,
                             "error": _AI_LAST_ERROR or "Impossible de préparer la réponse pour le moment."}), 502
+
+    if (
+        response_mode != "documented"
+        and answer_candidates
+        and not verified.get("selected_product_ids")
+        and (
+            _AI_LAST_ERROR
+            or not str(verified.get("answer", "") or "").strip()
+            or _answer_denies_available_inventory(verified.get("answer", ""))
+        )
+    ):
+        # A timed-out structured stream can still normalize into an empty dict.
+        # Never turn that transport artifact into a false "nothing in store"
+        # answer when deterministic retrieval has grounded candidates.
+        verified = grounded_documented_fallback(
+            query_plan, answer_candidates, [], degraded=True,
+        )
 
     if response_mode != "documented":
         verified = _guard_documented_inventory_contradiction(
