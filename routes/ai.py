@@ -5273,15 +5273,15 @@ def _generate_documented_client_answer_sync(
             "candidates": contexts,
             "documents": document_contexts,
         },
-        # K3's completion budget includes its private reasoning. This leaves
-        # enough room for a useful structured answer without inviting a long
-        # completion that misses the employee-service deadline.
-        max_tokens=1400,
+        # The foreground K2.6 answer is intentionally compact; K3 keeps the
+        # larger budget for the asynchronous documented upgrade.
+        max_tokens=1400 if quality_mode else 800,
         schema_name="client_documented_answer",
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,
         quality_mode=quality_mode,
         realtime_model=True,
+        timeout_seconds=None if quality_mode else 9,
     )
     if not isinstance(parsed, dict):
         return grounded_documented_fallback(query_plan, candidates, documents)

@@ -1383,7 +1383,8 @@ class ClientRagTests(unittest.TestCase):
             )
 
         call = provider.call_args
-        self.assertEqual(call.kwargs["max_tokens"], 1400)
+        self.assertEqual(call.kwargs["max_tokens"], 800)
+        self.assertEqual(call.kwargs["timeout_seconds"], 9)
         self.assertTrue(call.kwargs["realtime_model"])
         self.assertNotIn("comparisons", call.kwargs["schema"]["properties"])
         self.assertNotIn(
