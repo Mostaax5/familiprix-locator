@@ -739,6 +739,18 @@ def upsert_reference_candidate(
     can_verify = valid and assessment.auto_apply
     evidence_status = "verified" if can_verify else "requires_review"
     source_record_id = str(item.get("source_record_id", "") or item.get("product_code", "") or barcode)
+    rejected_values = {
+        (
+            str(dict(row).get("field_name", "") or ""),
+            str(dict(row).get("field_value", "") or "").strip(),
+        )
+        for row in db.execute(
+            """SELECT field_name, field_value
+               FROM product_reference_evidence
+               WHERE gtin_key=? AND verification_status='rejected'""",
+            (key,),
+        ).fetchall()
+    }
 
     promotable_fields = {"brand", "description", "image_url"}
     promoted_fields = set()
@@ -770,7 +782,7 @@ def upsert_reference_candidate(
     conflicts = []
     for field in REFERENCE_FIELDS:
         incoming = str(item.get(field, "") or "").strip()
-        if not incoming:
+        if not incoming or (field, incoming) in rejected_values:
             continue
         current = str((existing or {}).get(field, "") or "").strip()
         promote = can_promote(field, current, incoming)
@@ -799,6 +811,8 @@ def upsert_reference_candidate(
         for field in REFERENCE_FIELDS:
             incoming = str(item.get(field, "") or "").strip()
             current = str(existing.get(field, "") or "").strip()
+            if (field, incoming) in rejected_values:
+                continue
             if incoming and not current and can_verify:
                 updates[field] = incoming
             elif incoming and field in promoted_fields:
@@ -826,7 +840,11 @@ def upsert_reference_candidate(
         stored_barcode = existing["barcode"]
     else:
         fields = list(REFERENCE_FIELDS)
-        values = [str(item.get(field, "") or "").strip() for field in fields]
+        values = [
+            "" if (field, str(item.get(field, "") or "").strip()) in rejected_values
+            else str(item.get(field, "") or "").strip()
+            for field in fields
+        ]
         columns = ["barcode"] + fields + [
             "source", "source_url", "updated_at", "gtin_key", "match_method",
             "verification_status", "source_priority", "confidence", "last_verified_at",

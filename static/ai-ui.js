@@ -701,6 +701,51 @@ function clientRegulatoryIdentifiers(product) {
   return rendered + (hasDin ? '' : '<span title="Aucun DIN ou DIN-HM associé dans le catalogue">DIN / DIN-HM : non disponible</span>');
 }
 
+async function rejectClientProductImage() {
+  const candidateId = _clientFocusedProductId;
+  const product = currentClientMatches.find(
+    item => String(item.client_id || '') === String(candidateId || '')
+  );
+  if (!product?.id || !product.image_url) return;
+  if (!window.confirm('Retirer cette photo incorrecte et rechercher une photo de remplacement?')) return;
+
+  const button = document.getElementById('clientRejectImageButton');
+  const status = document.getElementById('clientImageReportStatus');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Retrait...';
+  }
+  if (status) status.textContent = '';
+  const result = await apiRejectProductImage(product.id);
+  if (!result?.success) {
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Photo incorrecte';
+    }
+    if (status) status.textContent = result?.error || 'Impossible de retirer cette photo.';
+    return;
+  }
+
+  const affectedIds = new Set((result.affected_product_ids || []).map(Number));
+  const barcode = String(result.barcode || product.barcode || '').replace(/\D/g, '');
+  for (const match of currentClientMatches) {
+    if (affectedIds.has(Number(match.id)) || (
+      barcode && String(match.barcode || '').replace(/\D/g, '') === barcode
+    )) {
+      match.image_url = '';
+    }
+  }
+  persistClientDraft();
+  renderClientMatches(currentClientMatches);
+  openClientProductDetails(candidateId);
+  const refreshedStatus = document.getElementById('clientImageReportStatus');
+  if (refreshedStatus) {
+    refreshedStatus.textContent = 'Photo retirée. Une photo de remplacement est recherchée.';
+  }
+  window.clearTimeout(_clientImagePollTimer);
+  _clientImagePollTimer = window.setTimeout(() => pollClientProductImages(0), 2500);
+}
+
 function openClientProductDetails(candidateId) {
   const product = currentClientMatches.find(item => String(item.client_id || '') === String(candidateId || ''));
   const modal = document.getElementById('clientProductModal');
@@ -725,6 +770,10 @@ function openClientProductDetails(candidateId) {
         ${product.brand ? `<div class="client-result-brand">${esc(product.brand)}</div>` : ''}
       </div>
     </div>
+    ${product.image_url && product.id ? `<div class="client-image-review-row">
+      <button type="button" id="clientRejectImageButton" class="client-image-reject" onclick="rejectClientProductImage()">Photo incorrecte</button>
+      <span id="clientImageReportStatus" role="status"></span>
+    </div>` : '<div id="clientImageReportStatus" class="client-image-review-status" role="status"></div>'}
     <div class="client-product-detail-section">
       <div class="client-product-detail-label">Emplacement en magasin</div>
       <div class="client-result-locations">${clientProductLocations(product)}</div>
@@ -1670,20 +1719,6 @@ async function runClientRequest(question, options={}) {
   if (status) status.textContent = mode === 'documented'
     ? 'Consultation des fiches produit et des sources disponibles.'
     : 'Analyse de la demande et vérification des produits proposés.';
-  if (!options.followUp) {
-    const previewProducts = localClientMatches(
-      retrievalQuestion, CLIENT_FAST_PRODUCT_LIMIT
-    );
-    if (previewProducts.length) {
-      currentClientMatches = previewProducts;
-      renderClientMatches(currentClientMatches);
-      if (status) {
-        status.textContent = mode === 'documented'
-          ? `${previewProducts.length} produit${previewProducts.length > 1 ? 's' : ''} du plan affiché${previewProducts.length > 1 ? 's' : ''}; préparation de la réponse documentée.`
-          : `${previewProducts.length} produit${previewProducts.length > 1 ? 's' : ''} du plan affiché${previewProducts.length > 1 ? 's' : ''}; analyse de la demande en cours.`;
-      }
-    }
-  }
   const result = await apiGenerateClientHelp({
     question,
     history,

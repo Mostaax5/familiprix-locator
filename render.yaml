@@ -22,9 +22,9 @@ services:
       - key: KIMI_API_KEY
         sync: false
       - key: KIMI_MODEL
-        value: kimi-k3
+        value: kimi-k2.6
       - key: KIMI_REALTIME_MODEL
-        value: kimi-k3
+        value: kimi-k2.6
       - key: KIMI_DOCUMENTED_MODEL
         value: kimi-k3
       - key: KIMI_REALTIME_REASONING_EFFORT

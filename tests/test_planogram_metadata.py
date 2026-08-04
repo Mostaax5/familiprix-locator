@@ -12,6 +12,7 @@ from routes.layout import build_default_layout_config
 from routes.products import (
     _process_planogram_post_import_job,
     build_reference_metadata_index,
+    find_existing_image_for_barcode,
     plan_planogram_flow,
     planogram_metadata,
     persist_image_for_barcode,
@@ -322,6 +323,81 @@ class PlanogramMetadataTests(unittest.TestCase):
             "1": "https://img.test/catalogue-razor.jpg",
         })
         schedule.assert_called_once_with([])
+        db.close()
+
+    def test_rejected_image_is_removed_for_exact_package_and_never_reused(self):
+        original_cache = dict(products_module._PROD_CACHE)
+        self.addCleanup(lambda: (
+            products_module._PROD_CACHE.clear(),
+            products_module._PROD_CACHE.update(original_cache),
+        ))
+        db = self.make_db()
+        wrong_image = "https://img.test/wrong-package.jpg"
+        db.execute(
+            """INSERT INTO products
+               (id, name, barcode, image_url, image_status, aisle, side,
+                section, shelf, position)
+               VALUES
+               (1, 'Razor', '063848966068', ?, 'verified', '1', 'Gauche', '1', '1', '1'),
+               (2, 'Razor', '0063848966068', ?, 'verified', '1', 'Gauche', '1', '1', '2')""",
+            (wrong_image, wrong_image),
+        )
+        upsert_reference_candidate(db, {
+            "barcode": "063848966068", "name": "Razor",
+            "image_url": wrong_image,
+            "source": "Manufacturer exact product page",
+        }, imported_at="2026-08-03T00:00:00+00:00")
+        db.commit()
+        app = self.make_test_app()
+        with patch("routes.products.get_db", return_value=db), \
+             patch("auth.get_db", return_value=db), \
+             patch("routes.products._schedule_product_corpus_refresh") as refresh, \
+             patch("routes.products.schedule_image_fill") as schedule:
+            with app.test_client() as client:
+                response = client.post("/api/products/1/image/reject", json={})
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            response.get_json()["affected_product_ids"], [1, 2]
+        )
+        images = [row[0] for row in db.execute(
+            "SELECT image_url FROM products ORDER BY id"
+        ).fetchall()]
+        self.assertEqual(images, ["", ""])
+        reference = db.execute(
+            "SELECT image_url FROM product_reference WHERE barcode=?",
+            ("063848966068",),
+        ).fetchone()
+        self.assertEqual(reference[0], "")
+        self.assertEqual(
+            find_existing_image_for_barcode(db, "063848966068"), ""
+        )
+        self.assertEqual(
+            persist_image_for_barcode(
+                db, "063848966068", wrong_image,
+                source="Manufacturer exact product page",
+            ),
+            0,
+        )
+        upsert_reference_candidate(db, {
+            "barcode": "063848966068", "name": "Razor",
+            "image_url": wrong_image,
+            "source": "Manufacturer exact product page",
+        }, imported_at="2026-08-04T00:00:00+00:00")
+        reference_after_enrichment = db.execute(
+            "SELECT image_url FROM product_reference WHERE barcode=?",
+            ("063848966068",),
+        ).fetchone()
+        self.assertEqual(reference_after_enrichment[0], "")
+        rejected = db.execute(
+            """SELECT COUNT(*) FROM product_reference_evidence
+               WHERE gtin_key=? AND field_name='image_url'
+                 AND verification_status='rejected'""",
+            (products_module.gtin_identity_key("063848966068"),),
+        ).fetchone()[0]
+        self.assertGreaterEqual(rejected, 1)
+        refresh.assert_called_once_with()
+        schedule.assert_called_once_with(["063848966068"], priority=True)
         db.close()
 
     def test_bulk_planogram_import_attaches_reference_metadata_and_clears_old_upc_data(self):

@@ -2536,10 +2536,29 @@ def find_product_at_position(db, aisle, side, section, shelf, position, exclude_
     return db.execute(query, tuple(params)).fetchone()
 
 
+def rejected_image_urls_for_barcode(db, barcode):
+    """Return image URLs explicitly rejected for this exact package identity."""
+    key = gtin_identity_key(barcode)
+    if not key:
+        return set()
+    rows = db.execute(
+        """SELECT field_value FROM product_reference_evidence
+           WHERE gtin_key=? AND field_name='image_url'
+             AND verification_status='rejected'""",
+        (key,),
+    ).fetchall()
+    return {
+        value for value in (
+            safe_http_url(dict(row).get("field_value", "")) for row in rows
+        ) if value
+    }
+
+
 def find_existing_image_for_barcode(db, barcode, exclude_id=None):
     """Return the best available image already stored for this exact barcode."""
     if not str(barcode or "").strip():
         return ""
+    rejected = rejected_image_urls_for_barcode(db, barcode)
     verified_found = set()
     available_found = set()
     for candidate in exact_gtin_variants(barcode):
@@ -2553,7 +2572,7 @@ def find_existing_image_for_barcode(db, barcode, exclude_id=None):
         if row:
             item = dict(row)
             image = safe_http_url(item.get("image_url", ""))
-            if image:
+            if image and image not in rejected:
                 available_found.add(image)
                 if item.get("image_status") == "verified":
                     verified_found.add(image)
@@ -2567,10 +2586,10 @@ def find_existing_image_for_barcode(db, barcode, exclude_id=None):
                  AND verification_status='verified'""",
             (key,),
         ).fetchall()
-        verified_found.update(
-            safe_http_url(dict(row).get("field_value", ""))
-            for row in rows if safe_http_url(dict(row).get("field_value", ""))
-        )
+        for row in rows:
+            image = safe_http_url(dict(row).get("field_value", ""))
+            if image and image not in rejected:
+                verified_found.add(image)
     preferred = verified_found or available_found
     if preferred:
         # A conflict remains visible to the audit, but the employee still gets
@@ -2589,6 +2608,7 @@ def find_existing_image_for_barcode(db, barcode, exclude_id=None):
         safe_http_url(dict(row).get("image_url", ""))
         for row in reference_rows
         if safe_http_url(dict(row).get("image_url", ""))
+        and safe_http_url(dict(row).get("image_url", "")) not in rejected
     ), "")
 
 
@@ -3832,7 +3852,7 @@ def release_optional_product_caches_if_needed():
 def persist_image_for_barcode(db, barcode, image_url, now=None, source="", source_url="", candidate=None):
     """Store an exact-package image suggestion; auto-attach only if verified."""
     image_url = str(image_url or "").strip()
-    if not image_url:
+    if not image_url or image_url in rejected_image_urls_for_barcode(db, barcode):
         return 0
     changed = 0
     product_ids = set()
@@ -5658,6 +5678,107 @@ def get_reference_product_images():
     # The existing worker verifies UPC/name before persisting a newly found image.
     schedule_image_fill(missing_barcodes, priority=True)
     return jsonify({"images": images})
+
+
+@products_bp.route("/api/products/<int:product_id>/image/reject", methods=["POST"])
+def reject_product_image(product_id):
+    """Reject one bad exact-package picture and queue a clean replacement."""
+    username, error = require_editor()
+    if error:
+        return error
+    db = get_db()
+    row = db.execute(
+        "SELECT id, barcode, image_url FROM products WHERE id=?", (product_id,)
+    ).fetchone()
+    if not row:
+        return jsonify({"success": False, "error": "Produit introuvable."}), 404
+    product = dict(row)
+    barcode = str(product.get("barcode", "") or "").strip()
+    if not gtin_identity_key(barcode):
+        return jsonify({
+            "success": False,
+            "error": "Aucun UPC exact ne permet de corriger cette photo.",
+        }), 400
+
+    current_image = safe_http_url(product.get("image_url", ""))
+    if not current_image:
+        current_image = find_existing_image_for_barcode(db, barcode)
+    if not current_image:
+        return jsonify({
+            "success": False, "error": "Aucune photo n'est actuellement associée."
+        }), 409
+
+    now = utc_now_iso()
+    key = gtin_identity_key(barcode)
+    affected_rows = _rows_for_barcodes(
+        db, "products", "id, barcode, image_url", [barcode]
+    )
+    affected_ids = []
+    for affected_row in affected_rows:
+        affected = dict(affected_row)
+        affected_id = int(affected["id"])
+        affected_ids.append(affected_id)
+        if safe_http_url(affected.get("image_url", "")) == current_image:
+            db.execute(
+                """UPDATE products SET image_url='', image_status='missing',
+                          modified_by=?, modified_at=? WHERE id=?""",
+                (username, now, affected_id),
+            )
+        db.execute(
+            """UPDATE product_field_evidence
+               SET verification_status='rejected', active=0, last_verified_at=?
+               WHERE product_id=? AND field_name='image_url' AND field_value=?""",
+            (now, affected_id, current_image),
+        )
+        record_field_evidence(
+            db, affected_id, "image_url", current_image,
+            source=f"Signalement manuel: {username}",
+            source_record_id=f"rejected:{hashlib.sha256(current_image.encode('utf-8')).hexdigest()[:20]}",
+            match_method="manual_rejection", confidence=1.0,
+            verification_status="rejected", imported_at=now,
+            last_verified_at=now, active=False,
+        )
+        create_review_issue(
+            db, affected_id, "possible_wrong_image", field_name="image_url",
+            existing_value=current_image, source=f"Signalement manuel: {username}",
+            match_method="manual_rejection", confidence=1.0,
+            details={"rejected_for_gtin": key}, created_at=now,
+        )
+
+    for exact_value in exact_gtin_variants(barcode):
+        db.execute(
+            """UPDATE product_reference SET image_url='', updated_at=?
+               WHERE barcode=? AND image_url=?""",
+            (now, exact_value, current_image),
+        )
+    db.execute(
+        """UPDATE product_reference_evidence
+           SET verification_status='rejected', active=0, last_verified_at=?
+           WHERE gtin_key=? AND field_name='image_url' AND field_value=?""",
+        (now, key, current_image),
+    )
+    record_reference_evidence(
+        db, barcode, "image_url", current_image,
+        source=f"Signalement manuel: {username}",
+        source_record_id=f"rejected:{hashlib.sha256(current_image.encode('utf-8')).hexdigest()[:20]}",
+        match_method="manual_rejection", confidence=1.0,
+        verification_status="rejected", imported_at=now,
+        last_verified_at=now, active=False,
+    )
+    db.commit()
+
+    with _IMAGE_FILL_STATE_LOCK:
+        for exact_value in exact_gtin_variants(barcode):
+            _IMAGE_FILL_RETRY_AFTER.pop(exact_value, None)
+    invalidate_product_search_cache()
+    _schedule_product_corpus_refresh()
+    schedule_image_fill([barcode], priority=True)
+    return jsonify({
+        "success": True,
+        "barcode": barcode,
+        "affected_product_ids": sorted(set(affected_ids)),
+        "replacement_pending": True,
+    }), 202
 
 
 @products_bp.route("/api/products/search", methods=["GET"])

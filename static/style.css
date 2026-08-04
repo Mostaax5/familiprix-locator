@@ -396,6 +396,10 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:#c8102e;box-sh
 .client-product-detail-label-row .client-product-detail-label{margin-bottom:0}
 .client-product-detail-copy{font-size:13px;line-height:1.6;color:#334155;white-space:pre-line}
 .client-product-detail-codes{display:flex;flex-wrap:wrap;gap:14px;margin-top:15px;color:#64748b;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}
+.client-image-review-row{display:flex;align-items:center;gap:10px;min-height:34px;margin-top:10px}
+.client-image-reject{border:0;background:transparent;color:#b4233d;padding:5px 0;font:inherit;font-size:11px;font-weight:700;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.client-image-reject:disabled{color:#94a3b8;cursor:wait}
+.client-image-review-row span,.client-image-review-status{color:#64748b;font-size:11px;line-height:1.4}
 .client-product-question{margin-top:18px;padding-top:16px;border-top:2px solid #e5e7eb}
 
 /* ── Product card enhanced ── */

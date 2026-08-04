@@ -78,6 +78,8 @@ class ClientRagTests(unittest.TestCase):
         with ai_module._DOCUMENTED_ANSWER_CACHE_LOCK:
             ai_module._DOCUMENTED_ANSWER_CACHE.clear()
             ai_module._DOCUMENTED_JOBS.clear()
+        with ai_module._CLIENT_QUERY_PLAN_CACHE_LOCK:
+            ai_module._CLIENT_QUERY_PLAN_CACHE.clear()
 
     def test_outbound_lookup_urls_cannot_reach_other_or_insecure_hosts(self):
         base = "https://example.com/catalog"
@@ -1181,6 +1183,8 @@ class ClientRagTests(unittest.TestCase):
 
             def execute(self, _query, _params):
                 self.calls += 1
+                if "verification_status='rejected'" in _query:
+                    return Result(rows=[])
                 if "product_reference_evidence" in _query:
                     return Result(rows=[{"field_value": "https://example.test/advil.jpg"}])
                 return Result(None)
@@ -1280,6 +1284,26 @@ class ClientRagTests(unittest.TestCase):
         }
         result = normalize_verified_client_answer(parsed, ["product:1"])
         self.assertEqual(result["selected_product_ids"], ["product:1"])
+
+    def test_partial_ai_answer_never_attaches_the_first_unrelated_candidates(self):
+        candidates = [{
+            "client_id": "product:1", "name": "TASSE TRANSPARENTE",
+        }, {
+            "client_id": "product:2", "name": "PARAMEDIC PANS TRANSP 5CMX1M",
+        }]
+        with patch(
+            "routes.ai._provider_structured_request",
+            return_value={
+                "_partial_answer": (
+                    "Le produit pertinent est PARAMEDIC PANS TRANSP 5CMX1M."
+                ),
+            },
+        ):
+            result = ai_module.generate_verified_client_answer(
+                "Je cherche un pansement transparent", {}, candidates,
+            )
+
+        self.assertEqual(result["selected_product_ids"], ["product:2"])
 
     def test_documented_answer_rejects_invented_products_and_sources(self):
         documents = [{"source_id": "store-plan"}, {"source_id": "health-canada:12"}]
@@ -1394,7 +1418,7 @@ class ClientRagTests(unittest.TestCase):
         self.assertLessEqual(len(result["comparisons"][0]["difference"]), 420)
         self.assertTrue(result["pharmacist_referral"])
 
-    def test_documented_answer_has_a_hard_end_to_end_deadline(self):
+    def test_documented_answer_returns_fast_model_before_deep_upgrade(self):
         product = {
             "id": 1, "client_id": "product:1", "name": "ADVIL 200MG CO100",
             "brand": "Advil", "description": "Comprimes d'ibuprofene.",
@@ -1404,16 +1428,30 @@ class ClientRagTests(unittest.TestCase):
             "documented",
         )
 
-        def slow_provider(*_args, **_kwargs):
-            time.sleep(0.08)
-            return None
+        quick = {
+            "answer": "Réponse rapide fondée sur le produit en magasin.",
+            "selected_product_ids": ["product:1"], "degraded": False,
+        }
+        deep = {
+            "answer": "Réponse approfondie fondée sur le produit en magasin.",
+            "selected_product_ids": ["product:1"], "degraded": False,
+        }
+
+        def answer(*_args, **kwargs):
+            if kwargs.get("quality_mode"):
+                time.sleep(0.08)
+                return dict(deep)
+            return dict(quick)
 
         started = time.perf_counter()
         with patch(
-            "routes.ai._DOCUMENTED_AI_HARD_TIMEOUT_SECONDS", 0.01,
+            "routes.ai.configured_ai_provider", return_value={"name": "kimi"},
         ), patch(
-            "routes.ai._provider_structured_request",
-            side_effect=slow_provider,
+            "routes.ai.KIMI_REALTIME_MODEL", "kimi-k2.6",
+        ), patch(
+            "routes.ai.KIMI_DOCUMENTED_MODEL", "kimi-k3",
+        ), patch(
+            "routes.ai._generate_documented_client_answer_sync", side_effect=answer,
         ):
             result = generate_documented_client_answer(
                 query_plan["corrected_query"], query_plan, [product], [],
@@ -1421,11 +1459,10 @@ class ClientRagTests(unittest.TestCase):
         elapsed = time.perf_counter() - started
 
         self.assertLess(elapsed, 0.06)
-        self.assertTrue(result["degraded"])
+        self.assertEqual(result["answer"], quick["answer"])
         self.assertTrue(result["_ai_pending"])
         self.assertTrue(result["_documented_job_id"])
         self.assertIn("product:1", result["selected_product_ids"])
-        # Let the bounded worker release its one request slot.
         time.sleep(0.1)
 
     def test_documented_background_answer_becomes_pollable_and_cached(self):
@@ -1460,15 +1497,26 @@ class ClientRagTests(unittest.TestCase):
             "warning": "",
         }
 
-        def slightly_slow_answer(*_args, **_kwargs):
-            time.sleep(0.08)
-            return dict(generated)
+        immediate_answer = {
+            **generated,
+            "answer": "Réponse documentée rapide et utile pour ce produit.",
+        }
+
+        def staged_answer(*_args, **kwargs):
+            if kwargs.get("quality_mode"):
+                time.sleep(0.08)
+                return dict(generated)
+            return dict(immediate_answer)
 
         with patch(
-            "routes.ai._DOCUMENTED_AI_HARD_TIMEOUT_SECONDS", 0.005,
+            "routes.ai.configured_ai_provider", return_value={"name": "kimi"},
+        ), patch(
+            "routes.ai.KIMI_REALTIME_MODEL", "kimi-k2.6",
+        ), patch(
+            "routes.ai.KIMI_DOCUMENTED_MODEL", "kimi-k3",
         ), patch(
             "routes.ai._generate_documented_client_answer_sync",
-            side_effect=slightly_slow_answer,
+            side_effect=staged_answer,
         ) as generator:
             immediate = generate_documented_client_answer(
                 question, query_plan, candidates, documents,
@@ -1490,7 +1538,7 @@ class ClientRagTests(unittest.TestCase):
                 question, query_plan, candidates, documents,
             )
 
-        self.assertEqual(generator.call_count, 1)
+        self.assertEqual(generator.call_count, 2)
         self.assertEqual(job["status"], "ready")
         self.assertEqual(job["result"]["answer"], generated["answer"])
         self.assertEqual(ready_response.status_code, 200)
@@ -1941,7 +1989,7 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(payload["max_completion_tokens"], 900)
         self.assertNotIn("thinking", payload)
 
-    def test_kimi_stream_returns_when_the_direct_answer_is_complete(self):
+    def test_kimi_stream_recovers_answer_if_response_ends_mid_json(self):
         answer = (
             "Les comprimes conviennent a un usage courant; les capsules "
             "peuvent etre plus faciles a avaler selon la personne."
@@ -1977,6 +2025,40 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertEqual(parsed, {"_partial_answer": answer})
         self.assertEqual(usage, {})
+
+    def test_kimi_stream_waits_for_product_ids_after_answer_field(self):
+        payload = json.dumps({
+            "answer": "Réponse utile qui cite PRODUIT EXACT.",
+            "selected_product_ids": ["product:42"],
+            "follow_up_questions": [],
+            "safety_flags": [],
+            "pharmacist_referral": False,
+            "pharmacist_reason": "",
+        }, ensure_ascii=False)
+        split_at = payload.index(', "selected_product_ids"')
+        chunks = (payload[:split_at], payload[split_at:])
+
+        class StreamResponse:
+            fp = None
+
+            def __init__(self):
+                self.lines = iter([
+                    (
+                        "data: " + json.dumps({
+                            "choices": [{"delta": {"content": chunk}}],
+                        }, ensure_ascii=False) + "\n\n"
+                    ).encode("utf-8")
+                    for chunk in chunks
+                ] + [b"data: [DONE]\n\n"])
+
+            def readline(self):
+                return next(self.lines, b"")
+
+        parsed, _usage = _read_kimi_stream(
+            StreamResponse(), time.monotonic() + 5,
+        )
+
+        self.assertEqual(parsed["selected_product_ids"], ["product:42"])
 
     def test_kimi_stream_deadline_includes_connection_time(self):
         events = []
@@ -2126,6 +2208,13 @@ class ClientRagTests(unittest.TestCase):
             _kimi_json_request(
                 [{"role": "user", "content": "plan"}],
                 max_tokens=450, quality_mode=False,
+                schema_name="query_plan",
+                schema={
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                    "additionalProperties": False,
+                },
             )
             plan_payload = json.loads(
                 opener.call_args.args[0].data.decode("utf-8")
@@ -2135,6 +2224,11 @@ class ClientRagTests(unittest.TestCase):
             documented_payload["thinking"], {"type": "disabled"}
         )
         self.assertEqual(plan_payload["thinking"], {"type": "disabled"})
+        self.assertEqual(plan_payload["response_format"]["type"], "json_schema")
+        self.assertEqual(
+            plan_payload["response_format"]["json_schema"]["name"],
+            "query_plan",
+        )
 
     def test_kimi_documented_request_is_not_downgraded_by_realtime_flag(self):
         response = MagicMock()
@@ -2355,6 +2449,33 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(classify_client_request("Quel Advil pour enfant?"), "detailed")
         self.assertEqual(classify_client_request("Et le liquide?", follow_up=True), "detailed")
 
+    def test_query_plan_cache_avoids_repaying_for_identical_conversation(self):
+        parsed = {
+            "intent": "toothbrush", "corrected_query": "brosse à dents électrique",
+            "search_queries": ["brosse à dents électrique"],
+            "keywords": ["brosse", "dents", "électrique"],
+            "must_include": ["brosse à dents électrique"], "exclude": ["dentifrice"],
+            "wants_all": False, "needs_comparison": False,
+            "answer_language": "fr", "medical": False,
+            "retrieval_scope": "store",
+        }
+        history = [{"role": "user", "content": "Je cherche une brosse"}]
+        with patch(
+            "routes.ai.configured_ai_provider", return_value={"name": "kimi"},
+        ), patch(
+            "routes.ai._provider_structured_request", return_value=parsed,
+        ) as provider:
+            first = ai_module.generate_client_query_plan(
+                "électrique si possible", history,
+            )
+            second = ai_module.generate_client_query_plan(
+                "électrique si possible", history,
+            )
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["retrieval_scope"], "store")
+        provider.assert_called_once()
+
     def test_client_retrieval_never_uses_reference_catalogue(self):
         placed = {"id": 1, "name": "Tylenol", "brand": "Tylenol", "barcode": "111"}
         corpus = [(placed, search_row(placed["name"], placed["brand"], barcode="111"))]
@@ -2371,7 +2492,7 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(matches, [])
         reference.assert_not_called()
 
-    def test_client_endpoint_returns_all_matches_and_marks_ai_citations(self):
+    def test_client_endpoint_returns_only_products_selected_by_ai(self):
         candidate = {
             "id": 1, "client_id": "product:1", "name": "Advil", "brand": "Advil",
             "barcode": "111", "aisle": "2", "side": "Gauche", "section": "1",
@@ -2387,6 +2508,7 @@ class ClientRagTests(unittest.TestCase):
             "search_queries": ["Advil"], "keywords": ["Advil"],
             "must_include": ["Advil"], "exclude": [], "wants_all": False,
             "needs_comparison": False, "answer_language": "fr", "medical": True,
+            "retrieval_scope": "store",
         }
         verified = {
             "answer": "Advil est le produit trouve.",
@@ -2396,7 +2518,7 @@ class ClientRagTests(unittest.TestCase):
         }
         with patch("routes.ai.configured_ai_provider", return_value={"name": "deepseek", "label": "DeepSeek", "model": "test"}), \
              patch("routes.ai._check_ai_rate_limit", return_value=True), \
-             patch("routes.ai.generate_client_query_plan") as old_planner, \
+             patch("routes.ai.generate_client_query_plan", return_value=plan) as planner, \
              patch("routes.products.hybrid_client_candidates", return_value=[candidate, second_candidate]), \
              patch("routes.products.hydrate_candidate_images"), \
              patch("routes.ai.generate_verified_client_answer", return_value=verified) as verifier, \
@@ -2414,10 +2536,10 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(payload["response_mode"], "detailed")
         self.assertEqual(
             [item["client_id"] for item in payload["products"]],
-            ["product:1", "product:2"],
+            ["product:1"],
         )
         self.assertEqual(payload["highlighted_product_ids"], ["product:1"])
-        old_planner.assert_not_called()
+        planner.assert_called_once()
         verifier.assert_called_once()
 
     def test_kimi_reads_the_full_question_in_one_answer_request(self):
@@ -2438,6 +2560,7 @@ class ClientRagTests(unittest.TestCase):
             "degraded": False, "warning": "",
         }
         captured = {}
+        semantic_plan = build_client_query_plan(question, "documented")
 
         def retrieve(question, plan, limit=60):
             captured["question"] = question
@@ -2450,7 +2573,7 @@ class ClientRagTests(unittest.TestCase):
         ), patch(
             "routes.ai._check_ai_rate_limit", return_value=True
         ), patch(
-            "routes.ai.generate_client_query_plan"
+            "routes.ai.generate_client_query_plan", return_value=semantic_plan,
         ) as planner, patch(
             "routes.products.hybrid_client_candidates", side_effect=retrieve
         ), patch(
@@ -2472,13 +2595,13 @@ class ClientRagTests(unittest.TestCase):
                 })
 
         self.assertEqual(response.status_code, 200)
-        planner.assert_not_called()
+        planner.assert_called_once_with(question, [])
         generator.assert_called_once()
         self.assertEqual(generator.call_args.args[0], question)
         self.assertEqual(captured["question"], question)
         self.assertEqual(captured["plan"]["corrected_query"], question)
 
-    def test_kimi_semantic_plan_retries_only_when_local_retrieval_is_empty(self):
+    def test_kimi_semantic_plan_drives_the_first_retrieval(self):
         candidate = {
             "id": 8, "client_id": "product:8",
             "name": "GRAVOL 50MG CO20", "brand": "Gravol",
@@ -2523,7 +2646,7 @@ class ClientRagTests(unittest.TestCase):
             "routes.ai._check_ai_rate_limit", return_value=True
         ) as rate_limit, patch(
             "routes.products.hybrid_client_candidates",
-            side_effect=[[], [candidate]],
+            return_value=[candidate],
         ) as retrieval, patch(
             "routes.ai.generate_client_query_plan", return_value=semantic_plan
         ) as planner, patch(
@@ -2551,11 +2674,12 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(
             response.get_json()["highlighted_product_ids"], ["product:8"]
         )
-        self.assertEqual(retrieval.call_count, 2)
+        self.assertEqual(retrieval.call_count, 1)
+        self.assertEqual(retrieval.call_args.args[1], semantic_plan)
         planner.assert_called_once()
         rate_limit.assert_called_once()
 
-    def test_kimi_replans_when_nonempty_candidates_miss_the_real_object(self):
+    def test_kimi_plan_prevents_a_wrong_object_from_entering_retrieval(self):
         unrelated = {
             "id": 1, "client_id": "product:1",
             "name": "TASSE TRANSPARENTE 1", "brand": "Test",
@@ -2595,7 +2719,7 @@ class ClientRagTests(unittest.TestCase):
             "routes.ai._check_ai_rate_limit", return_value=True,
         ), patch(
             "routes.products.hybrid_client_candidates",
-            side_effect=[[unrelated], [dressing]],
+            return_value=[dressing],
         ) as retrieval, patch(
             "routes.ai.generate_client_query_plan", return_value=semantic_plan,
         ) as planner, patch(
@@ -2622,7 +2746,8 @@ class ClientRagTests(unittest.TestCase):
             [item["client_id"] for item in response.get_json()["products"]],
             ["product:2"],
         )
-        self.assertEqual(retrieval.call_count, 2)
+        self.assertEqual(retrieval.call_count, 1)
+        self.assertEqual(retrieval.call_args.args[1], semantic_plan)
         planner.assert_called_once()
 
     def test_semantic_retry_clears_unrelated_cards_when_object_is_absent(self):
@@ -2658,7 +2783,7 @@ class ClientRagTests(unittest.TestCase):
             "routes.ai._check_ai_rate_limit", return_value=True,
         ), patch(
             "routes.products.hybrid_client_candidates",
-            side_effect=[[unrelated], []],
+            return_value=[],
         ) as retrieval, patch(
             "routes.ai.generate_client_query_plan", return_value=semantic_plan,
         ), patch(
@@ -2677,7 +2802,7 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["products"], [])
-        self.assertEqual(retrieval.call_count, 2)
+        self.assertEqual(retrieval.call_count, 1)
 
     def test_simple_product_lookup_does_not_call_ai(self):
         candidate = {
@@ -2882,6 +3007,12 @@ class ClientRagTests(unittest.TestCase):
                  "routes.ai.configured_ai_provider",
                  return_value={"name": "deepseek"},
              ) as provider, \
+             patch(
+                 "routes.ai.generate_client_query_plan",
+                 return_value=build_client_query_plan(
+                     "Montre tous les types et saveurs de mélatonine", "documented"
+                 ),
+             ), \
              patch("routes.ai._check_ai_rate_limit", return_value=True) as rate_limit, \
              patch("routes.ai.log_ai_interaction"):
             with app.test_client() as client:
@@ -2893,12 +3024,10 @@ class ClientRagTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(response.status_code, 200)
         self.assertFalse(payload["degraded"])
-        self.assertIn("difficulté occasionnelle à s'endormir", payload["answer"])
-        self.assertIn("gommes", payload["answer"])
-        self.assertIn("liquide ou suspension", payload["answer"])
-        generator.assert_not_called()
-        provider.assert_called_once()
-        rate_limit.assert_not_called()
+        self.assertEqual(payload["answer"], documented["answer"])
+        generator.assert_called_once()
+        self.assertGreaterEqual(provider.call_count, 1)
+        rate_limit.assert_called_once()
         retriever.assert_called_once_with(
             unittest.mock.ANY,
             unittest.mock.ANY,
@@ -2994,11 +3123,11 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertLess(payload["elapsed_ms"], 1000)
         self.assertIn("façon de les prendre", payload["answer"])
-        generator.assert_not_called()
-        provider.assert_called_once()
-        rate_limit.assert_not_called()
+        generator.assert_called_once()
+        self.assertGreaterEqual(provider.call_count, 1)
+        rate_limit.assert_called_once()
 
-    def test_catalogue_supported_comparison_skips_ai_delay(self):
+    def test_catalogue_comparison_fallback_remains_useful_if_ai_payload_is_invalid(self):
         candidates = [{
             "id": 1, "client_id": "product:1",
             "name": "SENSODYNE SENSIBILITE 100ML",
@@ -3030,7 +3159,7 @@ class ClientRagTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(response.status_code, 200)
         self.assertLess(payload["elapsed_ms"], 1000)
-        self.assertFalse(payload["degraded"])
+        self.assertTrue(payload["degraded"])
         self.assertIn("objectif principal", payload["answer"])
         self.assertEqual(
             [
@@ -3046,11 +3175,11 @@ class ClientRagTests(unittest.TestCase):
                 for source in payload["advice"]["documentation"]["sources"]
             },
         )
-        generator.assert_not_called()
-        provider.assert_called_once()
-        rate_limit.assert_not_called()
+        generator.assert_called_once()
+        self.assertGreaterEqual(provider.call_count, 1)
+        rate_limit.assert_called_once()
 
-    def test_documented_wound_comparison_skips_ai_delay(self):
+    def test_wound_comparison_fallback_remains_useful_if_ai_payload_is_invalid(self):
         candidates = [{
             "id": 1, "client_id": "product:1",
             "name": "PARAMEDIC PANS HYDRO 10X10CM 1",
@@ -3082,13 +3211,13 @@ class ClientRagTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(response.status_code, 200)
         self.assertLess(payload["elapsed_ms"], 1000)
-        self.assertFalse(payload["degraded"])
+        self.assertTrue(payload["degraded"])
         self.assertIn("forme un gel", payload["answer"])
-        generator.assert_not_called()
-        provider.assert_called_once()
-        rate_limit.assert_not_called()
+        generator.assert_called_once()
+        self.assertGreaterEqual(provider.call_count, 1)
+        rate_limit.assert_called_once()
 
-    def test_documented_toothbrush_power_comparison_skips_ai_delay(self):
+    def test_toothbrush_fallback_remains_useful_if_ai_payload_is_invalid(self):
         candidates = [{
             "id": 1, "client_id": "product:1",
             "name": "ORAL-B BR/DENTS A PILE 1", "barcode": "1001",
@@ -3121,19 +3250,19 @@ class ClientRagTests(unittest.TestCase):
 
         payload = response.get_json()
         self.assertEqual(response.status_code, 200)
-        self.assertFalse(payload["degraded"])
+        self.assertTrue(payload["degraded"])
         self.assertIn("brosse à pile", payload["answer"])
         self.assertIn("brosse rechargeable", payload["answer"])
-        generator.assert_not_called()
-        provider.assert_called_once()
-        rate_limit.assert_not_called()
+        generator.assert_called_once()
+        self.assertGreaterEqual(provider.call_count, 1)
+        rate_limit.assert_called_once()
         retriever.assert_called_once_with(
             unittest.mock.ANY,
             unittest.mock.ANY,
             include_live_regulatory=False,
         )
 
-    def test_documented_headache_question_uses_immediate_grounded_summary(self):
+    def test_headache_fallback_remains_useful_if_ai_payload_is_invalid(self):
         candidates = [{
             "id": 1, "client_id": "product:1",
             "name": "BIOMEDIC SOUL M/TETE ULT CO120", "brand": "Biomedic",
@@ -3173,24 +3302,24 @@ class ClientRagTests(unittest.TestCase):
 
         payload = response.get_json()
         self.assertEqual(response.status_code, 200)
-        self.assertFalse(payload["degraded"])
-        self.assertEqual(payload["warning"], "")
+        self.assertTrue(payload["degraded"])
+        self.assertTrue(payload["warning"])
         self.assertIn("mal de tête", payload["answer"])
         self.assertIn("acétaminophène", payload["answer"])
         self.assertEqual(
             [point["heading"] for point in payload["advice"]["documentation"]["key_points"]],
             ["Choix rapide", "Avant de proposer", "Ne pas combiner", "Quand référer"],
         )
-        generator.assert_not_called()
-        provider.assert_called_once()
-        rate_limit.assert_not_called()
+        generator.assert_called_once()
+        self.assertGreaterEqual(provider.call_count, 1)
+        rate_limit.assert_called_once()
         retriever.assert_called_once_with(
             unittest.mock.ANY,
             unittest.mock.ANY,
             include_live_regulatory=False,
         )
 
-    def test_documented_fever_question_uses_immediate_grounded_summary(self):
+    def test_fever_fallback_remains_useful_if_ai_payload_is_invalid(self):
         candidates = [{
             "id": 1, "client_id": "product:1",
             "name": "TYLENOL 500MG X/F CO100", "brand": "Tylenol",
@@ -3219,12 +3348,12 @@ class ClientRagTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(response.status_code, 200)
         self.assertLess(payload["elapsed_ms"], 1000)
-        self.assertFalse(payload["degraded"])
+        self.assertTrue(payload["degraded"])
         self.assertIn("Pour soulager une fièvre", payload["answer"])
         self.assertIn("acétaminophène", payload["answer"])
-        generator.assert_not_called()
-        provider.assert_called_once()
-        rate_limit.assert_not_called()
+        generator.assert_called_once()
+        self.assertGreaterEqual(provider.call_count, 1)
+        rate_limit.assert_called_once()
 
 
 if __name__ == "__main__":

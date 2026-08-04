@@ -7,7 +7,7 @@ import threading
 import time
 from collections import OrderedDict, defaultdict
 from concurrent.futures import (
-    ThreadPoolExecutor, TimeoutError as FutureTimeoutError, as_completed,
+    ThreadPoolExecutor, as_completed,
 )
 from html import unescape
 from urllib.error import HTTPError, URLError
@@ -57,6 +57,10 @@ _AI_LOG_EXECUTOR = ThreadPoolExecutor(
 _AI_LOG_SLOTS = threading.BoundedSemaphore(8)
 _KIMI_MODELS_CACHE = {"checked_at": 0.0, "models": set()}
 _KIMI_MODELS_LOCK = threading.Lock()
+_CLIENT_QUERY_PLAN_CACHE = OrderedDict()
+_CLIENT_QUERY_PLAN_CACHE_LOCK = threading.Lock()
+_CLIENT_QUERY_PLAN_CACHE_MAX = 256
+_CLIENT_QUERY_PLAN_CACHE_TTL_SECONDS = 15 * 60
 
 
 def _bounded_log_json(value):
@@ -200,17 +204,17 @@ OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY",  "").strip()
 OPENAI_MODEL    = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 KIMI_API_KEY = os.environ.get("KIMI_API_KEY", os.environ.get("MOONSHOT_API_KEY", "")).strip()
-# K3 is Kimi's current general-purpose flagship. Keep every default on the
-# same model family; the previous realtime default silently downgraded
-# documented answers to moonshot-v1-8k.
-KIMI_MODEL = os.environ.get("KIMI_MODEL", "kimi-k3").strip() or "kimi-k3"
+# K2.6 provides the low-latency structured planner and first answer. K3 is kept
+# for the optional documented upgrade, where deeper reasoning is worth waiting
+# for after the employee already has a useful answer on screen.
+KIMI_MODEL = os.environ.get("KIMI_MODEL", "kimi-k2.6").strip() or "kimi-k2.6"
 KIMI_REALTIME_MODEL = (
     os.environ.get("KIMI_REALTIME_MODEL", KIMI_MODEL).strip()
     or KIMI_MODEL
 )
 KIMI_DOCUMENTED_MODEL = (
-    os.environ.get("KIMI_DOCUMENTED_MODEL", KIMI_MODEL).strip()
-    or KIMI_MODEL
+    os.environ.get("KIMI_DOCUMENTED_MODEL", "kimi-k3").strip()
+    or "kimi-k3"
 )
 KIMI_BASE_URL = os.environ.get(
     "KIMI_BASE_URL", "https://api.moonshot.ai/v1"
@@ -260,19 +264,6 @@ try:
     )
 except (TypeError, ValueError):
     _AI_DOCUMENTED_REQUEST_TIMEOUT_SECONDS = 18
-try:
-    # Employees receive a complete grounded answer after this short foreground
-    # window. K3 keeps reasoning in the bounded background worker and upgrades
-    # that same answer card when its structured response is ready.
-    _DOCUMENTED_AI_HARD_TIMEOUT_SECONDS = min(
-        3.0,
-        max(
-            0.5,
-            float(os.environ.get("AI_DOCUMENTED_FOREGROUND_WAIT", "1.25")),
-        ),
-    )
-except (TypeError, ValueError):
-    _DOCUMENTED_AI_HARD_TIMEOUT_SECONDS = 1.25
 _DOCUMENTED_AI_EXECUTOR = ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="documented-ai",
 )
@@ -1791,15 +1782,6 @@ def _read_kimi_stream(response, deadline):
         content = delta.get("content")
         if content:
             content_parts.append(str(content))
-            # ``answer`` is the first structured field. As soon as its complete
-            # JSON string arrives, close the stream and let the deterministic
-            # layer add cards, sources, key points and safety notices. Waiting
-            # for K3 to generate those duplicate sections added 20-30 seconds.
-            partial_answer = _partial_json_answer(
-                "".join(content_parts)
-            )
-            if len(partial_answer) >= 45:
-                return {"_partial_answer": partial_answer}, usage
     raw_text = "".join(content_parts)
     parsed = _parse_chat_json(raw_text)
     if parsed is not None:
@@ -1892,19 +1874,22 @@ def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=F
             KIMI_DOCUMENTED_REASONING_EFFORT
             if quality_mode else KIMI_REALTIME_REASONING_EFFORT
         )
-        if isinstance(schema, dict) and schema_name:
-            payload["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": re.sub(r"[^a-zA-Z0-9_-]", "_", schema_name)[:64],
-                    "strict": True,
-                    "schema": schema,
-                },
-            }
-        else:
-            payload["response_format"] = {"type": "json_object"}
     else:
         payload["max_tokens"] = int(max_tokens)
+
+    # K2.6 and K3 both support strict structured output. Using the supplied
+    # schema matters here: a generic JSON object can finish with an answer but
+    # omit the product IDs that keep the UI grounded in store inventory.
+    if isinstance(schema, dict) and schema_name:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": re.sub(r"[^a-zA-Z0-9_-]", "_", schema_name)[:64],
+                "strict": True,
+                "schema": schema,
+            },
+        }
+    else:
         payload["response_format"] = {"type": "json_object"}
 
     if model.startswith(("kimi-k2.6", "kimi-k2.5")):
@@ -2191,10 +2176,14 @@ _CLIENT_QUERY_PLAN_SCHEMA = {
         "needs_comparison": {"type": "boolean"},
         "answer_language": {"type": "string"},
         "medical": {"type": "boolean"},
+        "retrieval_scope": {
+            "type": "string",
+            "enum": ["store", "context", "context_and_store"],
+        },
     },
     "required": ["intent", "corrected_query", "search_queries", "keywords",
                  "must_include", "exclude", "wants_all", "needs_comparison",
-                 "answer_language", "medical"],
+                 "answer_language", "medical", "retrieval_scope"],
     "additionalProperties": False,
 }
 
@@ -2217,6 +2206,9 @@ _CLIENT_QUERY_PLAN_INSTRUCTIONS = (
     "fonctionner pour n'importe quelle catégorie du magasin, pas seulement les médicaments. "
     "wants_all=true pour 'tous/toutes/all/each'. "
     "needs_comparison=true quand l'utilisateur demande une différence ou comparaison. "
+    "retrieval_scope='context' seulement si une question de suivi vise clairement les produits "
+    "déjà montrés; utilise 'context_and_store' pour demander des alternatives et 'store' pour "
+    "une nouvelle recherche. "
     "Retourne uniquement un objet JSON respectant exactement le schéma demandé."
 )
 
@@ -2248,6 +2240,12 @@ def normalize_client_query_plan(parsed, question):
         "needs_comparison": bool(parsed.get("needs_comparison", False)),
         "answer_language": "en" if language.startswith("en") else "fr",
         "medical": bool(parsed.get("medical", False)),
+        "retrieval_scope": (
+            str(parsed.get("retrieval_scope", "store") or "store").strip()
+            if str(parsed.get("retrieval_scope", "store") or "store").strip()
+            in {"store", "context", "context_and_store"}
+            else "store"
+        ),
     }
 
 
@@ -2267,9 +2265,34 @@ def normalize_client_history(value, max_messages=10):
 
 
 def generate_client_query_plan(question, history=None):
+    normalized_history = normalize_client_history(history)
+    provider_info = configured_ai_provider()
+    provider_name = str(
+        provider_info.get("name", "") if isinstance(provider_info, dict) else ""
+    )
+    cache_key = hashlib.sha256(json.dumps({
+        "provider": provider_name,
+        "model": KIMI_REALTIME_MODEL,
+        "question": re.sub(r"\s+", " ", str(question or "")).strip().lower(),
+        "history": normalized_history[-6:],
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    now = time.time()
+    with _CLIENT_QUERY_PLAN_CACHE_LOCK:
+        expired = [
+            key for key, entry in _CLIENT_QUERY_PLAN_CACHE.items()
+            if now - float(entry.get("created_at", 0) or 0)
+            > _CLIENT_QUERY_PLAN_CACHE_TTL_SECONDS
+        ]
+        for key in expired:
+            _CLIENT_QUERY_PLAN_CACHE.pop(key, None)
+        cached = _CLIENT_QUERY_PLAN_CACHE.pop(cache_key, None)
+        if cached:
+            _CLIENT_QUERY_PLAN_CACHE[cache_key] = cached
+            return json.loads(json.dumps(cached["plan"], ensure_ascii=False))
+
     parsed = _provider_structured_request(
         _CLIENT_QUERY_PLAN_INSTRUCTIONS,
-        {"conversation": normalize_client_history(history), "question": question,
+        {"conversation": normalized_history, "question": question,
          "required_schema": _CLIENT_QUERY_PLAN_SCHEMA},
         max_tokens=900,
         schema_name="client_query_plan",
@@ -2278,7 +2301,18 @@ def generate_client_query_plan(question, history=None):
         timeout_seconds=_AI_QUERY_PLAN_TIMEOUT_SECONDS,
         realtime_model=True,
     )
-    return normalize_client_query_plan(parsed, question) if isinstance(parsed, dict) else None
+    if not isinstance(parsed, dict):
+        return None
+    plan = normalize_client_query_plan(parsed, question)
+    with _CLIENT_QUERY_PLAN_CACHE_LOCK:
+        _CLIENT_QUERY_PLAN_CACHE.pop(cache_key, None)
+        _CLIENT_QUERY_PLAN_CACHE[cache_key] = {
+            "created_at": now,
+            "plan": json.loads(json.dumps(plan, ensure_ascii=False)),
+        }
+        while len(_CLIENT_QUERY_PLAN_CACHE) > _CLIENT_QUERY_PLAN_CACHE_MAX:
+            _CLIENT_QUERY_PLAN_CACHE.popitem(last=False)
+    return plan
 
 
 def classify_client_request(question, follow_up=False, focus_product_id="", selected_text=""):
@@ -2335,6 +2369,7 @@ def build_client_query_plan(question, mode="lookup"):
         "needs_comparison": any(marker in padded for marker in comparison_markers),
         "answer_language": "en" if english_words >= 2 else "fr",
         "medical": bool(intent_expansion_terms(question)),
+        "retrieval_scope": "store",
     }
 
 
@@ -2829,6 +2864,24 @@ def _answer_denies_available_inventory(answer):
     ))
 
 
+def _candidate_ids_named_in_answer(answer, candidates, limit=16):
+    """Recover only products whose exact catalogue name appears in partial text."""
+    from routes.products import normalize_search_text
+
+    normalized_answer = f" {normalize_search_text(answer)} "
+    selected = []
+    for product in candidates or []:
+        candidate_id = str(product.get("client_id", "") or "").strip()
+        name = normalize_search_text(product.get("name", ""))
+        if not candidate_id or len(name) < 4:
+            continue
+        if f" {name} " in normalized_answer:
+            selected.append(candidate_id)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
 def generate_verified_client_answer(question, query_plan, candidates, history=None,
                                     selected_text="", focus_product_id=""):
     contexts = [product_context_for_client_rag(product) for product in candidates]
@@ -2852,11 +2905,9 @@ def generate_verified_client_answer(question, query_plan, candidates, history=No
     if partial_answer:
         parsed = {
             "answer": partial_answer,
-            "selected_product_ids": [
-                str(product.get("client_id", "") or "")
-                for product in candidates[:10]
-                if product.get("client_id")
-            ],
+            "selected_product_ids": _candidate_ids_named_in_answer(
+                partial_answer, candidates
+            ),
             "follow_up_questions": [],
             "safety_flags": [],
             "pharmacist_referral": False,
@@ -5140,7 +5191,7 @@ def _documented_answer_covers_request(
 
 def _generate_documented_client_answer_sync(
     question, query_plan, candidates, documents, history=None,
-    selected_text="", focus_product_id="",
+    selected_text="", focus_product_id="", quality_mode=True,
 ):
     include_identifiers = bool(re.search(
         r"\b(?:DIN(?:[\s-]?HM)?|NPN|UPC|GTIN)\b",
@@ -5195,7 +5246,7 @@ def _generate_documented_client_answer_sync(
         schema_name="client_documented_answer",
         schema=_CLIENT_DOCUMENTED_SCHEMA,
         question_preview=question,
-        quality_mode=True,
+        quality_mode=quality_mode,
         realtime_model=True,
     )
     if not isinstance(parsed, dict):
@@ -5206,17 +5257,23 @@ def _generate_documented_client_answer_sync(
             query_plan, candidates, documents, degraded=False
         )
         grounded["answer"] = partial_answer
+        grounded["selected_product_ids"] = _candidate_ids_named_in_answer(
+            partial_answer, candidates, limit=8
+        )
         grounded["degraded"] = False
         grounded["warning"] = ""
         return grounded
     result = normalize_documented_client_answer(
         parsed, [product.get("client_id", "") for product in candidates], documents
     )
-    if not _documented_answer_covers_request(
-        result, query_plan, candidates, documents,
-    ):
+    # The model has read the complete question, evidence, and inventory. Older
+    # keyword heuristics replaced otherwise valid answers when they failed to
+    # contain a prescribed word, which made the documented mode look canned and
+    # often less relevant than the AI result. Structural validation and the
+    # selected-ID allowlist are the authoritative guards here.
+    if not str(result.get("answer", "") or "").strip():
         return grounded_documented_fallback(
-            query_plan, candidates, documents, degraded=False,
+            query_plan, candidates, documents, degraded=True,
         )
     grounded = grounded_documented_fallback(
         query_plan, candidates, documents, degraded=False
@@ -5442,13 +5499,7 @@ def generate_documented_client_answer(
     question, query_plan, candidates, documents, history=None,
     selected_text="", focus_product_id="",
 ):
-    """Bound the complete external AI operation, including network setup.
-
-    urllib's timeout applies to individual socket operations rather than the
-    full request. One stalled K3 connection could therefore occupy a Gunicorn
-    request thread far beyond the employee-facing deadline. A single process-
-    wide worker prevents queued AI calls and leaves product search responsive.
-    """
+    """Return a fast documented answer, then optionally upgrade it with K3."""
     cache_key = _documented_answer_cache_key(
         question, query_plan, candidates, documents, history,
         selected_text=selected_text, focus_product_id=focus_product_id,
@@ -5456,14 +5507,34 @@ def generate_documented_client_answer(
     cached = _documented_answer_cache_get(cache_key)
     if cached:
         return cached
+
+    # K2.6 without hidden thinking gives the employee a real, question-specific
+    # answer in the foreground. The previous implementation showed a canned
+    # fallback after 1.25 seconds while K3 was still working, so the user almost
+    # never saw what the model had actually written.
+    quick_result = _generate_documented_client_answer_sync(
+        question, query_plan, candidates, documents, history,
+        selected_text=selected_text,
+        focus_product_id=focus_product_id,
+        quality_mode=False,
+    )
+    quick_result = _guard_documented_inventory_contradiction(
+        quick_result, query_plan, candidates, documents,
+    )
+
+    provider = configured_ai_provider().get("name", "")
+    needs_upgrade = bool(
+        provider == "kimi"
+        and KIMI_DOCUMENTED_MODEL != KIMI_REALTIME_MODEL
+    )
+    if not needs_upgrade:
+        _documented_answer_cache_set(cache_key, quick_result)
+        if isinstance(quick_result, dict):
+            quick_result["_cache_hit"] = False
+        return quick_result
+
     if not _DOCUMENTED_AI_GATE.acquire(blocking=False):
-        _set_ai_error(
-            "Une reponse documentee est deja en preparation; "
-            "la reponse locale a ete utilisee."
-        )
-        return grounded_documented_fallback(
-            query_plan, candidates, documents, degraded=True,
-        )
+        return quick_result
 
     def task():
         try:
@@ -5471,6 +5542,7 @@ def generate_documented_client_answer(
                 question, query_plan, candidates, documents, history,
                 selected_text=selected_text,
                 focus_product_id=focus_product_id,
+                quality_mode=True,
             )
             return _guard_documented_inventory_contradiction(
                 result, query_plan, candidates, documents,
@@ -5480,7 +5552,11 @@ def generate_documented_client_answer(
 
     job_id = _documented_job_create()
     job_started_at = time.perf_counter()
-    future = _DOCUMENTED_AI_EXECUTOR.submit(task)
+    try:
+        future = _DOCUMENTED_AI_EXECUTOR.submit(task)
+    except RuntimeError:
+        _DOCUMENTED_AI_GATE.release()
+        return quick_result
 
     def finish_background(completed_future):
         try:
@@ -5505,27 +5581,9 @@ def generate_documented_client_answer(
         )
 
     future.add_done_callback(finish_background)
-    try:
-        result = future.result(timeout=_DOCUMENTED_AI_HARD_TIMEOUT_SECONDS)
-        _documented_answer_cache_set(cache_key, result)
-        if isinstance(result, dict):
-            result["_cache_hit"] = False
-        return result
-    except FutureTimeoutError:
-        _set_ai_error(
-            "La reponse approfondie continue en arriere-plan; "
-            "la reponse documentee immediate a ete utilisee."
-        )
-        fallback = grounded_documented_fallback(
-            query_plan, candidates, documents, degraded=True,
-        )
-        fallback["warning"] = (
-            "Réponse immédiate fondée sur les données et sources disponibles; "
-            "l'analyse approfondie continue en arrière-plan."
-        )
-        fallback["_ai_pending"] = True
-        fallback["_documented_job_id"] = job_id
-        return fallback
+    quick_result["_ai_pending"] = True
+    quick_result["_documented_job_id"] = job_id
+    return quick_result
 
 
 def generate_client_help_payload_deepseek(question, products):
@@ -6991,21 +7049,22 @@ def client_help():
             selected_text=selected_text,
         )
     query_plan = build_client_query_plan(question, response_mode)
-    mark_stage("query_plan_ready_ms")
-    active_ai_provider = {}
-    ai_rate_checked = False
     if response_mode != "lookup":
-        active_ai_provider = configured_ai_provider()
-        if not active_ai_provider["name"]:
+        if not configured_ai_provider()["name"]:
             return jsonify({
                 "success": False,
                 "error": "Aucune clé IA n’est configurée sur le serveur.",
             }), 503
 
-        # Retrieval prepares a small inventory-grounded context locally. Kimi
-        # then reads the complete question, history, plan and candidates in one
-        # request. A separate planning request doubled latency and could time out
-        # before the answer request even started.
+        if not _check_ai_rate_limit():
+            return jsonify({
+                "success": False,
+                "error": "Trop de requêtes IA. Réessayez dans une heure.",
+            }), 429
+        semantic_plan = generate_client_query_plan(question, history)
+        if isinstance(semantic_plan, dict):
+            query_plan = semantic_plan
+    mark_stage("query_plan_ready_ms")
 
     # Retrieval is immediate and inventory-safe: only mapped store-plan products
     # can become cards. A direct reply stays inside the products from that thread.
@@ -7018,20 +7077,30 @@ def client_help():
     )
     candidate_limit = 100 if query_plan.get("wants_all") else 60
     context_products = client_products_by_ids(context_product_ids, limit=80)
-    if follow_up and context_products:
+    retrieval_scope = str(query_plan.get("retrieval_scope", "store") or "store")
+    if follow_up and context_products and retrieval_scope == "context":
         candidates = context_products
     else:
-        retrieval_question = question
-        if follow_up and history:
-            previous_user = next(
-                (item["content"] for item in reversed(history) if item.get("role") == "user"), ""
-            )
-            if previous_user:
-                retrieval_question = f"{previous_user} {question}"
-                query_plan = build_client_query_plan(
-                    retrieval_question, response_mode
-                )
-        candidates = hybrid_client_candidates(retrieval_question, query_plan, limit=candidate_limit)
+        retrieval_question = str(
+            query_plan.get("corrected_query", "") or question
+        ).strip()
+        store_candidates = hybrid_client_candidates(
+            retrieval_question, query_plan, limit=candidate_limit
+        )
+        if follow_up and context_products and retrieval_scope == "context_and_store":
+            context_ids = {
+                str(product.get("client_id", "") or "")
+                for product in context_products
+            }
+            candidates = [
+                *context_products,
+                *[
+                    product for product in store_candidates
+                    if str(product.get("client_id", "") or "") not in context_ids
+                ],
+            ][:candidate_limit]
+        else:
+            candidates = store_candidates
     if (
         response_mode == "lookup"
         and client_candidates_need_semantic_retry(question, candidates)
@@ -7039,41 +7108,12 @@ def client_help():
         candidates = []
     if response_mode != "lookup":
         candidates = filter_client_answer_category(question, candidates)
-        # Most searches stay on the millisecond local path. An irrelevant list
-        # is not success, however: when candidates do not cover the employee's
-        # distinguishing concepts, let K3 interpret the complete sentence and
-        # retry with bilingual catalogue terms before composing the answer.
-        needs_semantic_retry = (
-            not follow_up
-            and client_candidates_need_semantic_retry(question, candidates)
-        )
-        if needs_semantic_retry:
-            if not ai_rate_checked and not _check_ai_rate_limit():
-                return jsonify({
-                    "success": False,
-                    "error": "Trop de requ\u00eates IA. Reessayez dans une heure.",
-                }), 429
-            ai_rate_checked = True
-            semantic_plan = generate_client_query_plan(question, history)
-            retry_resolved = False
-            if semantic_plan:
-                semantic_candidates = hybrid_client_candidates(
-                    question, semantic_plan, limit=candidate_limit
-                )
-                semantic_candidates = filter_client_answer_category(
-                    question, semantic_candidates
-                )
-                if client_candidates_satisfy_query_plan(
-                    semantic_plan, semantic_candidates,
-                ):
-                    query_plan = semantic_plan
-                    candidates = semantic_candidates
-                    retry_resolved = True
-            if not retry_resolved:
-                # Empty is safer and more useful than unrelated cards. The AI
-                # can still answer the question and state that no grounded store
-                # product matched the interpreted request.
-                candidates = []
+        if query_plan.get("must_include") and not client_candidates_satisfy_query_plan(
+            query_plan, candidates,
+        ):
+            # The AI can still answer the general question. A blank product list
+            # is safer than cards that miss an indispensable object or use.
+            candidates = []
     candidates = classify_client_result_roles(candidates, question)
     # Reuse known exact-UPC images now. Unknown-image web lookups are queued
     # only for cards that will actually be displayed.
@@ -7102,69 +7142,6 @@ def client_help():
             "elapsed_ms": elapsed_ms,
         })
 
-    normalized_question = normalize_search_text(question)
-    question_words = set(normalized_question.split())
-    is_toothbrush_power_comparison = bool(
-        query_plan.get("needs_comparison")
-        and question_words.intersection({"brosse", "brosses", "brush", "toothbrush"})
-        and question_words.intersection({"dent", "dents", "tooth", "teeth"})
-        and question_words.intersection({"pile", "piles"})
-        and any(word.startswith("recharg") for word in question_words)
-    )
-    is_form_comparison = bool(
-        query_plan.get("needs_comparison")
-        and question_words.intersection({
-            "forme", "formes", "liquide", "suspension", "comprime",
-            "comprimes", "capsule", "capsules", "gel", "gels",
-            "gomme", "gommes", "sirop", "caplet", "caplets",
-        })
-    )
-    is_wound_dressing_comparison = bool(
-        query_plan.get("needs_comparison")
-        and question_words.intersection({
-            "pansement", "pansements", "bandage", "bandages", "dressing",
-        })
-        and any(word.startswith("hydrocollo") for word in question_words)
-        and any(word.startswith("transp") for word in question_words)
-    )
-    catalogue_evidence_count = sum(
-        1 for product in candidates
-        if any(str(product.get(field, "") or "").strip() for field in (
-            "description", "usage_notes", "purpose", "compatibility",
-        ))
-    )
-    is_catalogue_supported_comparison = bool(
-        query_plan.get("needs_comparison")
-        and catalogue_evidence_count >= 2
-    )
-    is_immediate_documented_question = bool(
-        not follow_up
-        and not selected_text
-        and not focus_product_id
-        and (
-            is_toothbrush_power_comparison
-            or query_plan.get("intent") in {"headache_relief", "fever_relief"}
-            or "melaton" in normalized_question
-            or is_form_comparison
-            or is_wound_dressing_comparison
-            or is_catalogue_supported_comparison
-        )
-    )
-    active_ai_provider = active_ai_provider or configured_ai_provider()
-    # Kimi composes every explicit documented request. The existing deterministic
-    # summaries remain the resilient path while Kimi is not configured and avoid
-    # changing the legacy providers' latency contract.
-    use_local_documented_summary = bool(
-        response_mode == "documented"
-        and is_immediate_documented_question
-        and active_ai_provider["name"] != "kimi"
-    )
-    if not use_local_documented_summary:
-        if not active_ai_provider["name"]:
-            return jsonify({"success": False, "error": "Aucune clé IA n’est configurée sur le serveur."}), 503
-        if not ai_rate_checked and not _check_ai_rate_limit():
-            return jsonify({"success": False, "error": "Trop de requetes IA. Reessayez dans une heure."}), 429
-
     query_plan["context_product_ids"] = context_product_ids
     answer_candidates = list(candidates)
     if focus_product_id:
@@ -7172,25 +7149,11 @@ def client_help():
             key=lambda product: 0 if str(product.get("client_id", "")) == focus_product_id else 1
         )
     # A smaller grounded context improves response time and keeps comparisons readable.
-    answer_limit = (
-        8 if query_plan.get("intent") in {"headache_relief", "fever_relief"}
-        else (
-            12 if use_local_documented_summary
-            # Broad "all products" requests keep a representative 12-product
-            # context. Normal questions send only the strongest eight to K3;
-            # every matching card still remains available in the response.
-            else (
-                12 if query_plan.get("wants_all") else 8
-            ) if response_mode == "documented"
-            else 10
-        )
-    )
+    answer_limit = 12 if query_plan.get("wants_all") else 8
     answer_candidates = select_client_answer_candidates(
         answer_candidates,
         limit=answer_limit,
-        diversify_brands=(
-            query_plan.get("intent") in {"headache_relief", "fever_relief"}
-        ),
+        diversify_brands=bool(query_plan.get("medical")),
         question=" ".join(filter(None, [
             question,
             str(query_plan.get("corrected_query", "") or ""),
@@ -7208,24 +7171,24 @@ def client_help():
             include_live_regulatory=False,
         )
         mark_stage("documentation_ready_ms")
-        if use_local_documented_summary:
-            verified = grounded_documented_fallback(
-                query_plan, answer_candidates, documents, degraded=False,
-            )
-        else:
-            verified = generate_documented_client_answer(
-                question, query_plan, answer_candidates, documents, history,
-                selected_text=selected_text, focus_product_id=focus_product_id,
-            )
+        verified = generate_documented_client_answer(
+            question, query_plan, answer_candidates, documents, history,
+            selected_text=selected_text, focus_product_id=focus_product_id,
+        )
     else:
         verified = generate_verified_client_answer(
             question, query_plan, answer_candidates, history,
             selected_text=selected_text, focus_product_id=focus_product_id,
         )
     mark_stage("answer_ready_ms")
-    if not verified:
-        return jsonify({"success": False,
-                        "error": _AI_LAST_ERROR or "Impossible de préparer la réponse pour le moment."}), 502
+    if not isinstance(verified, dict):
+        if response_mode == "documented":
+            verified = grounded_documented_fallback(
+                query_plan, answer_candidates, documents, degraded=True,
+            )
+        else:
+            return jsonify({"success": False,
+                            "error": _AI_LAST_ERROR or "Impossible de préparer la réponse pour le moment."}), 502
 
     if response_mode != "documented":
         verified = _guard_documented_inventory_contradiction(
@@ -7238,6 +7201,11 @@ def client_help():
     highlighted_products = [
         by_id[candidate_id] for candidate_id in verified["selected_product_ids"]
         if candidate_id in by_id
+    ]
+    highlighted_product_ids = [
+        str(product.get("client_id", "") or "")
+        for product in highlighted_products
+        if product.get("client_id")
     ]
     hydrate_candidate_images(
         highlighted_products, queue_missing=True, queue_limit=12
@@ -7334,14 +7302,14 @@ def client_help():
     mark_stage("response_ready_ms")
     elapsed_ms = int((time.perf_counter() - started_at) * 1000)
     public_products = [
-        public_product_payload(product) for product in candidates
+        public_product_payload(product) for product in highlighted_products
     ]
     response_payload = {
         "success": True,
         "response_mode": response_mode,
         "answer": answer,
         "products": public_products,
-        "highlighted_product_ids": verified["selected_product_ids"],
+        "highlighted_product_ids": highlighted_product_ids,
         "query_plan": query_plan,
         "advice": advice,
         "elapsed_ms": elapsed_ms,
@@ -7363,7 +7331,7 @@ def client_help():
         cache_hit=bool(verified.get("_cache_hit", False)),
         pending=bool(verified.get("_ai_pending", False)),
         model=_AI_LAST_MODEL,
-        product_count=len(candidates),
+        product_count=len(highlighted_products),
     )
     if request.headers.get("X-AI-Diagnostics", "") == "1":
         response_payload["ai_diagnostics"] = {

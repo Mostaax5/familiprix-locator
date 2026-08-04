@@ -355,6 +355,21 @@ async function apiGetReferenceProductImages(barcodes) {
   }
 }
 
+async function apiRejectProductImage(id) {
+  try {
+    const {res, data} = await apiFetch(`/api/products/${Number(id)}/image/reject`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', ...getEditorHeaders()},
+      body: '{}'
+    });
+    return res.ok
+      ? data
+      : {success: false, error: data?.error || 'Impossible de signaler cette photo.'};
+  } catch (_) {
+    return {success: false, error: 'Impossible de signaler cette photo.'};
+  }
+}
+
 async function apiSetProductStock(id, inStock) {
   try {
     const {res, data} = await apiFetch(`/api/products/${id}/stock`, {

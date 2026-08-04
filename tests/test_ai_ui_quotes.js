@@ -66,6 +66,10 @@ const context = {
 vm.createContext(context);
 
 const source = fs.readFileSync('static/ai-ui.js', 'utf8');
+assert.ok(!source.includes('const previewProducts = localClientMatches('),
+  'AI modes must not expose local preview cards before model verification');
+assert.ok(source.includes('apiRejectProductImage(product.id)'),
+  'product details must allow a bad exact-package image to be rejected');
 vm.runInContext(`${source}\n;globalThis.__quoteTest = {
   renderQuotableClientAnswer,
   clientRegulatoryIdentifiers,
