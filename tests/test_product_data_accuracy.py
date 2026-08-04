@@ -1,3 +1,4 @@
+import hashlib
 import sqlite3
 import unittest
 from unittest.mock import patch
@@ -428,6 +429,38 @@ class ProductDataAccuracyTests(unittest.TestCase):
         item, search_row = _products_corpus(db)[0]
         self.assertIn("brand", item["_verified_fields"])
         self.assertEqual(search_row["_brand"], "exact brand")
+        db.close()
+
+    def test_aggregated_evidence_fingerprints_reject_stale_field_values(self):
+        db = self.make_db()
+        product_id = self.insert_product(db, name="Neutral item")
+        db.execute(
+            "UPDATE products SET brand='Exact Brand', category='Current' WHERE id=?",
+            (product_id,),
+        )
+        digest = lambda value: hashlib.md5(value.encode("utf-8")).hexdigest()
+        evidence = [{
+            "product_id": product_id,
+            "field_names": "brand,category",
+            "field_hashes": f"{digest('Exact Brand')},{digest('Old category')}",
+            "source": "trusted-source",
+            "source_url": "https://example.com/product",
+            "last_verified_at": "2026-08-03T00:00:00Z",
+        }]
+
+        products_module._PROD_CACHE.update(
+            key=None, rows=[], initialized=False, database_token=None,
+        )
+        with patch(
+            "routes.products._verified_current_product_field_sources",
+            return_value=evidence,
+        ):
+            item, search_row = _products_corpus(db)[0]
+
+        self.assertIn("brand", item["_verified_fields"])
+        self.assertNotIn("category", item["_verified_fields"])
+        self.assertEqual(search_row["_brand"], "exact brand")
+        self.assertNotIn("current", search_row["_identity_hay"])
         db.close()
 
     def test_available_description_influences_search_before_review(self):

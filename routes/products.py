@@ -705,20 +705,23 @@ def _verified_current_product_field_sources(db):
         # ``active`` is the current winner maintained by
         # record_field_evidence(). Aggregate fields sharing provenance in SQL so
         # a cold worker receives roughly 5k compact rows instead of ~48k rows
-        # carrying the same Familiprix URL repeatedly.
+        # carrying the same Familiprix URL repeatedly. Value fingerprints are
+        # checked against the current product in Python; this preserves the
+        # stale-evidence guard without a slow join comparing long text fields.
         return db.execute(
             f"""
             SELECT e.product_id,
                    STRING_AGG(e.field_name, ',' ORDER BY e.field_name) AS field_names,
+                   STRING_AGG(
+                       MD5(TRIM(COALESCE(e.field_value, ''))), ','
+                       ORDER BY e.field_name
+                   ) AS field_hashes,
                    e.source, e.source_url,
                    MAX(e.last_verified_at) AS last_verified_at
             FROM product_field_evidence e
-            JOIN products p ON p.id=e.product_id
             WHERE e.active=1
               AND e.verification_status='verified'
               AND e.field_name IN ({placeholders})
-              AND TRIM(COALESCE(e.field_value, '')) =
-                  TRIM(COALESCE({case_expression}, ''))
             GROUP BY e.product_id, e.source, e.source_url
             ORDER BY e.product_id
             """,
@@ -1185,6 +1188,7 @@ def _products_corpus(db, allow_identifier_stale=False):
 
     aliases_by_product = {}
     verified_by_product = {}
+    verified_hashes_by_product = {}
     field_sources_by_product = {}
     identifiers_by_product = {}
     try:
@@ -1208,6 +1212,10 @@ def _products_corpus(db, allow_identifier_stale=False):
                 ).split(",")
                 if field.strip() in FIELD_NAMES
             ]
+            field_hashes = [
+                value.strip().lower()
+                for value in str(evidence.get("field_hashes", "") or "").split(",")
+            ]
             provenance = {
                 "source": str(evidence.get("source", "") or ""),
                 "source_url": safe_http_url(evidence.get("source_url", "")),
@@ -1218,6 +1226,13 @@ def _products_corpus(db, allow_identifier_stale=False):
             verified_by_product.setdefault(product_id, set()).update(
                 field_names
             )
+            if len(field_hashes) == len(field_names):
+                product_hashes = verified_hashes_by_product.setdefault(
+                    product_id, {}
+                )
+                for field_name, field_hash in zip(field_names, field_hashes):
+                    if re.fullmatch(r"[a-f0-9]{32}", field_hash):
+                        product_hashes[field_name] = field_hash
             product_sources = field_sources_by_product.setdefault(
                 product_id, {}
             )
@@ -1249,6 +1264,7 @@ def _products_corpus(db, allow_identifier_stale=False):
     except Exception:
         aliases_by_product = {}
         verified_by_product = {}
+        verified_hashes_by_product = {}
         field_sources_by_product = {}
         identifiers_by_product = {}
     gtin_rows = [
@@ -1296,9 +1312,18 @@ def _products_corpus(db, allow_identifier_stale=False):
     for product_row in db.execute("SELECT * FROM products"):
         raw_item = dict(product_row)
         product_id = int(raw_item.get("id") or 0)
-        matching_verified_fields = set(
+        candidate_verified_fields = set(
             verified_by_product.get(product_id, set())
         )
+        expected_hashes = verified_hashes_by_product.get(product_id, {})
+        matching_verified_fields = {
+            field
+            for field in candidate_verified_fields
+            if not expected_hashes.get(field)
+            or hashlib.md5(
+                str(raw_item.get(field, "") or "").strip().encode("utf-8")
+            ).hexdigest() == expected_hashes[field]
+        }
         raw_item["_verified_fields"] = sorted(matching_verified_fields)
         item = row_to_product(raw_item)
         item["_field_sources"] = {
