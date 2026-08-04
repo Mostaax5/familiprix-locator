@@ -1900,11 +1900,19 @@ def client_required_concept_groups(query):
         groups.append(_HEADACHE_RELIEF_TERMS)
     if _is_electric_toothbrush_request(norm):
         groups.extend([
-            ("brosse dent", "brosse dents", "br dent", "br dents", "toothbrush",
+            ("brosse dent", "brosse dents", "brosse a dent", "brosse a dents",
+             "brosse de dent", "brosse de dents", "br dent", "br dents", "toothbrush",
              "rech bros", "recharge bros", "soni rech", "tete br dent"),
             ("electrique", "electric", "elec", "pile", "sonicare", "philips one",
              "tete br dent"),
         ])
+        if any(marker in tokens for marker in (
+            "rechargeable", "rechargeables", "recharge", "recharger",
+        )):
+            groups.append((
+                "rechargeable", "rechargeables", "recharge", "recharger",
+                "usb", "rech nr", "rech bl", "rech bros", "soni rech",
+            ))
     if _is_oral_charcoal_request(norm):
         groups.extend([
             _compile_client_concept_group(("charb", "charcoal")),
@@ -2285,6 +2293,17 @@ def filter_client_request_products(products, query):
             and row_matches_client_identity_constraints(row, query)
         ):
             filtered.append(product)
+    normalized_query = f" {normalize_search_text(query)} "
+    excludes_replacements = any(marker in normalized_query for marker in (
+        " pas de tete ", " pas des tetes ", " sans tete ", " sans tetes ",
+        " not replacement head ", " no replacement head ",
+        " without replacement head ",
+    ))
+    if excludes_replacements:
+        filtered = [
+            product for product in filtered
+            if client_product_result_role(product, query) != "replacement"
+        ]
     if _is_headache_request(query) or _is_fever_request(query):
         named = [
             product for product in filtered

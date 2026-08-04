@@ -1743,6 +1743,23 @@ def _partial_json_answer(raw_text):
         return ""
 
 
+def _partial_json_string_array(raw_text, field_name, max_items=16):
+    """Recover one completed string array from an unfinished JSON stream."""
+    match = re.search(
+        rf'"{re.escape(str(field_name))}"\s*:\s*',
+        str(raw_text or ""),
+    )
+    if not match:
+        return []
+    try:
+        value, _end = json.JSONDecoder().raw_decode(
+            str(raw_text or "")[match.end():]
+        )
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return _clean_ai_string_list(value, max_items)
+
+
 def _read_kimi_stream(response, deadline):
     content_parts = []
     usage = {}
@@ -1787,8 +1804,18 @@ def _read_kimi_stream(response, deadline):
     if parsed is not None:
         return parsed, usage
     partial_answer = _partial_json_answer(raw_text)
-    if partial_answer:
-        return {"_partial_answer": partial_answer}, usage
+    partial_selected_ids = _partial_json_string_array(
+        raw_text, "selected_product_ids", max_items=16,
+    )
+    partial_source_ids = _partial_json_string_array(
+        raw_text, "source_ids", max_items=16,
+    )
+    if partial_answer or partial_selected_ids:
+        return {
+            "_partial_answer": partial_answer,
+            "_partial_selected_product_ids": partial_selected_ids,
+            "_partial_source_ids": partial_source_ids,
+        }, usage
     return None, usage
 
 
@@ -2376,10 +2403,10 @@ def build_client_query_plan(question, mode="lookup"):
 _CLIENT_VERIFICATION_SCHEMA = {
     "type": "object",
     "properties": {
-        "answer": {"type": "string"},
         "selected_product_ids": {
-            "type": "array", "items": {"type": "string"}, "maxItems": 16,
+            "type": "array", "items": {"type": "string"}, "maxItems": 8,
         },
+        "answer": {"type": "string"},
         "follow_up_questions": {
             "type": "array", "items": {"type": "string"}, "maxItems": 4,
         },
@@ -2389,7 +2416,7 @@ _CLIENT_VERIFICATION_SCHEMA = {
         "pharmacist_referral": {"type": "boolean"},
         "pharmacist_reason": {"type": "string"},
     },
-    "required": ["answer", "selected_product_ids", "follow_up_questions",
+    "required": ["selected_product_ids", "answer", "follow_up_questions",
                  "safety_flags", "pharmacist_referral", "pharmacist_reason"],
     "additionalProperties": False,
 }
@@ -2443,6 +2470,15 @@ _CLIENT_VERIFICATION_INSTRUCTIONS = (
     "dans les données. Ne pose pas de diagnostic. Signale le pharmacien pour grossesse, bébé, "
     "interaction, difficulté respiratoire, symptômes graves, fièvre élevée ou persistante, ou "
     "doute médical. Retourne uniquement le JSON demandé."
+)
+
+
+_CLIENT_VERIFICATION_INSTRUCTIONS += (
+    " IMPORTANT: write selected_product_ids before answer in the JSON. Select at "
+    "most 8 products, and only products that satisfy the request. Never select or "
+    "name a product merely to explain that it is excluded. Answer every requested "
+    "dimension in 1 to 3 short paragraphs, about 80 to 170 words. Do not repeat a "
+    "long product list."
 )
 
 
@@ -2864,27 +2900,18 @@ def _answer_denies_available_inventory(answer):
     ))
 
 
-def _candidate_ids_named_in_answer(answer, candidates, limit=16):
-    """Recover only products whose exact catalogue name appears in partial text."""
-    from routes.products import normalize_search_text
-
-    normalized_answer = f" {normalize_search_text(answer)} "
-    selected = []
-    for product in candidates or []:
-        candidate_id = str(product.get("client_id", "") or "").strip()
-        name = normalize_search_text(product.get("name", ""))
-        if not candidate_id or len(name) < 4:
-            continue
-        if f" {name} " in normalized_answer:
-            selected.append(candidate_id)
-        if len(selected) >= limit:
-            break
-    return selected
-
-
 def generate_verified_client_answer(question, query_plan, candidates, history=None,
                                     selected_text="", focus_product_id=""):
-    contexts = [product_context_for_client_rag(product) for product in candidates]
+    include_identifiers = bool(re.search(
+        r"\b(?:DIN(?:[\s-]?HM)?|NPN|UPC|GTIN)\b",
+        str(question or ""), flags=re.IGNORECASE,
+    ))
+    contexts = [
+        _compact_documented_product_context(
+            product, include_identifiers=include_identifiers,
+        )
+        for product in candidates
+    ]
     parsed = _provider_structured_request(
         _CLIENT_VERIFICATION_INSTRUCTIONS,
         {"conversation": normalize_client_history(history), "question": question,
@@ -2892,7 +2919,7 @@ def generate_verified_client_answer(question, query_plan, candidates, history=No
          "focused_product_id": focus_product_id,
          "query_plan": query_plan, "candidates": contexts,
          "required_schema": _CLIENT_VERIFICATION_SCHEMA},
-        max_tokens=1400,
+        max_tokens=800,
         schema_name="client_verified_answer",
         schema=_CLIENT_VERIFICATION_SCHEMA,
         question_preview=question,
@@ -2905,8 +2932,8 @@ def generate_verified_client_answer(question, query_plan, candidates, history=No
     if partial_answer:
         parsed = {
             "answer": partial_answer,
-            "selected_product_ids": _candidate_ids_named_in_answer(
-                partial_answer, candidates
+            "selected_product_ids": parsed.get(
+                "_partial_selected_product_ids", []
             ),
             "follow_up_questions": [],
             "safety_flags": [],
@@ -2925,6 +2952,12 @@ _DOCUMENTED_SOURCE_IDS_SCHEMA = {
 _CLIENT_DOCUMENTED_SCHEMA = {
     "type": "object",
     "properties": {
+        "selected_product_ids": {
+            "type": "array", "items": {"type": "string"}, "maxItems": 8,
+        },
+        "source_ids": {
+            "type": "array", "items": {"type": "string"}, "maxItems": 8,
+        },
         "answer": {"type": "string"},
         "key_points": {
             "type": "array", "maxItems": 3,
@@ -2939,15 +2972,9 @@ _CLIENT_DOCUMENTED_SCHEMA = {
                 "additionalProperties": False,
             },
         },
-        "selected_product_ids": {
-            "type": "array", "items": {"type": "string"}, "maxItems": 8,
-        },
-        "source_ids": {
-            "type": "array", "items": {"type": "string"}, "maxItems": 8,
-        },
     },
     "required": [
-        "answer", "key_points", "selected_product_ids", "source_ids",
+        "selected_product_ids", "source_ids", "answer", "key_points",
     ],
     "additionalProperties": False,
 }
@@ -3038,6 +3065,13 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS += (
     "unverified description into a certain dose, indication, contraindication, "
     "ingredient, or compatibility claim. Select at most 8 products."
 )
+
+_CLIENT_DOCUMENTED_INSTRUCTIONS += (
+    " IMPORTANT: write selected_product_ids and source_ids before answer in the "
+    "JSON. Never select or name a product merely to explain that it is excluded. "
+    "Keep the direct answer concise enough for an employee to scan immediately."
+)
+
 
 _HEALTH_CANADA_DPD_API = "https://health-products.canada.ca/api/drug"
 _HEALTH_CANADA_DPD_INFO = "https://health-products.canada.ca/dpd-bdpp/info"
@@ -5257,9 +5291,25 @@ def _generate_documented_client_answer_sync(
             query_plan, candidates, documents, degraded=False
         )
         grounded["answer"] = partial_answer
-        grounded["selected_product_ids"] = _candidate_ids_named_in_answer(
-            partial_answer, candidates, limit=8
-        )
+        partial_ids = parsed.get("_partial_selected_product_ids", [])
+        valid_ids = {
+            str(product.get("client_id", "") or "")
+            for product in candidates
+        }
+        grounded["selected_product_ids"] = [
+            str(candidate_id) for candidate_id in partial_ids
+            if str(candidate_id) in valid_ids
+        ][:8]
+        valid_source_ids = {
+            str(document.get("source_id", "") or "")
+            for document in documents
+        }
+        grounded["source_ids"] = [
+            str(source_id) for source_id in parsed.get(
+                "_partial_source_ids", []
+            )
+            if str(source_id) in valid_source_ids
+        ][:16]
         grounded["degraded"] = False
         grounded["warning"] = ""
         return grounded
@@ -7061,10 +7111,6 @@ def client_help():
                 "success": False,
                 "error": "Trop de requêtes IA. Réessayez dans une heure.",
             }), 429
-        semantic_plan = generate_client_query_plan(question, history)
-        if isinstance(semantic_plan, dict):
-            query_plan = semantic_plan
-    mark_stage("query_plan_ready_ms")
 
     # Retrieval is immediate and inventory-safe: only mapped store-plan products
     # can become cards. A direct reply stays inside the products from that thread.
@@ -7075,32 +7121,58 @@ def client_help():
         hydrate_candidate_images,
         normalize_search_text, public_product_payload,
     )
-    candidate_limit = 100 if query_plan.get("wants_all") else 60
     context_products = client_products_by_ids(context_product_ids, limit=80)
-    retrieval_scope = str(query_plan.get("retrieval_scope", "store") or "store")
-    if follow_up and context_products and retrieval_scope == "context":
-        candidates = context_products
-    else:
+
+    def retrieve_with_plan(active_plan):
+        candidate_limit = 100 if active_plan.get("wants_all") else 60
+        retrieval_scope = str(
+            active_plan.get("retrieval_scope", "store") or "store"
+        )
+        if follow_up and context_products and retrieval_scope == "context":
+            return list(context_products)
         retrieval_question = str(
-            query_plan.get("corrected_query", "") or question
+            active_plan.get("corrected_query", "") or question
         ).strip()
         store_candidates = hybrid_client_candidates(
-            retrieval_question, query_plan, limit=candidate_limit
+            retrieval_question, active_plan, limit=candidate_limit
         )
         if follow_up and context_products and retrieval_scope == "context_and_store":
             context_ids = {
                 str(product.get("client_id", "") or "")
                 for product in context_products
             }
-            candidates = [
+            return [
                 *context_products,
                 *[
                     product for product in store_candidates
                     if str(product.get("client_id", "") or "") not in context_ids
                 ],
             ][:candidate_limit]
-        else:
-            candidates = store_candidates
+        return store_candidates
+
+    candidates = retrieve_with_plan(query_plan)
+    semantic_planner_used = False
+    if response_mode != "lookup":
+        preliminary_candidates = filter_client_answer_category(
+            question, candidates
+        )
+        needs_semantic_plan = bool(
+            follow_up
+            or selected_text
+            or (
+                not focus_product_id
+                and client_candidates_need_semantic_retry(
+                    question, preliminary_candidates
+                )
+            )
+        )
+        if needs_semantic_plan:
+            semantic_plan = generate_client_query_plan(question, history)
+            if isinstance(semantic_plan, dict):
+                query_plan = semantic_plan
+                candidates = retrieve_with_plan(query_plan)
+                semantic_planner_used = True
+    mark_stage("query_plan_ready_ms")
     if (
         response_mode == "lookup"
         and client_candidates_need_semantic_retry(question, candidates)
@@ -7181,6 +7253,12 @@ def client_help():
             selected_text=selected_text, focus_product_id=focus_product_id,
         )
     mark_stage("answer_ready_ms")
+    if not isinstance(verified, dict) and response_mode != "documented":
+        # A provider timeout must not break the employee workflow. The fallback
+        # remains limited to the already-filtered products in the current store.
+        verified = grounded_documented_fallback(
+            query_plan, answer_candidates, [], degraded=True,
+        )
     if not isinstance(verified, dict):
         if response_mode == "documented":
             verified = grounded_documented_fallback(
@@ -7338,6 +7416,7 @@ def client_help():
             "model": _AI_LAST_MODEL,
             "error": _AI_LAST_ERROR,
             "stages": diagnostic_stages,
+            "semantic_planner_used": semantic_planner_used,
             "documented_cache_hit": bool(verified.get("_cache_hit", False)),
         }
     return jsonify(response_payload)

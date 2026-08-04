@@ -142,6 +142,28 @@ class ClientRagTests(unittest.TestCase):
         }], "brosse à dents électrique")
         self.assertEqual(products[0]["result_role"], "primary")
 
+    def test_rechargeable_brush_request_excludes_battery_models_and_heads(self):
+        products = [{
+            "name": "SONICARE BROSSE A DENTS ELECTRIQUE",
+            "description": "Brosse rechargeable avec cable USB.",
+        }, {
+            "name": "ORAL-B BROSSE A DENTS A PILE",
+            "description": "Brosse electrique alimentee par piles.",
+        }, {
+            "name": "ORAL-B TETE DE REMPLACEMENT",
+            "description": "Brossette compatible avec un manche rechargeable.",
+        }]
+
+        filtered = filter_client_answer_category(
+            "brosse a dents electrique rechargeable, pas des tetes de remplacement",
+            products,
+        )
+
+        self.assertEqual(
+            [product["name"] for product in filtered],
+            ["SONICARE BROSSE A DENTS ELECTRIQUE"],
+        )
+
     def test_documented_answer_cache_reuses_identical_evidence(self):
         with ai_module._DOCUMENTED_ANSWER_CACHE_LOCK:
             ai_module._DOCUMENTED_ANSWER_CACHE.clear()
@@ -1297,6 +1319,7 @@ class ClientRagTests(unittest.TestCase):
                 "_partial_answer": (
                     "Le produit pertinent est PARAMEDIC PANS TRANSP 5CMX1M."
                 ),
+                "_partial_selected_product_ids": ["product:2"],
             },
         ):
             result = ai_module.generate_verified_client_answer(
@@ -2023,7 +2046,11 @@ class ClientRagTests(unittest.TestCase):
             StreamResponse(), time.monotonic() + 5,
         )
 
-        self.assertEqual(parsed, {"_partial_answer": answer})
+        self.assertEqual(parsed, {
+            "_partial_answer": answer,
+            "_partial_selected_product_ids": [],
+            "_partial_source_ids": [],
+        })
         self.assertEqual(usage, {})
 
     def test_kimi_stream_waits_for_product_ids_after_answer_field(self):
@@ -2595,13 +2622,13 @@ class ClientRagTests(unittest.TestCase):
                 })
 
         self.assertEqual(response.status_code, 200)
-        planner.assert_called_once_with(question, [])
+        planner.assert_not_called()
         generator.assert_called_once()
         self.assertEqual(generator.call_args.args[0], question)
         self.assertEqual(captured["question"], question)
         self.assertEqual(captured["plan"]["corrected_query"], question)
 
-    def test_kimi_semantic_plan_drives_the_first_retrieval(self):
+    def test_kimi_semantic_plan_retries_weak_local_retrieval(self):
         candidate = {
             "id": 8, "client_id": "product:8",
             "name": "GRAVOL 50MG CO20", "brand": "Gravol",
@@ -2674,7 +2701,7 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(
             response.get_json()["highlighted_product_ids"], ["product:8"]
         )
-        self.assertEqual(retrieval.call_count, 1)
+        self.assertEqual(retrieval.call_count, 2)
         self.assertEqual(retrieval.call_args.args[1], semantic_plan)
         planner.assert_called_once()
         rate_limit.assert_called_once()
@@ -2746,7 +2773,7 @@ class ClientRagTests(unittest.TestCase):
             [item["client_id"] for item in response.get_json()["products"]],
             ["product:2"],
         )
-        self.assertEqual(retrieval.call_count, 1)
+        self.assertEqual(retrieval.call_count, 2)
         self.assertEqual(retrieval.call_args.args[1], semantic_plan)
         planner.assert_called_once()
 
@@ -2802,7 +2829,7 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["products"], [])
-        self.assertEqual(retrieval.call_count, 1)
+        self.assertEqual(retrieval.call_count, 2)
 
     def test_simple_product_lookup_does_not_call_ai(self):
         candidate = {
