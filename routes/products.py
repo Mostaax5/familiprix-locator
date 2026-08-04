@@ -2415,10 +2415,23 @@ def normalized_digits(value):
     return re.sub(r"\D", "", str(value or ""))
 
 
+_SEARCH_SPECIAL_LATIN = str.maketrans({
+    "œ": "oe", "æ": "ae", "ø": "o", "ł": "l", "đ": "d",
+    "ð": "d", "þ": "th", "ħ": "h", "µ": "u", "μ": "u",
+})
+_SEARCH_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
 def normalize_search_text(value):
-    text = unicodedata.normalize("NFKD", str(value or ""))
-    text = "".join(character for character in text if not unicodedata.combining(character))
-    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    """Normalize catalogue text without a Python loop over every character."""
+    text = str(value or "").casefold().translate(_SEARCH_SPECIAL_LATIN)
+    # NFKD separates French accents; ASCII encoding removes only the combining
+    # marks. Both operations run in C and are far faster than testing every
+    # description character with unicodedata.combining in Python.
+    text = unicodedata.normalize("NFKD", text).encode(
+        "ascii", "ignore"
+    ).decode("ascii")
+    return _SEARCH_NON_ALNUM.sub(" ", text).strip()
 
 
 def tokenize_search_query(query):

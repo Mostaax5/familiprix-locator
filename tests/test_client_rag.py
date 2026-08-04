@@ -91,6 +91,15 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(normalize_url(base, "http://example.com/product/123"), "")
         self.assertFalse(_outbound_url_allowed("https://user:pass@example.com/private"))
 
+    def test_search_normalization_preserves_french_and_special_latin_words(self):
+        self.assertEqual(
+            normalize_search_text("c\u0153ur lev\u00e9, cr\u00e8me et go\u00fbt m\u00fbre"),
+            "coeur leve creme et gout mure",
+        )
+        self.assertEqual(
+            normalize_search_text("B\u00d8RN \u00c6sir"), "born aesir",
+        )
+
     def test_structured_description_uses_only_known_package_fields(self):
         description = structured_catalog_description({
             "name": "ACME VITAMINE C 500MG CO100",
