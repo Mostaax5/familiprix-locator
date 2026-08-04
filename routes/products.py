@@ -4941,13 +4941,17 @@ def _search_corpus_statistics(corpus):
 _GENERIC_QUERY_ANCHOR_TOKENS = frozenset({
     "accessoire", "accessoires", "anti", "brosse", "brosses", "caplet", "caplets",
     "capsule", "capsules", "comprime", "comprimes", "creme", "cremes",
+    "avoir", "avons", "choisir", "comment", "difference", "differences",
+    "different", "differente", "differentes", "differents", "format", "formats",
     "gel", "gels", "gelule", "gelules", "huile", "huiles", "lait", "liq",
-    "liqui", "liquide", "liquides", "nettoyant", "nettoyants", "pansement",
+    "leur", "leurs", "liqui", "liquide", "liquides", "magasin", "nettoyant",
+    "nettoyants", "pansement",
     "pansements", "pill", "pills", "pilule", "pilules", "produit",
-    "produits", "recharge", "recharges", "savon", "savons", "shampoing",
+    "produits", "quel", "quelle", "quelles", "quels", "recharge", "recharges",
+    "savon", "savons", "shampoing",
     "shampooing", "sirop", "sirops", "solution", "solutions", "spray",
     "supplement", "supplements", "tablet", "tablets", "vaporisateur",
-    "vaporisateurs", "vitamine", "vitamines",
+    "vaporisateurs", "vitamine", "vitamines", "type", "types",
 })
 
 

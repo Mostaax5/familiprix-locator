@@ -110,6 +110,19 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(plan["search_queries"], [question])
         self.assertEqual(plan["keywords"], [])
 
+    def test_semantic_retry_ignores_conversational_comparison_words(self):
+        question = (
+            "Quels types de melatonine avons-nous en magasin, quelles sont "
+            "leurs differences et comment choisir entre les formats?"
+        )
+        candidates = [{
+            "name": "BIOMEDIC MELATON 5MG CO100",
+            "description": "Melatonine 5 mg en comprimes.",
+        }]
+        self.assertFalse(
+            client_candidates_need_semantic_retry(question, candidates)
+        )
+
     def test_structured_description_uses_only_known_package_fields(self):
         description = structured_catalog_description({
             "name": "ACME VITAMINE C 500MG CO100",
