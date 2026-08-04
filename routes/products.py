@@ -686,6 +686,48 @@ def _searchable_identifier_status_sql(alias=""):
     )"""
 
 
+def _verified_current_product_field_sources(db):
+    """Load only the winning evidence that still matches the current product.
+
+    The evidence table is an audit log and can be much larger than the placed
+    catalogue. Sending every historical field value, including long product
+    descriptions, over the database connection made a cold search build take
+    about a minute. Ranking and comparing in SQL preserves the same strongest-
+    evidence rule while returning only compact provenance rows.
+    """
+    fields = tuple(sorted(FIELD_NAMES))
+    case_expression = "CASE e.field_name " + " ".join(
+        f"WHEN '{field}' THEN p.{field}" for field in fields
+    ) + " ELSE '' END"
+    placeholders = ",".join("?" for _field in fields)
+    return db.execute(
+        f"""
+        WITH ranked AS (
+            SELECT e.product_id, e.field_name, e.field_value,
+                   e.source, e.source_url, e.last_verified_at,
+                   {case_expression} AS current_value,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY e.product_id, e.field_name
+                       ORDER BY e.source_priority DESC,
+                                e.confidence DESC, e.id DESC
+                   ) AS evidence_rank
+            FROM product_field_evidence e
+            JOIN products p ON p.id=e.product_id
+            WHERE e.active=1
+              AND e.verification_status='verified'
+              AND e.field_name IN ({placeholders})
+        )
+        SELECT product_id, field_name, source, source_url, last_verified_at
+        FROM ranked
+        WHERE evidence_rank=1
+          AND TRIM(COALESCE(field_value, '')) =
+              TRIM(COALESCE(current_value, ''))
+        ORDER BY product_id, field_name
+        """,
+        fields,
+    )
+
+
 def _identifier_record(raw):
     row = dict(raw or {})
     return {
@@ -1077,7 +1119,6 @@ def _products_corpus(db, allow_identifier_stale=False):
     build_started_at = time.perf_counter()
     aliases_by_product = {}
     verified_by_product = {}
-    verified_values_by_product = {}
     field_sources_by_product = {}
     identifiers_by_product = {}
     try:
@@ -1088,22 +1129,11 @@ def _products_corpus(db, allow_identifier_stale=False):
             aliases_by_product.setdefault(int(alias["product_id"]), []).append(
                 str(alias.get("alias_value", "") or "")
             )
-        for evidence_row in db.execute(
-            """SELECT product_id, field_name, field_value, source, source_url, last_verified_at,
-                      source_priority, confidence, id
-               FROM product_field_evidence
-               WHERE active=1 AND verification_status='verified'
-               ORDER BY source_priority, confidence, id"""
-        ):
+        for evidence_row in _verified_current_product_field_sources(db):
             evidence = dict(evidence_row)
             verified_by_product.setdefault(int(evidence["product_id"]), set()).add(
                 str(evidence.get("field_name", "") or "")
             )
-            verified_values_by_product.setdefault(
-                int(evidence["product_id"]), {}
-            )[str(evidence.get("field_name", "") or "")] = str(
-                evidence.get("field_value", "") or ""
-            ).strip()
             field_sources_by_product.setdefault(
                 int(evidence["product_id"]), {}
             )[str(evidence.get("field_name", "") or "")] = {
@@ -1137,7 +1167,6 @@ def _products_corpus(db, allow_identifier_stale=False):
     except Exception:
         aliases_by_product = {}
         verified_by_product = {}
-        verified_values_by_product = {}
         field_sources_by_product = {}
         identifiers_by_product = {}
     gtin_keys = {
@@ -1164,12 +1193,9 @@ def _products_corpus(db, allow_identifier_stale=False):
     for product_row in db.execute("SELECT * FROM products"):
         raw_item = dict(product_row)
         product_id = int(raw_item.get("id") or 0)
-        verified_values = verified_values_by_product.get(product_id, {})
-        matching_verified_fields = {
-            field for field in verified_by_product.get(product_id, set())
-            if str(raw_item.get(field, "") or "").strip()
-            == str(verified_values.get(field, "") or "").strip()
-        }
+        matching_verified_fields = set(
+            verified_by_product.get(product_id, set())
+        )
         raw_item["_verified_fields"] = sorted(matching_verified_fields)
         item = row_to_product(raw_item)
         item["_field_sources"] = {
@@ -1320,7 +1346,7 @@ def _products_corpus(db, allow_identifier_stale=False):
     )
     del (
         gtin_keys, aliases_by_product, verified_by_product,
-        verified_values_by_product, field_sources_by_product,
+        field_sources_by_product,
         identifiers_by_product, reference_identifiers_by_gtin,
         document_frequency, catalog_brands, name_lead_frequency,
         search_document_keys, token_postings, token_prefixes,

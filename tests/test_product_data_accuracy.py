@@ -30,6 +30,7 @@ from routes.products import (
     _indexed_identifier_products,
     _materialize_mapped_products,
     _products_corpus,
+    _verified_current_product_field_sources,
     audit_product_data,
     build_reference_metadata_index,
     hybrid_client_candidates,
@@ -388,6 +389,45 @@ class ProductDataAccuracyTests(unittest.TestCase):
         self.assertNotIn("secretwidget", search_row["_hay"])
         self.assertNotIn("madeupingredient", search_row["_hay"])
         self.assertEqual(search_row["_brand"], "")
+        db.close()
+
+    def test_cold_corpus_loads_only_winning_evidence_for_current_values(self):
+        db = self.make_db()
+        product_id = self.insert_product(db, name="Neutral item")
+        db.execute(
+            "UPDATE products SET brand='Exact Brand' WHERE id=?",
+            (product_id,),
+        )
+        db.execute(
+            """INSERT INTO product_field_evidence
+               (product_id, field_name, field_value, source, source_priority,
+                confidence, verification_status, active)
+               VALUES (?, 'brand', 'Wrong Brand', 'weak-source', 10,
+                       0.5, 'verified', 1)""",
+            (product_id,),
+        )
+        db.execute(
+            """INSERT INTO product_field_evidence
+               (product_id, field_name, field_value, source, source_priority,
+                confidence, verification_status, active)
+               VALUES (?, 'brand', 'Exact Brand', 'trusted-source', 90,
+                       0.95, 'verified', 1)""",
+            (product_id,),
+        )
+
+        evidence = [
+            dict(row) for row in _verified_current_product_field_sources(db)
+        ]
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0]["source"], "trusted-source")
+        self.assertNotIn("field_value", evidence[0])
+
+        products_module._PROD_CACHE.update(
+            key=None, rows=[], initialized=False, database_token=None,
+        )
+        item, search_row = _products_corpus(db)[0]
+        self.assertIn("brand", item["_verified_fields"])
+        self.assertEqual(search_row["_brand"], "exact brand")
         db.close()
 
     def test_available_description_influences_search_before_review(self):
