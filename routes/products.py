@@ -5708,99 +5708,82 @@ def resolve_client_exact_identifiers(query, limit=100):
     identifier_queries = client_exact_identifier_queries(query)
     if not identifier_queries:
         return []
-    corpus = _employee_product_corpus()
-    cache_compatible = bool(
-        _PROD_CACHE.get("rows") is corpus
-        and _PROD_CACHE.get("statistics_rows_id") == id(corpus)
-    )
-    postings_by_type = (
-        _PROD_CACHE.get("identifier_postings") or {}
-        if cache_compatible else {}
-    )
-    matched_row_indices = []
-    matches_by_key = {}
+    db = get_db()
+    result_limit = max(1, min(int(limit or 100), 100))
+    all_identifier_types = {
+        identifier_type: {} for identifier_type in IDENTIFIER_TYPES
+    }
+    grouped = {}
+    ordered_keys = []
+
+    def exact_match(item, field, value):
+        allowed_types = _client_identifier_types(
+            field, all_identifier_types,
+        )
+        for identifier_type in allowed_types:
+            if identifier_type in {"UPC", "GTIN"}:
+                values = [item.get("barcode", "")]
+            elif identifier_type == "FAMILIPRIX_CODE":
+                values = [item.get("product_code", "")]
+            else:
+                values = []
+            values.extend(
+                identifier.get("value", "")
+                for identifier in item.get("_identifiers") or ()
+                if str(identifier.get("type", "")).upper().replace(
+                    "-", "_"
+                ) == identifier_type
+            )
+            expected = _exact_identifier_lookup_values(
+                identifier_type, value
+            )
+            if any(
+                _normalize_identifier_index_value(candidate) in expected
+                for candidate in values
+                if _normalize_identifier_index_value(candidate)
+            ):
+                return True
+        return False
 
     for identifier_query in identifier_queries:
         field = identifier_query["field"]
         value = identifier_query["value"]
-        allowed_types = _client_identifier_types(
-            field, postings_by_type or {
-                "UPC": {}, "GTIN": {}, "FAMILIPRIX_CODE": {},
-                **{identifier_type: {} for identifier_type in IDENTIFIER_TYPES},
-            },
-        )
-        current_indices = set()
-        if postings_by_type:
-            for identifier_type in allowed_types:
-                values = _exact_identifier_lookup_values(identifier_type, value)
-                for lookup_value in values:
-                    current_indices.update(
-                        int(index) for index in postings_by_type.get(
-                            identifier_type, {}
-                        ).get(lookup_value, ())
-                    )
-        else:
-            for row_index, (item, _row) in enumerate(corpus):
-                candidate_values = []
-                for identifier_type in allowed_types:
-                    if identifier_type in {"UPC", "GTIN"}:
-                        values = [item.get("barcode", "")]
-                    elif identifier_type == "FAMILIPRIX_CODE":
-                        values = [item.get("product_code", "")]
-                    else:
-                        values = [
-                            identifier.get("value", "")
-                            for identifier in item.get("_identifiers") or ()
-                            if str(identifier.get("type", "")).upper().replace(
-                                "-", "_"
-                            ) == identifier_type
-                        ]
-                    expected = _exact_identifier_lookup_values(
-                        identifier_type, value
-                    )
-                    if any(
-                        _normalize_identifier_index_value(candidate) in expected
-                        for candidate in values
-                        if _normalize_identifier_index_value(candidate)
-                    ):
-                        candidate_values.append(identifier_type)
-                if candidate_values:
-                    current_indices.add(row_index)
-
-        for row_index in sorted(
-            current_indices,
-            key=lambda index: location_sort_key(corpus[index][0]),
-        ):
-            if not (0 <= int(row_index) < len(corpus)):
+        candidates = _direct_identifier_products(
+            db, value, field, limit=min(400, max(80, result_limit * 4)),
+        ) or []
+        for item in candidates:
+            if not exact_match(item, field, value):
                 continue
-            item, row = corpus[int(row_index)]
-            key = _mapped_product_key(item, row)
+            barcode = normalized_digits(item.get("barcode", ""))
+            key = (
+                ("barcode", barcode) if barcode
+                else ("product", int(item.get("id") or 0))
+            )
+            product = grouped.get(key)
+            location = _client_location(item)
+            if product is None:
+                product = dict(item)
+                product["client_id"] = _client_candidate_id(product)
+                product["catalog_only"] = False
+                product["locations"] = [location]
+                product["_exact_identifier_matches"] = []
+                grouped[key] = product
+                ordered_keys.append(key)
+            elif location not in product["locations"]:
+                product["locations"].append(location)
+            if not product.get("image_url") and item.get("image_url"):
+                product["image_url"] = item.get("image_url")
+            product["in_stock"] = 1 if (
+                product.get("in_stock") or item.get("in_stock")
+            ) else 0
+            product["is_plano"] = 1 if (
+                product.get("is_plano") or item.get("is_plano")
+            ) else 0
             match_record = {"field": field, "value": value}
-            records = matches_by_key.setdefault(key, [])
+            records = product["_exact_identifier_matches"]
             if match_record not in records:
                 records.append(match_record)
-            if int(row_index) not in matched_row_indices:
-                matched_row_indices.append(int(row_index))
-
-    ordered_keys = []
-    for row_index in matched_row_indices:
-        item, row = corpus[row_index]
-        key = _mapped_product_key(item, row)
-        if key not in ordered_keys:
-            ordered_keys.append(key)
-    products = _materialize_mapped_products(
-        corpus, ordered_keys, limit=max(1, min(int(limit or 100), 100)),
-    )
-    for product in products:
-        row = _product_search_row(
-            product,
-            product.get("_search_aliases") or (),
-            product.get("_identifiers") or (),
-        )
-        product["_exact_identifier_matches"] = list(
-            matches_by_key.get(_mapped_product_key(product, row), ())
-        )
-    return products
+    return [grouped[key] for key in ordered_keys[:result_limit]]
 
 
 def client_identifier_query_requests_related_products(query):

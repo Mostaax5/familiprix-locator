@@ -146,22 +146,15 @@ class ClientRagTests(unittest.TestCase):
             "shelf": "1", "position": "1", "in_stock": 1,
             "_identifiers": [], "_verified_fields": [],
         }
-        corpus = [
-            (exact, search_row(
-                exact["name"], exact["brand"], exact["description"],
-                exact["barcode"],
-            )),
-            (noise, search_row(
-                noise["name"], noise["brand"], noise["description"],
-                noise["barcode"],
-            )),
-        ]
         question = (
             "063848907665 c'est le UPC. Est-ce que le produit est liquide "
             "ou en gel?"
         )
         with patch(
-            "routes.products._employee_product_corpus", return_value=corpus,
+            "routes.products.get_db", return_value=MagicMock(),
+        ), patch(
+            "routes.products._direct_identifier_products",
+            return_value=[noise, exact],
         ):
             matches = resolve_client_exact_identifiers(question)
 
@@ -203,12 +196,11 @@ class ClientRagTests(unittest.TestCase):
                 "verification_status": "requires_review",
             }],
         }
-        corpus = [(product, search_row(
-            product["name"], product["brand"], product["description"],
-            product["barcode"],
-        ))]
         with patch(
-            "routes.products._employee_product_corpus", return_value=corpus,
+            "routes.products.get_db", return_value=MagicMock(),
+        ), patch(
+            "routes.products._direct_identifier_products",
+            return_value=[product],
         ):
             matches = resolve_client_exact_identifiers(
                 "Le DIN 00559407 correspond a quoi?"
