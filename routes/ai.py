@@ -5657,25 +5657,40 @@ def generate_documented_client_answer(
     if cached:
         return cached
 
-    # K2.6 without hidden thinking gives the employee a real, question-specific
-    # answer in the foreground. The previous implementation showed a canned
-    # fallback after 1.25 seconds while K3 was still working, so the user almost
-    # never saw what the model had actually written.
-    quick_result = _generate_documented_client_answer_sync(
-        question, query_plan, candidates, documents, history,
-        selected_text=selected_text,
-        focus_product_id=focus_product_id,
-        quality_mode=False,
-    )
-    quick_result = _guard_documented_inventory_contradiction(
-        quick_result, query_plan, candidates, documents,
-    )
-
     provider = configured_ai_provider().get("name", "")
     needs_upgrade = bool(
         provider == "kimi"
         and KIMI_DOCUMENTED_MODEL != KIMI_REALTIME_MODEL
     )
+    exact_identifier_answer = bool(
+        needs_upgrade
+        and any(
+            product.get("_exact_identifier_matches")
+            for product in candidates
+        )
+    )
+    if exact_identifier_answer:
+        # Exact-code questions already have one deterministic package and its
+        # complete catalogue evidence. Show that grounded answer immediately;
+        # the normal K3 job below still reads the same product file and replaces
+        # it when the deeper answer is ready. This avoids making an employee wait
+        # for model startup just to learn a documented package property.
+        quick_result = grounded_documented_fallback(
+            query_plan, candidates, documents, degraded=False,
+        )
+    else:
+        # K2.6 without hidden thinking gives the employee a real,
+        # question-specific foreground answer for open-ended requests.
+        quick_result = _generate_documented_client_answer_sync(
+            question, query_plan, candidates, documents, history,
+            selected_text=selected_text,
+            focus_product_id=focus_product_id,
+            quality_mode=False,
+        )
+    quick_result = _guard_documented_inventory_contradiction(
+        quick_result, query_plan, candidates, documents,
+    )
+
     if not needs_upgrade:
         _documented_answer_cache_set(cache_key, quick_result)
         if isinstance(quick_result, dict):
@@ -5685,13 +5700,15 @@ def generate_documented_client_answer(
     if not _DOCUMENTED_AI_GATE.acquire(blocking=False):
         return quick_result
 
+    background_quality_mode = not exact_identifier_answer
+
     def task():
         try:
             result = _generate_documented_client_answer_sync(
                 question, query_plan, candidates, documents, history,
                 selected_text=selected_text,
                 focus_product_id=focus_product_id,
-                quality_mode=True,
+                quality_mode=background_quality_mode,
             )
             return _guard_documented_inventory_contradiction(
                 result, query_plan, candidates, documents,
@@ -5723,7 +5740,10 @@ def generate_documented_client_answer(
             degraded=not _documented_answer_is_cacheable(
                 completed_result
             ),
-            model=KIMI_DOCUMENTED_MODEL,
+            model=(
+                KIMI_DOCUMENTED_MODEL
+                if background_quality_mode else KIMI_REALTIME_MODEL
+            ),
             product_count=len(
                 (completed_result or {}).get("selected_product_ids") or []
             ),

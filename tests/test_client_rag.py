@@ -1667,6 +1667,58 @@ class ClientRagTests(unittest.TestCase):
         self.assertIn("product:1", result["selected_product_ids"])
         time.sleep(0.1)
 
+    def test_documented_exact_code_returns_grounded_answer_before_ai_upgrade(self):
+        product = {
+            "id": 1884, "client_id": "product:1884",
+            "name": "BIOMEDIC GEL ANALG GLACE 255G", "brand": "Biomedic",
+            "barcode": "063848907665",
+            "description": "Gel for temporary muscular and joint pain relief.",
+            "dosage_form": "GEL", "_verified_fields": ["description", "dosage_form"],
+            "_exact_identifier_matches": [{
+                "field": "upc", "value": "063848907665",
+            }],
+        }
+        question = "UPC 063848907665 : est-ce liquide ou en gel?"
+        query_plan = build_client_query_plan(question, "documented")
+        deep = {
+            "answer": "La fiche approfondie confirme qu'il s'agit d'un gel.",
+            "selected_product_ids": ["product:1884"],
+            "degraded": False,
+        }
+
+        def answer(*_args, **kwargs):
+            self.assertFalse(kwargs.get("quality_mode"))
+            time.sleep(0.08)
+            return dict(deep)
+
+        started = time.perf_counter()
+        with patch(
+            "routes.ai.configured_ai_provider", return_value={"name": "kimi"},
+        ), patch(
+            "routes.ai.KIMI_REALTIME_MODEL", "kimi-k2.6",
+        ), patch(
+            "routes.ai.KIMI_DOCUMENTED_MODEL", "kimi-k3",
+        ), patch(
+            "routes.ai._generate_documented_client_answer_sync",
+            side_effect=answer,
+        ) as generator:
+            result = generate_documented_client_answer(
+                question, query_plan, [product], [],
+            )
+            elapsed = time.perf_counter() - started
+            for _attempt in range(50):
+                if generator.call_count:
+                    break
+                time.sleep(0.02)
+
+        self.assertLess(elapsed, 0.06)
+        self.assertIn("BIOMEDIC GEL ANALG GLACE 255G", result["answer"])
+        self.assertIn("gel topique", result["answer"])
+        self.assertTrue(result["_ai_pending"])
+        self.assertTrue(result["_documented_job_id"])
+        self.assertEqual(generator.call_count, 1)
+        time.sleep(0.1)
+
     def test_documented_background_answer_becomes_pollable_and_cached(self):
         question = "Compare le produit asynchrone unique"
         query_plan = build_client_query_plan(question, "documented")
