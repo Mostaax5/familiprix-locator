@@ -33,6 +33,7 @@ from routes.ai import (
 from routes.products import (
     classify_client_result_roles,
     client_candidates_need_semantic_retry,
+    client_exact_identifier_queries,
     client_excluded_concept_terms,
     client_required_concept_groups,
     filter_client_request_products,
@@ -40,6 +41,7 @@ from routes.products import (
     hybrid_client_candidates,
     normalize_search_text,
     product_matches_client_request,
+    resolve_client_exact_identifiers,
     row_matches_client_concepts,
     tokenize_search_query,
 )
@@ -109,6 +111,114 @@ class ClientRagTests(unittest.TestCase):
         plan = build_client_query_plan(question, "detailed")
         self.assertEqual(plan["search_queries"], [question])
         self.assertEqual(plan["keywords"], [])
+
+    def test_exact_identifier_extraction_accepts_label_before_or_after_code(self):
+        self.assertEqual(
+            client_exact_identifier_queries(
+                "063848907665 c'est le UPC du produit en question"
+            ),
+            [{"field": "upc", "value": "063848907665"}],
+        )
+        self.assertEqual(
+            client_exact_identifier_queries("DIN-HM 80012345"),
+            [{"field": "din_hm", "value": "80012345"}],
+        )
+        self.assertEqual(
+            client_exact_identifier_queries("code pharmacie 146962"),
+            [{"field": "familiprix_code", "value": "146962"}],
+        )
+
+    def test_exact_upc_resolution_cannot_be_erased_by_question_words(self):
+        exact = {
+            "id": 1884, "name": "BIOMEDIC GEL ANALG GLACE 255G",
+            "brand": "Biomedic", "barcode": "063848907665",
+            "product_code": "146962",
+            "description": "Gel for temporary muscular and joint pain relief.",
+            "aisle": "Labo", "side": "Gauche", "section": "3",
+            "shelf": "2", "position": "5", "in_stock": 1,
+            "_identifiers": [], "_verified_fields": ["description"],
+        }
+        noise = {
+            "id": 2, "name": "EDGE GEL RASER PEAU SENSIBLE",
+            "brand": "Edge", "barcode": "841058005209",
+            "description": "Shaving gel for sensitive skin.",
+            "aisle": "5", "side": "Gauche", "section": "1",
+            "shelf": "1", "position": "1", "in_stock": 1,
+            "_identifiers": [], "_verified_fields": [],
+        }
+        corpus = [
+            (exact, search_row(
+                exact["name"], exact["brand"], exact["description"],
+                exact["barcode"],
+            )),
+            (noise, search_row(
+                noise["name"], noise["brand"], noise["description"],
+                noise["barcode"],
+            )),
+        ]
+        question = (
+            "063848907665 c'est le UPC. Est-ce que le produit est liquide "
+            "ou en gel?"
+        )
+        with patch(
+            "routes.products._employee_product_corpus", return_value=corpus,
+        ):
+            matches = resolve_client_exact_identifiers(question)
+
+        self.assertEqual([item["id"] for item in matches], [1884])
+        self.assertEqual(
+            matches[0]["_exact_identifier_matches"],
+            [{"field": "upc", "value": "063848907665"}],
+        )
+        context = _compact_documented_product_context(
+            matches[0], include_identifiers=True,
+        )
+        self.assertEqual(
+            context["catalogue_description"]["text"],
+            exact["description"],
+        )
+        self.assertEqual(
+            context["catalogue_identifiers"]["upc_or_gtin"],
+            "063848907665",
+        )
+        self.assertEqual(
+            context["matched_identifiers"][0]["match"], "exact",
+        )
+        fallback = ai_module.grounded_documented_fallback(
+            build_client_query_plan(question, "documented"), matches, [],
+        )
+        self.assertIn("BIOMEDIC GEL ANALG GLACE 255G", fallback["answer"])
+        self.assertIn("gel topique", fallback["answer"])
+        self.assertNotIn("aucun produit", fallback["answer"].lower())
+
+    def test_unconfirmed_din_is_exactly_searchable_without_becoming_verified(self):
+        product = {
+            "id": 5, "name": "TEST PACKAGE", "brand": "Test",
+            "barcode": "012345678905", "description": "Test description.",
+            "aisle": "1", "side": "Gauche", "section": "1",
+            "shelf": "1", "position": "1", "in_stock": 1,
+            "_verified_fields": [],
+            "_identifiers": [{
+                "type": "DIN", "value": "00559407",
+                "verification_status": "requires_review",
+            }],
+        }
+        corpus = [(product, search_row(
+            product["name"], product["brand"], product["description"],
+            product["barcode"],
+        ))]
+        with patch(
+            "routes.products._employee_product_corpus", return_value=corpus,
+        ):
+            matches = resolve_client_exact_identifiers(
+                "Le DIN 00559407 correspond a quoi?"
+            )
+
+        self.assertEqual([item["id"] for item in matches], [5])
+        self.assertEqual(
+            matches[0]["_identifiers"][0]["verification_status"],
+            "requires_review",
+        )
 
     def test_semantic_retry_ignores_conversational_comparison_words(self):
         question = (
@@ -2953,6 +3063,75 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(payload["highlighted_product_ids"], ["product:1"])
         verifier.assert_called_once()
 
+    def test_documented_code_question_sends_exact_product_file_to_ai(self):
+        candidate = {
+            "id": 1884, "client_id": "product:1884",
+            "name": "BIOMEDIC GEL ANALG GLACE 255G", "brand": "Biomedic",
+            "barcode": "063848907665", "product_code": "146962",
+            "description": (
+                "Gel for temporary muscular and joint pain relief."
+            ),
+            "description_status": "verified",
+            "_verified_fields": ["description", "dosage_form", "purpose"],
+            "dosage_form": "GEL", "purpose": "Temporary pain relief.",
+            "aisle": "Labo", "side": "Gauche", "section": "3",
+            "shelf": "2", "position": "5", "in_stock": 1,
+            "_identifiers": [],
+            "_exact_identifier_matches": [{
+                "field": "upc", "value": "063848907665",
+            }],
+        }
+        documented = {
+            "answer": (
+                "Ce code correspond au gel Biomedic; il s'agit d'un gel, "
+                "pas d'un liquide."
+            ),
+            "selected_product_ids": ["product:1884"],
+            "follow_up_questions": [], "safety_flags": [],
+            "pharmacist_referral": False, "pharmacist_reason": "",
+            "key_points": [], "comparisons": [], "useful_guidance": [],
+            "important_checks": [], "source_ids": [],
+        }
+        with patch(
+            "routes.products.resolve_client_exact_identifiers",
+            return_value=[candidate],
+        ), patch(
+            "routes.products.hybrid_client_candidates"
+        ) as semantic_search, patch(
+            "routes.products.hydrate_candidate_images"
+        ), patch(
+            "routes.ai.configured_ai_provider", return_value={"name": "kimi"},
+        ), patch(
+            "routes.ai._check_ai_rate_limit", return_value=True,
+        ), patch(
+            "routes.ai.retrieve_client_documentation", return_value=[],
+        ), patch(
+            "routes.ai.generate_documented_client_answer",
+            return_value=documented,
+        ) as answerer, patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": (
+                        "063848907665 c'est le UPC. Est-ce liquide ou en gel?"
+                    ),
+                    "mode": "documented",
+                })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(
+            [item["client_id"] for item in payload["products"]],
+            ["product:1884"],
+        )
+        self.assertIn("gel", payload["answer"].lower())
+        semantic_search.assert_not_called()
+        sent_candidates = answerer.call_args.args[2]
+        self.assertEqual(sent_candidates[0]["description"], candidate["description"])
+        self.assertEqual(
+            sent_candidates[0]["_exact_identifier_matches"],
+            candidate["_exact_identifier_matches"],
+        )
+
     def test_client_endpoint_forces_uncertain_identifier_warning(self):
         candidate = {
             "id": 1, "client_id": "product:1", "name": "Possible product",
@@ -2969,7 +3148,8 @@ class ClientRagTests(unittest.TestCase):
             "follow_up_questions": [], "safety_flags": [],
             "pharmacist_referral": False, "pharmacist_reason": "",
         }
-        with patch("routes.products.hybrid_client_candidates", return_value=[candidate]), \
+        with patch("routes.products.resolve_client_exact_identifiers", return_value=[candidate]), \
+             patch("routes.products.hybrid_client_candidates", return_value=[candidate]), \
              patch("routes.products.hydrate_candidate_images"), \
              patch("routes.ai.configured_ai_provider", return_value={"name": "deepseek"}), \
              patch("routes.ai._check_ai_rate_limit", return_value=True), \

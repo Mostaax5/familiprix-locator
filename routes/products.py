@@ -5601,6 +5601,218 @@ def client_products_by_ids(candidate_ids, limit=60):
     return _materialize_mapped_products(corpus, ordered_keys, limit=limit)
 
 
+_CLIENT_IDENTIFIER_LABELS = (
+    ("din_hm", re.compile(r"\bdin\s*hm\b")),
+    ("pseudo_din", re.compile(r"\bpseudo\s*din\b")),
+    ("familiprix_code", re.compile(
+        r"\b(?:code\s+(?:familiprix|pharmacie|produit)|familiprix\s+code)\b"
+    )),
+    ("upc", re.compile(r"\b(?:upc|gtin|code\s+barres?|barcode)\b")),
+    ("npn", re.compile(r"\bnpn\b")),
+    ("din", re.compile(r"\bdin\b")),
+    ("pin", re.compile(r"\bpin\b")),
+    ("nip", re.compile(r"\bnip\b")),
+    ("case_gtin", re.compile(r"\b(?:case\s+gtin|gtin\s+caisse)\b")),
+    ("inner_gtin", re.compile(r"\b(?:inner\s+gtin|gtin\s+interieur)\b")),
+    ("manufacturer_part_number", re.compile(
+        r"\b(?:manufacturer\s+part|numero\s+fabricant)\b"
+    )),
+    ("supplier_item_number", re.compile(
+        r"\b(?:supplier\s+(?:item|code)|code\s+fournisseur)\b"
+    )),
+    ("wholesaler_item_number", re.compile(
+        r"\b(?:wholesaler\s+(?:item|code)|code\s+grossiste)\b"
+    )),
+    ("ramq_billing_code", re.compile(r"\b(?:ramq|code\s+ramq)\b")),
+    ("health_canada_id", re.compile(
+        r"\b(?:health\s+canada\s+id|identifiant\s+sante\s+canada)\b"
+    )),
+)
+
+
+def client_exact_identifier_queries(query):
+    """Extract exact product identifiers from a natural-language request.
+
+    Unlabelled values must contain 8-14 digits, which covers retail GTINs and
+    Canadian regulatory identifiers without mistaking common sizes for codes.
+    A nearby label also enables shorter retailer or supplier identifiers. The
+    label may appear before or after the value, as employees commonly write
+    either ``UPC 123...`` or ``123... c'est le UPC``.
+    """
+    normalized = normalize_search_text(query)
+    if not normalized:
+        return []
+    labels = [
+        (field, match)
+        for field, pattern in _CLIENT_IDENTIFIER_LABELS
+        for match in pattern.finditer(normalized)
+    ]
+    extracted = []
+    seen = set()
+    for match in re.finditer(r"(?<!\d)\d(?:[\d ]{2,22}\d)?(?!\d)", normalized):
+        value = normalized_digits(match.group(0))
+        if not (4 <= len(value) <= 18):
+            continue
+        nearby = []
+        for field, label_match in labels:
+            if label_match.end() <= match.start():
+                distance = match.start() - label_match.end()
+            elif label_match.start() >= match.end():
+                distance = label_match.start() - match.end()
+            else:
+                distance = 0
+            if distance <= 36:
+                nearby.append((distance, field))
+        field = min(nearby, default=(999, "all_identifiers"))[1]
+        if not nearby and not (8 <= len(value) <= 14):
+            continue
+        key = (field, value)
+        if key in seen:
+            continue
+        seen.add(key)
+        extracted.append({"field": field, "value": value})
+    return extracted
+
+
+def _client_identifier_types(field, postings_by_type):
+    field = str(field or "").strip().lower()
+    if field in {"upc", "gtin"}:
+        return {"UPC", "GTIN"}
+    if field in {"code", "familiprix_code"}:
+        return {"FAMILIPRIX_CODE"}
+    if field in {"identifier", "all_identifiers"}:
+        return set(postings_by_type)
+    return set(_IDENTIFIER_SEARCH_FIELDS.get(field, ()))
+
+
+def _exact_identifier_lookup_values(identifier_type, value):
+    normalized = _normalize_identifier_index_value(value)
+    if not normalized:
+        return set()
+    if identifier_type in {"UPC", "GTIN"}:
+        return {
+            _normalize_identifier_index_value(candidate)
+            for candidate in exact_gtin_variants(value)
+            if _normalize_identifier_index_value(candidate)
+        }
+    return {normalized}
+
+
+def resolve_client_exact_identifiers(query, limit=100):
+    """Resolve exact codes before semantic search can discard them.
+
+    Results come only from mapped ``products`` rows. Review-status DIN/NPN/
+    DIN-HM associations remain searchable and keep their existing confirmation
+    metadata; this resolver does not upgrade their verification status.
+    """
+    identifier_queries = client_exact_identifier_queries(query)
+    if not identifier_queries:
+        return []
+    corpus = _employee_product_corpus()
+    cache_compatible = bool(
+        _PROD_CACHE.get("rows") is corpus
+        and _PROD_CACHE.get("statistics_rows_id") == id(corpus)
+    )
+    postings_by_type = (
+        _PROD_CACHE.get("identifier_postings") or {}
+        if cache_compatible else {}
+    )
+    matched_row_indices = []
+    matches_by_key = {}
+
+    for identifier_query in identifier_queries:
+        field = identifier_query["field"]
+        value = identifier_query["value"]
+        allowed_types = _client_identifier_types(
+            field, postings_by_type or {
+                "UPC": {}, "GTIN": {}, "FAMILIPRIX_CODE": {},
+                **{identifier_type: {} for identifier_type in IDENTIFIER_TYPES},
+            },
+        )
+        current_indices = set()
+        if postings_by_type:
+            for identifier_type in allowed_types:
+                values = _exact_identifier_lookup_values(identifier_type, value)
+                for lookup_value in values:
+                    current_indices.update(
+                        int(index) for index in postings_by_type.get(
+                            identifier_type, {}
+                        ).get(lookup_value, ())
+                    )
+        else:
+            for row_index, (item, _row) in enumerate(corpus):
+                candidate_values = []
+                for identifier_type in allowed_types:
+                    if identifier_type in {"UPC", "GTIN"}:
+                        values = [item.get("barcode", "")]
+                    elif identifier_type == "FAMILIPRIX_CODE":
+                        values = [item.get("product_code", "")]
+                    else:
+                        values = [
+                            identifier.get("value", "")
+                            for identifier in item.get("_identifiers") or ()
+                            if str(identifier.get("type", "")).upper().replace(
+                                "-", "_"
+                            ) == identifier_type
+                        ]
+                    expected = _exact_identifier_lookup_values(
+                        identifier_type, value
+                    )
+                    if any(
+                        _normalize_identifier_index_value(candidate) in expected
+                        for candidate in values
+                        if _normalize_identifier_index_value(candidate)
+                    ):
+                        candidate_values.append(identifier_type)
+                if candidate_values:
+                    current_indices.add(row_index)
+
+        for row_index in sorted(
+            current_indices,
+            key=lambda index: location_sort_key(corpus[index][0]),
+        ):
+            if not (0 <= int(row_index) < len(corpus)):
+                continue
+            item, row = corpus[int(row_index)]
+            key = _mapped_product_key(item, row)
+            match_record = {"field": field, "value": value}
+            records = matches_by_key.setdefault(key, [])
+            if match_record not in records:
+                records.append(match_record)
+            if int(row_index) not in matched_row_indices:
+                matched_row_indices.append(int(row_index))
+
+    ordered_keys = []
+    for row_index in matched_row_indices:
+        item, row = corpus[row_index]
+        key = _mapped_product_key(item, row)
+        if key not in ordered_keys:
+            ordered_keys.append(key)
+    products = _materialize_mapped_products(
+        corpus, ordered_keys, limit=max(1, min(int(limit or 100), 100)),
+    )
+    for product in products:
+        row = _product_search_row(
+            product,
+            product.get("_search_aliases") or (),
+            product.get("_identifiers") or (),
+        )
+        product["_exact_identifier_matches"] = list(
+            matches_by_key.get(_mapped_product_key(product, row), ())
+        )
+    return products
+
+
+def client_identifier_query_requests_related_products(query):
+    normalized = normalize_search_text(query)
+    return any(marker in normalized for marker in (
+        "alternative", "alternatives", "autre produit", "autres produits",
+        "compare avec", "equivalent", "equivalents", "remplacement",
+        "semblable", "semblables", "similaire", "similaires",
+        "same as", "similar product",
+    ))
+
+
 def _hybrid_client_candidates(question, query_plan, limit=60):
     """Hybrid retrieval for the one-button Client search.
 
@@ -5908,7 +6120,27 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
 
 
 def hybrid_client_candidates(question, query_plan, limit=60):
-    return _hybrid_client_candidates(question, query_plan, limit=limit)
+    identifier_queries = client_exact_identifier_queries(question)
+    exact_products = resolve_client_exact_identifiers(
+        question, limit=limit,
+    ) if identifier_queries else []
+    if identifier_queries and not client_identifier_query_requests_related_products(
+        question
+    ):
+        return exact_products[:limit]
+    products = _hybrid_client_candidates(question, query_plan, limit=limit)
+    if not exact_products:
+        return products
+    exact_ids = {
+        str(product.get("client_id", "") or "") for product in exact_products
+    }
+    return [
+        *exact_products,
+        *[
+            product for product in products
+            if str(product.get("client_id", "") or "") not in exact_ids
+        ],
+    ][:limit]
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -6162,6 +6394,12 @@ def search_products():
         items = rank_products_by_field(
             [item for item, _ in corpus], query, field, limit=limit
         )
+        return jsonify([public_product_payload(item) for item in items])
+    identifier_queries = client_exact_identifier_queries(query)
+    if identifier_queries and not client_identifier_query_requests_related_products(
+        query
+    ):
+        items = resolve_client_exact_identifiers(query, limit=limit)
         return jsonify([public_product_payload(item) for item in items])
     nq = normalize_search_text(query)
     dq = normalized_digits(query)

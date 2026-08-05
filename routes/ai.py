@@ -2491,6 +2491,14 @@ _CLIENT_VERIFICATION_INSTRUCTIONS += (
     "long product list."
 )
 
+_CLIENT_VERIFICATION_INSTRUCTIONS += (
+    " matched_identifiers means the server resolved the employee's exact code "
+    "to this store product. Never say that code or product was not found. Read "
+    "the candidate name and catalogue_description before answering the requested "
+    "property. An unconfirmed DIN, NPN or DIN-HM remains unconfirmed even when it "
+    "was useful for exact retrieval."
+)
+
 
 def _client_rag_identifier_groups(product):
     """Separate authoritative identifiers from useful, explicitly unsafe clues."""
@@ -2730,7 +2738,12 @@ def select_client_answer_candidates(candidates, limit=16, diversify_brands=False
         tokens = [token for token in text.split() if not token.isdigit()]
         return tuple(tokens[:3])
 
-    selected = []
+    selected = [
+        product for product in candidates
+        if product.get("_exact_identifier_matches")
+    ][:limit]
+    if len(selected) >= limit:
+        return selected
     if question and candidates:
         searchable = [(
             product,
@@ -2872,9 +2885,17 @@ def filter_client_answer_category(question, candidates):
     """
     from routes.products import filter_client_request_products, normalize_search_text
 
-    constrained = filter_client_request_products(candidates, question)
+    exact_matches = [
+        product for product in candidates
+        if product.get("_exact_identifier_matches")
+    ]
+    other_candidates = [
+        product for product in candidates
+        if not product.get("_exact_identifier_matches")
+    ]
+    constrained = filter_client_request_products(other_candidates, question)
     if len(constrained) != len(candidates):
-        candidates = constrained
+        candidates = [*exact_matches, *constrained]
 
     normalized_question = normalize_search_text(question)
     if "melaton" not in normalized_question:
@@ -3085,6 +3106,15 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS += (
     " IMPORTANT: write selected_product_ids and source_ids before answer in the "
     "JSON. Never select or name a product merely to explain that it is excluded. "
     "Keep the direct answer concise enough for an employee to scan immediately."
+)
+
+_CLIENT_DOCUMENTED_INSTRUCTIONS += (
+    " matched_identifiers is produced by deterministic exact-code lookup. If it "
+    "is present, the product exists in the current store plan: never answer that "
+    "the code or product was not found. Read the exact product name, its complete "
+    "catalogue_description, verified_facts and catalogue clues, then answer the "
+    "employee's actual question as a human would after reading that product file. "
+    "Keep an unconfirmed DIN, NPN or DIN-HM explicitly unconfirmed."
 )
 
 
@@ -4294,7 +4324,42 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             if source_id not in source_ids_by_product[candidate_id]:
                 source_ids_by_product[candidate_id].append(source_id)
 
-    if names and is_toothbrush_query:
+    exact_selected = [
+        product for product in selected
+        if product.get("_exact_identifier_matches")
+    ]
+    asks_physical_form = bool(question_words.intersection({
+        "capsule", "capsules", "comprime", "comprimes", "creme", "gel",
+        "gels", "liquide", "liquides", "onguent", "sirop", "solution",
+        "forme", "format",
+    }))
+
+    if len(exact_selected) == 1 and len(selected) == 1:
+        exact_product = exact_selected[0]
+        exact_name = str(exact_product.get("name", "") or "").strip()
+        exact_excerpt = product_evidence_excerpt(exact_product, limit=320)
+        exact_form = forms[0] if len(forms) == 1 else ""
+        if asks_physical_form and exact_form:
+            answer = (
+                f"Le code correspond exactement à {exact_name}. "
+                f"D'après le nom et la fiche du catalogue, il s'agit d'un {exact_form}, "
+                "et non d'un simple liquide. "
+                + (f"La fiche indique aussi : {exact_excerpt}. " if exact_excerpt else "")
+                + "Confirmez le mode d'emploi sur l'emballage."
+            )
+        elif exact_excerpt:
+            answer = (
+                f"Le code correspond exactement à {exact_name}. "
+                f"Sa fiche catalogue indique : {exact_excerpt}. "
+                "Confirmez sur l'emballage toute information marquée non vérifiée."
+            )
+        else:
+            answer = (
+                f"Le code correspond exactement à {exact_name} dans le plan du magasin. "
+                "La fiche ne contient pas assez de détails pour confirmer la caractéristique "
+                "demandée; vérifiez l'emballage."
+            )
+    elif names and is_toothbrush_query:
         group_parts = []
         for label, singular, plural in (
             ("brosse à pile", "brosse à pile", "brosses à pile"),
@@ -5148,6 +5213,23 @@ def _compact_documented_product_context(product, include_identifiers=False):
         "catalogue_clues_to_confirm": catalogue_clues,
         "search_clues_not_product_facts": search_clues,
     }
+    matched_identifiers = [
+        {
+            "field": str(match.get("field", "") or "")[:60],
+            "value": str(match.get("value", "") or "")[:80],
+            "match": "exact",
+        }
+        for match in product.get("_exact_identifier_matches") or []
+        if isinstance(match, dict) and str(match.get("value", "") or "").strip()
+    ]
+    if matched_identifiers:
+        compact["matched_identifiers"] = matched_identifiers[:6]
+        compact["catalogue_identifiers"] = {
+            key: value for key, value in {
+                "upc_or_gtin": str(product.get("barcode", "") or "")[:80],
+                "familiprix_code": str(product.get("product_code", "") or "")[:80],
+            }.items() if value
+        }
     if include_identifiers:
         compact["verified_identifiers"] = (
             context.get("verified_identifiers", []) or []
@@ -7091,15 +7173,29 @@ def client_help():
     # can become cards. A direct reply stays inside the products from that thread.
     from routes.products import (
         classify_client_result_roles, client_products_by_ids,
+        client_exact_identifier_queries,
+        client_identifier_query_requests_related_products,
         client_candidates_need_semantic_retry,
         client_candidates_satisfy_query_plan, hybrid_client_candidates,
         hydrate_candidate_images,
         normalize_search_text, public_product_payload,
+        resolve_client_exact_identifiers,
     )
+    identifier_queries = client_exact_identifier_queries(question)
+    exact_identifier_products = resolve_client_exact_identifiers(
+        question, limit=100,
+    ) if identifier_queries else []
+    expand_identifier_search = bool(
+        identifier_queries
+        and client_identifier_query_requests_related_products(question)
+    )
+    query_plan["exact_identifier_queries"] = identifier_queries
     context_products = client_products_by_ids(context_product_ids, limit=80)
 
     def retrieve_with_plan(active_plan):
         candidate_limit = 100 if active_plan.get("wants_all") else 60
+        if identifier_queries and not expand_identifier_search:
+            return list(exact_identifier_products)[:candidate_limit]
         retrieval_scope = str(
             active_plan.get("retrieval_scope", "store") or "store"
         )
@@ -7111,6 +7207,18 @@ def client_help():
         store_candidates = hybrid_client_candidates(
             retrieval_question, active_plan, limit=candidate_limit
         )
+        if exact_identifier_products:
+            exact_ids = {
+                str(product.get("client_id", "") or "")
+                for product in exact_identifier_products
+            }
+            store_candidates = [
+                *exact_identifier_products,
+                *[
+                    product for product in store_candidates
+                    if str(product.get("client_id", "") or "") not in exact_ids
+                ],
+            ][:candidate_limit]
         if follow_up and context_products and retrieval_scope == "context_and_store":
             context_ids = {
                 str(product.get("client_id", "") or "")
@@ -7132,12 +7240,15 @@ def client_help():
             question, candidates
         )
         needs_semantic_plan = bool(
-            follow_up
-            or selected_text
-            or (
-                not focus_product_id
-                and client_candidates_need_semantic_retry(
-                    question, preliminary_candidates
+            not identifier_queries
+            and (
+                follow_up
+                or selected_text
+                or (
+                    not focus_product_id
+                    and client_candidates_need_semantic_retry(
+                        question, preliminary_candidates
+                    )
                 )
             )
         )
@@ -7155,8 +7266,12 @@ def client_help():
         candidates = []
     if response_mode != "lookup":
         candidates = filter_client_answer_category(question, candidates)
-        if query_plan.get("must_include") and not client_candidates_satisfy_query_plan(
+        if (
+            not identifier_queries
+            and query_plan.get("must_include")
+            and not client_candidates_satisfy_query_plan(
             query_plan, candidates,
+            )
         ):
             # The AI can still answer the general question. A blank product list
             # is safer than cards that miss an indispensable object or use.
