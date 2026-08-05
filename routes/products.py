@@ -38,6 +38,7 @@ from product_data import (
     canonical_gtin,
     classify_source,
     create_review_issue,
+    description_quality_issue,
     exact_gtin_variants,
     field_evidence_for_value,
     gtin_check_digit_valid,
@@ -996,7 +997,10 @@ def _product_search_row(item, aliases=(), identifiers=()):
     verified_fields = set(item.get("_verified_fields") or [])
 
     def verified(field):
-        return item.get(field, "") if field in verified_fields else ""
+        value = item.get(field, "") if field in verified_fields else ""
+        if field == "description" and description_quality_issue(value):
+            return ""
+        return value
 
     raw_name = str(item.get("name", "") or "")
     raw_verified_brand = str(verified("brand") or "")
@@ -1031,7 +1035,9 @@ def _product_search_row(item, aliases=(), identifiers=()):
     # evidence rather than identity and therefore receive less semantic weight
     # than verified fields. A verified description is already present above.
     if "description" not in verified_fields:
-        hay_parts.append(normalize_search_text(item.get("description", "")))
+        unverified_description = str(item.get("description", "") or "")
+        if not description_quality_issue(unverified_description):
+            hay_parts.append(normalize_search_text(unverified_description))
     identifier_text = " ".join(
         str(identifier.get("value", "") or "")
         for identifier in identifiers
@@ -2584,7 +2590,9 @@ def row_to_product(product):
         return None
     item = dict(product)
     raw_image = safe_http_url(item.get("image_url"))
-    raw_description = str(item.get("description", "") or "").strip()
+    stored_description = str(item.get("description", "") or "").strip()
+    description_issue = description_quality_issue(stored_description)
+    raw_description = "" if description_issue else stored_description
     image_status = str(item.get("image_status", "") or "")
     description_status = str(item.get("description_status", "") or "")
     has_evidence_context = "_verified_fields" in item
@@ -2601,6 +2609,10 @@ def row_to_product(product):
     item["description_available_unverified"] = bool(
         raw_description and not description_is_verified
     )
+    item["description_quarantined"] = bool(description_issue)
+    item["description_quality_issue"] = description_issue
+    if description_issue:
+        item["description_status"] = "possible_wrong"
     # Availability and verification are separate concerns.  Employees need the
     # best data already present in the catalogue now; the flags above preserve
     # the review state without blanking pictures or descriptions.
@@ -2623,6 +2635,7 @@ _SEARCH_CACHE_PRODUCT_FIELDS = frozenset({
     "linked_position", "flipped_label", "last_change_by", "last_change_at",
     "data_status", "identity_status", "description_status", "image_status",
     "image_available_unverified", "description_available_unverified",
+    "description_quarantined", "description_quality_issue",
 }) | frozenset(FIELD_NAMES)
 
 
@@ -2920,13 +2933,21 @@ def build_reference_metadata_index(db, barcodes=None):
         placeholders = ",".join("?" for _ in chunk)
         evidence_rows.extend(db.execute(
             f"""SELECT * FROM product_reference_evidence
-                WHERE gtin_key IN ({placeholders}) AND active=1
-                  AND verification_status='verified'""",
+                WHERE gtin_key IN ({placeholders}) AND (
+                  (active=1 AND verification_status='verified')
+                  OR verification_status='rejected'
+                )""",
             tuple(chunk),
         ).fetchall())
     evidence_by_key = {}
+    rejected_by_key = {}
     for row in evidence_rows:
         evidence = dict(row)
+        if evidence.get("verification_status") == "rejected":
+            rejected_by_key.setdefault(evidence["gtin_key"], {}).setdefault(
+                evidence["field_name"], set()
+            ).add(str(evidence.get("field_value", "") or "").strip())
+            continue
         evidence_by_key.setdefault(evidence["gtin_key"], {}).setdefault(
             evidence["field_name"], []
         ).append(evidence)
@@ -2936,6 +2957,10 @@ def build_reference_metadata_index(db, barcodes=None):
             "_conflicts": {}, "_field_evidence": {},
             "verification_status": "verified",
         }
+        quarantined_fields = (
+            ["description"]
+            if rejected_by_key.get(key, {}).get("description") else []
+        )
         highest = None
         for field, field_rows in evidence_by_key.get(key, {}).items():
             if field not in REFERENCE_FIELDS:
@@ -2945,10 +2970,21 @@ def build_reference_metadata_index(db, barcodes=None):
                 for evidence in field_rows
                 if str(evidence.get("field_value", "") or "").strip()
             }
+            if field == "description":
+                unsafe_values = {
+                    value for value in values if description_quality_issue(value)
+                }
+                if unsafe_values:
+                    quarantined_fields.append("description")
+                values -= unsafe_values
             if len(values) == 1:
                 combined[field] = next(iter(values))
                 chosen = max(
-                    field_rows,
+                    [
+                        evidence for evidence in field_rows
+                        if str(evidence.get("field_value", "") or "").strip()
+                        == combined[field]
+                    ],
                     key=lambda evidence: (
                         int(evidence.get("source_priority") or 0),
                         float(evidence.get("confidence") or 0),
@@ -2981,22 +3017,27 @@ def build_reference_metadata_index(db, barcodes=None):
         for field in ("description", "image_url"):
             if str(combined.get(field, "") or "").strip():
                 continue
-            value = next((
-                safe_http_url(candidate.get(field, ""))
-                if field == "image_url"
-                else str(candidate.get(field, "") or "").strip()
-                for candidate in fallback_rows
-                if (
+            value = ""
+            rejected_values = rejected_by_key.get(key, {}).get(field, set())
+            for candidate in fallback_rows:
+                candidate_value = (
                     safe_http_url(candidate.get(field, ""))
                     if field == "image_url"
                     else str(candidate.get(field, "") or "").strip()
                 )
-            ), "")
+                if not candidate_value or candidate_value in rejected_values:
+                    continue
+                if field == "description" and description_quality_issue(candidate_value):
+                    quarantined_fields.append("description")
+                    continue
+                value = candidate_value
+                break
             if value:
                 combined[field] = value
                 unverified_fields.append(field)
         combined["_unverified_fields"] = unverified_fields
-        if unverified_fields:
+        combined["_quarantined_fields"] = sorted(set(quarantined_fields))
+        if unverified_fields or quarantined_fields:
             combined["verification_status"] = "requires_review"
         index[key] = combined
         for variant in exact_gtin_variants(item.get("barcode", "")):
@@ -3036,6 +3077,7 @@ def materialize_reference_rows(db, rows):
         if not identifiers:
             identifiers = row.get("_identifiers", [])
         unverified_fields = set(metadata.get("_unverified_fields") or [])
+        quarantined_fields = set(metadata.get("_quarantined_fields") or [])
         description = str(metadata.get("description", "") or "").strip()
         products.append({
             "barcode": barcode,
@@ -3043,10 +3085,20 @@ def materialize_reference_rows(db, rows):
             "brand": str(metadata.get("brand", "") or row.get("brand", "") or "").strip(),
             "description": description,
             "description_status": (
-                "unverified" if "description" in unverified_fields else "verified"
-            ) if description else "missing",
+                "possible_wrong" if "description" in quarantined_fields
+                else "unverified" if "description" in unverified_fields
+                else "verified"
+            ) if description else (
+                "possible_wrong" if "description" in quarantined_fields
+                else "missing"
+            ),
             "description_available_unverified": bool(
                 description and "description" in unverified_fields
+            ),
+            "description_quarantined": "description" in quarantined_fields,
+            "description_quality_issue": (
+                "foreign_language_description"
+                if "description" in quarantined_fields else ""
             ),
             "image_url": str(metadata.get("image_url", "") or "").strip(),
             "image_status": (
@@ -3079,6 +3131,8 @@ def merge_reference_metadata(product, reference):
             continue
         if not str(merged.get(field, "") or "").strip():
             value = str(reference.get(field, "") or "").strip()
+            if field == "description" and description_quality_issue(value):
+                continue
             if value:
                 merged[field] = value
     return merged
@@ -3090,6 +3144,12 @@ def planogram_metadata(existing, reference, barcode, product_code=""):
     incoming_key = gtin_identity_key(barcode)
     existing_key = gtin_identity_key(existing.get("barcode", ""))
     prior = existing if incoming_key and incoming_key == existing_key else {}
+    prior = dict(prior)
+    reference = dict(reference or {})
+    if description_quality_issue(prior.get("description", "")):
+        prior["description"] = ""
+    if description_quality_issue(reference.get("description", "")):
+        reference["description"] = ""
     anchor = prior or {
         "barcode": barcode,
         "name": str(reference.get("name", "") or ""),
@@ -3129,13 +3189,52 @@ def update_product_metadata_from_reference(
 ):
     """Attach only exact, trusted, conflict-free metadata and retain evidence."""
     original = dict(product or {})
+    reference = dict(reference or {})
     if not original.get("id"):
         return False
     timestamp = now or utc_now_iso()
     source = str(reference.get("source", "") or "")
     source_url = str(reference.get("source_url", "") or "")
     source_type, source_priority = classify_source(source, source_url)
-    assessment_input = original
+    incoming_description = str(reference.get("description", "") or "").strip()
+    incoming_description_issue = description_quality_issue(incoming_description)
+    if incoming_description_issue:
+        create_review_issue(
+            db, original["id"], incoming_description_issue,
+            field_name="description",
+            existing_value=str(original.get("description", "") or ""),
+            candidate_value=incoming_description,
+            source=source, source_url=source_url,
+            match_method="language_quarantine", confidence=1.0,
+            details={"reason": "description_not_french_or_english"},
+            created_at=timestamp,
+        )
+        record_field_evidence(
+            db, original["id"], "description", incoming_description,
+            source=source, source_url=source_url,
+            source_record_id=reference.get("barcode", ""),
+            match_method="language_quarantine", confidence=1.0,
+            verification_status="rejected", imported_at=timestamp,
+            last_verified_at=timestamp, active=False,
+        )
+        reference["description"] = ""
+
+    assessment_input = dict(original)
+    existing_description_issue = description_quality_issue(
+        assessment_input.get("description", "")
+    )
+    if existing_description_issue:
+        assessment_input["description"] = ""
+        create_review_issue(
+            db, original["id"], existing_description_issue,
+            field_name="description",
+            existing_value=str(original.get("description", "") or ""),
+            source=str(original.get("primary_source", "") or "legacy_catalogue"),
+            source_url=str(original.get("primary_source_url", "") or ""),
+            match_method="language_quarantine", confidence=1.0,
+            details={"reason": "stored_description_not_french_or_english"},
+            created_at=timestamp,
+        )
     if promote_higher_priority and source_type == "store_catalog":
         assessment_input = dict(original)
         assessment_input["description"] = ""
@@ -3164,7 +3263,12 @@ def update_product_metadata_from_reference(
     changed_fields = {}
     for field in _REFERENCE_METADATA_FIELDS:
         incoming = str(reference.get(field, "") or "").strip()
-        current = str(original.get(field, "") or "").strip()
+        stored_current = str(original.get(field, "") or "").strip()
+        current = (
+            "" if field == "description"
+            and description_quality_issue(stored_current)
+            else stored_current
+        )
         if not incoming or field in conflicts:
             continue
         field_evidence = dict(
@@ -3314,7 +3418,7 @@ _QUALITY_ISSUE_TYPES = (
     "package_size_conflict", "strength_conflict", "variant_conflict",
     "format_conflict", "multiple_possible_matches", "possible_wrong_image",
     "possible_wrong_description", "missing_description", "missing_image",
-    "unverified_suggestion",
+    "foreign_language_description", "unverified_suggestion",
 )
 
 
@@ -3610,6 +3714,20 @@ def audit_product_data(db, product_ids=None, trigger_type="manual", employee="sy
 
         description = str(product.get("description", "") or "").strip()
         image_url = str(product.get("image_url", "") or "").strip()
+        description_issue = description_quality_issue(description)
+        if description_issue:
+            create_review_issue(
+                db, product_id, description_issue,
+                field_name="description", existing_value=description,
+                source=product.get("primary_source", "legacy_catalogue"),
+                source_url=(
+                    product.get("primary_source_url", "")
+                    or product.get("source_url", "")
+                ),
+                match_method="language_quarantine", confidence=1.0,
+                details={"reason": "description_not_french_or_english"},
+                created_at=timestamp,
+            )
         if not description:
             create_review_issue(
                 db, product_id, "missing_description", field_name="description",
@@ -3696,6 +3814,8 @@ def audit_product_data(db, product_ids=None, trigger_type="manual", employee="sy
             if "possible_wrong_image" in conflict_issues:
                 image_status = "possible_wrong"
             if "possible_wrong_description" in conflict_issues:
+                description_status = "possible_wrong"
+            if "foreign_language_description" in conflict_issues:
                 description_status = "possible_wrong"
         elif not description:
             data_status = "missing_description"

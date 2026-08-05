@@ -14,10 +14,12 @@ from product_backup import (
 )
 from product_data import (
     assess_metadata_candidate,
+    description_quality_issue,
     exact_gtin_variants,
     gtin_identity_key,
     normalize_identifier,
     record_reference_evidence,
+    repair_quarantined_descriptions,
     upsert_product_identifier,
     upsert_reference_candidate,
 )
@@ -27,6 +29,7 @@ from routes.ai import (
 )
 from routes import products as products_module
 from routes.products import (
+    _product_search_row,
     _indexed_client_search_entries,
     _indexed_identifier_products,
     _materialize_mapped_products,
@@ -187,6 +190,44 @@ class ProductDataAccuracyTests(unittest.TestCase):
         self.assertFalse(result.auto_apply)
         self.assertIn("package_size_conflict", {issue["type"] for issue in result.issues})
 
+    def test_exact_gtin_same_brand_allows_abbreviated_bilingual_name(self):
+        result = assess_metadata_candidate(
+            {
+                "barcode": "063848966068",
+                "name": "MARCELLE TAMP DEMAQ DCE 2X85",
+                "brand": "Marcelle",
+            },
+            {
+                "barcode": "063848966068",
+                "name": "Gentle Makeup Remover Pads for Sensitive Eyes",
+                "brand": "Marcelle",
+                "source": "Open Beauty Facts",
+            },
+        )
+        self.assertTrue(result.accepted)
+        self.assertNotIn(
+            "product_name_conflict", {issue["type"] for issue in result.issues}
+        )
+
+    def test_exact_gtin_different_brand_still_blocks_wrong_image_family(self):
+        result = assess_metadata_candidate(
+            {
+                "barcode": "063848966068",
+                "name": "ACME VITAMINE C 500MG",
+                "brand": "Acme",
+            },
+            {
+                "barcode": "063848966068",
+                "name": "Canned tuna in spring water",
+                "brand": "Ocean Fish",
+                "source": "Open Food Facts",
+            },
+        )
+        issue_types = {issue["type"] for issue in result.issues}
+        self.assertFalse(result.accepted)
+        self.assertIn("brand_conflict", issue_types)
+        self.assertIn("product_name_conflict", issue_types)
+
     def test_abbreviated_and_written_package_counts_are_equivalent(self):
         result = assess_metadata_candidate(
             {"barcode": "063848966068", "name": "Advil 200MG CO50"},
@@ -230,6 +271,135 @@ class ProductDataAccuracyTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(evidence["verification_status"], "requires_review")
         self.assertEqual(evidence["active"], 0)
+        db.close()
+
+    def test_foreign_description_is_quarantined_without_losing_exact_image(self):
+        db = self.make_db()
+        barcode = "063848966068"
+        foreign_description = (
+            "Verfris je haar met deze droogshampoo tussen wasbeurten. "
+            "Deze verzorging geeft je haar glans en helpt uitgroei camoufleren."
+        )
+
+        result = upsert_reference_candidate(db, {
+            "barcode": barcode,
+            "name": "TEST PRODUCT 100ML",
+            "description": foreign_description,
+            "image_url": "https://magasiner.familiprix.com/medias/exact.png",
+            "source": "Familiprix",
+            "source_url": "https://magasiner.familiprix.com/fr/p/123",
+        }, imported_at="2026-08-04T00:00:00Z")
+
+        stored = dict(db.execute(
+            "SELECT description, image_url FROM product_reference WHERE barcode=?",
+            (barcode,),
+        ).fetchone())
+        reference = reference_metadata_for_barcode(
+            build_reference_metadata_index(db, [barcode]), barcode,
+        )
+        rejected = dict(db.execute(
+            """SELECT verification_status, active
+               FROM product_reference_evidence
+               WHERE field_name='description'"""
+        ).fetchone())
+
+        self.assertIn(
+            "foreign_language_description",
+            {issue["type"] for issue in result["issues"]},
+        )
+        self.assertEqual(stored["description"], "")
+        self.assertEqual(
+            stored["image_url"],
+            "https://magasiner.familiprix.com/medias/exact.png",
+        )
+        self.assertEqual(reference.get("description", ""), "")
+        self.assertIn("description", reference["_quarantined_fields"])
+        self.assertEqual(rejected["verification_status"], "rejected")
+        self.assertEqual(rejected["active"], 0)
+        db.close()
+
+    def test_foreign_description_never_reaches_cards_search_or_ai(self):
+        foreign_description = (
+            "Vitamin supplements for kids мултивитрини за деца нителна "
+            "добавка с подсладител и дъвчащи таблетки за деца."
+        )
+        raw = {
+            "id": 1, "name": "TEST VITAMIN", "barcode": "063848966068",
+            "description": foreign_description,
+            "description_status": "possible_wrong",
+            "_verified_fields": [],
+        }
+
+        public = row_to_product(raw)
+        search_row = _product_search_row(raw)
+        context = product_context_for_client_rag(raw)
+
+        self.assertEqual(public["description"], "")
+        self.assertTrue(public["description_quarantined"])
+        self.assertNotIn("мултивитрини", search_row["_hay"])
+        self.assertEqual(context["description"], "")
+        self.assertEqual(context["notes"], "")
+        self.assertTrue(context["description_quarantined"])
+
+    def test_french_scientific_description_is_not_quarantined(self):
+        description = (
+            "Formule française avec bêta-carotène et vitamine C. "
+            "Convient au format de 100 comprimés et contient 500 mg par unité."
+        )
+        self.assertEqual(description_quality_issue(description), "")
+
+    def test_quality_repair_restores_saved_verified_french_description(self):
+        db = self.make_db()
+        barcode = "063848966068"
+        foreign_description = (
+            "Verfris je haar met deze droogshampoo tussen wasbeurten. "
+            "Deze verzorging geeft je haar glans en helpt uitgroei camoufleren."
+        )
+        french_description = (
+            "Shampooing sec rafraîchissant pour cheveux bruns, format 200 ml. "
+            "Il absorbe l'excès de sébum entre les lavages."
+        )
+        db.execute(
+            """INSERT INTO product_reference
+               (barcode, gtin_key, name, description, source)
+               VALUES (?, ?, 'TEST SHP SEC 200ML', ?, 'Planogramme')""",
+            (barcode, gtin_identity_key(barcode), foreign_description),
+        )
+        product_id = self.insert_product(
+            db, name="TEST SHP SEC 200ML", barcode=barcode,
+        )
+        db.execute(
+            "UPDATE products SET description=? WHERE id=?",
+            (foreign_description, product_id),
+        )
+        record_reference_evidence(
+            db, barcode, "description", french_description,
+            source="Familiprix", source_record_id="123",
+            verification_status="verified", active=False,
+        )
+
+        result = repair_quarantined_descriptions(
+            db, now="2026-08-04T12:00:00Z"
+        )
+
+        reference = db.execute(
+            "SELECT description FROM product_reference WHERE barcode=?", (barcode,)
+        ).fetchone()
+        product = db.execute(
+            "SELECT description, description_status FROM products WHERE id=?",
+            (product_id,),
+        ).fetchone()
+        old_evidence = db.execute(
+            """SELECT verification_status FROM product_reference_evidence
+               WHERE field_value=?""",
+            (foreign_description,),
+        ).fetchone()
+        self.assertEqual(result["reference_descriptions_repaired"], 1)
+        self.assertEqual(result["product_descriptions_repaired"], 1)
+        self.assertEqual(reference["description"], french_description)
+        self.assertEqual(product["description"], french_description)
+        self.assertEqual(product["description_status"], "verified")
+        self.assertEqual(old_evidence["verification_status"], "rejected")
         db.close()
 
     def test_media_is_found_across_equivalent_upc_and_gtin_forms(self):

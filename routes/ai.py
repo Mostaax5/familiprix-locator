@@ -21,10 +21,12 @@ from observability import record_ai_answer
 from product_data import (
     assess_metadata_candidate,
     classify_source,
+    description_quality_issue,
     gtin_identity_key,
     gtin_check_digit_valid,
     normalize_text,
     record_reference_evidence,
+    structured_identity_description,
     upsert_reference_identifier,
     upsert_reference_candidate,
 )
@@ -1341,6 +1343,9 @@ def lookup_brocade(barcode):
 def product_context_for_client_help(product):
     verified_fields = set(product.get("_verified_fields") or [])
     description = str(product.get("description", "") or "").strip()
+    quarantined_description = bool(description_quality_issue(description))
+    if quarantined_description:
+        description = ""
     description_verified = bool(
         description and (
             "description" in verified_fields
@@ -1367,11 +1372,13 @@ def product_context_for_client_help(product):
         "notes":    description,
         "description_verified": description_verified,
         "description_status": str(
-            product.get("description_status", "unverified") or "unverified"
+            "possible_wrong" if quarantined_description
+            else product.get("description_status", "unverified") or "unverified"
         ),
         "unverified_description_included": bool(
             description and not description_verified
         ),
+        "description_quarantined": quarantined_description,
         "location": location,
         # The UPC is essential context: without it a question that names a UPC
         # ("quelle saveur a le 0605388...") could never be matched to its product.
@@ -2572,6 +2579,8 @@ def product_context_for_client_rag(product):
     context = product_context_for_client_help(product)
     verified_fields = set(product.get("_verified_fields") or [])
     description = str(product.get("description", "") or "").strip()
+    if description_quality_issue(description):
+        description = ""
     verified_identifiers, unconfirmed_identifier_candidates = (
         _client_rag_identifier_groups(product)
     )
@@ -2590,7 +2599,10 @@ def product_context_for_client_rag(product):
         "locations": product.get("locations") or [],
         "description": description,
         "description_status": (
-            "verified" if "description" in verified_fields else "unverified"
+            "possible_wrong" if description_quality_issue(
+                product.get("description", "")
+            ) else "verified" if "description" in verified_fields
+            else "unverified"
         ),
         "category": verified_value("category"),
         "package_size": verified_value("package_size"),
@@ -3637,6 +3649,8 @@ _AI_DESCRIPTION_MARKETING_RE = re.compile(
 def _description_excerpt_for_ai(value, max_chars=900):
     """Extract exact, useful catalogue facts instead of a marketing preamble."""
     text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if description_quality_issue(text):
+        return ""
     max_chars = max(120, int(max_chars or 900))
     if len(text) <= max_chars and not _AI_DESCRIPTION_MARKETING_RE.search(text):
         return text
@@ -6270,50 +6284,8 @@ _CATALOG_INCOMPLETE_SQL = (
 
 
 def structured_catalog_description(product):
-    """Describe only facts already attached to this exact catalogue package.
-
-    This is the final fallback after exact online sources miss. It deliberately
-    does not infer purpose, ingredients, compatibility, or medical use.
-    """
-    item = dict(product or {})
-    name = re.sub(r"\s+", " ", str(item.get("name", "") or "")).strip(" .")
-    if len(name) < 3:
-        return ""
-    brand = re.sub(r"\s+", " ", str(item.get("brand", "") or "")).strip(" .")
-    normalized_name = normalize_text(name)
-    facts = []
-
-    def add_fact(label, *fields):
-        values = []
-        for field in fields:
-            value = re.sub(
-                r"\s+", " ", str(item.get(field, "") or "")
-            ).strip(" .")
-            if (
-                value and normalize_text(value) not in normalized_name
-                and value not in values
-            ):
-                values.append(value)
-        if values:
-            facts.append(f"{label}: {' '.join(values)}")
-
-    if brand and normalize_text(brand) not in normalized_name:
-        facts.append(f"Marque: {brand}")
-    add_fact("Format", "package_size", "package_unit")
-    add_fact("Variante", "variant")
-    add_fact("Saveur ou parfum", "flavour")
-    add_fact("Couleur", "colour")
-    add_fact("Concentration", "strength")
-    add_fact("Forme", "dosage_form")
-    add_fact("Fabricant", "manufacturer")
-    add_fact("Catégorie", "category")
-    add_fact("Compatibilité", "compatibility")
-    if facts:
-        return f"{name}. " + ". ".join(facts[:7]) + "."
-    return (
-        f"Produit du catalogue identifié sous le nom exact « {name} ». "
-        "Les caractéristiques détaillées restent à confirmer sur l’emballage."
-    )
+    """Compatibility wrapper for the shared exact-field fallback."""
+    return structured_identity_description(product)
 
 
 def _apply_provisional_catalog_description(db, row, placed_products, now):

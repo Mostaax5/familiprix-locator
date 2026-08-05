@@ -5143,6 +5143,7 @@ let productQualityPollTimer = null;
 const PRODUCT_QUALITY_LABELS = {
   possible_wrong_image: 'Image possiblement incorrecte',
   possible_wrong_description: 'Description possiblement incorrecte',
+  foreign_language_description: 'Description dans une autre langue',
   package_size_conflict: 'Conflit de format',
   strength_conflict: 'Conflit de concentration',
   variant_conflict: 'Conflit de variante',

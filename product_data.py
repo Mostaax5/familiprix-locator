@@ -111,6 +111,41 @@ _COLOURS = {
     "violet", "purple", "orange", "jaune", "yellow",
 }
 
+_FOREIGN_DESCRIPTION_SCRIPT_RE = re.compile(
+    r"[\u0400-\u052f\u0590-\u08ff\u0900-\u0dff\u3040-\u30ff"
+    r"\u3400-\u9fff\uac00-\ud7af]"
+)
+_DESCRIPTION_DOMESTIC_MARKERS = {
+    "avec", "sans", "pour", "dans", "cette", "produit", "ingredients",
+    "utilisation", "convient", "contient", "format", "saveur", "parfum",
+    "with", "without", "this", "that", "product", "ingredients", "use",
+    "contains", "suitable", "size", "flavour", "flavor", "scent",
+}
+_FOREIGN_DESCRIPTION_MARKERS = (
+    {
+        "ingredienti", "destrosio", "vitamina", "acido", "ascorbato",
+        "pompelmo", "agente", "carica", "cellulosa", "vegetale",
+        "antiagglomeranti", "compresse", "senza", "della", "degli",
+    },
+    {
+        "verfris", "deze", "droogshampoo", "tussen", "wasbeurten",
+        "geeft", "glans", "zoek", "naar", "heerlijk", "vertrouwde",
+        "verzorging", "uitgroei", "geblondeerd", "camoufleren",
+    },
+    {
+        "producto", "ingredientes", "vitamina", "acido", "sabor",
+        "cabello", "piel", "para", "esta", "este", "contiene", "modo",
+    },
+    {
+        "produkt", "inhaltsstoffe", "anwendung", "geeignet", "enthalt",
+        "haare", "haut", "ohne", "dieses", "diese", "zwischen",
+    },
+    {
+        "produto", "ingredientes", "vitamina", "acido", "sabor",
+        "cabelo", "pele", "esta", "este", "contem", "utilizacao",
+    },
+)
+
 
 def text_digits(value) -> str:
     return re.sub(r"\D", "", str(value or ""))
@@ -120,6 +155,73 @@ def normalize_text(value) -> str:
     text = unicodedata.normalize("NFKD", str(value or ""))
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     return re.sub(r"[^a-z0-9%]+", " ", text.lower()).strip()
+
+
+def description_quality_issue(value) -> str:
+    """Return a high-confidence reason a description must be quarantined.
+
+    The employee UI is French/English. This deliberately catches only strong
+    signals so scientific names, accents and short multilingual package labels
+    are not discarded. It is a safety boundary, not a general language model.
+    """
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) < 35:
+        return ""
+    if len(_FOREIGN_DESCRIPTION_SCRIPT_RE.findall(text)) >= 4:
+        return "foreign_language_description"
+
+    tokens = set(normalize_text(text).split())
+    domestic_hits = len(tokens & _DESCRIPTION_DOMESTIC_MARKERS)
+    foreign_hits = max(
+        (len(tokens & markers) for markers in _FOREIGN_DESCRIPTION_MARKERS),
+        default=0,
+    )
+    if foreign_hits >= 4 and foreign_hits >= domestic_hits + 2:
+        return "foreign_language_description"
+    return ""
+
+
+def structured_identity_description(product) -> str:
+    """Build a useful French fallback from exact-package fields only."""
+    item = dict(product or {})
+    name = re.sub(r"\s+", " ", str(item.get("name", "") or "")).strip(" .")
+    if len(name) < 3:
+        return ""
+    normalized_name = normalize_text(name)
+    facts = []
+
+    def add_fact(label, *fields):
+        values = []
+        for field_name in fields:
+            value = re.sub(
+                r"\s+", " ", str(item.get(field_name, "") or "")
+            ).strip(" .")
+            if (
+                value and normalize_text(value) not in normalized_name
+                and value not in values
+            ):
+                values.append(value)
+        if values:
+            facts.append(f"{label}: {' '.join(values)}")
+
+    brand = re.sub(r"\s+", " ", str(item.get("brand", "") or "")).strip(" .")
+    if brand and normalize_text(brand) not in normalized_name:
+        facts.append(f"Marque: {brand}")
+    add_fact("Format", "package_size", "package_unit")
+    add_fact("Variante", "variant")
+    add_fact("Saveur ou parfum", "flavour")
+    add_fact("Couleur", "colour")
+    add_fact("Concentration", "strength")
+    add_fact("Forme", "dosage_form")
+    add_fact("Fabricant", "manufacturer")
+    add_fact("Catégorie", "category")
+    add_fact("Compatibilité", "compatibility")
+    if facts:
+        return f"{name}. " + ". ".join(facts[:7]) + "."
+    return (
+        f"Produit du catalogue identifié sous le nom exact « {name} ». "
+        "Les caractéristiques détaillées restent à confirmer sur l’emballage."
+    )
 
 
 def gtin_check_digit_valid(value) -> bool:
@@ -296,6 +398,15 @@ def _brand_conflicts(left, right) -> bool:
     return bool(left_tokens and right_tokens and not _token_sets_overlap(left_tokens, right_tokens))
 
 
+def _brand_matches(left, right) -> bool:
+    left_tokens = _tokens(left, _BRAND_NOISE)
+    right_tokens = _tokens(right, _BRAND_NOISE)
+    return bool(
+        left_tokens and right_tokens
+        and _token_sets_overlap(left_tokens, right_tokens)
+    )
+
+
 def _name_conflicts(left, right) -> bool:
     left_tokens = _tokens(left, _GENERIC_NAME_WORDS)
     right_tokens = _tokens(right, _GENERIC_NAME_WORDS)
@@ -394,6 +505,7 @@ def assess_metadata_candidate(existing, candidate, match_method="exact_gtin") ->
     if (
         source_type not in {"store_catalog", "manual"}
         and _name_conflicts(existing.get("name"), candidate.get("name"))
+        and not _brand_matches(existing.get("brand"), candidate.get("brand"))
     ):
         issues.append({"type": "product_name_conflict", "field": "name", "reason": "no_meaningful_name_overlap"})
 
@@ -708,6 +820,18 @@ def upsert_reference_candidate(
     review. Existing non-empty values are never overwritten automatically.
     """
     item = dict(candidate or {})
+    rejected_description = str(item.get("description", "") or "").strip()
+    description_issue = description_quality_issue(rejected_description)
+    quality_issues = []
+    if description_issue:
+        quality_issues.append({
+            "type": description_issue,
+            "field": "description",
+            "reason": "description_not_french_or_english",
+        })
+        # Keep the other exact-package fields independently usable. The unsafe
+        # description is retained below as rejected evidence, never as content.
+        item["description"] = ""
     barcode = str(item.get("barcode", "") or "").strip()
     key = gtin_identity_key(barcode)
     if not key:
@@ -751,6 +875,14 @@ def upsert_reference_candidate(
             (key,),
         ).fetchall()
     }
+    if description_issue:
+        record_reference_evidence(
+            db, barcode, "description", rejected_description,
+            source=source, source_url=source_url,
+            source_record_id=source_record_id, match_method="language_quarantine",
+            confidence=1.0, verification_status="rejected",
+            imported_at=imported_at, last_verified_at=imported_at, active=False,
+        )
 
     promotable_fields = {"brand", "description", "image_url"}
     promoted_fields = set()
@@ -803,7 +935,7 @@ def upsert_reference_candidate(
                 "candidate": incoming,
             })
 
-    all_issues = list(assessment.issues) + conflicts
+    all_issues = quality_issues + list(assessment.issues) + conflicts
     verification = "verified" if can_verify and not all_issues else "requires_review"
     confidence = assessment.confidence if valid else min(assessment.confidence, 0.5)
     if existing:
@@ -817,6 +949,11 @@ def upsert_reference_candidate(
                 updates[field] = incoming
             elif incoming and field in promoted_fields:
                 updates[field] = incoming
+        if (
+            description_issue
+            and description_quality_issue(existing.get("description", ""))
+        ):
+            updates["description"] = ""
         updates.update({
             "gtin_key": key,
             "match_method": "exact_gtin",
@@ -982,3 +1119,214 @@ def sync_basic_aliases(db, product_id, product, source="planogram", verified=Fal
         except Exception:
             return inserted
     return inserted
+
+
+def _best_safe_description_evidence(db, gtin_key):
+    if not gtin_key:
+        return {}
+    try:
+        rows = db.execute(
+            """SELECT * FROM product_reference_evidence
+               WHERE gtin_key=? AND field_name='description'
+                 AND verification_status<>'rejected'
+               ORDER BY CASE WHEN verification_status='verified' THEN 0 ELSE 1 END,
+                        active DESC, source_priority DESC, confidence DESC, id DESC""",
+            (gtin_key,),
+        ).fetchall()
+    except Exception:
+        return {}
+    for row in rows:
+        item = dict(row)
+        value = str(item.get("field_value", "") or "").strip()
+        if value and not description_quality_issue(value):
+            return item
+    return {}
+
+
+def repair_quarantined_descriptions(db, *, now="", actor="catalogue_quality_repair"):
+    """Replace legacy foreign descriptions with the best saved safe evidence.
+
+    Verified Familiprix evidence wins even if an older import deactivated it.
+    When no safe source exists, an exact-field fallback keeps the product usable
+    without inventing an indication, ingredient or compatibility claim.
+    """
+    reference_rows = [
+        dict(row) for row in db.execute(
+            "SELECT * FROM product_reference WHERE TRIM(COALESCE(description,''))<>''"
+        ).fetchall()
+    ]
+    repaired_references = 0
+    for row in reference_rows:
+        current = str(row.get("description", "") or "").strip()
+        issue = description_quality_issue(current)
+        if not issue:
+            continue
+        barcode = str(row.get("barcode", "") or "").strip()
+        key = gtin_identity_key(barcode)
+        evidence = _best_safe_description_evidence(db, key)
+        replacement = str(evidence.get("field_value", "") or "").strip()
+        if not replacement:
+            replacement = structured_identity_description(row)
+            evidence = {
+                "source": "Exact product identity fallback",
+                "source_url": "",
+                "source_record_id": str(row.get("product_code", "") or barcode),
+                "match_method": "deterministic_catalog_fields",
+                "confidence": 0.6,
+                "verification_status": "requires_review",
+            }
+        if not replacement or description_quality_issue(replacement):
+            continue
+
+        db.execute(
+            """UPDATE product_reference_evidence
+               SET verification_status='rejected', active=0, last_verified_at=?
+               WHERE gtin_key=? AND field_name='description' AND field_value=?""",
+            (now, key, current),
+        )
+        record_reference_evidence(
+            db, barcode, "description", current,
+            source=f"Automatic quarantine: {actor}",
+            source_record_id=f"quarantined:{barcode}",
+            match_method="language_quarantine", confidence=1.0,
+            verification_status="rejected", imported_at=now,
+            last_verified_at=now, active=False,
+        )
+        status = str(evidence.get("verification_status", "") or "requires_review")
+        source = str(evidence.get("source", "") or "")
+        source_url = str(evidence.get("source_url", "") or "")
+        source_record_id = str(
+            evidence.get("source_record_id", "")
+            or row.get("product_code", "") or barcode
+        )
+        record_reference_evidence(
+            db, barcode, "description", replacement,
+            source=source, source_url=source_url,
+            source_record_id=source_record_id,
+            match_method=str(evidence.get("match_method", "") or "exact_gtin"),
+            confidence=float(evidence.get("confidence", 0.6) or 0.6),
+            verification_status=status, imported_at=now,
+            last_verified_at=now if status == "verified" else "",
+            active=status == "verified",
+        )
+        db.execute(
+            """UPDATE product_reference
+               SET description=?, updated_at=?, verification_status=CASE
+                 WHEN ?='verified' THEN verification_status ELSE 'requires_review' END
+               WHERE barcode=?""",
+            (replacement, now, status, barcode),
+        )
+        row["description"] = replacement
+        repaired_references += 1
+
+    reference_choices = {}
+    for row in reference_rows:
+        value = str(row.get("description", "") or "").strip()
+        key = gtin_identity_key(row.get("barcode", ""))
+        if not key or not value or description_quality_issue(value):
+            continue
+        rank = (
+            int(row.get("source_priority") or 0),
+            float(row.get("confidence") or 0),
+        )
+        if key not in reference_choices or rank > reference_choices[key][0]:
+            reference_choices[key] = (rank, row)
+
+    repaired_products = []
+    product_rows = [
+        dict(row) for row in db.execute(
+            "SELECT * FROM products WHERE TRIM(COALESCE(description,''))<>''"
+        ).fetchall()
+    ]
+    for product in product_rows:
+        current = str(product.get("description", "") or "").strip()
+        issue = description_quality_issue(current)
+        if not issue:
+            continue
+        product_id = int(product["id"])
+        key = gtin_identity_key(product.get("barcode", ""))
+        evidence = _best_safe_description_evidence(db, key)
+        replacement = str(evidence.get("field_value", "") or "").strip()
+        if not replacement:
+            reference = (reference_choices.get(key) or (None, {}))[1]
+            replacement = str(reference.get("description", "") or "").strip()
+            if replacement:
+                evidence = {
+                    "source": reference.get("source", ""),
+                    "source_url": reference.get("source_url", ""),
+                    "source_record_id": reference.get("product_code", ""),
+                    "match_method": "exact_gtin",
+                    "confidence": reference.get("confidence", 0.6),
+                    "verification_status": reference.get(
+                        "verification_status", "requires_review"
+                    ),
+                }
+        if not replacement:
+            replacement = structured_identity_description(product)
+            evidence = {
+                "source": "Exact product identity fallback",
+                "source_url": "", "source_record_id": product.get("barcode", ""),
+                "match_method": "deterministic_catalog_fields",
+                "confidence": 0.6, "verification_status": "requires_review",
+            }
+        if not replacement or description_quality_issue(replacement):
+            continue
+
+        db.execute(
+            """UPDATE product_field_evidence
+               SET verification_status='rejected', active=0, last_verified_at=?
+               WHERE product_id=? AND field_name='description' AND field_value=?""",
+            (now, product_id, current),
+        )
+        record_field_evidence(
+            db, product_id, "description", current,
+            source=f"Automatic quarantine: {actor}",
+            source_record_id=f"quarantined:{product_id}",
+            match_method="language_quarantine", confidence=1.0,
+            verification_status="rejected", imported_at=now,
+            last_verified_at=now, active=False,
+        )
+        status = str(evidence.get("verification_status", "") or "requires_review")
+        record_field_evidence(
+            db, product_id, "description", replacement,
+            source=str(evidence.get("source", "") or ""),
+            source_url=str(evidence.get("source_url", "") or ""),
+            source_record_id=str(
+                evidence.get("source_record_id", "")
+                or product.get("barcode", "")
+            ),
+            match_method=str(evidence.get("match_method", "") or "exact_gtin"),
+            confidence=float(evidence.get("confidence", 0.6) or 0.6),
+            verification_status=status, imported_at=now,
+            last_verified_at=now if status == "verified" else "",
+            active=status == "verified",
+        )
+        db.execute(
+            """UPDATE products SET description=?, description_status=?,
+                      modified_by=?, modified_at=? WHERE id=?""",
+            (
+                replacement,
+                "verified" if status == "verified" else "unverified",
+                actor, now, product_id,
+            ),
+        )
+        db.execute(
+            """UPDATE product_data_issues SET status='resolved', resolved_at=?,
+                      resolved_by=? WHERE product_id=? AND field_name='description'
+                      AND issue_type='foreign_language_description' AND status='open'""",
+            (now, actor, product_id),
+        )
+        if status == "verified":
+            db.execute(
+                """UPDATE product_data_issues SET status='resolved', resolved_at=?,
+                          resolved_by=? WHERE product_id=? AND field_name='description'
+                          AND issue_type='possible_wrong_description' AND status='open'""",
+                (now, actor, product_id),
+            )
+        repaired_products.append(product_id)
+
+    return {
+        "reference_descriptions_repaired": repaired_references,
+        "product_descriptions_repaired": len(repaired_products),
+        "product_ids": repaired_products,
+    }
