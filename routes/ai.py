@@ -3112,6 +3112,34 @@ _CLIENT_DOCUMENTED_SCHEMA = {
     "additionalProperties": False,
 }
 
+_CLIENT_DOCUMENTED_FAST_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "selected_product_ids": {
+            "type": "array", "items": {"type": "string"}, "maxItems": 8,
+        },
+        "answer": {"type": "string"},
+    },
+    "required": ["selected_product_ids", "answer"],
+    "additionalProperties": False,
+}
+
+_CLIENT_DOCUMENTED_FAST_INSTRUCTIONS = (
+    "Tu es l'assistant produit expert d'un employé Familiprix. Lis la question "
+    "complète puis les fiches candidates. Elles proviennent du plan du magasin, "
+    "mais certaines sont seulement des voisines de recherche: rejette tout produit "
+    "qui ne correspond pas à l'objet demandé. Réponds directement à la vraie "
+    "question en français, comme un humain compétent, en 2 à 4 phrases faciles à "
+    "dire au client. Explique le choix ou la différence demandée; ne remplace jamais "
+    "la réponse par un décompte de produits. Tu peux donner des critères généraux, "
+    "mais n'attribue à un produit précis que les faits présents dans sa fiche et "
+    "signale toute donnée non vérifiée. Pour une comparaison absente des fiches, dis "
+    "exactement ce qu'il faut vérifier sur l'emballage. Pour une question médicale, "
+    "ne diagnostique pas et ne donne pas de dose inventée. Retourne uniquement un "
+    "JSON avec selected_product_ids d'abord, puis answer. Sélectionne au maximum huit "
+    "produits réellement pertinents et utilise uniquement les candidate_id fournis."
+)
+
 _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "Tu produis une réponse documentée de très haute qualité pour un employé Familiprix. "
     "Le but est de répondre exactement à la demande, puis de rendre les faits importants "
@@ -4092,6 +4120,10 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
             product.get("_retrieval_sources") or ()
         )
     ]
+    category_identity_candidates = [
+        product for product in category_candidates
+        if product.get("_semantic_category_identity_match")
+    ]
     semantic_candidates = [
         product for product in candidates
         if set(product.get("_retrieval_sources") or ()).intersection({
@@ -4100,6 +4132,8 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
     ]
     if exact_candidates:
         fallback_candidates = exact_candidates
+    elif len(category_identity_candidates) >= 2:
+        fallback_candidates = category_identity_candidates
     elif len(category_candidates) >= 2:
         fallback_candidates = category_candidates
     elif semantic_candidates:
@@ -5500,22 +5534,32 @@ def _generate_documented_client_answer_sync(
             "keywords", "must_include", "constraints", "evidence_fields", "exclude",
         )
     }
+    request_contexts = contexts if quality_mode else contexts[:10]
+    request_documents = document_contexts if quality_mode else document_contexts[:8]
+    request_instructions = (
+        _CLIENT_DOCUMENTED_INSTRUCTIONS
+        if quality_mode else _CLIENT_DOCUMENTED_FAST_INSTRUCTIONS
+    )
+    request_schema = (
+        _CLIENT_DOCUMENTED_SCHEMA
+        if quality_mode else _CLIENT_DOCUMENTED_FAST_SCHEMA
+    )
     parsed = _provider_structured_request(
-        _CLIENT_DOCUMENTED_INSTRUCTIONS,
+        request_instructions,
         {
             "conversation": _compact_documented_history(history),
             "question": question,
             "selected_text_from_previous_answer": selected_text[:500],
             "focused_product_id": focus_product_id,
             "query_plan": compact_plan,
-            "candidates": contexts,
-            "documents": document_contexts,
+            "candidates": request_contexts,
+            "documents": request_documents,
         },
         # The foreground K2.6 answer is intentionally compact; K3 keeps the
         # larger budget for the asynchronous documented upgrade.
-        max_tokens=1400 if quality_mode else 800,
+        max_tokens=1400 if quality_mode else 520,
         schema_name="client_documented_answer",
-        schema=_CLIENT_DOCUMENTED_SCHEMA,
+        schema=request_schema,
         question_preview=question,
         quality_mode=quality_mode,
         realtime_model=True,

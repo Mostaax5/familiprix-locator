@@ -6224,15 +6224,19 @@ def _semantic_ranked_product_keys(question, corpus, limit=100):
         default=0.0,
     )
 
-    def add(key, contribution, source, similarity):
+    def add(key, contribution, source, similarity, category=""):
         if key is None:
             return
         scores[key] = scores.get(key, 0.0) + contribution
         detail = evidence.setdefault(key, {
             "sources": [], "semantic_similarity": 0.0,
+            "semantic_categories": [],
         })
         if source not in detail["sources"]:
             detail["sources"].append(source)
+        category = str(category or "").strip()
+        if category and category not in detail["semantic_categories"]:
+            detail["semantic_categories"].append(category)
         detail["semantic_similarity"] = max(
             detail["semantic_similarity"], float(similarity or 0),
         )
@@ -6260,7 +6264,8 @@ def _semantic_ranked_product_keys(question, corpus, limit=100):
         similarity = float(hit.get("similarity") or 0)
         if similarity < max(0.30, best_category_similarity - 0.025):
             continue
-        category = normalize_search_text(hit.get("category", ""))
+        raw_category = str(hit.get("category", "") or "").strip()
+        category = normalize_search_text(raw_category)
         keys = category_postings.get(category, ())
         if not keys:
             continue
@@ -6270,7 +6275,7 @@ def _semantic_ranked_product_keys(question, corpus, limit=100):
         for key in keys:
             add(
                 key, contribution, "semantic_category",
-                similarity,
+                similarity, category=raw_category,
             )
         # The category stage identifies the requested object; later lexical
         # scoring handles constraints such as "moins de sucre" inside it. A
@@ -6321,6 +6326,7 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         fused[key] = fused.get(key, 0.0) + 1.0 / (60.0 + rank)
         detail = evidence.setdefault(key, {
             "sources": [], "semantic_similarity": 0.0,
+            "semantic_categories": [],
         })
         if "lexical" not in detail["sources"]:
             detail["sources"].append("lexical")
@@ -6377,6 +6383,64 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         product["_semantic_similarity"] = float(
             detail.get("semantic_similarity") or 0
         )
+        product["_semantic_categories"] = list(
+            detail.get("semantic_categories") or []
+        )
+
+    # A retailer taxonomy can be intentionally broad (for example popcorn may
+    # share a shelf leaf with potato chips). When several products independently
+    # repeat the selected leaf in their own name or description, use that direct
+    # identity evidence to remove sibling products. If the catalogue text is
+    # sparse, retain the category recall instead of producing an empty result.
+    category_identity_stopwords = {
+        "avec", "autres", "pour", "produit", "produits", "soin", "soins",
+    }
+
+    def category_leaf_matches_identity(product):
+        leaf_terms = []
+        for category in product.get("_semantic_categories") or ():
+            leaf = str(category or "").rsplit(">", 1)[-1]
+            for term in normalize_search_text(leaf).split():
+                if len(term) >= 4 and term not in category_identity_stopwords:
+                    leaf_terms.append(term)
+        if not leaf_terms:
+            return False
+        identity = normalize_search_text(" ".join(filter(None, (
+            str(product.get("name", "") or ""),
+            str(product.get("brand", "") or ""),
+            str(product.get("description", "") or ""),
+            str(product.get("official_name_fr", "") or ""),
+            str(product.get("official_name_en", "") or ""),
+            str(product.get("purpose", "") or ""),
+            " ".join(product.get("_search_aliases") or ()),
+        ))))
+        actual_terms = identity.split()
+        return any(
+            _search_token_matches(
+                actual,
+                expected,
+                tuple(SEARCH_ABBREVIATIONS.get(expected, ())),
+            )
+            for expected in leaf_terms
+            for actual in actual_terms
+        )
+
+    category_identity_products = []
+    for product in products:
+        identity_match = bool(
+            "semantic_category" in set(
+                product.get("_retrieval_sources") or ()
+            ) and category_leaf_matches_identity(product)
+        )
+        product["_semantic_category_identity_match"] = identity_match
+        if identity_match:
+            category_identity_products.append(product)
+    if len(category_identity_products) >= 2:
+        identity_ids = {id(product) for product in category_identity_products}
+        products = [
+            *category_identity_products,
+            *[product for product in products if id(product) not in identity_ids],
+        ]
     if _client_query_excludes_replacements(question):
         products = [
             product for product in products

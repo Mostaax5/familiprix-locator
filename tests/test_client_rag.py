@@ -224,30 +224,42 @@ class ClientRagTests(unittest.TestCase):
     def test_real_chips_wording_is_recovered_by_independent_category_embedding(self):
         category = "Aliments et breuvages > Collations > Croustilles"
         products = [{
-            "id": 1, "name": "ESSENTIEL CROUST NAT 16X150G",
+            "id": 1, "client_id": "product:1",
+            "name": "ESSENTIEL CROUST NAT 16X150G",
             "brand": "Essentiel", "barcode": "101",
             "description": "Croustilles nature.",
             "_catalogue_category": category,
         }, {
-            "id": 2, "name": "ESSENTIEL CROUST BBQ 16X150G",
+            "id": 2, "client_id": "product:2",
+            "name": "ESSENTIEL CROUST BBQ 16X150G",
             "brand": "Essentiel", "barcode": "102",
             "description": "Croustilles saveur barbecue.",
             "_catalogue_category": category,
         }, {
-            "id": 3, "name": "ESSENTIEL CROUST KETCH 16X150G",
+            "id": 3, "client_id": "product:3",
+            "name": "ESSENTIEL CROUST KETCH 16X150G",
             "brand": "Essentiel", "barcode": "103",
             "description": "Croustilles saveur ketchup.",
             "_catalogue_category": category,
         }, {
-            "id": 4, "name": "METAMUCIL ORA S/SUCRE 662G",
+            "id": 4, "client_id": "product:4",
+            "name": "METAMUCIL ORA S/SUCRE 662G",
             "brand": "Metamucil", "barcode": "104",
             "description": "Poudre de fibres sans sucre.",
             "_catalogue_category": "Sante > Fibres",
         }, {
-            "id": 5, "name": "MELATONINE S/SUCRE GUM45",
+            "id": 5, "client_id": "product:5",
+            "name": "MELATONINE S/SUCRE GUM45",
             "brand": "Test", "barcode": "105",
             "description": "Melatonine en gommes sans sucre.",
             "_catalogue_category": "Sante > Sommeil",
+        }, {
+            "id": 6, "client_id": "product:6",
+            "name": "IMPERIAL M/SOUFFLE BBQ 16X300G",
+            "brand": "Imperial", "barcode": "106",
+            "description": "Mais souffle saveur barbecue.",
+            # A real catalogue can group sibling snacks under a coarse leaf.
+            "_catalogue_category": category,
         }]
         corpus = [(
             product,
@@ -270,12 +282,20 @@ class ClientRagTests(unittest.TestCase):
             matches = hybrid_client_candidates(question, plan, limit=20)
 
         self.assertEqual(
-            {product["name"] for product in matches},
+            {product["name"] for product in matches[:3]},
             {
                 "ESSENTIEL CROUST NAT 16X150G",
                 "ESSENTIEL CROUST BBQ 16X150G",
                 "ESSENTIEL CROUST KETCH 16X150G",
             },
+        )
+        self.assertEqual(matches[3]["name"], "IMPERIAL M/SOUFFLE BBQ 16X300G")
+        fallback = ai_module.grounded_documented_fallback(
+            plan, matches, [],
+        )
+        self.assertEqual(
+            fallback["selected_product_ids"],
+            ["product:1", "product:2", "product:3"],
         )
 
     def test_documented_timeout_keeps_semantic_family_and_drops_constraint_noise(self):
@@ -1748,12 +1768,12 @@ class ClientRagTests(unittest.TestCase):
             )
 
         call = provider.call_args
-        self.assertEqual(call.kwargs["max_tokens"], 800)
+        self.assertEqual(call.kwargs["max_tokens"], 520)
         self.assertEqual(call.kwargs["timeout_seconds"], 9)
         self.assertTrue(call.kwargs["realtime_model"])
-        self.assertNotIn("comparisons", call.kwargs["schema"]["properties"])
-        self.assertNotIn(
-            "follow_up_questions", call.kwargs["schema"]["properties"]
+        self.assertEqual(
+            set(call.kwargs["schema"]["properties"]),
+            {"selected_product_ids", "answer"},
         )
         compact_payload = call.args[1]
         self.assertNotIn("required_schema", compact_payload)
