@@ -211,7 +211,7 @@ def _safe_provider_error(exc):
     return f"{type(exc).__name__}: {str(exc)[:160]}"
 
 
-def _embed_texts(texts, task_type, timeout_seconds):
+def _embed_texts(texts, task_type, timeout_seconds, max_attempts=3):
     if not texts:
         return []
     if not SEMANTIC_EMBEDDING_API_KEY:
@@ -229,7 +229,8 @@ def _embed_texts(texts, task_type, timeout_seconds):
     )
     payload = json.dumps({"requests": requests}, ensure_ascii=False).encode("utf-8")
     last_error = None
-    for attempt in range(3):
+    attempt_count = max(1, min(int(max_attempts or 1), 3))
+    for attempt in range(attempt_count):
         try:
             request = Request(
                 url,
@@ -248,7 +249,10 @@ def _embed_texts(texts, task_type, timeout_seconds):
             ]
         except HTTPError as exc:
             last_error = exc
-            if exc.code not in {429, 500, 502, 503, 504} or attempt == 2:
+            if (
+                exc.code not in {429, 500, 502, 503, 504}
+                or attempt == attempt_count - 1
+            ):
                 break
             retry_after = exc.headers.get("Retry-After", "") if exc.headers else ""
             try:
@@ -258,7 +262,7 @@ def _embed_texts(texts, task_type, timeout_seconds):
             time.sleep(delay)
         except (URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
             last_error = exc
-            if attempt == 2:
+            if attempt == attempt_count - 1:
                 break
             time.sleep(float(2 ** attempt))
     raise RuntimeError(_safe_provider_error(last_error or RuntimeError("embedding impossible")))
@@ -276,6 +280,7 @@ def _query_embedding(query):
             return cached
     vector = _embed_texts(
         [normalized], "RETRIEVAL_QUERY", SEMANTIC_QUERY_TIMEOUT_SECONDS,
+        max_attempts=1,
     )[0]
     with _QUERY_CACHE_LOCK:
         _QUERY_CACHE[cache_key] = vector
@@ -751,6 +756,14 @@ def semantic_product_hits(query, product_limit=80, category_limit=12):
     """Return independent product/category vector ranks for RRF fusion."""
     status = semantic_search_status()
     if not status.get("ready") or not status.get("schema_ready"):
+        return []
+    if (
+        "HTTP 429" in str(status.get("last_error", "") or "")
+        and time.time() - float(status.get("updated_at", 0) or 0) < 45
+    ):
+        # The same embedding quota powers indexing and query vectors. Repeating
+        # a known rate-limited request three times made an employee wait tens of
+        # seconds before the lexical/AI-planner recovery could run.
         return []
     started = time.perf_counter()
     db = None

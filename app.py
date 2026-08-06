@@ -225,12 +225,17 @@ def healthz():
 def readyz():
     """Tell Render when this revision is ready for employee traffic."""
     warmup = reconcile_catalogue_warmup_state()
-    if not DB_BOOT_PENDING and warmup.get("stage") != "ready":
+    # A completed search snapshot proves that PostgreSQL was readable even if
+    # a slower background migration still holds the boot flag. Let the payload
+    # cache finish so a stale maintenance gate cannot strand a healthy revision.
+    if (
+        (not DB_BOOT_PENDING or product_search_cache_ready())
+        and warmup.get("stage") != "ready"
+    ):
         ensure_catalogue_warmup_started()
         warmup = reconcile_catalogue_warmup_state()
     ready = bool(
-        not DB_BOOT_PENDING
-        and product_search_cache_ready()
+        product_search_cache_ready()
         and product_payload_cache_ready()
         and warmup.get("stage") == "ready"
     )
@@ -239,6 +244,7 @@ def readyz():
         "search_ready": product_search_cache_ready(),
         "product_payload_ready": product_payload_cache_ready(),
         "reference_search_ready": reference_search_cache_ready(),
+        "database_boot_pending": bool(DB_BOOT_PENDING),
         "catalogue_warmup": warmup,
     }), (200 if ready else 503)
 

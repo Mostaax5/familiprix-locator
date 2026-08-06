@@ -2563,7 +2563,6 @@ _CLIENT_VERIFICATION_SCHEMA = {
             "type": "array", "items": {"type": "string"}, "maxItems": 16,
         },
         "answer": {"type": "string"},
-        "answer_references": _CLIENT_ANSWER_REFERENCE_SCHEMA,
         "follow_up_questions": {
             "type": "array", "items": {"type": "string"}, "maxItems": 4,
         },
@@ -2573,9 +2572,8 @@ _CLIENT_VERIFICATION_SCHEMA = {
         "pharmacist_referral": {"type": "boolean"},
         "pharmacist_reason": {"type": "string"},
     },
-    "required": ["selected_product_ids", "answer", "answer_references",
-                 "follow_up_questions", "safety_flags", "pharmacist_referral",
-                 "pharmacist_reason"],
+    "required": ["selected_product_ids", "answer", "follow_up_questions",
+                 "safety_flags", "pharmacist_referral", "pharmacist_reason"],
     "additionalProperties": False,
 }
 
@@ -2620,10 +2618,7 @@ _CLIENT_VERIFICATION_INSTRUCTIONS += (
     "utile au mode documente. Reponds toujours avec les informations disponibles "
     "avant de proposer une precision. follow_up_questions vient seulement apres une "
     "reponse autonome; retourne une liste vide si aucune question n'apporte une vraie "
-    "valeur. Pour chaque produit mentionne dans answer, ajoute answer_references avec "
-    "son candidate_id et la plus courte quote copiee mot pour mot depuis answer qui "
-    "le designe. Une meme quote peut referencer plusieurs formats. Ne reference jamais "
-    "un produit uniquement pour dire de l'eviter ou de l'exclure."
+    "valeur."
 )
 
 
@@ -3111,7 +3106,7 @@ def generate_verified_client_answer(question, query_plan, candidates, history=No
          "selected_text_from_previous_answer": selected_text,
          "focused_product_id": focus_product_id,
          "query_plan": query_plan, "candidates": contexts},
-        max_tokens=750,
+        max_tokens=650,
         schema_name="client_verified_answer",
         schema=_CLIENT_VERIFICATION_SCHEMA,
         question_preview=question,
@@ -4260,6 +4255,8 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
     ]
     if exact_candidates:
         fallback_candidates = exact_candidates
+    elif query_plan.get("retrieval_uncertain"):
+        fallback_candidates = []
     elif len(category_identity_candidates) >= 2:
         fallback_candidates = category_identity_candidates
     elif len(category_candidates) >= 2:
@@ -7598,6 +7595,7 @@ def client_help():
         client_exact_identifier_queries,
         client_identifier_query_requests_related_products,
         client_candidates_need_semantic_retry,
+        client_candidates_satisfy_query_plan,
         hybrid_client_candidates,
         hydrate_candidate_images,
         public_product_payload,
@@ -7672,6 +7670,25 @@ def client_help():
         return store_candidates
 
     candidates = retrieve_with_plan(query_plan)
+    retrieval_uncertain = bool(
+        response_mode != "lookup"
+        and not identifier_queries
+        and client_candidates_need_semantic_retry(question, candidates)
+    )
+    if retrieval_uncertain and not semantic_planner_used:
+        semantic_plan = generate_client_query_plan(question, history)
+        if isinstance(semantic_plan, dict):
+            semantic_planner_used = True
+            semantic_plan["exact_identifier_queries"] = identifier_queries
+            semantic_plan["semantic_search"] = True
+            planned_candidates = retrieve_with_plan(semantic_plan)
+            plan_satisfied = client_candidates_satisfy_query_plan(
+                semantic_plan, planned_candidates,
+            )
+            query_plan = semantic_plan
+            candidates = planned_candidates if plan_satisfied else []
+            retrieval_uncertain = not plan_satisfied
+    query_plan["retrieval_uncertain"] = retrieval_uncertain
     if (
         response_mode == "lookup"
         and client_candidates_need_semantic_retry(question, candidates)

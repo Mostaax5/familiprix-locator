@@ -152,6 +152,11 @@ assert.ok(citedMarkup.includes('ESSENTIEL CROUST NAT ON16X150G'));
 assert.ok(citedMarkup.includes('client-answer-inline-products'));
 assert.ok(citedMarkup.includes('data-product-id="product:11"'));
 assert.ok(citedMarkup.includes('data-product-id="product:12"'));
+const inferredCitationMarkup = context.__quoteTest.renderQuotableClientAnswer(
+  citedAnswer, citedProducts, 'inferred-exchange'
+);
+assert.ok(inferredCitationMarkup.includes('LA/COC TOR/CHIPS TACO 12X360G'));
+assert.ok(inferredCitationMarkup.includes('ESSENTIEL CROUST NAT ON16X150G'));
 
 const productButton = context.__quoteTest.clientQuoteButton(
   'Produit Exemple: Description utile', 'product:42', 'Citer cette description'

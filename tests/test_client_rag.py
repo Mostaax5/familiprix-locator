@@ -3284,6 +3284,75 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(captured["plan"]["corrected_query"], question)
         self.assertTrue(captured["plan"]["semantic_search"])
 
+    def test_weak_first_turn_retrieval_uses_ai_plan_before_answering(self):
+        unrelated = {
+            "id": 3, "client_id": "product:3",
+            "name": "METAMUCIL ORA S/SUCRE 662G", "brand": "Metamucil",
+            "description": "Poudre de fibres sans sucre.",
+            "barcode": "103", "aisle": "Labo", "side": "A",
+            "section": "2", "shelf": "3", "position": "1",
+        }
+        chips = {
+            "id": 4, "client_id": "product:4",
+            "name": "ESSENTIEL CROUST NAT 150G", "brand": "Essentiel",
+            "description": "Croustilles nature, sac de 150 g.",
+            "barcode": "104", "aisle": "1", "side": "A",
+            "section": "2", "shelf": "3", "position": "2",
+        }
+        semantic_plan = {
+            "intent": "food_comparison",
+            "answer_goal": "Comparer les croustilles selon leur sucre.",
+            "product_family": "croustilles",
+            "corrected_query": "croustilles avec le moins de sucre",
+            "search_queries": ["croustilles", "chips"],
+            "keywords": ["croustilles", "sucre"],
+            "must_include": ["croustilles"],
+            "constraints": ["eviter le sucre"],
+            "evidence_fields": ["sucres"],
+            "exclude": [], "wants_all": False,
+            "needs_comparison": True, "answer_language": "fr",
+            "medical": False, "retrieval_scope": "store",
+        }
+        verified = {
+            "answer": "ESSENTIEL CROUST NAT 150G est l'option a comparer.",
+            "selected_product_ids": ["product:4"],
+            "answer_references": [], "follow_up_questions": [],
+            "safety_flags": [], "pharmacist_referral": False,
+            "pharmacist_reason": "",
+        }
+
+        with patch(
+            "routes.ai.configured_ai_provider",
+            return_value={"name": "kimi", "label": "Kimi", "model": "kimi-k2.6"},
+        ), patch(
+            "routes.ai._check_ai_rate_limit", return_value=True,
+        ), patch(
+            "routes.products.hybrid_client_candidates",
+            side_effect=[[unrelated], [chips]],
+        ) as retrieval, patch(
+            "routes.ai.generate_client_query_plan", return_value=semantic_plan,
+        ) as planner, patch(
+            "routes.products.hydrate_candidate_images",
+        ), patch(
+            "routes.ai.generate_verified_client_answer", return_value=verified,
+        ), patch("routes.ai.log_ai_interaction"):
+            with app.test_client() as client:
+                response = client.post("/api/client/help", json={
+                    "question": "Quelles chips ont le moins de sucre?",
+                    "mode": "ai",
+                })
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(retrieval.call_count, 2)
+        planner.assert_called_once()
+        self.assertEqual(payload["products"][0]["client_id"], "product:4")
+        self.assertEqual(
+            payload["query_plan"]["corrected_query"],
+            "croustilles avec le moins de sucre",
+        )
+        self.assertFalse(payload["query_plan"]["retrieval_uncertain"])
+
     def test_kimi_semantic_plan_retries_weak_local_retrieval(self):
         candidate = {
             "id": 8, "client_id": "product:8",
@@ -3357,10 +3426,13 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(
             response.get_json()["highlighted_product_ids"], ["product:8"]
         )
-        self.assertEqual(retrieval.call_count, 1)
-        self.assertEqual(retrieval.call_args.args[0], "Il me faut quelque chose pour calmer le coeur leve")
+        self.assertEqual(retrieval.call_count, 2)
+        self.assertEqual(
+            retrieval.call_args.args[0],
+            "Produit pour soulager les nausees",
+        )
         self.assertTrue(retrieval.call_args.args[1]["semantic_search"])
-        planner.assert_not_called()
+        planner.assert_called_once()
         rate_limit.assert_called_once()
 
     def test_kimi_plan_prevents_a_wrong_object_from_entering_retrieval(self):
@@ -3430,13 +3502,13 @@ class ClientRagTests(unittest.TestCase):
             [item["client_id"] for item in response.get_json()["products"]],
             ["product:2"],
         )
-        self.assertEqual(retrieval.call_count, 1)
+        self.assertEqual(retrieval.call_count, 2)
         self.assertEqual(
             retrieval.call_args.args[0],
-            "objet transparent pour proteger une blessure",
+            "pansement transparent pour blessure",
         )
         self.assertTrue(retrieval.call_args.args[1]["semantic_search"])
-        planner.assert_not_called()
+        planner.assert_called_once()
 
     def test_semantic_retry_clears_unrelated_cards_when_object_is_absent(self):
         unrelated = {
@@ -3490,7 +3562,7 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["products"], [])
-        self.assertEqual(retrieval.call_count, 1)
+        self.assertEqual(retrieval.call_count, 2)
 
     def test_simple_product_lookup_does_not_call_ai(self):
         candidate = {
