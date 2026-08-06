@@ -270,13 +270,42 @@ class ClientRagTests(unittest.TestCase):
             matches = hybrid_client_candidates(question, plan, limit=20)
 
         self.assertEqual(
-            {product["name"] for product in matches[:3]},
+            {product["name"] for product in matches},
             {
                 "ESSENTIEL CROUST NAT 16X150G",
                 "ESSENTIEL CROUST BBQ 16X150G",
                 "ESSENTIEL CROUST KETCH 16X150G",
             },
         )
+
+    def test_documented_timeout_keeps_semantic_family_and_drops_constraint_noise(self):
+        products = [{
+            "id": 1, "client_id": "product:1",
+            "name": "ESSENTIEL CROUST NAT 16X150G",
+            "description": "Croustilles nature.",
+            "_retrieval_sources": ["semantic_category", "lexical"],
+        }, {
+            "id": 2, "client_id": "product:2",
+            "name": "ESSENTIEL CROUST BBQ 16X150G",
+            "description": "Croustilles saveur barbecue.",
+            "_retrieval_sources": ["semantic_category"],
+        }, {
+            "id": 3, "client_id": "product:3",
+            "name": "METAMUCIL ORA S/SUCRE 662G",
+            "description": "Poudre de fibres sans sucre.",
+            "_retrieval_sources": ["lexical"],
+        }]
+        question = "quelle chips sont les moins sucre"
+        fallback = ai_module.grounded_documented_fallback(
+            build_client_query_plan(question, "documented"), products, [],
+        )
+
+        self.assertEqual(
+            fallback["selected_product_ids"],
+            ["product:1", "product:2"],
+        )
+        self.assertIn("ESSENTIEL CROUST NAT", fallback["answer"])
+        self.assertNotIn("METAMUCIL", fallback["answer"])
 
     def test_exact_identifier_extraction_accepts_label_before_or_after_code(self):
         self.assertEqual(

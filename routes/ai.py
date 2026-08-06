@@ -4078,8 +4078,36 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
     """Return a useful, source-backed response when every AI attempt fails."""
     from routes.products import normalize_search_text
 
-    selected = [
+    # Hybrid retrieval may deliberately keep lexical neighbours for the answer
+    # model to rerank. If that model times out, never expose those neighbours as
+    # recommendations. Category-grounded semantic candidates are the strongest
+    # fallback boundary; exact identifier lookups remain intact.
+    exact_candidates = [
         product for product in candidates
+        if product.get("_exact_identifier_matches")
+    ]
+    category_candidates = [
+        product for product in candidates
+        if "semantic_category" in set(
+            product.get("_retrieval_sources") or ()
+        )
+    ]
+    semantic_candidates = [
+        product for product in candidates
+        if set(product.get("_retrieval_sources") or ()).intersection({
+            "semantic_category", "semantic_product",
+        })
+    ]
+    if exact_candidates:
+        fallback_candidates = exact_candidates
+    elif len(category_candidates) >= 2:
+        fallback_candidates = category_candidates
+    elif semantic_candidates:
+        fallback_candidates = semantic_candidates
+    else:
+        fallback_candidates = candidates
+    selected = [
+        product for product in fallback_candidates
         if str(product.get("client_id", "") or "").strip()
     ][:16]
     selected_ids = [str(product.get("client_id", "") or "") for product in selected]
@@ -4666,15 +4694,17 @@ def grounded_documented_fallback(query_plan, candidates, documents, degraded=Tru
                 evidence_items.append((name, excerpt))
             if len(evidence_items) >= 3:
                 break
-        if query_plan.get("needs_comparison") and len(evidence_items) >= 2:
+        if query_plan.get("needs_comparison"):
+            displayed_names = ", ".join(names[:4])
             answer = (
-                "D'après les fiches actuelles du magasin, voici la différence la plus utile : "
-                + " ".join(
-                    f"{name} — {excerpt}."
-                    for name, excerpt in evidence_items
-                )
-                + " Comparez ensuite l'usage précis, le format et les avertissements sur "
-                "l'emballage; une fiche marquée non vérifiée doit être confirmée."
+                f"J'ai trouvé {len(names)} option{'s' if len(names) > 1 else ''} "
+                f"pertinente{'s' if len(names) > 1 else ''} dans le plan actuel : "
+                f"{displayed_names}. "
+                "Les fiches disponibles ne contiennent pas toutes une valeur confirmée "
+                "pour le critère demandé, donc je ne peux pas classer honnêtement ces "
+                "produits sans vérifier leur emballage. Les cartes ci-dessous permettent "
+                "de comparer les produits et leurs emplacements; vérifiez le critère "
+                "précis sur l'étiquette."
             )
         elif len(evidence_items) >= 2:
             answer = (

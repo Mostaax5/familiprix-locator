@@ -46,7 +46,16 @@ SEMANTIC_EMBEDDING_BASE_URL = os.environ.get(
     "https://generativelanguage.googleapis.com/v1beta",
 ).rstrip("/")
 SEMANTIC_INDEX_BATCH_SIZE = max(
-    4, min(int(os.environ.get("SEMANTIC_INDEX_BATCH_SIZE", "64") or 64), 100)
+    4, min(int(os.environ.get("SEMANTIC_INDEX_BATCH_SIZE", "40") or 40), 100)
+)
+SEMANTIC_INDEX_BATCH_PAUSE_SECONDS = max(
+    0.0,
+    min(
+        float(
+            os.environ.get("SEMANTIC_INDEX_BATCH_PAUSE_SECONDS", "31") or 31
+        ),
+        120.0,
+    ),
 )
 SEMANTIC_QUERY_TIMEOUT_SECONDS = max(
     1.0,
@@ -83,6 +92,8 @@ _STATUS = {
     "skipped_this_run": 0,
     "last_query_ms": 0,
     "last_query_hits": 0,
+    "last_category_hits": [],
+    "last_product_hits": [],
     "last_error": "",
     "started_at": 0.0,
     "updated_at": 0.0,
@@ -592,7 +603,11 @@ def _index_documents(db, documents, existing, stage):
         pending.append(document)
         if len(pending) >= SEMANTIC_INDEX_BATCH_SIZE:
             flush()
-            time.sleep(0.05)
+            # Keep the one-time catalogue build below the embedding provider's
+            # free-tier rolling quota and leave headroom for live employee
+            # queries. Completed batches are already durable in PostgreSQL.
+            if SEMANTIC_INDEX_BATCH_PAUSE_SECONDS:
+                time.sleep(SEMANTIC_INDEX_BATCH_PAUSE_SECONDS)
     flush()
     if metadata_updates:
         db.commit()
@@ -792,9 +807,32 @@ def semantic_product_hits(query, product_limit=80, category_limit=12):
                     "similarity": round(similarity, 5),
                 })
         elapsed_ms = int(round((time.perf_counter() - started) * 1000))
+        category_diagnostics = [
+            {
+                "rank": hit["rank"],
+                "category": hit["category"][:240],
+                "similarity": hit["similarity"],
+            }
+            for hit in hits if hit["kind"] == "category"
+        ][:8]
+        product_diagnostics = [
+            {
+                "rank": hit["rank"],
+                "product_id": hit["product_id"],
+                "similarity": hit["similarity"],
+            }
+            for hit in hits if hit["kind"] == "product"
+        ][:8]
         _set_status(
             last_query_ms=elapsed_ms,
             last_query_hits=len(hits),
+            last_category_hits=category_diagnostics,
+            last_product_hits=product_diagnostics,
+            stage=(
+                "partial_ready"
+                if semantic_search_status().get("stage") == "error"
+                else semantic_search_status().get("stage", "ready")
+            ),
             last_error="",
         )
         return hits
@@ -807,6 +845,8 @@ def semantic_product_hits(query, product_limit=80, category_limit=12):
         _set_status(
             last_query_ms=int(round((time.perf_counter() - started) * 1000)),
             last_query_hits=0,
+            last_category_hits=[],
+            last_product_hits=[],
             last_error=_safe_provider_error(exc),
         )
         return []

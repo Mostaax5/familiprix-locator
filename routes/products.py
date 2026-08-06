@@ -6258,7 +6258,7 @@ def _semantic_ranked_product_keys(question, corpus, limit=100):
     accepted_categories = 0
     for hit in category_hits:
         similarity = float(hit.get("similarity") or 0)
-        if similarity < max(0.30, best_category_similarity - 0.08):
+        if similarity < max(0.30, best_category_similarity - 0.025):
             continue
         category = normalize_search_text(hit.get("category", ""))
         keys = category_postings.get(category, ())
@@ -6272,7 +6272,11 @@ def _semantic_ranked_product_keys(question, corpus, limit=100):
                 key, contribution, "semantic_category",
                 similarity,
             )
-        if accepted_categories >= 4:
+        # The category stage identifies the requested object; later lexical
+        # scoring handles constraints such as "moins de sucre" inside it. A
+        # second neighbouring category often represents the constraint itself
+        # and was the source of unrelated recommendations.
+        if accepted_categories >= 1:
             break
     return scores, evidence
 
@@ -6321,6 +6325,21 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         if "lexical" not in detail["sources"]:
             detail["sources"].append("lexical")
 
+    category_supported_keys = {
+        key for key, detail in semantic_evidence.items()
+        if "semantic_category" in set(detail.get("sources") or ())
+    }
+    # Once a strong semantic category maps to several real store packages, it
+    # becomes the candidate boundary and lexical relevance reranks *inside*
+    # that boundary. Constraint-only hits such as an unrelated "sans sucre"
+    # product can no longer enter merely because they share the comparison
+    # word. If semantic evidence is sparse, keep the lexical safety fallback.
+    if len(category_supported_keys) >= 2:
+        fused = {
+            key: score for key, score in fused.items()
+            if key in category_supported_keys
+        }
+
     ranked_keys = sorted(
         fused,
         key=lambda key: (-fused[key], str(key)),
@@ -6329,6 +6348,23 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         corpus, ranked_keys,
         limit=min(100, max(int(limit or 60), int(limit or 60) * 2)),
     )
+    required_concepts = client_required_concept_groups(question)
+    excluded_concepts = client_excluded_concept_terms(question)
+    constrained_products = []
+    for product in products:
+        row = _product_search_row(
+            product,
+            product.get("_search_aliases") or (),
+            product.get("_identifiers") or (),
+        )
+        if not row_matches_client_concepts(
+            row, required_concepts, excluded_concepts,
+        ):
+            continue
+        if not row_matches_client_identity_constraints(row, question):
+            continue
+        constrained_products.append(product)
+    products = constrained_products
     for product in products:
         row = _product_search_row(
             product,
