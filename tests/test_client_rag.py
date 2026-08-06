@@ -137,6 +137,30 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(plan["constraints"], ["le moins de sucre possible"])
         self.assertEqual(plan["evidence_fields"], ["nutrition", "sucres"])
 
+    def test_compact_semantic_plan_derives_safe_retrieval_defaults(self):
+        question = "Montre-moi toutes les options et explique leurs différences"
+        plan = ai_module.normalize_client_query_plan({
+            "product_family": "crèmes hydratantes pour le visage",
+            "answer_goal": "Comparer les crèmes hydratantes disponibles.",
+            "corrected_query": "crèmes hydratantes visage",
+            "search_queries": ["crème hydratante visage", "face moisturizer"],
+            "constraints": ["pour peau sensible"],
+            "evidence_fields": ["type de peau", "parfum", "format"],
+            "exclude": ["crème pour le corps"],
+            "answer_language": "fr",
+            "medical": False,
+            "retrieval_scope": "store",
+        }, question)
+
+        self.assertEqual(
+            plan["must_include"], ["crèmes hydratantes pour le visage"]
+        )
+        self.assertEqual(
+            plan["search_queries"][0], "crèmes hydratantes pour le visage"
+        )
+        self.assertTrue(plan["wants_all"])
+        self.assertTrue(plan["needs_comparison"])
+
     def test_semantic_family_retrieval_does_not_let_constraint_words_take_over(self):
         products = [{
             "id": 1, "name": "ESSENTIEL CROUST NAT 16X150G",
@@ -2601,6 +2625,37 @@ class ClientRagTests(unittest.TestCase):
             "query_plan",
         )
 
+    def test_kimi_planner_override_uses_small_non_thinking_json_request(self):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "choices": [{
+                "message": {"content": json.dumps({
+                    "product_family": "savon pour les mains",
+                    "search_queries": ["savon mains", "hand soap"],
+                }, ensure_ascii=False)},
+            }],
+            "usage": {},
+        }, ensure_ascii=False).encode("utf-8")
+
+        with patch("routes.ai._safe_urlopen", return_value=response) as opener, \
+             patch("routes.ai._log_ai_usage"):
+            result = _kimi_json_request(
+                [{"role": "user", "content": "savon"}],
+                max_tokens=320,
+                realtime_model=True,
+                schema_name="client_query_plan",
+                schema=ai_module._CLIENT_QUERY_PLAN_SCHEMA,
+                model_override="moonshot-v1-8k",
+            )
+
+        payload = json.loads(opener.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(result["product_family"], "savon pour les mains")
+        self.assertEqual(payload["model"], "moonshot-v1-8k")
+        self.assertEqual(payload["max_tokens"], 320)
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertNotIn("thinking", payload)
+        self.assertNotIn("stream", payload)
+
     def test_kimi_documented_request_is_not_downgraded_by_realtime_flag(self):
         response = MagicMock()
         response.__enter__.return_value.read.return_value = json.dumps({
@@ -2846,6 +2901,11 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first["retrieval_scope"], "store")
         provider.assert_called_once()
+        self.assertNotIn("required_schema", provider.call_args.args[1])
+        self.assertEqual(provider.call_args.kwargs["max_tokens"], 320)
+        self.assertEqual(
+            provider.call_args.kwargs["model_override"], "moonshot-v1-8k"
+        )
 
     def test_client_retrieval_never_uses_reference_catalogue(self):
         placed = {"id": 1, "name": "Tylenol", "brand": "Tylenol", "barcode": "111"}

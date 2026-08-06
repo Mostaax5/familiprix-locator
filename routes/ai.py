@@ -206,13 +206,20 @@ OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY",  "").strip()
 OPENAI_MODEL    = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 KIMI_API_KEY = os.environ.get("KIMI_API_KEY", os.environ.get("MOONSHOT_API_KEY", "")).strip()
-# K2.6 provides the low-latency structured planner and first answer. K3 is kept
-# for the optional documented upgrade, where deeper reasoning is worth waiting
-# for after the employee already has a useful answer on screen.
+# K2.6 provides the first grounded answer. K3 is kept for the optional
+# documented upgrade, where deeper reasoning is worth waiting for after the
+# employee already has a useful answer on screen.
 KIMI_MODEL = os.environ.get("KIMI_MODEL", "kimi-k2.6").strip() or "kimi-k2.6"
 KIMI_REALTIME_MODEL = (
     os.environ.get("KIMI_REALTIME_MODEL", KIMI_MODEL).strip()
     or KIMI_MODEL
+)
+# Planning is a small classification and query-rewrite task. A compact model
+# keeps it off the slower answer-model queue; K2.6 still reads the retrieved
+# product records and writes the employee-facing answer.
+KIMI_PLANNER_MODEL = (
+    os.environ.get("KIMI_PLANNER_MODEL", "moonshot-v1-8k").strip()
+    or "moonshot-v1-8k"
 )
 KIMI_DOCUMENTED_MODEL = (
     os.environ.get("KIMI_DOCUMENTED_MODEL", "kimi-k3").strip()
@@ -1957,9 +1964,9 @@ def _select_kimi_model(quality_mode=False, realtime_model=False):
 
 def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=False,
                        timeout_seconds=None, realtime_model=False,
-                       schema_name="", schema=None):
+                       schema_name="", schema=None, model_override=""):
     """Call Kimi's OpenAI-compatible endpoint with bounded response memory."""
-    model = _select_kimi_model(
+    model = str(model_override or "").strip() or _select_kimi_model(
         quality_mode=quality_mode, realtime_model=realtime_model
     )
     global _AI_LAST_MODEL
@@ -1983,7 +1990,8 @@ def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=F
     # K2.6 and K3 both support strict structured output. Using the supplied
     # schema matters here: a generic JSON object can finish with an answer but
     # omit the product IDs that keep the UI grounded in store inventory.
-    if isinstance(schema, dict) and schema_name:
+    supports_strict_schema = model.startswith(("kimi-k3", "kimi-k2.6"))
+    if isinstance(schema, dict) and schema_name and supports_strict_schema:
         payload["response_format"] = {
             "type": "json_schema",
             "json_schema": {
@@ -2240,7 +2248,7 @@ def _openai_structured_request(system_prompt, user_payload, max_tokens,
 def _provider_structured_request(system_prompt, user_payload, max_tokens,
                                  schema_name, schema, question_preview="",
                                  quality_mode=False, timeout_seconds=None,
-                                 realtime_model=False):
+                                 realtime_model=False, model_override=""):
     provider = configured_ai_provider()["name"]
     if provider == "kimi":
         return _kimi_json_request([
@@ -2248,7 +2256,8 @@ def _provider_structured_request(system_prompt, user_payload, max_tokens,
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
         ], max_tokens=max_tokens, question_preview=question_preview,
            quality_mode=quality_mode, timeout_seconds=timeout_seconds,
-           realtime_model=realtime_model, schema_name=schema_name, schema=schema)
+           realtime_model=realtime_model, schema_name=schema_name, schema=schema,
+           model_override=model_override)
     if provider == "deepseek":
         return _deepseek_json_request([
             {"role": "system", "content": system_prompt},
@@ -2269,18 +2278,13 @@ def _provider_structured_request(system_prompt, user_payload, max_tokens,
 _CLIENT_QUERY_PLAN_SCHEMA = {
     "type": "object",
     "properties": {
-        "intent": {"type": "string"},
-        "answer_goal": {"type": "string"},
         "product_family": {"type": "string"},
+        "answer_goal": {"type": "string"},
         "corrected_query": {"type": "string"},
-        "search_queries": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
-        "keywords": {"type": "array", "items": {"type": "string"}, "maxItems": 16},
-        "must_include": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
-        "constraints": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
-        "evidence_fields": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
-        "exclude": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
-        "wants_all": {"type": "boolean"},
-        "needs_comparison": {"type": "boolean"},
+        "search_queries": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
+        "constraints": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
+        "evidence_fields": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
+        "exclude": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
         "answer_language": {"type": "string"},
         "medical": {"type": "boolean"},
         "retrieval_scope": {
@@ -2288,47 +2292,26 @@ _CLIENT_QUERY_PLAN_SCHEMA = {
             "enum": ["store", "context", "context_and_store"],
         },
     },
-    "required": ["intent", "answer_goal", "product_family", "corrected_query",
-                 "search_queries", "keywords", "must_include", "constraints",
-                 "evidence_fields", "exclude", "wants_all", "needs_comparison",
+    "required": ["product_family", "answer_goal", "corrected_query",
+                 "search_queries", "constraints", "evidence_fields", "exclude",
                  "answer_language", "medical", "retrieval_scope"],
     "additionalProperties": False,
 }
 
 _CLIENT_QUERY_PLAN_INSTRUCTIONS = (
-    "Tu es le planificateur de recherche d'un catalogue de pharmacie québécoise. "
-    "Lis et analyse d'abord la phrase complète et l'historique récent sans perdre son intention. "
-    "Identifie l'objet principal, le besoin, les contraintes, les variantes demandées et ce qui "
-    "doit être exclu. Ne traite jamais un mot isolé comme l'intention complète. Une question "
-    "de suivi comme 'et pour les enfants?' doit devenir une requête autonome qui conserve le "
-    "produit ou besoin discuté juste avant. Corrige les fautes probables "
-    "de marques et produits (exemple: advile/dadvile -> Advil), mais ne transforme jamais "
-    "une demande de nourriture en demande de médicament. Sépare toujours l'identité du produit "
-    "des critères servant à le choisir. product_family nomme la catégorie concrète à chercher "
-    "en magasin. answer_goal reformule en une phrase ce que l'employé doit réellement répondre. "
-    "constraints contient les préférences et limites comme sans sucre, sans parfum, pour enfant, "
-    "format liquide ou compatibilité. evidence_fields indique les faits qu'il faudra comparer, "
-    "comme nutrition, ingrédients, dosage, format, compatibilité ou dimensions. Un critère de "
-    "choix n'est pas nécessairement écrit dans le nom du produit: il ne doit jamais remplacer la "
-    "catégorie pendant la recherche. Même si les faits demandés risquent de manquer, cherche "
-    "d'abord toute la bonne famille de produits; la réponse expliquera ensuite ce qui peut ou non "
-    "être confirmé. Génère des requêtes bilingues français/anglais avec les noms courants, noms "
-    "officiels, abréviations probables et synonymes précis qui peuvent réellement apparaître dans "
-    "le nom, la marque, la description ou les notes. search_queries commence par plusieurs "
-    "formulations COURTES de la famille de produits, sans y répéter toute la question. keywords "
-    "contient des indices supplémentaires. must_include ne contient que l'identité indispensable "
-    "de la famille, jamais une préférence dont l'absence dans la fiche éliminerait tous les bons "
-    "produits. exclude contient seulement des catégories voisines clairement non demandées. Pour "
-    "un symptôme, ajoute les familles ou ingrédients "
-    "raisonnablement pertinents sans prétendre poser un diagnostic; pour un assortiment, "
-    "conserve toutes les contraintes de catégorie, saveur, format et marque. Le plan doit "
-    "fonctionner pour n'importe quelle catégorie du magasin, pas seulement les médicaments. "
-    "wants_all=true pour 'tous/toutes/all/each'. "
-    "needs_comparison=true quand l'utilisateur demande une différence ou comparaison. "
-    "retrieval_scope='context' seulement si une question de suivi vise clairement les produits "
-    "déjà montrés; utilise 'context_and_store' pour demander des alternatives et 'store' pour "
-    "une nouvelle recherche. "
-    "Retourne uniquement un objet JSON respectant exactement le schéma demandé."
+    "Tu interprètes une demande client pour rechercher le catalogue réel d'une pharmacie. "
+    "Lis la question entière et l'historique; ne réponds pas encore. product_family est l'objet "
+    "concret à trouver, jamais un attribut servant à le choisir. constraints contient les "
+    "préférences ou limites. corrected_query reformule la demande de façon autonome et corrige "
+    "les fautes probables. search_queries contient de 2 à 6 expressions très courtes, en français "
+    "et en anglais si utile, qui peuvent apparaître dans les noms ou descriptions; commence par "
+    "la famille exacte. evidence_fields nomme les faits à lire pour répondre, par exemple "
+    "ingrédients, nutrition, format, dosage, usage ou compatibilité. exclude contient seulement "
+    "les familles clairement non demandées. Pour une question de suivi, conserve l'objet discuté. "
+    "retrieval_scope vaut context si elle vise uniquement les produits déjà affichés, "
+    "context_and_store si elle demande d'autres options, sinon store. medical est vrai lorsque "
+    "le besoin touche un symptôme, un médicament, un traitement ou la santé. Le résultat doit "
+    "s'appliquer à n'importe quelle catégorie du magasin. Retourne uniquement le JSON demandé."
 )
 
 
@@ -2347,22 +2330,49 @@ def _clean_ai_string_list(value, max_items):
 
 def normalize_client_query_plan(parsed, question):
     parsed = parsed if isinstance(parsed, dict) else {}
+    local_plan = build_client_query_plan(question, "detailed")
     language = str(parsed.get("answer_language", "fr") or "fr").lower()
+    product_family = str(
+        parsed.get("product_family", "") or ""
+    ).strip()[:240]
+    search_queries = _clean_ai_string_list(
+        parsed.get("search_queries"), 6
+    )
+    if product_family and product_family not in search_queries:
+        search_queries.insert(0, product_family)
+    corrected_query = str(
+        parsed.get("corrected_query", "")
+        or (search_queries[0] if search_queries else "")
+        or product_family
+        or question
+    ).strip()
+    must_include = _clean_ai_string_list(parsed.get("must_include"), 10)
+    if product_family and not must_include:
+        must_include = [product_family]
+    medical = bool(parsed.get("medical", False)) or bool(
+        local_plan.get("medical", False)
+    )
     return {
-        "intent": str(parsed.get("intent", "product_search") or "product_search").strip(),
+        "intent": str(parsed.get("intent", "") or (
+            "medical_product_question" if medical else "product_search"
+        )).strip(),
         "answer_goal": str(parsed.get("answer_goal", "") or question).strip()[:600],
-        "product_family": str(parsed.get("product_family", "") or "").strip()[:240],
-        "corrected_query": str(parsed.get("corrected_query", "") or question).strip(),
-        "search_queries": _clean_ai_string_list(parsed.get("search_queries"), 10),
+        "product_family": product_family,
+        "corrected_query": corrected_query,
+        "search_queries": search_queries,
         "keywords": _clean_ai_string_list(parsed.get("keywords"), 16),
-        "must_include": _clean_ai_string_list(parsed.get("must_include"), 10),
+        "must_include": must_include,
         "constraints": _clean_ai_string_list(parsed.get("constraints"), 10),
         "evidence_fields": _clean_ai_string_list(parsed.get("evidence_fields"), 10),
         "exclude": _clean_ai_string_list(parsed.get("exclude"), 10),
-        "wants_all": bool(parsed.get("wants_all", False)),
-        "needs_comparison": bool(parsed.get("needs_comparison", False)),
+        "wants_all": bool(
+            parsed.get("wants_all", local_plan.get("wants_all", False))
+        ),
+        "needs_comparison": bool(parsed.get(
+            "needs_comparison", local_plan.get("needs_comparison", False)
+        )),
         "answer_language": "en" if language.startswith("en") else "fr",
-        "medical": bool(parsed.get("medical", False)),
+        "medical": medical,
         "retrieval_scope": (
             str(parsed.get("retrieval_scope", "store") or "store").strip()
             if str(parsed.get("retrieval_scope", "store") or "store").strip()
@@ -2393,10 +2403,14 @@ def generate_client_query_plan(question, history=None):
     provider_name = str(
         provider_info.get("name", "") if isinstance(provider_info, dict) else ""
     )
+    provider_model = str(
+        provider_info.get("model", "") if isinstance(provider_info, dict) else ""
+    )
+    planner_model = KIMI_PLANNER_MODEL if provider_name == "kimi" else ""
     cache_key = hashlib.sha256(json.dumps({
-        "pipeline": 2,
+        "pipeline": 3,
         "provider": provider_name,
-        "model": KIMI_REALTIME_MODEL,
+        "model": planner_model or provider_model,
         "question": re.sub(r"\s+", " ", str(question or "")).strip().lower(),
         "history": normalized_history[-6:],
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -2416,14 +2430,14 @@ def generate_client_query_plan(question, history=None):
 
     parsed = _provider_structured_request(
         _CLIENT_QUERY_PLAN_INSTRUCTIONS,
-        {"conversation": normalized_history, "question": question,
-         "required_schema": _CLIENT_QUERY_PLAN_SCHEMA},
-        max_tokens=600,
+        {"conversation": normalized_history[-6:], "question": question},
+        max_tokens=320,
         schema_name="client_query_plan",
         schema=_CLIENT_QUERY_PLAN_SCHEMA,
         question_preview=question,
         timeout_seconds=_AI_QUERY_PLAN_TIMEOUT_SECONDS,
         realtime_model=True,
+        model_override=planner_model,
     )
     if not isinstance(parsed, dict):
         return None
@@ -2526,76 +2540,37 @@ _CLIENT_VERIFICATION_SCHEMA = {
 }
 
 _CLIENT_VERIFICATION_INSTRUCTIONS = (
-    "Tu rédiges une réponse de travail claire pour un employé Familiprix. Les candidats viennent "
-    "uniquement du plan réel du magasin. Ils forment volontairement une liste à rappel élevé: "
-    "certains sont pertinents et d'autres sont seulement des voisins lexicaux. Lis chaque fiche "
-    "comme le ferait un employé expérimenté; ne suppose jamais que l'ordre du moteur prouve la "
-    "pertinence. Commence par answer_goal, product_family et constraints du query_plan, puis "
-    "évalue le nom, la description et les faits de chaque candidat par rapport à l'intention "
-    "complète. "
-    "selected_product_ids identifie tous les produits suffisamment liés à la demande qui doivent "
-    "rester dans le résultat final; utilise uniquement des candidate_id fournis, sans en inventer, "
-    "et écarte tous les candidats non pertinents. Pour une faute "
-    "de marque, comprends la vraie marque correspondante. Une demande "
-    "sur ce qu'il faut manger ne justifie pas automatiquement un analgésique. Ne prétends pas "
-    "connaître une saveur, un ingrédient ou un dosage absent des données. Rédige answer dans "
-    "answer_language, directement selon la demande et en tenant compte de l'historique. "
-    "Les descriptions disponibles peuvent être marquées non vérifiées: utilise-les comme contexte "
-    "pratique, mais ne présente pas un attribut incertain comme un fait confirmé. Les autres champs "
-    "non vérifiés sont volontairement omis: ne les reconstitue jamais à partir du nom ou de tes "
-    "connaissances. Si data_status n'est pas complete_verified, "
-    "indique brièvement ce que l'employé doit confirmer sur l'emballage lorsque cette "
-    "information est nécessaire. "
-    "verified_identifiers contient uniquement des identifiants confirmés. "
-    "unconfirmed_identifier_candidates contient des DIN, NPN ou DIN-HM candidats qui peuvent "
-    "être erronés: utilise-les seulement comme indices de recherche pour comprendre pourquoi un "
-    "produit correspond. Si tu cites un de ces numéros, écris explicitement qu'il est à confirmer "
-    "sur l'emballage. Ne le présente jamais comme l'identifiant certain du produit et ne l'utilise "
-    "jamais pour déduire un ingrédient, un dosage, une autorisation, une indication, une "
-    "équivalence ou toute autre propriété. Un identifiant candidat ne suffit pas non plus à "
-    "rattacher automatiquement une fiche réglementaire au produit. "
-    "Ne déclare jamais deux produits thérapeutiquement équivalents, interchangeables ou sûrs "
-    "comme substituts; une relation de famille ou de format ne prouve pas cela. "
-    "Si selected_text_from_previous_answer est fourni, réponds précisément à la question en reliant "
-    "ce passage au contexte. Si focused_product_id est fourni, centre la réponse sur ce produit. "
-    "Fais une réponse précise, facile à dire au client et suffisamment approfondie pour répondre à TOUTES "
-    "les dimensions demandées: 2 à 5 petits paragraphes, sans Markdown, sans **, et sans recopier "
-    "une longue liste de produits. Pour une comparaison de formes, distingue explicitement les "
-    "liquides/suspensions, comprimés/caplets, capsules liquides/liqui-gels et mini-gels quand ils "
-    "sont présents. Explique les différences pratiques pertinentes: façon de les prendre, facilité "
-    "à avaler, flexibilité de dose, clientèle/âge indiqué dans les données, ingrédient, dosage et "
-    "format. Tu peux employer des connaissances générales de pharmacie pour expliquer une forme, "
-    "mais présente-les comme générales et n'attribue jamais au produit un fait absent de sa fiche. "
-    "Si beaucoup de produits correspondent, résume les familles et sélectionne tous les produits "
-    "pertinents fournis, jusqu'à 16; seules les cartes sélectionnées seront affichées. "
-    "Décode les abréviations de planogramme usuelles: ENF=enfants, CO=comprimés, CAPS=capsules, "
-    "SIR=sirop, CR=crème, VAPO=vaporisateur, GTTE=gouttes, X/F=extra fort; les nombres indiquent "
-    "souvent le dosage ou le format. "
-    "Si candidates est vide, dis clairement qu'aucun produit correspondant n'est trouvé dans le plan, "
-    "réponds prudemment à la question générale sans nommer de produit et propose de préciser la demande. "
-    "Mentionne chaque produit sélectionné "
-    "avec son nom EXACT, copié tel quel, afin que l'interface puisse le rendre cliquable. Ne "
-    "nomme aucun produit non sélectionné. Pour une comparaison, explique les différences visibles "
-    "dans les données. Ne pose pas de diagnostic. Signale le pharmacien pour grossesse, bébé, "
-    "interaction, difficulté respiratoire, symptômes graves, fièvre élevée ou persistante, ou "
-    "doute médical. Retourne uniquement le JSON demandé."
-)
-
-
-_CLIENT_VERIFICATION_INSTRUCTIONS += (
-    " IMPORTANT: write selected_product_ids before answer in the JSON. Select at "
-    "most 16 products, and only products that satisfy the request. Never select or "
-    "name a product merely to explain that it is excluded. Answer every requested "
-    "dimension in 1 to 3 short paragraphs, about 80 to 170 words. Do not repeat a "
-    "long product list."
-)
-
-_CLIENT_VERIFICATION_INSTRUCTIONS += (
-    " matched_identifiers means the server resolved the employee's exact code "
-    "to this store product. Never say that code or product was not found. Read "
-    "the candidate name and catalogue_description before answering the requested "
-    "property. An unconfirmed DIN, NPN or DIN-HM remains unconfirmed even when it "
-    "was useful for exact retrieval."
+    "Tu es l'assistant produit expert d'un employé Familiprix. Réponds comme une personne "
+    "expérimentée qui a lu les fiches des produits du magasin. Commence par comprendre la "
+    "question complète, l'historique, answer_goal, product_family et constraints. Les candidates "
+    "forment une liste à rappel élevé: certains sont pertinents, d'autres seulement des voisins "
+    "lexicaux. Analyse leur nom, catalogue_description, verified_facts et catalogue_clues_to_confirm; "
+    "ne fais jamais confiance à leur ordre. Écarte tout produit qui ne répond pas réellement à la "
+    "demande. Écris selected_product_ids avant answer et utilise uniquement les candidate_id fournis. "
+    "Sélectionne jusqu'à 16 produits pertinents; ne sélectionne et ne nomme jamais un produit pour "
+    "expliquer qu'il est exclu. Mentionne chaque produit cité avec son nom EXACT afin qu'il devienne "
+    "cliquable dans l'interface. "
+    "Réponds d'abord à la vraie question, dans answer_language, en 1 à 3 courts paragraphes faciles "
+    "à dire au client, environ 70 à 160 mots. Donne la conclusion utile puis les différences ou "
+    "critères qui la justifient. Ne remplace pas l'explication par une liste de produits. Pour une "
+    "comparaison, traite toutes les dimensions demandées et distingue les variantes réellement "
+    "visibles: usage, forme, format, quantité, ingrédients, concentration, saveur, compatibilité ou "
+    "autre critère pertinent. Si plusieurs options existent, résume les familles au lieu de recopier "
+    "tous les noms dans answer; les cartes afficheront la liste complète. "
+    "Tu peux utiliser tes connaissances générales pour expliquer un concept ou un critère de choix. "
+    "Sépare toutefois cette explication générale des faits sur un produit précis: n'attribue jamais "
+    "à un produit une saveur, un ingrédient, un dosage, une propriété ou un usage absent de sa fiche. "
+    "Une description non vérifiée peut servir d'indice pratique, mais indique brièvement de confirmer "
+    "sur l'emballage lorsque ce fait détermine le choix. Les champs catalogue_clues_to_confirm ne sont "
+    "pas des faits confirmés. matched_identifiers signifie que le serveur a retrouvé exactement le "
+    "produit avec le code demandé: ne dis jamais qu'il est introuvable. Un DIN, NPN ou DIN-HM non "
+    "confirmé reste incertain, même s'il a permis la recherche; ne l'utilise pas pour déduire des "
+    "propriétés ni une équivalence. Ne déclare jamais deux produits thérapeutiquement équivalents ou "
+    "interchangeables sans preuve explicite. "
+    "Utilise selected_text_from_previous_answer et focused_product_id lorsqu'ils sont fournis. Si "
+    "candidates est vide, réponds prudemment à la question générale sans inventer un produit présent. "
+    "Ne pose pas de diagnostic. Oriente vers le pharmacien pour grossesse, bébé, interactions, "
+    "symptômes graves ou persistants, urgence possible ou doute médical. Retourne uniquement le JSON demandé."
 )
 
 
@@ -3052,9 +3027,8 @@ def generate_verified_client_answer(question, query_plan, candidates, history=No
         {"conversation": normalize_client_history(history), "question": question,
          "selected_text_from_previous_answer": selected_text,
          "focused_product_id": focus_product_id,
-         "query_plan": query_plan, "candidates": contexts,
-         "required_schema": _CLIENT_VERIFICATION_SCHEMA},
-        max_tokens=800,
+         "query_plan": query_plan, "candidates": contexts},
+        max_tokens=600,
         schema_name="client_verified_answer",
         schema=_CLIENT_VERIFICATION_SCHEMA,
         question_preview=question,
