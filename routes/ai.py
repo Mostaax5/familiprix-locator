@@ -2542,6 +2542,20 @@ def build_client_query_plan(question, mode="lookup"):
     }
 
 
+_CLIENT_ANSWER_REFERENCE_SCHEMA = {
+    "type": "array", "maxItems": 12,
+    "items": {
+        "type": "object",
+        "properties": {
+            "candidate_id": {"type": "string"},
+            "quote": {"type": "string"},
+        },
+        "required": ["candidate_id", "quote"],
+        "additionalProperties": False,
+    },
+}
+
+
 _CLIENT_VERIFICATION_SCHEMA = {
     "type": "object",
     "properties": {
@@ -2549,6 +2563,7 @@ _CLIENT_VERIFICATION_SCHEMA = {
             "type": "array", "items": {"type": "string"}, "maxItems": 16,
         },
         "answer": {"type": "string"},
+        "answer_references": _CLIENT_ANSWER_REFERENCE_SCHEMA,
         "follow_up_questions": {
             "type": "array", "items": {"type": "string"}, "maxItems": 4,
         },
@@ -2558,8 +2573,9 @@ _CLIENT_VERIFICATION_SCHEMA = {
         "pharmacist_referral": {"type": "boolean"},
         "pharmacist_reason": {"type": "string"},
     },
-    "required": ["selected_product_ids", "answer", "follow_up_questions",
-                 "safety_flags", "pharmacist_referral", "pharmacist_reason"],
+    "required": ["selected_product_ids", "answer", "answer_references",
+                 "follow_up_questions", "safety_flags", "pharmacist_referral",
+                 "pharmacist_reason"],
     "additionalProperties": False,
 }
 
@@ -2595,6 +2611,19 @@ _CLIENT_VERIFICATION_INSTRUCTIONS = (
     "candidates est vide, réponds prudemment à la question générale sans inventer un produit présent. "
     "Ne pose pas de diagnostic. Oriente vers le pharmacien pour grossesse, bébé, interactions, "
     "symptômes graves ou persistants, urgence possible ou doute médical. Retourne uniquement le JSON demandé."
+)
+
+
+_CLIENT_VERIFICATION_INSTRUCTIONS += (
+    " Une comparaison simple d'ingredients, de formes, de formats ou de quantites "
+    "doit deja recevoir ici une reponse complete: ne reserve jamais l'explication "
+    "utile au mode documente. Reponds toujours avec les informations disponibles "
+    "avant de proposer une precision. follow_up_questions vient seulement apres une "
+    "reponse autonome; retourne une liste vide si aucune question n'apporte une vraie "
+    "valeur. Pour chaque produit mentionne dans answer, ajoute answer_references avec "
+    "son candidate_id et la plus courte quote copiee mot pour mot depuis answer qui "
+    "le designe. Une meme quote peut referencer plusieurs formats. Ne reference jamais "
+    "un produit uniquement pour dire de l'eviter ou de l'exclure."
 )
 
 
@@ -2788,6 +2817,32 @@ def _unconfirmed_identifier_notice(question, answer, products):
     return ""
 
 
+def _normalize_answer_references(values, valid_ids, answer, limit=12):
+    valid_ids = set(valid_ids)
+    answer_text = str(answer or "")
+    answer_folded = re.sub(r"\s+", " ", answer_text).casefold()
+    references = []
+    seen = set()
+    for item in values if isinstance(values, list) else []:
+        if not isinstance(item, dict):
+            continue
+        candidate_id = str(item.get("candidate_id", "") or "").strip()
+        quote = re.sub(r"\s+", " ", str(item.get("quote", "") or "")).strip()[:240]
+        key = (candidate_id, quote.casefold())
+        if (
+            candidate_id not in valid_ids
+            or len(quote) < 2
+            or quote.casefold() not in answer_folded
+            or key in seen
+        ):
+            continue
+        seen.add(key)
+        references.append({"candidate_id": candidate_id, "quote": quote})
+        if len(references) >= limit:
+            break
+    return references
+
+
 def normalize_verified_client_answer(parsed, valid_ids):
     parsed = parsed if isinstance(parsed, dict) else {}
     valid_ids = set(valid_ids)
@@ -2798,9 +2853,13 @@ def normalize_verified_client_answer(parsed, valid_ids):
             selected.append(candidate_id)
         if len(selected) >= 16:
             break
+    answer = str(parsed.get("answer", "") or "").strip()
     return {
-        "answer": str(parsed.get("answer", "") or "").strip(),
+        "answer": answer,
         "selected_product_ids": selected,
+        "answer_references": _normalize_answer_references(
+            parsed.get("answer_references"), valid_ids, answer,
+        ),
         "follow_up_questions": _clean_ai_string_list(parsed.get("follow_up_questions"), 4),
         "safety_flags": _clean_ai_string_list(parsed.get("safety_flags"), 5),
         "pharmacist_referral": bool(parsed.get("pharmacist_referral", False)),
@@ -3052,7 +3111,7 @@ def generate_verified_client_answer(question, query_plan, candidates, history=No
          "selected_text_from_previous_answer": selected_text,
          "focused_product_id": focus_product_id,
          "query_plan": query_plan, "candidates": contexts},
-        max_tokens=600,
+        max_tokens=750,
         schema_name="client_verified_answer",
         schema=_CLIENT_VERIFICATION_SCHEMA,
         question_preview=question,
@@ -3082,6 +3141,30 @@ _DOCUMENTED_SOURCE_IDS_SCHEMA = {
     "type": "array", "items": {"type": "string"}, "maxItems": 4,
 }
 
+_DOCUMENTED_TEXT_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "text": {"type": "string"},
+        "source_ids": _DOCUMENTED_SOURCE_IDS_SCHEMA,
+    },
+    "required": ["text", "source_ids"],
+    "additionalProperties": False,
+}
+
+_DOCUMENTED_COMPARISON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "candidate_id": {"type": "string"},
+        "difference": {"type": "string"},
+        "practical_note": {"type": "string"},
+        "source_ids": _DOCUMENTED_SOURCE_IDS_SCHEMA,
+    },
+    "required": [
+        "candidate_id", "difference", "practical_note", "source_ids",
+    ],
+    "additionalProperties": False,
+}
+
 _CLIENT_DOCUMENTED_SCHEMA = {
     "type": "object",
     "properties": {
@@ -3092,8 +3175,9 @@ _CLIENT_DOCUMENTED_SCHEMA = {
             "type": "array", "items": {"type": "string"}, "maxItems": 8,
         },
         "answer": {"type": "string"},
+        "answer_references": _CLIENT_ANSWER_REFERENCE_SCHEMA,
         "key_points": {
-            "type": "array", "maxItems": 3,
+            "type": "array", "maxItems": 5,
             "items": {
                 "type": "object",
                 "properties": {
@@ -3105,9 +3189,26 @@ _CLIENT_DOCUMENTED_SCHEMA = {
                 "additionalProperties": False,
             },
         },
+        "comparisons": {
+            "type": "array", "maxItems": 6,
+            "items": _DOCUMENTED_COMPARISON_SCHEMA,
+        },
+        "useful_guidance": {
+            "type": "array", "maxItems": 4,
+            "items": _DOCUMENTED_TEXT_ITEM_SCHEMA,
+        },
+        "important_checks": {
+            "type": "array", "maxItems": 4,
+            "items": _DOCUMENTED_TEXT_ITEM_SCHEMA,
+        },
+        "follow_up_questions": {
+            "type": "array", "items": {"type": "string"}, "maxItems": 3,
+        },
     },
     "required": [
-        "selected_product_ids", "source_ids", "answer", "key_points",
+        "selected_product_ids", "source_ids", "answer", "answer_references",
+        "key_points", "comparisons", "useful_guidance", "important_checks",
+        "follow_up_questions",
     ],
     "additionalProperties": False,
 }
@@ -3249,6 +3350,27 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS += (
     "catalogue_description, verified_facts and catalogue clues, then answer the "
     "employee's actual question as a human would after reading that product file. "
     "Keep an unconfirmed DIN, NPN or DIN-HM explicitly unconfirmed."
+)
+
+
+_CLIENT_DOCUMENTED_INSTRUCTIONS += (
+    " IMPORTANT: the following output contract overrides any earlier sentence "
+    "saying that the server will generate comparisons, guidance, checks, or "
+    "follow-up questions. First, answer the complete question immediately in "
+    "answer with the same clarity expected from the normal AI mode. Never make "
+    "the employee ask a question before receiving a useful answer. Then use your "
+    "own judgment to add only material depth: evidence-backed comparisons in "
+    "comparisons, practical decision help in useful_guidance, and uncertainties "
+    "or label checks that could change the choice in important_checks. Do not "
+    "repeat answer in those sections and do not add generic filler. Return "
+    "follow_up_questions only when an answer would materially improve the next "
+    "recommendation; they are optional suggestions after the answer, never "
+    "prerequisites. Return an empty array when no useful question is needed. For "
+    "every product mentioned in answer, add answer_references containing its "
+    "candidate_id and the shortest quote copied exactly from answer that refers "
+    "to it. A shared quote may reference more than one package. Return exactly "
+    "selected_product_ids, source_ids, answer, answer_references, key_points, "
+    "comparisons, useful_guidance, important_checks, and follow_up_questions."
 )
 
 
@@ -5563,7 +5685,7 @@ def _generate_documented_client_answer_sync(
         },
         # The foreground K2.6 answer is intentionally compact; K3 keeps the
         # larger budget for the asynchronous documented upgrade.
-        max_tokens=1400 if quality_mode else 520,
+        max_tokens=1800 if quality_mode else 520,
         schema_name="client_documented_answer",
         schema=request_schema,
         question_preview=question,
@@ -5630,10 +5752,22 @@ def _generate_documented_client_answer_sync(
     if not result.get("key_points"):
         result["key_points"] = grounded.get("key_points", [])[:3]
     selected_ids = set(result.get("selected_product_ids") or [])
-    result["comparisons"] = [
+    grounded_comparisons = [
         comparison for comparison in grounded.get("comparisons", [])
         if comparison.get("candidate_id") in selected_ids
-    ][:4]
+    ]
+    model_comparisons = list(result.get("comparisons") or [])
+    compared_ids = {
+        str(comparison.get("candidate_id", "") or "")
+        for comparison in model_comparisons
+    }
+    result["comparisons"] = [
+        *model_comparisons,
+        *[
+            comparison for comparison in grounded_comparisons
+            if str(comparison.get("candidate_id", "") or "") not in compared_ids
+        ],
+    ][:6]
     if not result.get("useful_guidance"):
         result["useful_guidance"] = grounded.get("useful_guidance", [])[:2]
     if not result.get("important_checks"):
@@ -5763,6 +5897,9 @@ def _documented_job_finish(job_id, result, elapsed_ms):
     if _documented_answer_is_cacheable(result):
         public_result = {
             "answer": str(result.get("answer", "") or ""),
+            "answer_references": list(
+                result.get("answer_references") or []
+            )[:12],
             "selected_product_ids": list(
                 result.get("selected_product_ids") or []
             )[:16],
@@ -5890,6 +6027,10 @@ def _guard_selected_product_relevance(result, candidates):
     guarded = dict(result)
     guarded["selected_product_ids"] = kept_ids
     kept = set(kept_ids)
+    guarded["answer_references"] = [
+        reference for reference in guarded.get("answer_references", [])
+        if str(reference.get("candidate_id", "") or "") in kept
+    ]
     guarded["comparisons"] = [
         comparison for comparison in guarded.get("comparisons", [])
         if str(comparison.get("candidate_id", "") or "") in kept
@@ -7764,6 +7905,7 @@ def client_help():
         "success": True,
         "response_mode": response_mode,
         "answer": answer,
+        "answer_references": verified.get("answer_references", []),
         "products": public_products,
         "highlighted_product_ids": highlighted_product_ids,
         "query_plan": query_plan,

@@ -1701,6 +1701,11 @@ class ClientRagTests(unittest.TestCase):
         parsed = {
             "answer": "Advil",
             "selected_product_ids": ["product:1", "invented:99", "product:1"],
+            "answer_references": [
+                {"candidate_id": "product:1", "quote": "Advil"},
+                {"candidate_id": "invented:99", "quote": "Advil"},
+                {"candidate_id": "product:1", "quote": "Motrin"},
+            ],
             "follow_up_questions": [],
             "safety_flags": [],
             "pharmacist_referral": False,
@@ -1708,6 +1713,9 @@ class ClientRagTests(unittest.TestCase):
         }
         result = normalize_verified_client_answer(parsed, ["product:1"])
         self.assertEqual(result["selected_product_ids"], ["product:1"])
+        self.assertEqual(result["answer_references"], [
+            {"candidate_id": "product:1", "quote": "Advil"},
+        ])
 
     def test_partial_ai_answer_never_attaches_the_first_unrelated_candidates(self):
         candidates = [{
@@ -1735,6 +1743,10 @@ class ClientRagTests(unittest.TestCase):
         parsed = {
             "answer": "Réponse documentée.",
             "selected_product_ids": ["product:1", "invented:9"],
+            "answer_references": [
+                {"candidate_id": "product:1", "quote": "Réponse"},
+                {"candidate_id": "invented:9", "quote": "documentée"},
+            ],
             "key_points": [{
                 "heading": "Ingrédient", "detail": "Ibuprofène 200 mg.",
                 "source_ids": ["health-canada:12", "invented-source"],
@@ -1752,6 +1764,9 @@ class ClientRagTests(unittest.TestCase):
         result = normalize_documented_client_answer(parsed, ["product:1"], documents)
 
         self.assertEqual(result["selected_product_ids"], ["product:1"])
+        self.assertEqual(result["answer_references"], [
+            {"candidate_id": "product:1", "quote": "Réponse"},
+        ])
         self.assertEqual(result["key_points"][0]["source_ids"], ["health-canada:12"])
         self.assertEqual(result["comparisons"], [])
         self.assertEqual(result["source_ids"], ["health-canada:12"])
@@ -1802,6 +1817,74 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(result["selected_product_ids"], ["product:7"])
         self.assertEqual(result["comparisons"][0]["candidate_id"], "product:7")
         self.assertTrue(result["safety_flags"])
+
+    def test_deep_documented_model_generates_material_extra_analysis(self):
+        product = {
+            "id": 8, "client_id": "product:8",
+            "name": "ESSENTIEL CROUST NAT 150G", "brand": "Essentiel",
+            "description": "Croustilles nature, sac de 150 g.",
+            "_verified_fields": ["description"],
+            "aisle": "1", "side": "A", "section": "2",
+            "shelf": "3", "position": "4",
+        }
+        documents = [{
+            "source_id": "catalog:8", "title": "Fiche produit",
+            "publisher": "Catalogue", "evidence": "Croustilles nature 150 g.",
+            "candidate_ids": ["product:8"], "trust_level": 70,
+        }]
+        parsed = {
+            "selected_product_ids": ["product:8"],
+            "source_ids": ["catalog:8"],
+            "answer": "ESSENTIEL CROUST NAT 150G est l'option nature du plan.",
+            "answer_references": [{
+                "candidate_id": "product:8",
+                "quote": "ESSENTIEL CROUST NAT 150G",
+            }],
+            "key_points": [{
+                "heading": "Choix direct", "detail": "Le format est de 150 g.",
+                "source_ids": ["catalog:8"],
+            }],
+            "comparisons": [{
+                "candidate_id": "product:8", "difference": "Saveur nature.",
+                "practical_note": "Comparer le tableau nutritionnel.",
+                "source_ids": ["catalog:8"],
+            }],
+            "useful_guidance": [{
+                "text": "Comparer les glucides et les sucres par portion.",
+                "source_ids": [],
+            }],
+            "important_checks": [{
+                "text": "Confirmer la portion sur le sac.",
+                "source_ids": ["catalog:8"],
+            }],
+            "follow_up_questions": ["Le client compare-t-il aussi le sodium?"],
+        }
+
+        with patch(
+            "routes.ai._provider_structured_request", return_value=parsed,
+        ) as provider:
+            result = ai_module._generate_documented_client_answer_sync(
+                "Quelles chips choisir?", {"answer_language": "fr"},
+                [product], documents, quality_mode=True,
+            )
+
+        call = provider.call_args
+        self.assertEqual(call.kwargs["max_tokens"], 1800)
+        self.assertEqual(set(call.kwargs["schema"]["properties"]), {
+            "selected_product_ids", "source_ids", "answer",
+            "answer_references", "key_points", "comparisons",
+            "useful_guidance", "important_checks", "follow_up_questions",
+        })
+        self.assertEqual(result["answer_references"][0]["candidate_id"], "product:8")
+        self.assertEqual(result["comparisons"][0]["difference"], "Saveur nature.")
+        self.assertEqual(
+            result["useful_guidance"][0]["text"],
+            "Comparer les glucides et les sucres par portion.",
+        )
+        self.assertEqual(
+            result["follow_up_questions"],
+            ["Le client compare-t-il aussi le sodium?"],
+        )
 
     def test_documented_answer_keeps_products_when_ai_is_unavailable(self):
         product = {

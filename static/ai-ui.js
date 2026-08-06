@@ -31,6 +31,33 @@ function normalizeClientResponseMode(mode) {
   return ['lookup', 'detailed', 'documented'].includes(mode) ? mode : 'detailed';
 }
 
+function clientAnswerReferencesForStorage(value, answer='', products=[]) {
+  const availableIds = new Set(
+    (Array.isArray(products) ? products : [])
+      .map(product => String(product?.client_id || ''))
+      .filter(Boolean)
+  );
+  const answerText = String(answer || '');
+  const normalizedAnswer = typeof normalizeSearchText === 'function'
+    ? normalizeSearchText(answerText) : answerText.toLocaleLowerCase();
+  const references = [];
+  const seen = new Set();
+  for (const item of Array.isArray(value) ? value : []) {
+    const candidateId = String(item?.candidate_id || '').slice(0, 120);
+    const quote = String(item?.quote || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+    const normalizedQuote = typeof normalizeSearchText === 'function'
+      ? normalizeSearchText(quote) : quote.toLocaleLowerCase();
+    const key = `${candidateId}\n${normalizedQuote}`;
+    if (!candidateId || !quote || seen.has(key)) continue;
+    if (availableIds.size && !availableIds.has(candidateId)) continue;
+    if (normalizedAnswer && normalizedQuote && !normalizedAnswer.includes(normalizedQuote)) continue;
+    seen.add(key);
+    references.push({candidate_id: candidateId, quote});
+    if (references.length >= 12) break;
+  }
+  return references;
+}
+
 function getClientQuestion() {
   return document.getElementById('clientQuestion')?.value.trim() || '';
 }
@@ -136,17 +163,22 @@ function neutralClientWarning(value) {
 function clientResultForStorage(result) {
   if (!result || typeof result !== 'object') return null;
   const advice = result.advice || {};
+  const products = Array.isArray(result.products) ? result.products : [];
+  const answer = String(result.answer || advice.summary || '').slice(0, 6000);
   return {
     success: true,
     response_mode: normalizeClientResponseMode(result.response_mode),
-    answer: String(result.answer || advice.summary || '').slice(0, 6000),
+    answer,
+    answer_references: clientAnswerReferencesForStorage(
+      result.answer_references, answer, products
+    ),
     degraded: Boolean(result.degraded),
     warning: neutralClientWarning(result.warning),
     elapsed_ms: Number(result.elapsed_ms) || 0,
     highlighted_product_ids: Array.isArray(result.highlighted_product_ids)
       ? result.highlighted_product_ids.slice(0, 16).map(String)
       : [],
-    products: (Array.isArray(result.products) ? result.products : [])
+    products: products
       .slice(0, CLIENT_MAX_PRODUCTS_PER_EXCHANGE)
       .map(product => clientProductForStorage(product, result.response_mode === 'lookup')),
     advice: {
@@ -280,9 +312,9 @@ function setClientSearchMode(mode, shouldPersist=true) {
     const status = document.getElementById('clientHelpStatus');
     if (status) {
       status.textContent = _clientSearchMode === 'documented'
-        ? 'Réponse détaillée à partir des fiches produit et des sources disponibles.'
+        ? 'Réponse complète, puis analyse approfondie des fiches et sources disponibles.'
         : (_clientSearchMode === 'ai'
-          ? 'Analyse de la demande et vérification des produits du plan.'
+          ? 'Réponse directe à la demande avec les produits pertinents du plan.'
           : 'Recherche rapide : noms, images et emplacements du plan.');
     }
   }
@@ -309,20 +341,153 @@ function cleanClientAnswer(answer) {
     .trim();
 }
 
+const CLIENT_REFERENCE_STOPWORDS = new Set([
+  'avec', 'aux', 'cette', 'dans', 'des', 'du', 'elle', 'elles', 'est', 'et',
+  'format', 'les', 'leur', 'leurs', 'mais', 'pour', 'produit', 'produits',
+  'qui', 'sans', 'sont', 'sur', 'the', 'this', 'une', 'unites', 'votre',
+  'ca', 'co', 'com', 'g', 'gr', 'mg', 'ml', 'pot', 'reg', 'spl',
+]);
+
+function normalizedClientAnswerText(value) {
+  if (typeof normalizeSearchText === 'function') return normalizeSearchText(value);
+  return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function clientAnswerLinkAliases(products) {
+  const aliases = new Map();
+  const add = (label, product) => {
+    const clean = String(label || '').trim();
+    const key = clean.toLocaleLowerCase();
+    if (clean.length < 3 || !key) return;
+    if (!aliases.has(key)) aliases.set(key, {label: clean, products: []});
+    const entry = aliases.get(key);
+    if (!entry.products.some(item => String(item.client_id || '') === String(product.client_id || ''))) {
+      entry.products.push(product);
+    }
+  };
+  for (const product of Array.isArray(products) ? products : []) {
+    add(product.name, product);
+    if (String(product.brand || '').trim().length >= 4) add(product.brand, product);
+  }
+  return [...aliases.values()]
+    .filter(entry => entry.products.length === 1)
+    .map(entry => ({label: entry.label, product: entry.products[0]}))
+    .sort((a, b) => b.label.length - a.label.length);
+}
+
 function linkifyClientAnswer(answer, products, exchangeId='') {
   const text = cleanClientAnswer(answer);
-  const named = [...products]
-    .filter(product => String(product.name || '').trim())
-    .sort((a, b) => String(b.name).length - String(a.name).length);
-  if (!named.length) return esc(text);
+  const aliases = clientAnswerLinkAliases(products);
+  if (!aliases.length) return esc(text);
 
-  const escapedNames = named.map(product => String(product.name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  const pattern = new RegExp(`(${escapedNames.join('|')})`, 'gi');
-  const byName = new Map(named.map(product => [String(product.name).toLocaleLowerCase(), product]));
+  const escapedAliases = aliases.map(item => item.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const pattern = new RegExp(`(${escapedAliases.join('|')})`, 'gi');
+  const byAlias = new Map(aliases.map(item => [item.label.toLocaleLowerCase(), item.product]));
   return text.split(pattern).map(part => {
-    const product = byName.get(String(part).toLocaleLowerCase());
+    const product = byAlias.get(String(part).toLocaleLowerCase());
     return product ? clientProductLink(product, part, exchangeId) : esc(part);
   }).join('');
+}
+
+function clientReferenceTerms(value) {
+  return normalizedClientAnswerText(value).split(' ').filter(term => (
+    term.length >= 3
+    && !CLIENT_REFERENCE_STOPWORDS.has(term)
+    && !/^\d/.test(term)
+  ));
+}
+
+function clientReferenceTermMatches(term, passageTerms) {
+  return passageTerms.some(candidate => (
+    candidate === term
+    || (term.length >= 4 && candidate.length >= 4
+      && (candidate.startsWith(term) || term.startsWith(candidate)))
+  ));
+}
+
+function clientPassageProductScore(passage, product, brandFrequency) {
+  const passageText = normalizedClientAnswerText(passage);
+  if (!passageText) return 0;
+  const passageTerms = passageText.split(' ').filter(Boolean);
+  const name = normalizedClientAnswerText(product?.name);
+  const brand = normalizedClientAnswerText(product?.brand);
+  if (name.length >= 4 && passageText.includes(name)) return 200;
+
+  let score = 0;
+  const brandPresent = brand.length >= 4 && passageText.includes(brand);
+  if (brandPresent) score += brandFrequency === 1 ? 42 : 18;
+
+  const nameTerms = [...new Set(clientReferenceTerms(product?.name))];
+  const nameMatches = nameTerms.filter(term => clientReferenceTermMatches(term, passageTerms)).length;
+  score += nameMatches * 9;
+  if (nameMatches >= 2) score += 8;
+  if (brandPresent && nameMatches) score += 6;
+
+  const descriptionTerms = [...new Set(clientReferenceTerms([
+    product?.description, product?.usage_notes,
+  ].filter(Boolean).join(' ')))];
+  const descriptionMatches = descriptionTerms
+    .filter(term => clientReferenceTermMatches(term, passageTerms)).length;
+  score += Math.min(descriptionMatches, 6) * 2;
+  return score;
+}
+
+function clientPassageProductAssignments(passages, products, references=[]) {
+  const assignments = passages.map(() => []);
+  const productsById = new Map((Array.isArray(products) ? products : []).map(product => (
+    [String(product.client_id || ''), product]
+  )));
+  const explicitlyAssigned = new Set();
+  const add = (index, product) => {
+    if (index < 0 || !product || assignments[index].includes(product)) return;
+    assignments[index].push(product);
+  };
+
+  for (const reference of Array.isArray(references) ? references : []) {
+    const product = productsById.get(String(reference?.candidate_id || ''));
+    const quote = normalizedClientAnswerText(reference?.quote);
+    if (!product || !quote) continue;
+    const index = passages.findIndex(passage => normalizedClientAnswerText(passage).includes(quote));
+    if (index < 0) continue;
+    add(index, product);
+    explicitlyAssigned.add(String(product.client_id || ''));
+  }
+
+  const brandCounts = new Map();
+  for (const product of productsById.values()) {
+    const brand = normalizedClientAnswerText(product.brand);
+    if (brand) brandCounts.set(brand, (brandCounts.get(brand) || 0) + 1);
+  }
+  for (const product of productsById.values()) {
+    if (explicitlyAssigned.has(String(product.client_id || ''))) continue;
+    const brand = normalizedClientAnswerText(product.brand);
+    let bestIndex = -1;
+    let bestScore = 0;
+    passages.forEach((passage, index) => {
+      const score = clientPassageProductScore(
+        passage, product, brandCounts.get(brand) || 0
+      );
+      if (score > bestScore) {
+        bestScore = score;
+        bestIndex = index;
+      }
+    });
+    if (bestIndex >= 0 && bestScore >= 22) add(bestIndex, product);
+  }
+  return assignments.map(items => items.slice(0, 4));
+}
+
+function clientInlineProductReferences(passage, products, exchangeId='') {
+  const passageText = normalizedClientAnswerText(passage);
+  const unlinked = products.filter(product => {
+    const name = normalizedClientAnswerText(product?.name);
+    return !name || !passageText.includes(name);
+  });
+  if (!unlinked.length) return '';
+  const links = unlinked.map(product => clientProductLink(product, '', exchangeId))
+    .join('<span class="client-link-sep"> &middot; </span>');
+  return `<span class="client-answer-inline-products"><span>Produit${unlinked.length > 1 ? 's' : ''} concern&eacute;${unlinked.length > 1 ? 's' : ''} :</span> ${links}</span>`;
 }
 
 function clientQuoteButton(quote, focusProductId='', label='Citer ce passage') {
@@ -330,7 +495,7 @@ function clientQuoteButton(quote, focusProductId='', label='Citer ce passage') {
   return `<button type="button" class="client-quote-action" data-quote="${encodeURIComponent(cleanQuote)}" data-focus-product="${esc(focusProductId)}" onclick="event.stopPropagation();quoteClientPassage(decodeURIComponent(this.dataset.quote),this.dataset.focusProduct)" title="${esc(label)}" aria-label="${esc(label)}">&#8220;</button>`;
 }
 
-function renderQuotableClientAnswer(answer, products=[], exchangeId='') {
+function renderQuotableClientAnswer(answer, products=[], exchangeId='', references=[]) {
   const text = cleanClientAnswer(answer);
   if (!text) return '';
   const passages = [];
@@ -353,9 +518,10 @@ function renderQuotableClientAnswer(answer, products=[], exchangeId='') {
     }
     if (passage) passages.push(passage);
   }
-  return passages.map(passage => `
+  const assignments = clientPassageProductAssignments(passages, products, references);
+  return passages.map((passage, index) => `
     <div class="client-answer-paragraph">
-      <div class="client-answer-paragraph-text">${linkifyClientAnswer(passage, products, exchangeId)}</div>
+      <div class="client-answer-paragraph-text">${linkifyClientAnswer(passage, products, exchangeId)}${clientInlineProductReferences(passage, assignments[index], exchangeId)}</div>
       ${clientQuoteButton(passage)}
     </div>`).join('');
 }
@@ -443,7 +609,7 @@ function renderDocumentedClientDetails(result, exchangeId) {
       <div class="client-doc-heading">${esc(title)}</div>
       <div class="client-doc-list">${items.map(item => `
         <div class="client-doc-item">
-          <div class="client-doc-item-copy">${esc(item.text || '')}${clientDocumentCitations(item.source_ids, sourceNumbers, exchangeId)}</div>
+          <div class="client-doc-item-copy">${linkifyClientAnswer(item.text || '', products, exchangeId)}${clientDocumentCitations(item.source_ids, sourceNumbers, exchangeId)}</div>
           ${clientQuoteButton(item.text || '', '', 'Citer ce point')}
         </div>
       `).join('')}</div>
@@ -456,7 +622,7 @@ function renderDocumentedClientDetails(result, exchangeId) {
         <div class="client-doc-item">
           <div>
             <div class="client-doc-item-heading">${esc(item.heading || '')}</div>
-            <div class="client-doc-item-copy">${esc(item.detail || '')}${clientDocumentCitations(item.source_ids, sourceNumbers, exchangeId)}</div>
+            <div class="client-doc-item-copy">${linkifyClientAnswer(item.detail || '', products, exchangeId)}${clientDocumentCitations(item.source_ids, sourceNumbers, exchangeId)}</div>
           </div>
           ${clientQuoteButton(`${item.heading || ''}: ${item.detail || ''}`, '', 'Citer ce point')}
         </div>
@@ -471,8 +637,8 @@ function renderDocumentedClientDetails(result, exchangeId) {
         return `<div class="client-doc-comparison">
           <div class="client-doc-comparison-product">${product ? clientProductLink(product, '', exchangeId) : esc(productName)}</div>
           <div class="client-doc-comparison-copy">
-            ${item.difference ? `<div><strong>Différence :</strong> ${esc(item.difference)}</div>` : ''}
-            ${item.practical_note ? `<div><strong>En pratique :</strong> ${esc(item.practical_note)}</div>` : ''}
+            ${item.difference ? `<div><strong>Différence :</strong> ${linkifyClientAnswer(item.difference, products, exchangeId)}</div>` : ''}
+            ${item.practical_note ? `<div><strong>En pratique :</strong> ${linkifyClientAnswer(item.practical_note, products, exchangeId)}</div>` : ''}
             ${clientDocumentCitations(item.source_ids, sourceNumbers, exchangeId)}
             ${clientQuoteButton(`${productName}: ${copy}`, item.candidate_id || '', 'Citer cette comparaison')}
           </div>
@@ -522,13 +688,13 @@ function renderLatestAssistantDetails(result, exchangeId, includeActions=true) {
       ? '<div class="msg info client-ai-fallback">Réponse immédiate affichée. Approfondissement en cours.</div>'
       : (result?.degraded ? `<div class="msg info client-ai-fallback">${esc(result.warning || 'Réponse de secours fondée sur les données disponibles.')}</div>` : '')}
     ${result?.response_mode === 'documented' ? '<div class="client-doc-heading">À dire au client</div>' : ''}
-    <div class="client-chat-answer">${renderQuotableClientAnswer(result?.answer || advice.summary || '', products, exchangeId)}</div>
+    <div class="client-chat-answer">${renderQuotableClientAnswer(result?.answer || advice.summary || '', products, exchangeId, result?.answer_references || [])}</div>
     ${links ? `<div class="client-answer-products"><span>Produits cités :</span> ${links}</div>` : ''}
     ${clientProductsActionMarkup(result, exchangeId)}
     ${renderDocumentedClientDetails(result, exchangeId)}
     ${advice.follow_up_questions?.length ? `
       <div class="advice-section">
-        <span class="advice-label">À préciser avec le client</span>
+        <span class="advice-label">Pour aller plus loin (facultatif)</span>
         <div class="advice-list">${advice.follow_up_questions.map(item => `<button type="button" class="advice-item client-followup-suggestion" data-question="${encodeURIComponent(String(item))}" onclick="useClientFollowup(decodeURIComponent(this.dataset.question))">${esc(item)}</button>`).join('')}</div>
       </div>` : ''}
     ${advice.safety_flags?.length ? `
@@ -1476,11 +1642,15 @@ function prepareClientResult(result) {
     highlightedIds = products.map(product => String(product.client_id || '')).filter(Boolean);
   }
   const answer = cleanClientAnswer(prepared.answer || advice.summary || '');
+  const answerReferences = clientAnswerReferencesForStorage(
+    prepared.answer_references, answer, products
+  );
   return {
     ...prepared,
     success: true,
     response_mode: normalizeClientResponseMode(prepared.response_mode),
     answer,
+    answer_references: answerReferences,
     warning: neutralClientWarning(prepared.warning),
     products,
     highlighted_product_ids: highlightedIds,
@@ -1568,6 +1738,8 @@ function mergeDocumentedClientUpgrade(baseResult, upgrade, elapsedMs=0) {
   return prepareClientResult({
     ...base,
     answer: String(finalResult.answer || base.answer || ''),
+    answer_references: Array.isArray(finalResult.answer_references)
+      ? finalResult.answer_references : [],
     degraded: false,
     warning: '',
     ai_pending: false,

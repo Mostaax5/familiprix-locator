@@ -275,6 +275,8 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:#c8102e;box-sh
 .client-answer-paragraph{display:grid;grid-template-columns:minmax(0,1fr) 34px;gap:8px;align-items:start}
 .client-answer-paragraph+.client-answer-paragraph{margin-top:9px;padding-top:9px;border-top:1px solid #f1f5f9}
 .client-answer-paragraph-text{white-space:pre-line;min-width:0}
+.client-answer-inline-products{display:block;margin-top:5px;color:#64748b;font-size:12px;line-height:1.55;white-space:normal}
+.client-answer-inline-products>span:first-child{color:#475569;font-weight:700}
 .client-quote-action{width:34px;height:34px;display:grid;place-items:center;flex:none;border:1px solid #cbd5e1;border-radius:6px;background:#fff;color:#2563eb;font-family:Georgia,serif;font-size:24px;line-height:1;cursor:pointer;touch-action:manipulation}
 .client-quote-action:hover,.client-quote-action:focus-visible,.client-quote-action.is-active{border-color:#2563eb;background:#eff6ff;outline:none}
 .client-response-mode{display:inline-flex;margin-bottom:8px;border-radius:5px;padding:3px 7px;font-size:9px;font-weight:800;text-transform:uppercase;background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe}

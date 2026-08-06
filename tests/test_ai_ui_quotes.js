@@ -129,6 +129,30 @@ assert.ok(!confirmedDinMarkup.includes('non disponible'));
 const rendered = context.__quoteTest.renderQuotableClientAnswer(longAnswer, []);
 assert.ok((rendered.match(/client-quote-action/g) || []).length >= 2);
 
+const citedProducts = [{
+  id: 11, client_id: 'product:11', name: 'LA/COC TOR/CHIPS TACO 12X360G',
+  brand: 'La Cocina', description: 'Croustilles de tortilla coupe epaisse.',
+}, {
+  id: 12, client_id: 'product:12', name: 'ESSENTIEL CROUST NAT ON16X150G',
+  brand: 'Essentiel', description: 'Croustilles nature ondulees.',
+}];
+const citedAnswer = [
+  'Les croustilles La Cocina sont un bon choix selon leur fiche.',
+  'Les croustilles Nature Essentiel doivent etre confirmees sur emballage.',
+].join('\n');
+const citedMarkup = context.__quoteTest.renderQuotableClientAnswer(
+  citedAnswer, citedProducts, 'cited-exchange', [{
+    candidate_id: 'product:11', quote: 'croustilles La Cocina',
+  }, {
+    candidate_id: 'product:12', quote: 'Nature Essentiel',
+  }]
+);
+assert.ok(citedMarkup.includes('LA/COC TOR/CHIPS TACO 12X360G'));
+assert.ok(citedMarkup.includes('ESSENTIEL CROUST NAT ON16X150G'));
+assert.ok(citedMarkup.includes('client-answer-inline-products'));
+assert.ok(citedMarkup.includes('data-product-id="product:11"'));
+assert.ok(citedMarkup.includes('data-product-id="product:12"'));
+
 const productButton = context.__quoteTest.clientQuoteButton(
   'Produit Exemple: Description utile', 'product:42', 'Citer cette description'
 );
@@ -159,6 +183,7 @@ const savedProduct = {
 context.__quoteTest.seedSearchState(
   {
     response_mode: 'detailed', answer: 'Réponse sauvegardée',
+    answer_references: [{candidate_id: 'product:42', quote: 'Réponse'}],
     highlighted_product_ids: ['product:42'],
     advice: {summary: 'Réponse sauvegardée', follow_up_questions: ['Pourquoi?']},
   },
@@ -169,6 +194,7 @@ const savedState = context.__quoteTest.getClientSearchStateForStorage();
 assert.strictEqual(savedState.products.length, 1);
 assert.strictEqual(savedState.products[0].description, 'Description persistée');
 assert.strictEqual(savedState.latest_result.answer, 'Réponse sauvegardée');
+assert.strictEqual(savedState.latest_result.answer_references[0].candidate_id, 'product:42');
 
 const firstResult = {
   response_mode: 'detailed', answer: 'Première réponse',
@@ -271,6 +297,7 @@ const upgradedDocumented = context.__quoteTest.mergeDocumentedClientUpgrade(
   },
   {
     answer: 'Réponse approfondie finale.',
+    answer_references: [{candidate_id: 'product:42', quote: 'Réponse approfondie'}],
     selected_product_ids: ['product:42'],
     follow_up_questions: ['Quel format préférez-vous?'],
     safety_flags: ['Vérifier l’étiquette.'],
@@ -290,6 +317,7 @@ const upgradedDocumented = context.__quoteTest.mergeDocumentedClientUpgrade(
 assert.strictEqual(upgradedDocumented.answer, 'Réponse approfondie finale.');
 assert.strictEqual(upgradedDocumented.degraded, false);
 assert.strictEqual(upgradedDocumented.ai_pending, false);
+assert.strictEqual(upgradedDocumented.answer_references[0].candidate_id, 'product:42');
 assert.strictEqual(
   upgradedDocumented.advice.documentation.key_points[0].heading,
   'Point final',
