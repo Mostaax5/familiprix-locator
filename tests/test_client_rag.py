@@ -2102,6 +2102,9 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(generator.call_count, 2)
         self.assertEqual(job["status"], "ready")
         self.assertEqual(job["result"]["answer"], generated["answer"])
+        self.assertEqual(
+            job["result"]["products"][0]["client_id"], "product:async",
+        )
         self.assertEqual(ready_response.status_code, 200)
         self.assertTrue(ready_response.get_json()["ready"])
         self.assertTrue(cached["_cache_hit"])

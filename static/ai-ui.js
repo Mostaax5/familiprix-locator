@@ -1715,9 +1715,9 @@ function updateClientExchangeResult(exchangeId, rawResult) {
 function mergeDocumentedClientUpgrade(baseResult, upgrade, elapsedMs=0) {
   const base = prepareClientResult(baseResult);
   const finalResult = upgrade && typeof upgrade === 'object' ? upgrade : {};
-  const selectedIds = Array.isArray(finalResult.selected_product_ids)
+  const hasSelectedIds = Array.isArray(finalResult.selected_product_ids);
+  const selectedIds = hasSelectedIds
     ? finalResult.selected_product_ids.slice(0, 16).map(String) : [];
-  const selectedSet = new Set(selectedIds);
   const documentation = base.advice?.documentation || {};
   const allSources = Array.isArray(documentation.sources)
     ? documentation.sources : [];
@@ -1732,11 +1732,21 @@ function mergeDocumentedClientUpgrade(baseResult, upgrade, elapsedMs=0) {
     ))
     : allSources;
   if (sources.length === 1 && allSources.length > 1) sources = allSources;
-  const selectedProducts = base.products.filter(product => (
-    selectedSet.has(String(product.client_id || ''))
-  ));
+  const productsById = new Map(base.products.map(product => (
+    [String(product.client_id || ''), product]
+  )));
+  for (const rawProduct of Array.isArray(finalResult.products) ? finalResult.products : []) {
+    const product = typeof normalizeProduct === 'function'
+      ? normalizeProduct(rawProduct) : {...rawProduct};
+    const candidateId = String(product.client_id || '');
+    if (candidateId) productsById.set(candidateId, product);
+  }
+  const selectedProducts = selectedIds
+    .map(candidateId => productsById.get(candidateId))
+    .filter(Boolean);
   return prepareClientResult({
     ...base,
+    products: hasSelectedIds ? selectedProducts : base.products,
     answer: String(finalResult.answer || base.answer || ''),
     answer_references: Array.isArray(finalResult.answer_references)
       ? finalResult.answer_references : [],

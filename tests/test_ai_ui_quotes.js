@@ -303,7 +303,11 @@ const upgradedDocumented = context.__quoteTest.mergeDocumentedClientUpgrade(
   {
     answer: 'Réponse approfondie finale.',
     answer_references: [{candidate_id: 'product:42', quote: 'Réponse approfondie'}],
-    selected_product_ids: ['product:42'],
+    selected_product_ids: ['product:42', 'product:43'],
+    products: [{
+      ...savedProduct, id: 43, client_id: 'product:43',
+      name: 'Produit découvert en analyse', barcode: '456',
+    }],
     follow_up_questions: ['Quel format préférez-vous?'],
     safety_flags: ['Vérifier l’étiquette.'],
     pharmacist_referral: false,
@@ -323,6 +327,10 @@ assert.strictEqual(upgradedDocumented.answer, 'Réponse approfondie finale.');
 assert.strictEqual(upgradedDocumented.degraded, false);
 assert.strictEqual(upgradedDocumented.ai_pending, false);
 assert.strictEqual(upgradedDocumented.answer_references[0].candidate_id, 'product:42');
+assert.deepStrictEqual(
+  JSON.parse(JSON.stringify(upgradedDocumented.products.map(product => product.client_id))),
+  ['product:42', 'product:43'],
+);
 assert.strictEqual(
   upgradedDocumented.advice.documentation.key_points[0].heading,
   'Point final',

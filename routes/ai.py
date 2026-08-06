@@ -5897,6 +5897,7 @@ def _documented_job_finish(job_id, result, elapsed_ms):
             "answer_references": list(
                 result.get("answer_references") or []
             )[:12],
+            "products": list(result.get("products") or [])[:16],
             "selected_product_ids": list(
                 result.get("selected_product_ids") or []
             )[:16],
@@ -6107,7 +6108,20 @@ def generate_documented_client_answer(
             result = _guard_documented_inventory_contradiction(
                 result, query_plan, candidates, documents,
             )
-            return _guard_selected_product_relevance(result, candidates)
+            result = _guard_selected_product_relevance(result, candidates)
+            if isinstance(result, dict):
+                from routes.products import public_product_payload
+
+                selected_ids = set(result.get("selected_product_ids") or [])
+                selected_products = [
+                    product for product in candidates
+                    if str(product.get("client_id", "") or "") in selected_ids
+                ][:16]
+                result["products"] = [
+                    public_product_payload(product)
+                    for product in selected_products
+                ]
+            return result
         finally:
             _DOCUMENTED_AI_GATE.release()
 
