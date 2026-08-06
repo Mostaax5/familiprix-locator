@@ -279,10 +279,10 @@ _DOCUMENTED_JOB_MAX = 32
 _DOCUMENTED_JOB_TTL_SECONDS = 10 * 60
 try:
     _AI_QUERY_PLAN_TIMEOUT_SECONDS = min(
-        7, max(3, int(os.environ.get("AI_QUERY_PLAN_TIMEOUT", "5")))
+        8, max(4, int(os.environ.get("AI_QUERY_PLAN_TIMEOUT", "6")))
     )
 except (TypeError, ValueError):
-    _AI_QUERY_PLAN_TIMEOUT_SECONDS = 5
+    _AI_QUERY_PLAN_TIMEOUT_SECONDS = 6
 _DEEPSEEK_DOCUMENTED_THINKING = (
     os.environ.get("DEEPSEEK_DOCUMENTED_THINKING", "").strip().lower()
     in {"1", "true", "yes", "on"}
@@ -1767,7 +1767,72 @@ def _partial_json_string_array(raw_text, field_name, max_items=16):
     return _clean_ai_string_list(value, max_items)
 
 
-def _read_kimi_stream(response, deadline):
+def _partial_json_string(raw_text, field_name):
+    match = re.search(
+        rf'"{re.escape(str(field_name))}"\s*:\s*("(?:\\.|[^"\\])*")',
+        str(raw_text or ""),
+        flags=re.DOTALL,
+    )
+    if not match:
+        return ""
+    try:
+        return str(json.loads(match.group(1)) or "").strip()
+    except (TypeError, json.JSONDecodeError):
+        return ""
+
+
+def _partial_json_boolean(raw_text, field_name, default=False):
+    match = re.search(
+        rf'"{re.escape(str(field_name))}"\s*:\s*(true|false)',
+        str(raw_text or ""), flags=re.IGNORECASE,
+    )
+    if not match:
+        return bool(default)
+    return match.group(1).lower() == "true"
+
+
+def _partial_client_query_plan(raw_text):
+    """Recover the useful front of a planner stream before its deadline.
+
+    Kimi emits schema fields in order. Product identity and search phrases are
+    intentionally first, so retrieval can still use the model's interpretation
+    even if trailing booleans arrive just after the employee-facing deadline.
+    """
+    product_family = _partial_json_string(raw_text, "product_family")
+    corrected_query = _partial_json_string(raw_text, "corrected_query")
+    search_queries = _partial_json_string_array(
+        raw_text, "search_queries", max_items=10,
+    )
+    if not product_family and not corrected_query and not search_queries:
+        return None
+    return {
+        "intent": _partial_json_string(raw_text, "intent") or "product_search",
+        "answer_goal": _partial_json_string(raw_text, "answer_goal"),
+        "product_family": product_family,
+        "corrected_query": corrected_query,
+        "search_queries": search_queries,
+        "keywords": _partial_json_string_array(raw_text, "keywords", 16),
+        "must_include": _partial_json_string_array(raw_text, "must_include", 10),
+        "constraints": _partial_json_string_array(raw_text, "constraints", 10),
+        "evidence_fields": _partial_json_string_array(
+            raw_text, "evidence_fields", 10,
+        ),
+        "exclude": _partial_json_string_array(raw_text, "exclude", 10),
+        "wants_all": _partial_json_boolean(raw_text, "wants_all"),
+        "needs_comparison": _partial_json_boolean(
+            raw_text, "needs_comparison",
+        ),
+        "answer_language": (
+            _partial_json_string(raw_text, "answer_language") or "fr"
+        ),
+        "medical": _partial_json_boolean(raw_text, "medical"),
+        "retrieval_scope": (
+            _partial_json_string(raw_text, "retrieval_scope") or "store"
+        ),
+    }
+
+
+def _read_kimi_stream(response, deadline, schema_name=""):
     content_parts = []
     usage = {}
     total_bytes = 0
@@ -1810,6 +1875,10 @@ def _read_kimi_stream(response, deadline):
     parsed = _parse_chat_json(raw_text)
     if parsed is not None:
         return parsed, usage
+    if schema_name == "client_query_plan":
+        partial_plan = _partial_client_query_plan(raw_text)
+        if partial_plan is not None:
+            return partial_plan, usage
     partial_answer = _partial_json_answer(raw_text)
     partial_selected_ids = _partial_json_string_array(
         raw_text, "selected_product_ids", max_items=16,
@@ -1969,7 +2038,7 @@ def _kimi_json_request(messages, max_tokens, question_preview="", quality_mode=F
         with _safe_urlopen(request_obj, timeout=timeout) as response:
             if stream_response:
                 parsed, usage = _read_kimi_stream(
-                    response, request_deadline
+                    response, request_deadline, schema_name=schema_name,
                 )
                 if parsed is None:
                     _set_ai_error(
@@ -2349,7 +2418,7 @@ def generate_client_query_plan(question, history=None):
         _CLIENT_QUERY_PLAN_INSTRUCTIONS,
         {"conversation": normalized_history, "question": question,
          "required_schema": _CLIENT_QUERY_PLAN_SCHEMA},
-        max_tokens=900,
+        max_tokens=600,
         schema_name="client_query_plan",
         schema=_CLIENT_QUERY_PLAN_SCHEMA,
         question_preview=question,

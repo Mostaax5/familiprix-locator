@@ -2394,6 +2394,42 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertEqual(parsed["selected_product_ids"], ["product:42"])
 
+    def test_kimi_stream_recovers_product_family_from_partial_query_plan(self):
+        partial = (
+            '{"intent":"food_comparison",'
+            '"answer_goal":"Comparer les croustilles selon leur sucre",'
+            '"product_family":"croustilles",'
+            '"corrected_query":"croustilles avec le moins de sucre",'
+            '"search_queries":["croustilles","chips"],'
+            '"keywords":['
+        )
+
+        class StreamResponse:
+            fp = None
+
+            def __init__(self):
+                self.lines = iter([
+                    (
+                        "data: " + json.dumps({
+                            "choices": [{"delta": {"content": partial}}],
+                        }, ensure_ascii=False) + "\n\n"
+                    ).encode("utf-8"),
+                    b"",
+                ])
+
+            def readline(self):
+                return next(self.lines, b"")
+
+        parsed, usage = _read_kimi_stream(
+            StreamResponse(), time.monotonic() + 5,
+            schema_name="client_query_plan",
+        )
+
+        self.assertEqual(parsed["product_family"], "croustilles")
+        self.assertEqual(parsed["search_queries"], ["croustilles", "chips"])
+        self.assertEqual(parsed["retrieval_scope"], "store")
+        self.assertEqual(usage, {})
+
     def test_kimi_stream_deadline_includes_connection_time(self):
         events = []
         captured = {}
@@ -2409,9 +2445,10 @@ class ClientRagTests(unittest.TestCase):
             self.assertEqual(timeout, 15)
             return response
 
-        def reader(_response, deadline):
+        def reader(_response, deadline, schema_name=""):
             events.append("read")
             captured["deadline"] = deadline
+            captured["schema_name"] = schema_name
             return {"answer": "ok"}, {}
 
         with patch("routes.ai.KIMI_API_KEY", "secret"), \
