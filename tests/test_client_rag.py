@@ -2907,6 +2907,50 @@ class ClientRagTests(unittest.TestCase):
             provider.call_args.kwargs["model_override"], "moonshot-v1-8k"
         )
 
+    def test_query_planner_retries_k26_only_when_compact_model_is_rejected(self):
+        parsed = {
+            "product_family": "shampoing sec",
+            "answer_goal": "Trouver un shampoing sec.",
+            "corrected_query": "shampoing sec",
+            "search_queries": ["shampoing sec", "dry shampoo"],
+            "constraints": [],
+            "evidence_fields": ["format", "parfum"],
+            "exclude": [],
+            "answer_language": "fr",
+            "medical": False,
+            "retrieval_scope": "store",
+        }
+
+        def provider_side_effect(*_args, **kwargs):
+            if kwargs["model_override"] == "moonshot-v1-8k":
+                ai_module._AI_LAST_ERROR = (
+                    "Le service est indisponible (HTTP 404)."
+                )
+                return None
+            return parsed
+
+        with patch(
+            "routes.ai.configured_ai_provider",
+            return_value={"name": "kimi", "model": "kimi-k2.6"},
+        ), patch(
+            "routes.ai.KIMI_PLANNER_MODEL", "moonshot-v1-8k"
+        ), patch(
+            "routes.ai.KIMI_REALTIME_MODEL", "kimi-k2.6"
+        ), patch(
+            "routes.ai._provider_structured_request",
+            side_effect=provider_side_effect,
+        ) as provider:
+            plan = ai_module.generate_client_query_plan(
+                "Je voudrais du shampoing sec en aérosol"
+            )
+
+        self.assertEqual(plan["product_family"], "shampoing sec")
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(
+            provider.call_args_list[1].kwargs["model_override"], "kimi-k2.6"
+        )
+        self.assertEqual(ai_module._AI_LAST_ERROR, "")
+
     def test_client_retrieval_never_uses_reference_catalogue(self):
         placed = {"id": 1, "name": "Tylenol", "brand": "Tylenol", "barcode": "111"}
         corpus = [(placed, search_row(placed["name"], placed["brand"], barcode="111"))]

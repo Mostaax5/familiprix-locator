@@ -2398,6 +2398,7 @@ def normalize_client_history(value, max_messages=10):
 
 
 def generate_client_query_plan(question, history=None):
+    global _AI_LAST_ERROR
     normalized_history = normalize_client_history(history)
     provider_info = configured_ai_provider()
     provider_name = str(
@@ -2428,17 +2429,34 @@ def generate_client_query_plan(question, history=None):
             _CLIENT_QUERY_PLAN_CACHE[cache_key] = cached
             return json.loads(json.dumps(cached["plan"], ensure_ascii=False))
 
-    parsed = _provider_structured_request(
+    request_args = (
         _CLIENT_QUERY_PLAN_INSTRUCTIONS,
         {"conversation": normalized_history[-6:], "question": question},
-        max_tokens=320,
-        schema_name="client_query_plan",
-        schema=_CLIENT_QUERY_PLAN_SCHEMA,
-        question_preview=question,
-        timeout_seconds=_AI_QUERY_PLAN_TIMEOUT_SECONDS,
-        realtime_model=True,
-        model_override=planner_model,
     )
+    request_kwargs = {
+        "max_tokens": 320,
+        "schema_name": "client_query_plan",
+        "schema": _CLIENT_QUERY_PLAN_SCHEMA,
+        "question_preview": question,
+        "timeout_seconds": _AI_QUERY_PLAN_TIMEOUT_SECONDS,
+        "realtime_model": True,
+        "model_override": planner_model,
+    }
+    if provider_name == "kimi":
+        _AI_LAST_ERROR = ""
+    parsed = _provider_structured_request(*request_args, **request_kwargs)
+    if (
+        not isinstance(parsed, dict)
+        and provider_name == "kimi"
+        and planner_model != KIMI_REALTIME_MODEL
+        and re.search(r"HTTP\s+(?:400|403|404|422)\b", _AI_LAST_ERROR)
+    ):
+        # An account can lose access to a legacy planner model. Retry only an
+        # immediate compatibility/permission rejection, never a timeout.
+        request_kwargs["model_override"] = KIMI_REALTIME_MODEL
+        parsed = _provider_structured_request(*request_args, **request_kwargs)
+        if isinstance(parsed, dict):
+            _AI_LAST_ERROR = ""
     if not isinstance(parsed, dict):
         return None
     plan = normalize_client_query_plan(parsed, question)
