@@ -297,6 +297,23 @@ class ClientRagTests(unittest.TestCase):
             fallback["selected_product_ids"],
             ["product:1", "product:2", "product:3"],
         )
+        guarded = ai_module._guard_selected_product_relevance({
+            "answer": (
+                "Les croustilles Nature Essentiel et La Cocina sont les "
+                "options à vérifier en premier."
+            ),
+            "selected_product_ids": [
+                "product:1", "product:2", "product:3", "product:6",
+            ],
+            "comparisons": [{
+                "candidate_id": "product:6", "difference": "Popcorn",
+            }],
+        }, matches)
+        self.assertEqual(
+            guarded["selected_product_ids"],
+            ["product:1", "product:2", "product:3"],
+        )
+        self.assertEqual(guarded["comparisons"], [])
 
     def test_documented_timeout_keeps_semantic_family_and_drops_constraint_noise(self):
         products = [{

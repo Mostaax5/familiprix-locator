@@ -3133,11 +3133,17 @@ _CLIENT_DOCUMENTED_FAST_INSTRUCTIONS = (
     "dire au client. Explique le choix ou la différence demandée; ne remplace jamais "
     "la réponse par un décompte de produits. Tu peux donner des critères généraux, "
     "mais n'attribue à un produit précis que les faits présents dans sa fiche et "
-    "signale toute donnée non vérifiée. Pour une comparaison absente des fiches, dis "
-    "exactement ce qu'il faut vérifier sur l'emballage. Pour une question médicale, "
+    "signale toute donnée non vérifiée. L'absence d'un ingrédient, d'une valeur ou "
+    "d'un mot dans une fiche ne prouve jamais qu'il est absent du produit. Ne classe "
+    "jamais des produits selon le sucre, le sodium, un ingrédient, un dosage ou une "
+    "autre valeur mesurable si les mêmes valeurs confirmées ne sont pas fournies pour "
+    "les produits comparés. Dans ce cas, explique le critère général utile, dis que le "
+    "classement exact est impossible avec les fiches actuelles et précise quoi vérifier "
+    "sur l'emballage. Pour une question médicale, "
     "ne diagnostique pas et ne donne pas de dose inventée. Retourne uniquement un "
     "JSON avec selected_product_ids d'abord, puis answer. Sélectionne au maximum huit "
-    "produits réellement pertinents et utilise uniquement les candidate_id fournis."
+    "produits réellement pertinents et utilise uniquement les candidate_id fournis. "
+    "N'utilise aucun Markdown."
 )
 
 _CLIENT_DOCUMENTED_INSTRUCTIONS = (
@@ -5534,7 +5540,7 @@ def _generate_documented_client_answer_sync(
             "keywords", "must_include", "constraints", "evidence_fields", "exclude",
         )
     }
-    request_contexts = contexts if quality_mode else contexts[:10]
+    request_contexts = contexts if quality_mode else contexts[:8]
     request_documents = document_contexts if quality_mode else document_contexts[:8]
     request_instructions = (
         _CLIENT_DOCUMENTED_INSTRUCTIONS
@@ -5837,6 +5843,60 @@ def _guard_documented_inventory_contradiction(
     )
 
 
+def _guard_selected_product_relevance(result, candidates):
+    """Remove coarse-category siblings the answer did not actually identify."""
+    if not isinstance(result, dict):
+        return result
+    selected_ids = [
+        str(candidate_id or "").strip()
+        for candidate_id in result.get("selected_product_ids") or ()
+        if str(candidate_id or "").strip()
+    ]
+    if not selected_ids:
+        return result
+    by_id = {
+        str(product.get("client_id", "") or ""): product
+        for product in candidates
+        if str(product.get("client_id", "") or "")
+    }
+    identity_ids = {
+        candidate_id for candidate_id in selected_ids
+        if by_id.get(candidate_id, {}).get(
+            "_semantic_category_identity_match"
+        )
+    }
+    if len(identity_ids) < 2:
+        return result
+
+    from routes.products import normalize_search_text
+
+    normalized_answer = normalize_search_text(result.get("answer", ""))
+
+    def explicitly_named(product):
+        name = normalize_search_text(product.get("name", ""))
+        brand = normalize_search_text(product.get("brand", ""))
+        return bool(
+            (len(name) >= 5 and name in normalized_answer)
+            or (len(brand) >= 4 and brand in normalized_answer)
+        )
+
+    kept_ids = [
+        candidate_id for candidate_id in selected_ids
+        if candidate_id in identity_ids
+        or explicitly_named(by_id.get(candidate_id, {}))
+    ]
+    if len(kept_ids) < 2 or kept_ids == selected_ids:
+        return result
+    guarded = dict(result)
+    guarded["selected_product_ids"] = kept_ids
+    kept = set(kept_ids)
+    guarded["comparisons"] = [
+        comparison for comparison in guarded.get("comparisons", [])
+        if str(comparison.get("candidate_id", "") or "") in kept
+    ]
+    return guarded
+
+
 def generate_documented_client_answer(
     question, query_plan, candidates, documents, history=None,
     selected_text="", focus_product_id="",
@@ -5883,6 +5943,9 @@ def generate_documented_client_answer(
     quick_result = _guard_documented_inventory_contradiction(
         quick_result, query_plan, candidates, documents,
     )
+    quick_result = _guard_selected_product_relevance(
+        quick_result, candidates,
+    )
 
     if not needs_upgrade:
         _documented_answer_cache_set(cache_key, quick_result)
@@ -5903,9 +5966,10 @@ def generate_documented_client_answer(
                 focus_product_id=focus_product_id,
                 quality_mode=background_quality_mode,
             )
-            return _guard_documented_inventory_contradiction(
+            result = _guard_documented_inventory_contradiction(
                 result, query_plan, candidates, documents,
             )
+            return _guard_selected_product_relevance(result, candidates)
         finally:
             _DOCUMENTED_AI_GATE.release()
 
@@ -7583,6 +7647,9 @@ def client_help():
         verified = _guard_documented_inventory_contradiction(
             verified, query_plan, answer_candidates, documents,
         )
+    verified = _guard_selected_product_relevance(
+        verified, answer_candidates,
+    )
 
     degraded = bool(verified.get("degraded", False))
     warning = str(verified.get("warning", "") or "").strip()
