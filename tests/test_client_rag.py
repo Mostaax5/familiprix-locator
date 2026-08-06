@@ -112,6 +112,90 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(plan["search_queries"], [question])
         self.assertEqual(plan["keywords"], [])
 
+    def test_semantic_plan_separates_product_family_from_choice_constraints(self):
+        question = "Quel type de chips choisir si je ne veux pas de sucre?"
+        plan = ai_module.normalize_client_query_plan({
+            "intent": "food_comparison",
+            "answer_goal": "Comparer les croustilles du magasin selon leur sucre.",
+            "product_family": "croustilles",
+            "corrected_query": "croustilles avec le moins de sucre",
+            "search_queries": ["croustilles", "chips", "potato chips"],
+            "keywords": ["croustilles", "chips", "sucre"],
+            "must_include": ["croustilles"],
+            "constraints": ["le moins de sucre possible"],
+            "evidence_fields": ["nutrition", "sucres"],
+            "exclude": [],
+            "wants_all": False,
+            "needs_comparison": True,
+            "answer_language": "fr",
+            "medical": False,
+            "retrieval_scope": "store",
+        }, question)
+
+        self.assertEqual(plan["product_family"], "croustilles")
+        self.assertEqual(plan["must_include"], ["croustilles"])
+        self.assertEqual(plan["constraints"], ["le moins de sucre possible"])
+        self.assertEqual(plan["evidence_fields"], ["nutrition", "sucres"])
+
+    def test_semantic_family_retrieval_does_not_let_constraint_words_take_over(self):
+        products = [{
+            "id": 1, "name": "ESSENTIEL CROUST NAT 16X150G",
+            "brand": "Essentiel", "barcode": "101",
+            "description": "Croustilles nature.",
+        }, {
+            "id": 2, "name": "ESSENTIEL CROUST BBQ 16X150G",
+            "brand": "Essentiel", "barcode": "102",
+            "description": "Croustilles saveur barbecue.",
+        }, {
+            "id": 3, "name": "ESSENTIEL CROUST KETCH 16X150G",
+            "brand": "Essentiel", "barcode": "103",
+            "description": "Croustilles saveur ketchup.",
+        }, {
+            "id": 4, "name": "METAMUCIL ORA S/SUCRE 662G",
+            "brand": "Metamucil", "barcode": "104",
+            "description": "Poudre de fibres sans sucre.",
+        }, {
+            "id": 5, "name": "A GAGNON MELATON S/SUCRE GUM45",
+            "brand": "Adrien Gagnon", "barcode": "105",
+            "description": "Mélatonine en gommes sans sucre.",
+        }]
+        corpus = [(
+            product,
+            search_row(
+                product["name"], product["brand"],
+                product["description"], product["barcode"],
+            ),
+        ) for product in products]
+        plan = {
+            "intent": "food_comparison",
+            "answer_goal": "Comparer les croustilles selon leur sucre.",
+            "product_family": "croustilles",
+            "corrected_query": "croustilles avec le moins de sucre",
+            "search_queries": ["croustilles", "chips", "potato chips"],
+            "keywords": ["croustilles", "chips", "sucre"],
+            "must_include": ["croustilles"],
+            "constraints": ["le moins de sucre possible"],
+            "evidence_fields": ["nutrition", "sucres"],
+            "exclude": [], "wants_all": False,
+            "needs_comparison": True, "answer_language": "fr",
+            "medical": False, "retrieval_scope": "store",
+        }
+
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus):
+            matches = hybrid_client_candidates(
+                plan["corrected_query"], plan, limit=20,
+            )
+
+        self.assertEqual(
+            {product["name"] for product in matches},
+            {
+                "ESSENTIEL CROUST NAT 16X150G",
+                "ESSENTIEL CROUST BBQ 16X150G",
+                "ESSENTIEL CROUST KETCH 16X150G",
+            },
+        )
+
     def test_exact_identifier_extraction_accepts_label_before_or_after_code(self):
         self.assertEqual(
             client_exact_identifier_queries(
@@ -2845,7 +2929,7 @@ class ClientRagTests(unittest.TestCase):
                 })
 
         self.assertEqual(response.status_code, 200)
-        planner.assert_not_called()
+        planner.assert_called_once_with(question, [])
         generator.assert_called_once()
         self.assertEqual(generator.call_args.args[0], question)
         self.assertEqual(captured["question"], question)
@@ -2924,7 +3008,7 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(
             response.get_json()["highlighted_product_ids"], ["product:8"]
         )
-        self.assertEqual(retrieval.call_count, 2)
+        self.assertEqual(retrieval.call_count, 1)
         self.assertEqual(retrieval.call_args.args[1], semantic_plan)
         planner.assert_called_once()
         rate_limit.assert_called_once()
@@ -2996,7 +3080,7 @@ class ClientRagTests(unittest.TestCase):
             [item["client_id"] for item in response.get_json()["products"]],
             ["product:2"],
         )
-        self.assertEqual(retrieval.call_count, 2)
+        self.assertEqual(retrieval.call_count, 1)
         self.assertEqual(retrieval.call_args.args[1], semantic_plan)
         planner.assert_called_once()
 
@@ -3052,7 +3136,7 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["products"], [])
-        self.assertEqual(retrieval.call_count, 2)
+        self.assertEqual(retrieval.call_count, 1)
 
     def test_simple_product_lookup_does_not_call_ai(self):
         candidate = {

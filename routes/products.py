@@ -5826,7 +5826,11 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         return out
 
     corrected = str(query_plan.get("corrected_query", "") or "").strip()
+    product_family = str(query_plan.get("product_family", "") or "").strip()
+    family_tokens = list(dict.fromkeys(tokenize_search_query(product_family)))
     phrases = [question]
+    if product_family:
+        phrases.append(product_family)
     if corrected and normalize_search_text(corrected) != normalize_search_text(question):
         phrases.append(corrected)
     phrases.extend(clean_list(query_plan.get("search_queries"), 10))
@@ -5980,6 +5984,16 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
         evidence_anchor_match = strong_anchor_match or _row_matches_query_anchor(
             row, anchor_tokens,
         )
+        family_identity_match = bool(family_tokens) and all(
+            _row_matches_query_token(
+                row, token, identity_only=True, fuzzy=True,
+            )
+            for token in family_tokens
+        )
+        family_evidence_match = bool(family_tokens) and all(
+            _row_matches_query_token(row, token, fuzzy=True)
+            for token in family_tokens
+        )
         if not row_matches_client_concepts(row, required_concepts, excluded_concepts):
             continue
         if not row_matches_client_identity_constraints(row, question):
@@ -6058,6 +6072,33 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
                 "name_anchor_match": name_anchor_match,
                 "strong_anchor_match": strong_anchor_match,
                 "anchor_match": evidence_anchor_match,
+                "family_identity_match": family_identity_match,
+                "family_evidence_match": family_evidence_match,
+            }
+
+    # The semantic planner separates the product family from choice criteria.
+    # When that family exists in the store, a record matching only a constraint
+    # such as "sans sucre", "sans parfum" or "pour enfants" cannot replace the
+    # requested object. Identity evidence wins; descriptions are the fallback
+    # for heavily abbreviated planogram names.
+    if family_tokens:
+        family_match_key = (
+            "family_identity_match"
+            if any(
+                evidence.get("family_identity_match")
+                for evidence in scored.values()
+            )
+            else "family_evidence_match"
+            if any(
+                evidence.get("family_evidence_match")
+                for evidence in scored.values()
+            )
+            else ""
+        )
+        if family_match_key:
+            scored = {
+                key: evidence for key, evidence in scored.items()
+                if evidence.get(family_match_key)
             }
 
     # Once the store has evidence for the distinguishing concept, products

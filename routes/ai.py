@@ -2201,10 +2201,14 @@ _CLIENT_QUERY_PLAN_SCHEMA = {
     "type": "object",
     "properties": {
         "intent": {"type": "string"},
+        "answer_goal": {"type": "string"},
+        "product_family": {"type": "string"},
         "corrected_query": {"type": "string"},
         "search_queries": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
         "keywords": {"type": "array", "items": {"type": "string"}, "maxItems": 16},
         "must_include": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
+        "constraints": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
+        "evidence_fields": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
         "exclude": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
         "wants_all": {"type": "boolean"},
         "needs_comparison": {"type": "boolean"},
@@ -2215,8 +2219,9 @@ _CLIENT_QUERY_PLAN_SCHEMA = {
             "enum": ["store", "context", "context_and_store"],
         },
     },
-    "required": ["intent", "corrected_query", "search_queries", "keywords",
-                 "must_include", "exclude", "wants_all", "needs_comparison",
+    "required": ["intent", "answer_goal", "product_family", "corrected_query",
+                 "search_queries", "keywords", "must_include", "constraints",
+                 "evidence_fields", "exclude", "wants_all", "needs_comparison",
                  "answer_language", "medical", "retrieval_scope"],
     "additionalProperties": False,
 }
@@ -2229,12 +2234,23 @@ _CLIENT_QUERY_PLAN_INSTRUCTIONS = (
     "de suivi comme 'et pour les enfants?' doit devenir une requête autonome qui conserve le "
     "produit ou besoin discuté juste avant. Corrige les fautes probables "
     "de marques et produits (exemple: advile/dadvile -> Advil), mais ne transforme jamais "
-    "une demande de nourriture en demande de médicament. Génère des requêtes bilingues "
-    "français/anglais et uniquement des synonymes précis qui peuvent réellement apparaître dans "
-    "le nom, la marque, la description ou les notes d'un produit. search_queries contient des "
-    "formulations de recherche courtes, pas des phrases de réponse. must_include contient les "
-    "concepts indispensables à l'identité ou à l'usage demandé; exclude contient les catégories "
-    "voisines mais non demandées. Pour un symptôme, ajoute les familles ou ingrédients "
+    "une demande de nourriture en demande de médicament. Sépare toujours l'identité du produit "
+    "des critères servant à le choisir. product_family nomme la catégorie concrète à chercher "
+    "en magasin. answer_goal reformule en une phrase ce que l'employé doit réellement répondre. "
+    "constraints contient les préférences et limites comme sans sucre, sans parfum, pour enfant, "
+    "format liquide ou compatibilité. evidence_fields indique les faits qu'il faudra comparer, "
+    "comme nutrition, ingrédients, dosage, format, compatibilité ou dimensions. Un critère de "
+    "choix n'est pas nécessairement écrit dans le nom du produit: il ne doit jamais remplacer la "
+    "catégorie pendant la recherche. Même si les faits demandés risquent de manquer, cherche "
+    "d'abord toute la bonne famille de produits; la réponse expliquera ensuite ce qui peut ou non "
+    "être confirmé. Génère des requêtes bilingues français/anglais avec les noms courants, noms "
+    "officiels, abréviations probables et synonymes précis qui peuvent réellement apparaître dans "
+    "le nom, la marque, la description ou les notes. search_queries commence par plusieurs "
+    "formulations COURTES de la famille de produits, sans y répéter toute la question. keywords "
+    "contient des indices supplémentaires. must_include ne contient que l'identité indispensable "
+    "de la famille, jamais une préférence dont l'absence dans la fiche éliminerait tous les bons "
+    "produits. exclude contient seulement des catégories voisines clairement non demandées. Pour "
+    "un symptôme, ajoute les familles ou ingrédients "
     "raisonnablement pertinents sans prétendre poser un diagnostic; pour un assortiment, "
     "conserve toutes les contraintes de catégorie, saveur, format et marque. Le plan doit "
     "fonctionner pour n'importe quelle catégorie du magasin, pas seulement les médicaments. "
@@ -2265,10 +2281,14 @@ def normalize_client_query_plan(parsed, question):
     language = str(parsed.get("answer_language", "fr") or "fr").lower()
     return {
         "intent": str(parsed.get("intent", "product_search") or "product_search").strip(),
+        "answer_goal": str(parsed.get("answer_goal", "") or question).strip()[:600],
+        "product_family": str(parsed.get("product_family", "") or "").strip()[:240],
         "corrected_query": str(parsed.get("corrected_query", "") or question).strip(),
         "search_queries": _clean_ai_string_list(parsed.get("search_queries"), 10),
         "keywords": _clean_ai_string_list(parsed.get("keywords"), 16),
         "must_include": _clean_ai_string_list(parsed.get("must_include"), 10),
+        "constraints": _clean_ai_string_list(parsed.get("constraints"), 10),
+        "evidence_fields": _clean_ai_string_list(parsed.get("evidence_fields"), 10),
         "exclude": _clean_ai_string_list(parsed.get("exclude"), 10),
         "wants_all": bool(parsed.get("wants_all", False)),
         "needs_comparison": bool(parsed.get("needs_comparison", False)),
@@ -2305,6 +2325,7 @@ def generate_client_query_plan(question, history=None):
         provider_info.get("name", "") if isinstance(provider_info, dict) else ""
     )
     cache_key = hashlib.sha256(json.dumps({
+        "pipeline": 2,
         "provider": provider_name,
         "model": KIMI_REALTIME_MODEL,
         "question": re.sub(r"\s+", " ", str(question or "")).strip().lower(),
@@ -2392,6 +2413,8 @@ def build_client_query_plan(question, mode="lookup"):
         "intent": specific_intent or (
             "product_lookup" if mode == "lookup" else "advice_or_comparison"
         ),
+        "answer_goal": question,
+        "product_family": "",
         "corrected_query": question,
         "search_queries": [question],
         # The complete question is already searched once. Splitting a local
@@ -2401,6 +2424,8 @@ def build_client_query_plan(question, mode="lookup"):
         # is genuinely weak.
         "keywords": [],
         "must_include": [],
+        "constraints": [],
+        "evidence_fields": [],
         "exclude": [],
         "wants_all": wants_all,
         "needs_comparison": any(marker in padded for marker in comparison_markers),
@@ -2414,7 +2439,7 @@ _CLIENT_VERIFICATION_SCHEMA = {
     "type": "object",
     "properties": {
         "selected_product_ids": {
-            "type": "array", "items": {"type": "string"}, "maxItems": 8,
+            "type": "array", "items": {"type": "string"}, "maxItems": 16,
         },
         "answer": {"type": "string"},
         "follow_up_questions": {
@@ -2433,7 +2458,12 @@ _CLIENT_VERIFICATION_SCHEMA = {
 
 _CLIENT_VERIFICATION_INSTRUCTIONS = (
     "Tu rédiges une réponse de travail claire pour un employé Familiprix. Les candidats viennent "
-    "uniquement du plan réel du magasin et ont déjà été classés par un moteur déterministe. "
+    "uniquement du plan réel du magasin. Ils forment volontairement une liste à rappel élevé: "
+    "certains sont pertinents et d'autres sont seulement des voisins lexicaux. Lis chaque fiche "
+    "comme le ferait un employé expérimenté; ne suppose jamais que l'ordre du moteur prouve la "
+    "pertinence. Commence par answer_goal, product_family et constraints du query_plan, puis "
+    "évalue le nom, la description et les faits de chaque candidat par rapport à l'intention "
+    "complète. "
     "selected_product_ids identifie tous les produits suffisamment liés à la demande qui doivent "
     "rester dans le résultat final; utilise uniquement des candidate_id fournis, sans en inventer, "
     "et écarte tous les candidats non pertinents. Pour une faute "
@@ -2485,7 +2515,7 @@ _CLIENT_VERIFICATION_INSTRUCTIONS = (
 
 _CLIENT_VERIFICATION_INSTRUCTIONS += (
     " IMPORTANT: write selected_product_ids before answer in the JSON. Select at "
-    "most 8 products, and only products that satisfy the request. Never select or "
+    "most 16 products, and only products that satisfy the request. Never select or "
     "name a product merely to explain that it is excluded. Answer every requested "
     "dimension in 1 to 3 short paragraphs, about 80 to 170 words. Do not repeat a "
     "long product list."
@@ -2989,7 +3019,7 @@ _CLIENT_DOCUMENTED_SCHEMA = {
     "type": "object",
     "properties": {
         "selected_product_ids": {
-            "type": "array", "items": {"type": "string"}, "maxItems": 8,
+            "type": "array", "items": {"type": "string"}, "maxItems": 16,
         },
         "source_ids": {
             "type": "array", "items": {"type": "string"}, "maxItems": 8,
@@ -3021,8 +3051,11 @@ _CLIENT_DOCUMENTED_INSTRUCTIONS = (
     "repérables en quelques secondes. La liste de produits est une preuve d'inventaire, pas "
     "la réponse: ne commence jamais par « j'ai trouvé X produits ». Commence par la réponse "
     "ou la décision utile que l'employé peut dire au client. Les produits candidats proviennent "
-    "uniquement du plan "
-    "actuel du magasin. Les documents fournis sont la seule preuve autorisée pour attribuer "
+    "uniquement du plan actuel du magasin. Cette liste est volontairement large afin de ne pas "
+    "perdre le bon produit avant ton analyse: ne considère jamais son ordre comme une preuve. "
+    "Lis answer_goal, product_family et constraints, puis lis réellement chaque fiche et conserve "
+    "uniquement celles qui répondent à l'objet complet. Les documents fournis sont la seule preuve "
+    "autorisée pour attribuer "
     "un ingrédient, un dosage, une indication, une contre-indication, un âge, une interaction "
     "ou une propriété à un produit précis. Les fiches Santé Canada ont priorité sur les fiches "
     "de catalogue; les noms de planogramme et descriptions peuvent être abrégés ou incomplets. "
@@ -5357,8 +5390,9 @@ def _generate_documented_client_answer_sync(
     compact_plan = {
         key: query_plan.get(key)
         for key in (
-            "intent", "corrected_query", "wants_all", "needs_comparison",
-            "answer_language", "medical", "keywords", "must_include", "exclude",
+            "intent", "answer_goal", "product_family", "corrected_query",
+            "wants_all", "needs_comparison", "answer_language", "medical",
+            "keywords", "must_include", "constraints", "evidence_fields", "exclude",
         )
     }
     parsed = _provider_structured_request(
@@ -7196,9 +7230,9 @@ def client_help():
         client_exact_identifier_queries,
         client_identifier_query_requests_related_products,
         client_candidates_need_semantic_retry,
-        client_candidates_satisfy_query_plan, hybrid_client_candidates,
+        hybrid_client_candidates,
         hydrate_candidate_images,
-        normalize_search_text, public_product_payload,
+        public_product_payload,
         resolve_client_exact_identifiers,
     )
     identifier_queries = client_exact_identifier_queries(question)
@@ -7210,6 +7244,20 @@ def client_help():
         and client_identifier_query_requests_related_products(question)
     )
     query_plan["exact_identifier_queries"] = identifier_queries
+    semantic_planner_used = False
+    if response_mode != "lookup" and not identifier_queries:
+        # The model must understand the complete request before catalogue words
+        # can dominate retrieval. A local lexical hit is not proof that the
+        # requested product family was understood (for example, a constraint
+        # such as "sans sucre" can otherwise retrieve every unrelated product
+        # mentioning sugar). If planning times out, the deterministic plan
+        # remains a bounded, usable fallback.
+        semantic_plan = generate_client_query_plan(question, history)
+        if isinstance(semantic_plan, dict):
+            semantic_plan["exact_identifier_queries"] = identifier_queries
+            query_plan = semantic_plan
+            semantic_planner_used = True
+    mark_stage("query_plan_ready_ms")
     context_products = client_products_by_ids(context_product_ids, limit=80)
 
     def retrieve_with_plan(active_plan):
@@ -7254,48 +7302,16 @@ def client_help():
         return store_candidates
 
     candidates = retrieve_with_plan(query_plan)
-    semantic_planner_used = False
-    if response_mode != "lookup":
-        preliminary_candidates = filter_client_answer_category(
-            question, candidates
-        )
-        needs_semantic_plan = bool(
-            not identifier_queries
-            and (
-                follow_up
-                or selected_text
-                or (
-                    not focus_product_id
-                    and client_candidates_need_semantic_retry(
-                        question, preliminary_candidates
-                    )
-                )
-            )
-        )
-        if needs_semantic_plan:
-            semantic_plan = generate_client_query_plan(question, history)
-            if isinstance(semantic_plan, dict):
-                query_plan = semantic_plan
-                candidates = retrieve_with_plan(query_plan)
-                semantic_planner_used = True
-    mark_stage("query_plan_ready_ms")
     if (
         response_mode == "lookup"
         and client_candidates_need_semantic_retry(question, candidates)
     ):
         candidates = []
     if response_mode != "lookup":
-        candidates = filter_client_answer_category(question, candidates)
-        if (
-            not identifier_queries
-            and query_plan.get("must_include")
-            and not client_candidates_satisfy_query_plan(
-            query_plan, candidates,
-            )
-        ):
-            # The AI can still answer the general question. A blank product list
-            # is safer than cards that miss an indispensable object or use.
-            candidates = []
+        filter_question = str(
+            query_plan.get("corrected_query", "") or question
+        ).strip()
+        candidates = filter_client_answer_category(filter_question, candidates)
     candidates = classify_client_result_roles(candidates, question)
     # Reuse known exact-UPC images now. Unknown-image web lookups are queued
     # only for cards that will actually be displayed.
@@ -7330,14 +7346,17 @@ def client_help():
         answer_candidates.sort(
             key=lambda product: 0 if str(product.get("client_id", "")) == focus_product_id else 1
         )
-    # A smaller grounded context improves response time and keeps comparisons readable.
-    answer_limit = 12 if query_plan.get("wants_all") else 8
+    # Retrieval is deliberately broad; the answer model is the semantic
+    # reranker and needs enough real product files to reject lexical neighbours
+    # without losing a valid package that ranked just below them.
+    answer_limit = 24 if query_plan.get("wants_all") else 16
     answer_candidates = select_client_answer_candidates(
         answer_candidates,
         limit=answer_limit,
         diversify_brands=bool(query_plan.get("medical")),
         question=" ".join(filter(None, [
             question,
+            str(query_plan.get("product_family", "") or ""),
             str(query_plan.get("corrected_query", "") or ""),
             " ".join(query_plan.get("must_include") or []),
         ])),
