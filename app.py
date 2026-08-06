@@ -33,6 +33,11 @@ from routes.regulatory import (
     schedule_regulatory_enrichment_after,
 )
 from observability import maybe_log_operational_warning, record_request
+from semantic_search import (
+    maybe_resume_semantic_product_index,
+    schedule_semantic_product_index,
+    semantic_search_status,
+)
 
 
 def _preload_idna_codec():
@@ -391,6 +396,7 @@ def get_system_info():
         # resume maintenance after search is ready.
         maybe_resume_enrichment()
         maybe_resume_regulatory_enrichment()
+        maybe_resume_semantic_product_index()
     duplicate_slots = db.execute(
         """
         SELECT COUNT(*) AS count
@@ -428,6 +434,7 @@ def get_system_info():
         "self_keepalive": _SELF_KEEPALIVE_ACTIVE,
         "catalogue_schema": schema_status,
         "catalogue_warmup": reconcile_catalogue_warmup_state(),
+        "semantic_search": semantic_search_status(),
         "database_boot_pending": bool(DB_BOOT_PENDING),
         "database_boot_error": bool(DB_BOOT_ERROR),
     })
@@ -670,6 +677,7 @@ def _start_persistence_services(*, background=False):
             time.sleep(1)
             ensure_catalogue_warmup_started()
         tasks = (
+            schedule_semantic_product_index,
             schedule_reference_metadata_sync,
             schedule_initial_product_quality_audit,
             schedule_backfill_missing,

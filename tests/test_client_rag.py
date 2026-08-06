@@ -77,6 +77,7 @@ class ClientRagTests(unittest.TestCase):
             mapped_indices_by_key={}, document_in_stock={},
             representative_indices=(), document_barcodes=(),
             identifier_postings={}, product_id_to_key={},
+            category_postings={},
         )
         with ai_module._DOCUMENTED_ANSWER_CACHE_LOCK:
             ai_module._DOCUMENTED_ANSWER_CACHE.clear()
@@ -213,6 +214,63 @@ class ClientRagTests(unittest.TestCase):
 
         self.assertEqual(
             {product["name"] for product in matches},
+            {
+                "ESSENTIEL CROUST NAT 16X150G",
+                "ESSENTIEL CROUST BBQ 16X150G",
+                "ESSENTIEL CROUST KETCH 16X150G",
+            },
+        )
+
+    def test_real_chips_wording_is_recovered_by_independent_category_embedding(self):
+        category = "Aliments et breuvages > Collations > Croustilles"
+        products = [{
+            "id": 1, "name": "ESSENTIEL CROUST NAT 16X150G",
+            "brand": "Essentiel", "barcode": "101",
+            "description": "Croustilles nature.",
+            "_catalogue_category": category,
+        }, {
+            "id": 2, "name": "ESSENTIEL CROUST BBQ 16X150G",
+            "brand": "Essentiel", "barcode": "102",
+            "description": "Croustilles saveur barbecue.",
+            "_catalogue_category": category,
+        }, {
+            "id": 3, "name": "ESSENTIEL CROUST KETCH 16X150G",
+            "brand": "Essentiel", "barcode": "103",
+            "description": "Croustilles saveur ketchup.",
+            "_catalogue_category": category,
+        }, {
+            "id": 4, "name": "METAMUCIL ORA S/SUCRE 662G",
+            "brand": "Metamucil", "barcode": "104",
+            "description": "Poudre de fibres sans sucre.",
+            "_catalogue_category": "Sante > Fibres",
+        }, {
+            "id": 5, "name": "MELATONINE S/SUCRE GUM45",
+            "brand": "Test", "barcode": "105",
+            "description": "Melatonine en gommes sans sucre.",
+            "_catalogue_category": "Sante > Sommeil",
+        }]
+        corpus = [(
+            product,
+            search_row(
+                product["name"], product["brand"],
+                product["description"], product["barcode"],
+            ),
+        ) for product in products]
+        question = "quelle chips sont les moins sucre"
+        plan = build_client_query_plan(question, "documented")
+        plan["semantic_search"] = True
+        semantic_hits = [{
+            "kind": "category", "rank": 1, "product_id": 0,
+            "barcode": "", "category": category, "similarity": 0.82,
+        }]
+
+        with patch("routes.products.get_db", return_value=object()), \
+             patch("routes.products._products_corpus", return_value=corpus), \
+             patch("routes.products.semantic_product_hits", return_value=semantic_hits):
+            matches = hybrid_client_candidates(question, plan, limit=20)
+
+        self.assertEqual(
+            {product["name"] for product in matches[:3]},
             {
                 "ESSENTIEL CROUST NAT 16X150G",
                 "ESSENTIEL CROUST BBQ 16X150G",
@@ -3070,11 +3128,12 @@ class ClientRagTests(unittest.TestCase):
                 })
 
         self.assertEqual(response.status_code, 200)
-        planner.assert_called_once_with(question, [])
+        planner.assert_not_called()
         generator.assert_called_once()
         self.assertEqual(generator.call_args.args[0], question)
         self.assertEqual(captured["question"], question)
         self.assertEqual(captured["plan"]["corrected_query"], question)
+        self.assertTrue(captured["plan"]["semantic_search"])
 
     def test_kimi_semantic_plan_retries_weak_local_retrieval(self):
         candidate = {
@@ -3150,8 +3209,9 @@ class ClientRagTests(unittest.TestCase):
             response.get_json()["highlighted_product_ids"], ["product:8"]
         )
         self.assertEqual(retrieval.call_count, 1)
-        self.assertEqual(retrieval.call_args.args[1], semantic_plan)
-        planner.assert_called_once()
+        self.assertEqual(retrieval.call_args.args[0], "Il me faut quelque chose pour calmer le coeur leve")
+        self.assertTrue(retrieval.call_args.args[1]["semantic_search"])
+        planner.assert_not_called()
         rate_limit.assert_called_once()
 
     def test_kimi_plan_prevents_a_wrong_object_from_entering_retrieval(self):
@@ -3222,8 +3282,12 @@ class ClientRagTests(unittest.TestCase):
             ["product:2"],
         )
         self.assertEqual(retrieval.call_count, 1)
-        self.assertEqual(retrieval.call_args.args[1], semantic_plan)
-        planner.assert_called_once()
+        self.assertEqual(
+            retrieval.call_args.args[0],
+            "objet transparent pour proteger une blessure",
+        )
+        self.assertTrue(retrieval.call_args.args[1]["semantic_search"])
+        planner.assert_not_called()
 
     def test_semantic_retry_clears_unrelated_cards_when_object_is_absent(self):
         unrelated = {

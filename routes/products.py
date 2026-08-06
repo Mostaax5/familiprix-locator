@@ -51,6 +51,7 @@ from product_data import (
     upsert_product_identifier,
     upsert_reference_candidate,
 )
+from semantic_search import semantic_product_hits, schedule_semantic_product_index
 
 products_bp = Blueprint("products", __name__)
 
@@ -581,6 +582,7 @@ _PROD_CACHE = {
     "mapped_indices_by_key": {}, "document_in_stock": {},
     "representative_indices": (), "document_barcodes": (),
     "identifier_postings": {}, "product_id_to_key": {},
+    "category_postings": {},
 }
 _PROD_LOCK = threading.RLock()
 _PROD_REFRESH_LOCK = threading.Lock()
@@ -1311,6 +1313,7 @@ def _products_corpus(db, allow_identifier_stale=False):
     token_postings = {}
     name_token_postings = {}
     mapped_indices_by_key = {}
+    category_postings = {}
     document_in_stock = {}
     product_id_to_key = {}
     representative_indices = array("I")
@@ -1332,6 +1335,18 @@ def _products_corpus(db, allow_identifier_stale=False):
         }
         raw_item["_verified_fields"] = sorted(matching_verified_fields)
         item = row_to_product(raw_item)
+        # These private copies support semantic category fan-out without
+        # changing public facts. row_to_product has already blanked any field
+        # that lacks current verified evidence.
+        item["_catalogue_category"] = str(
+            item.get("category", "") or ""
+        ).strip()
+        item["_catalogue_official_name_fr"] = str(
+            item.get("official_name_fr", "") or ""
+        ).strip()
+        item["_catalogue_official_name_en"] = str(
+            item.get("official_name_en", "") or ""
+        ).strip()
         item["_field_sources"] = {
             field: provenance
             for field, provenance in field_sources_by_product.get(
@@ -1362,6 +1377,13 @@ def _products_corpus(db, allow_identifier_stale=False):
         mapped_indices_by_key.setdefault(
             document_key, array("I")
         ).append(row_index)
+        normalized_category = normalize_search_text(
+            item.get("_catalogue_category", "")
+        )
+        if normalized_category:
+            category_postings.setdefault(
+                normalized_category, []
+            ).append(document_key)
         if product_id:
             product_id_to_key[product_id] = document_key
         document_in_stock[document_key] = bool(
@@ -1480,6 +1502,10 @@ def _products_corpus(db, allow_identifier_stale=False):
         document_barcodes=tuple(document_barcodes),
         identifier_postings=identifier_postings,
         product_id_to_key=product_id_to_key,
+        category_postings={
+            category: tuple(dict.fromkeys(keys))
+            for category, keys in category_postings.items()
+        },
         last_build_ms=int(
             round((time.perf_counter() - build_started_at) * 1000)
         ),
@@ -1498,6 +1524,7 @@ def _products_corpus(db, allow_identifier_stale=False):
         mapped_indices_by_key, document_in_stock,
         representative_indices, document_barcodes,
         identifier_postings, product_id_to_key,
+        category_postings,
     )
     release_unused_memory()
     return rows
@@ -1620,6 +1647,10 @@ def _schedule_product_corpus_refresh():
                 _products_corpus(db, allow_identifier_stale=False)
             release_unused_memory()
             warm_product_payload_cache()
+            # Product names/descriptions changed or a new planogram introduced
+            # packages. Persist only the changed semantic documents; the
+            # existing vector index remains searchable during this refresh.
+            schedule_semantic_product_index()
         except Exception as exc:
             print(f"[Recherche] actualisation de l'index impossible: {exc}")
         finally:
@@ -2663,6 +2694,8 @@ def _compact_search_cache_product(item):
             compact[field] = value
     for field in (
         "_verified_fields", "_field_sources", "_search_aliases", "_identifiers",
+        "_catalogue_category", "_catalogue_official_name_fr",
+        "_catalogue_official_name_en",
     ):
         value = product.get(field)
         if value:
@@ -5796,7 +5829,7 @@ def client_identifier_query_requests_related_products(query):
     ))
 
 
-def _hybrid_client_candidates(question, query_plan, limit=60):
+def _lexical_client_candidates(question, query_plan, limit=60):
     """Hybrid retrieval for the one-button Client search.
 
     A fast query plan supplies search phrases and constraints. This retriever
@@ -6135,6 +6168,179 @@ def _hybrid_client_candidates(question, query_plan, limit=60):
     products = _materialize_mapped_products(
         corpus, ranked_keys, limit=min(200, max(limit, limit * 2)),
     )
+    if _client_query_excludes_replacements(question):
+        products = [
+            product for product in products
+            if client_product_result_role(product, question) != "replacement"
+        ]
+    return products[:limit]
+
+
+def _semantic_ranked_product_keys(question, corpus, limit=100):
+    """Translate pgvector product/category ranks into mapped store packages.
+
+    Category embeddings are indexed first and fan out to every mapped package
+    in that category. This makes a new deployment useful before all individual
+    product documents have finished their background embedding pass.
+    """
+    hits = semantic_product_hits(
+        question,
+        product_limit=min(120, max(50, int(limit or 100))),
+        category_limit=12,
+    )
+    if not hits:
+        return {}, {}
+    cache_matches = (
+        _PROD_CACHE.get("rows") is corpus
+        and _PROD_CACHE.get("statistics_rows_id") == id(corpus)
+    )
+    product_id_to_key = (
+        _PROD_CACHE.get("product_id_to_key") or {}
+        if cache_matches else {}
+    )
+    category_postings = (
+        _PROD_CACHE.get("category_postings") or {}
+        if cache_matches else {}
+    )
+    if not product_id_to_key or not category_postings:
+        for item, row in corpus:
+            key = _mapped_product_key(item, row)
+            product_id = int(item.get("id") or 0)
+            if product_id:
+                product_id_to_key.setdefault(product_id, key)
+            category = normalize_search_text(
+                item.get("_catalogue_category", "")
+                or item.get("category", "")
+            )
+            if category:
+                category_postings.setdefault(category, []).append(key)
+
+    scores = {}
+    evidence = {}
+    product_hits = [hit for hit in hits if hit.get("kind") == "product"]
+    category_hits = [hit for hit in hits if hit.get("kind") == "category"]
+    best_category_similarity = max(
+        (float(hit.get("similarity") or 0) for hit in category_hits),
+        default=0.0,
+    )
+
+    def add(key, contribution, source, similarity):
+        if key is None:
+            return
+        scores[key] = scores.get(key, 0.0) + contribution
+        detail = evidence.setdefault(key, {
+            "sources": [], "semantic_similarity": 0.0,
+        })
+        if source not in detail["sources"]:
+            detail["sources"].append(source)
+        detail["semantic_similarity"] = max(
+            detail["semantic_similarity"], float(similarity or 0),
+        )
+
+    for hit in product_hits:
+        rank = max(1, int(hit.get("rank") or 1))
+        key = product_id_to_key.get(int(hit.get("product_id") or 0))
+        if key is None:
+            barcode = normalized_digits(hit.get("barcode", ""))
+            if barcode:
+                key = ("barcode", barcode)
+        add(
+            key,
+            1.15 / (60.0 + rank),
+            "semantic_product",
+            hit.get("similarity"),
+        )
+
+    # Keep only categories close to the best semantic interpretation. Without
+    # this relative gate, distant neighbours could fan out to hundreds of
+    # unrelated store products even though their cosine score was technically
+    # positive.
+    accepted_categories = 0
+    for hit in category_hits:
+        similarity = float(hit.get("similarity") or 0)
+        if similarity < max(0.30, best_category_similarity - 0.08):
+            continue
+        category = normalize_search_text(hit.get("category", ""))
+        keys = category_postings.get(category, ())
+        if not keys:
+            continue
+        accepted_categories += 1
+        rank = max(1, int(hit.get("rank") or 1))
+        contribution = 1.05 / (60.0 + rank)
+        for key in keys:
+            add(
+                key, contribution, "semantic_category",
+                similarity,
+            )
+        if accepted_categories >= 4:
+            break
+    return scores, evidence
+
+
+def _hybrid_client_candidates(question, query_plan, limit=60):
+    """Fuse lexical/BM25 and multilingual vector ranks with RRF.
+
+    The two retrievers are intentionally independent. A customer word that is
+    absent from the catalogue vocabulary can therefore never erase a relevant
+    semantic category, while an exact catalogue term still remains fast and
+    deterministic.
+    """
+    lexical_limit = min(160, max(int(limit or 60) * 2, 80))
+    lexical_products = _lexical_client_candidates(
+        question, query_plan, limit=lexical_limit,
+    )
+    informative_tokens = tokenize_search_query(question)
+    use_semantic = bool(query_plan.get("semantic_search")) or (
+        len(informative_tokens) >= 3
+        or len(lexical_products) < 5
+        or client_candidates_need_semantic_retry(question, lexical_products)
+    )
+    if not use_semantic:
+        return lexical_products[:limit]
+
+    corpus = _employee_product_corpus()
+    semantic_scores, semantic_evidence = _semantic_ranked_product_keys(
+        question, corpus, limit=max(100, int(limit or 60) * 2),
+    )
+    if not semantic_scores:
+        return lexical_products[:limit]
+
+    fused = dict(semantic_scores)
+    evidence = dict(semantic_evidence)
+    for rank, product in enumerate(lexical_products, start=1):
+        row = _product_search_row(
+            product,
+            product.get("_search_aliases") or (),
+            product.get("_identifiers") or (),
+        )
+        key = _mapped_product_key(product, row)
+        fused[key] = fused.get(key, 0.0) + 1.0 / (60.0 + rank)
+        detail = evidence.setdefault(key, {
+            "sources": [], "semantic_similarity": 0.0,
+        })
+        if "lexical" not in detail["sources"]:
+            detail["sources"].append("lexical")
+
+    ranked_keys = sorted(
+        fused,
+        key=lambda key: (-fused[key], str(key)),
+    )
+    products = _materialize_mapped_products(
+        corpus, ranked_keys,
+        limit=min(100, max(int(limit or 60), int(limit or 60) * 2)),
+    )
+    for product in products:
+        row = _product_search_row(
+            product,
+            product.get("_search_aliases") or (),
+            product.get("_identifiers") or (),
+        )
+        key = _mapped_product_key(product, row)
+        detail = evidence.get(key, {})
+        product["_retrieval_sources"] = list(detail.get("sources") or [])
+        product["_semantic_similarity"] = float(
+            detail.get("semantic_similarity") or 0
+        )
     if _client_query_excludes_replacements(question):
         products = [
             product for product in products

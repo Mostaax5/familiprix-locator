@@ -2484,6 +2484,8 @@ def classify_client_request(question, follow_up=False, focus_product_id="", sele
         "laquelle choisir", "quoi choisir", "devrais", "dois je", "peut on",
         "comment", "pourquoi", "c est quoi", "what is", "which one", "should i",
         "recommend", "conseille", "meilleur", "mieux", "avantage", "inconvenient",
+        "le moins", "les moins", "moins de", "moins sucre", "plus faible",
+        "lowest", "least", "which has less", "which have less",
         "liquide ou", "comprime ou", "capsule ou", "gel ou", "pour un enfant",
     )
     padded = f" {normalized} "
@@ -2507,7 +2509,11 @@ def build_client_query_plan(question, mode="lookup"):
     normalized = normalize_search_text(question)
     padded = f" {normalized} "
     specific_intent = client_request_intent(question)
-    comparison_markers = ("difference", "compare", "comparaison", "versus", " vs ", " ou ")
+    comparison_markers = (
+        "difference", "compare", "comparaison", "versus", " vs ", " ou ",
+        "le moins", "les moins", "moins de", "moins sucre", "plus faible",
+        "lowest", "least", "which has less", "which have less",
+    )
     wants_all = any(word in normalized.split() for word in ("all", "tout", "tous", "toute", "toutes"))
     english_words = sum(word in normalized.split() for word in ("what", "which", "show", "find", "all", "tell"))
     return {
@@ -5280,6 +5286,14 @@ def _compact_documented_product_context(product, include_identifiers=False):
         value = str(product.get(field, "") or "").strip()
         if value:
             catalogue_clues[field] = value[:500]
+    for field, private_field in (
+        ("category", "_catalogue_category"),
+        ("official_name_fr", "_catalogue_official_name_fr"),
+        ("official_name_en", "_catalogue_official_name_en"),
+    ):
+        value = str(product.get(private_field, "") or "").strip()
+        if value and field not in catalogue_clues:
+            catalogue_clues[field] = value[:500]
     search_clues = {}
     for field in ("usage_notes", "search_terms"):
         value = str(product.get(field, "") or "").strip()
@@ -5727,8 +5741,18 @@ def _guard_documented_inventory_contradiction(
         return result
     from routes.products import client_candidates_need_semantic_retry
 
-    if not selected_exists and client_candidates_need_semantic_retry(
-        str(query_plan.get("corrected_query", "") or ""), candidates,
+    semantic_inventory_evidence = any(
+        set(product.get("_retrieval_sources") or ()).intersection({
+            "semantic_product", "semantic_category",
+        })
+        for product in candidates
+    )
+    if (
+        not selected_exists
+        and not semantic_inventory_evidence
+        and client_candidates_need_semantic_retry(
+            str(query_plan.get("corrected_query", "") or ""), candidates,
+        )
     ):
         return result
     # A model cannot both select grounded store products and tell the employee
@@ -7271,6 +7295,10 @@ def client_help():
             selected_text=selected_text,
         )
     query_plan = build_client_query_plan(question, response_mode)
+    # First-turn discovery is handled by independent lexical + vector
+    # retrievers. The answer model must read the products, not guess which
+    # catalogue words should be searched before any products are available.
+    query_plan["semantic_search"] = response_mode != "lookup"
     if response_mode != "lookup":
         if not configured_ai_provider()["name"]:
             return jsonify({
@@ -7306,16 +7334,18 @@ def client_help():
     )
     query_plan["exact_identifier_queries"] = identifier_queries
     semantic_planner_used = False
-    if response_mode != "lookup" and not identifier_queries:
-        # The model must understand the complete request before catalogue words
-        # can dominate retrieval. A local lexical hit is not proof that the
-        # requested product family was understood (for example, a constraint
-        # such as "sans sucre" can otherwise retrieve every unrelated product
-        # mentioning sugar). If planning times out, the deterministic plan
-        # remains a bounded, usable fallback.
+    if (
+        response_mode != "lookup"
+        and not identifier_queries
+        and (follow_up or selected_text or focus_product_id)
+    ):
+        # A follow-up can depend on an earlier answer ("et pour un enfant ?").
+        # Only that conversational rewrite still needs a compact model plan.
+        # New standalone questions never wait for this network call.
         semantic_plan = generate_client_query_plan(question, history)
         if isinstance(semantic_plan, dict):
             semantic_plan["exact_identifier_queries"] = identifier_queries
+            semantic_plan["semantic_search"] = True
             query_plan = semantic_plan
             semantic_planner_used = True
     mark_stage("query_plan_ready_ms")
@@ -7619,11 +7649,14 @@ def client_help():
         product_count=len(highlighted_products),
     )
     if request.headers.get("X-AI-Diagnostics", "") == "1":
+        from semantic_search import semantic_search_status
+
         response_payload["ai_diagnostics"] = {
             "model": _AI_LAST_MODEL,
             "error": _AI_LAST_ERROR,
             "stages": diagnostic_stages,
             "semantic_planner_used": semantic_planner_used,
+            "semantic_search": semantic_search_status(),
             "documented_cache_hit": bool(verified.get("_cache_hit", False)),
         }
     return jsonify(response_payload)
