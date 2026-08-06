@@ -37,8 +37,8 @@ SEMANTIC_EMBEDDING_API_KEY = os.environ.get(
     os.environ.get("GEMINI_API_KEY", ""),
 ).strip()
 SEMANTIC_EMBEDDING_MODEL = (
-    os.environ.get("SEMANTIC_EMBEDDING_MODEL", "gemini-embedding-001").strip()
-    or "gemini-embedding-001"
+    os.environ.get("SEMANTIC_EMBEDDING_MODEL", "gemini-embedding-2").strip()
+    or "gemini-embedding-2"
 )
 SEMANTIC_EMBEDDING_DIMENSIONS = 768
 SEMANTIC_EMBEDDING_BASE_URL = os.environ.get(
@@ -639,6 +639,10 @@ def _semantic_index_worker():
         values = dict(count_row) if count_row else {}
         _set_status(total_products=int(values.get("count") or 0))
         existing = _existing_documents(db)
+        # A previous quota-limited run may already have committed useful
+        # category/product batches. Publish them before requesting one more
+        # embedding so searches never wait for a full-catalogue pass.
+        _refresh_index_counts(db)
         verified_fields = _verified_fields_by_product(db)
 
         category_documents = _category_documents(db, verified_fields)
@@ -667,6 +671,13 @@ def _semantic_index_worker():
                 db.rollback()
             except Exception:
                 pass
+            try:
+                _refresh_index_counts(db)
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
         _set_status(
             stage="error", last_error=_safe_provider_error(exc),
             indexed_this_run=indexed_total, skipped_this_run=skipped_total,

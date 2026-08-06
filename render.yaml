@@ -26,7 +26,7 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: SEMANTIC_EMBEDDING_MODEL
-        value: gemini-embedding-001
+        value: gemini-embedding-2
       - key: KIMI_MODEL
         value: kimi-k2.6
       - key: KIMI_REALTIME_MODEL
