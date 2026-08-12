@@ -67,6 +67,14 @@ function _removeDbg() {
 
 // ── Camera DOM helpers ────────────────────────────────────────────────────────
 function getCameraDom() {
+  if (cameraUsageMode === 'expiry') {
+    return {
+      status: document.getElementById('expiryScannerStatus'),
+      button: document.getElementById('expiryCameraButton'),
+      video: document.getElementById('expiryCameraPreview'),
+      reader: document.getElementById('expiryHtml5Reader')
+    };
+  }
   if (cameraUsageMode === 'search') {
     return {
       status: document.getElementById('searchScannerStatus'),
@@ -114,6 +122,16 @@ async function toggleCamera() {
   }
   if (!requireEditorSession('ouvrir la camera de scan')) return;
   cameraUsageMode = 'scan';
+  await startCamera();
+}
+
+async function toggleExpiryCamera() {
+  if (scannerStream || html5Scanner || quaggaActive) {
+    await stopCamera();
+    return;
+  }
+  if (!requireEditorSession('ouvrir la caméra des dates')) return;
+  cameraUsageMode = 'expiry';
   await startCamera();
 }
 
@@ -335,7 +353,9 @@ function showCameraExtras() {
   torchEnabled = false;
   const ids = cameraUsageMode === 'scan'
     ? ['torchButton', 'zoomSlider']
-    : ['searchTorchButton', 'searchZoomSlider'];
+    : cameraUsageMode === 'expiry'
+      ? ['expiryTorchButton', 'expiryZoomSlider']
+      : ['searchTorchButton', 'searchZoomSlider'];
   const caps = cameraTrack && typeof cameraTrack.getCapabilities === 'function'
     ? cameraTrack.getCapabilities()
     : {};
@@ -348,7 +368,9 @@ function showCameraExtras() {
     torchEl.style.color = '';
   }
   const zoomEl = document.getElementById(ids[1]);
-  const zoomLabelId = cameraUsageMode === 'scan' ? 'zoomValue' : 'searchZoomValue';
+  const zoomLabelId = cameraUsageMode === 'scan'
+    ? 'zoomValue'
+    : cameraUsageMode === 'expiry' ? 'expiryZoomValue' : 'searchZoomValue';
   const zoomLabel = document.getElementById(zoomLabelId);
   if (zoomEl && caps.zoom) {
     zoomEl.min = caps.zoom.min ?? 1;
@@ -373,7 +395,11 @@ function _zoomLabel(val) {
 }
 
 function hideCameraExtras() {
-  ['torchButton', 'zoomSlider', 'zoomValue', 'searchTorchButton', 'searchZoomSlider', 'searchZoomValue'].forEach(id => {
+  [
+    'torchButton', 'zoomSlider', 'zoomValue',
+    'searchTorchButton', 'searchZoomSlider', 'searchZoomValue',
+    'expiryTorchButton', 'expiryZoomSlider', 'expiryZoomValue',
+  ].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.style.display = 'none';
   });
@@ -386,7 +412,9 @@ async function toggleTorch() {
   try {
     await cameraTrack.applyConstraints({advanced: [{torch: torchEnabled}]});
   } catch (_) { torchEnabled = !torchEnabled; }
-  const ids = cameraUsageMode === 'scan' ? ['torchButton'] : ['searchTorchButton'];
+  const ids = cameraUsageMode === 'scan'
+    ? ['torchButton']
+    : cameraUsageMode === 'expiry' ? ['expiryTorchButton'] : ['searchTorchButton'];
   ids.forEach(id => {
     const el = document.getElementById(id);
     if (el) {
@@ -398,8 +426,12 @@ async function toggleTorch() {
 
 function applyZoom(val) {
   const parsed = parseFloat(val);
-  const labelId = cameraUsageMode === 'scan' ? 'zoomValue' : 'searchZoomValue';
-  const sliderId = cameraUsageMode === 'scan' ? 'zoomSlider' : 'searchZoomSlider';
+  const labelId = cameraUsageMode === 'scan'
+    ? 'zoomValue'
+    : cameraUsageMode === 'expiry' ? 'expiryZoomValue' : 'searchZoomValue';
+  const sliderId = cameraUsageMode === 'scan'
+    ? 'zoomSlider'
+    : cameraUsageMode === 'expiry' ? 'expiryZoomSlider' : 'searchZoomSlider';
   const label = document.getElementById(labelId);
   const slider = document.getElementById(sliderId);
   if (label) { label.textContent = _zoomLabel(parsed); label.style.display = ''; }
@@ -930,7 +962,10 @@ async function scanFromPhoto(input, mode) {
   if (!file) return;
 
   const isSearch = mode === 'search';
-  const statusEl = document.getElementById(isSearch ? 'searchScannerStatus' : 'scannerStatus');
+  const isExpiry = mode === 'expiry';
+  const statusEl = document.getElementById(
+    isSearch ? 'searchScannerStatus' : isExpiry ? 'expiryScannerStatus' : 'scannerStatus'
+  );
   const setStatus = t => { if (statusEl) statusEl.textContent = t; };
 
   setStatus('Lecture de la photo...');
@@ -1004,6 +1039,12 @@ async function scanFromPhoto(input, mode) {
     document.getElementById('searchInput').value = code;
     setStatus(`✓ ${code}`);
     doSearch();
+  } else if (isExpiry) {
+    scanPaused = true;
+    cameraUsageMode = 'expiry';
+    document.getElementById('expiryScanInput').value = code;
+    setStatus(`✓ ${code}`);
+    lookupExpiryFromInput(true, code);
   } else {
     scanPaused = false;
     document.getElementById('scanInput').value = code;
@@ -1472,22 +1513,24 @@ async function stopCamera() {
   button.style.borderColor = '';
   const pb = document.getElementById('pauseScanButton');
   if (pb) { pb.style.display = 'none'; pb.textContent = '⏸ Pause'; pb.style.background = ''; pb.style.color = ''; pb.style.borderColor = ''; }
-  if (cameraUsageMode === 'search') {
-    document.getElementById('cameraPreview').srcObject = null;
-    document.getElementById('cameraPreview').style.display = 'block';
-    document.getElementById('html5Reader').style.display = 'none';
-    document.getElementById('scannerStatus').textContent = 'Camera arretee';
-    const cb = document.getElementById('cameraButton');
-    cb.textContent = 'Ouvrir camera';
-    cb.style.background = ''; cb.style.color = ''; cb.style.borderColor = '';
-  } else {
-    document.getElementById('searchCameraPreview').srcObject = null;
-    document.getElementById('searchCameraPreview').style.display = 'block';
-    document.getElementById('searchHtml5Reader').style.display = 'none';
-    document.getElementById('searchScannerStatus').textContent = 'Camera arretee';
-    const scb = document.getElementById('searchCameraButton');
-    scb.textContent = 'Ouvrir camera';
-    scb.style.background = ''; scb.style.color = ''; scb.style.borderColor = '';
+  for (const view of [
+    {video: 'cameraPreview', reader: 'html5Reader', status: 'scannerStatus', button: 'cameraButton'},
+    {video: 'searchCameraPreview', reader: 'searchHtml5Reader', status: 'searchScannerStatus', button: 'searchCameraButton'},
+    {video: 'expiryCameraPreview', reader: 'expiryHtml5Reader', status: 'expiryScannerStatus', button: 'expiryCameraButton'},
+  ]) {
+    const otherVideo = document.getElementById(view.video);
+    const otherReader = document.getElementById(view.reader);
+    const otherStatus = document.getElementById(view.status);
+    const otherButton = document.getElementById(view.button);
+    if (otherVideo) { otherVideo.srcObject = null; otherVideo.style.display = 'block'; }
+    if (otherReader) { otherReader.innerHTML = ''; otherReader.style.display = 'none'; }
+    if (otherStatus) otherStatus.textContent = 'Caméra arrêtée';
+    if (otherButton) {
+      otherButton.textContent = 'Ouvrir caméra';
+      otherButton.style.background = '';
+      otherButton.style.color = '';
+      otherButton.style.borderColor = '';
+    }
   }
   cameraUsageMode = 'scan';
 }
@@ -1603,6 +1646,12 @@ function onDecodedCode(decodedText, instant=false) {
   if (cameraUsageMode === 'search') {
     doSearchValue(rawValue);
     scheduleScanResume(1500);   // search has no confirm step → resume shortly
+  } else if (cameraUsageMode === 'expiry') {
+    lookupExpiryFromInput(true, rawValue);
+    try { getCameraDom().status.textContent = '✓ Lu — entrez la date'; } catch (_) {}
+    // Keep this product locked in place until its date is saved or cleared.
+    // The camera itself still goes to sleep via the anti-overheating timer.
+    window.clearTimeout(scanResumeTimer);
   } else {
     lookupScanFromInput(true, rawValue);
     // Mapping: stay PAUSED while the description loads and the employee confirms,
@@ -1664,9 +1713,9 @@ function resetCameraCandidate() {
 
 // ── Input helpers ─────────────────────────────────────────────────────────────
 function getActiveBarcodeInput() {
-  return cameraUsageMode === 'search'
-    ? document.getElementById('searchInput')
-    : document.getElementById('scanInput');
+  if (cameraUsageMode === 'search') return document.getElementById('searchInput');
+  if (cameraUsageMode === 'expiry') return document.getElementById('expiryScanInput');
+  return document.getElementById('scanInput');
 }
 
 function setScannedBarcode(barcode) {
@@ -1734,7 +1783,9 @@ function handleScanInputKey(event) {
 }
 
 function handleHardwareScannerKey(event) {
-  if (!document.getElementById('scan').classList.contains('active')) return;
+  const scanActive = document.getElementById('scan').classList.contains('active');
+  const expiryActive = document.getElementById('expiry')?.classList.contains('active');
+  if (!scanActive && !expiryActive) return;
   if (event.ctrlKey || event.altKey || event.metaKey) return;
 
   const target = event.target;
@@ -1745,9 +1796,11 @@ function handleHardwareScannerKey(event) {
   if (event.key === 'Enter' || event.key === 'Tab') {
     if (hardwareScanBuffer.length >= 6) {
       event.preventDefault();
+      cameraUsageMode = expiryActive ? 'expiry' : 'scan';
       setScannedBarcode(hardwareScanBuffer);
       hardwareScanBuffer = '';
-      lookupScanFromInput(true);
+      if (expiryActive) lookupExpiryFromInput(true);
+      else lookupScanFromInput(true);
     }
     return;
   }
@@ -1757,18 +1810,26 @@ function handleHardwareScannerKey(event) {
   window.clearTimeout(hardwareScanTimer);
   hardwareScanTimer = window.setTimeout(() => {
     if (looksLikeCompleteRetailBarcode(hardwareScanBuffer)) {
+      cameraUsageMode = expiryActive ? 'expiry' : 'scan';
       setScannedBarcode(hardwareScanBuffer);
-      lookupScanFromInput(true);
+      if (expiryActive) lookupExpiryFromInput(true);
+      else lookupScanFromInput(true);
     } else if (looksLikeBarcode(hardwareScanBuffer)) {
+      cameraUsageMode = expiryActive ? 'expiry' : 'scan';
       setScannedBarcode(hardwareScanBuffer);
-      document.getElementById('scannerStatus').textContent = 'Code rempli - appuyez sur Verifier';
+      const status = document.getElementById(
+        expiryActive ? 'expiryScannerStatus' : 'scannerStatus'
+      );
+      if (status) status.textContent = 'Code rempli — appuyez sur Vérifier';
     }
     hardwareScanBuffer = '';
   }, 500);
 }
 
 function showCameraHint(message) {
-  document.getElementById('scanResult').innerHTML = `<div class="msg error">${esc(message)}</div>`;
+  const targetId = cameraUsageMode === 'expiry' ? 'expiryLookupResult' : 'scanResult';
+  const target = document.getElementById(targetId);
+  if (target) target.innerHTML = `<div class="msg error">${esc(message)}</div>`;
 }
 
 // ── Device support display ────────────────────────────────────────────────────

@@ -52,6 +52,21 @@ PRODUCT_DATA_TABLE_COLUMNS = {
         "source_url", "confidence", "verification_status", "approved_by",
         "approved_role", "created_at", "last_verified_at",
     ),
+    "product_expiry_status": (
+        "store_key", "gtin_key", "barcode", "product_name", "brand",
+        "image_url", "product_code", "earliest_expiry_date", "checked_at",
+        "checked_by", "recorded_by", "note", "locations_json", "revision",
+    ),
+    "product_expiry_events": (
+        "store_key", "gtin_key", "barcode", "action",
+        "previous_expiry_date", "expiry_date", "product_name", "initials",
+        "recorded_by", "note", "created_at",
+    ),
+}
+
+PRODUCT_DATA_ORDER_COLUMNS = {
+    "product_reference": "barcode",
+    "product_expiry_status": "store_key, gtin_key",
 }
 
 PRODUCT_ID_TABLES = {
@@ -87,7 +102,7 @@ _PRODUCT_RESTORE_DEFAULTS = {
 def build_product_data_backup(db):
     return {
         table: [dict(row) for row in db.execute(
-            f"SELECT * FROM {table} ORDER BY {'barcode' if table == 'product_reference' else 'id'}"
+            f"SELECT * FROM {table} ORDER BY {PRODUCT_DATA_ORDER_COLUMNS.get(table, 'id')}"
         ).fetchall()]
         for table in PRODUCT_DATA_TABLE_COLUMNS
     }
@@ -207,6 +222,18 @@ def restore_product_data_backup(db, payload, product_id_map):
             if table == "product_reference" and not str(item.get("barcode", "") or "").strip():
                 skipped += 1
                 continue
+            if table == "product_expiry_status" and not all(
+                str(item.get(column, "") or "").strip()
+                for column in ("store_key", "gtin_key", "barcode", "earliest_expiry_date")
+            ):
+                skipped += 1
+                continue
+            if table == "product_expiry_events" and not all(
+                str(item.get(column, "") or "").strip()
+                for column in ("store_key", "gtin_key", "barcode", "action", "created_at")
+            ):
+                skipped += 1
+                continue
             values = tuple(_clean_value(item.get(column, "")) for column in columns)
             placeholders = ",".join("?" for _ in columns)
             if table == "product_reference":
@@ -214,6 +241,31 @@ def restore_product_data_backup(db, payload, product_id_map):
                 conflict = "ON CONFLICT(barcode) DO UPDATE SET " + ",".join(
                     f"{column}=excluded.{column}" for column in update_columns
                 )
+            elif table == "product_expiry_status":
+                update_columns = [
+                    column for column in columns
+                    if column not in {"store_key", "gtin_key"}
+                ]
+                conflict = "ON CONFLICT(store_key, gtin_key) DO UPDATE SET " + ",".join(
+                    f"{column}=excluded.{column}" for column in update_columns
+                )
+            elif table == "product_expiry_events":
+                existing = db.execute(
+                    """SELECT id FROM product_expiry_events
+                       WHERE store_key=? AND gtin_key=? AND barcode=? AND action=?
+                         AND COALESCE(previous_expiry_date, '')=?
+                         AND COALESCE(expiry_date, '')=?
+                         AND COALESCE(product_name, '')=?
+                         AND COALESCE(initials, '')=?
+                         AND COALESCE(recorded_by, '')=?
+                         AND COALESCE(note, '')=? AND created_at=?
+                       LIMIT 1""",
+                    values,
+                ).fetchone()
+                if existing:
+                    skipped += 1
+                    continue
+                conflict = ""
             elif table == "product_data_issues":
                 existing = db.execute(
                     """

@@ -32,6 +32,7 @@ from routes.regulatory import (
     maybe_resume_regulatory_enrichment, regulatory_bp,
     schedule_regulatory_enrichment_after,
 )
+from routes.expiry import expiry_bp
 from observability import maybe_log_operational_warning, record_request
 from semantic_search import (
     maybe_resume_semantic_product_index,
@@ -144,11 +145,12 @@ app.register_blueprint(ai_bp)
 app.register_blueprint(gist_bp)
 app.register_blueprint(import_export_bp)
 app.register_blueprint(regulatory_bp)
+app.register_blueprint(expiry_bp)
 app.register_blueprint(auth_bp)
 
 
 _PRODUCT_DATA_BLUEPRINTS = {
-    "products", "ai", "gist", "import_export", "regulatory",
+    "products", "ai", "gist", "import_export", "regulatory", "expiry",
 }
 
 
@@ -194,7 +196,8 @@ def _asset_version():
         "templates/index.html", "static/style.css", "static/scanner.js",
         "static/api.js", "static/config.js", "static/store.js", "static/lock.js",
         "static/search.js", "static/gist-ui.js", "static/ai-ui.js",
-        "static/scan-ui.js", "static/layout-ui.js", "static/main.js",
+        "static/scan-ui.js", "static/expiry-ui.js", "static/layout-ui.js",
+        "static/main.js",
         "static/vendor/zxing-library-0.21.3.min.js",
         "static/service-worker.js", "static/manifest.json", "static/icon.svg",
     )

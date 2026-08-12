@@ -28,6 +28,7 @@ from product_data import (
     upsert_reference_candidate,
 )
 from product_backup import (
+    PRODUCT_DATA_ORDER_COLUMNS,
     PRODUCT_DATA_TABLE_COLUMNS,
     restore_product_backup_row,
     restore_product_data_backup,
@@ -202,7 +203,7 @@ def _export_database_locked():
                     output.write(",")
                 json.dump(table, output, ensure_ascii=False)
                 output.write(":")
-                order_column = "barcode" if table == "product_reference" else "id"
+                order_column = PRODUCT_DATA_ORDER_COLUMNS.get(table, "id")
                 write_rows(
                     output,
                     f"SELECT * FROM {table} ORDER BY {order_column}",

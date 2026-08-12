@@ -26,6 +26,7 @@
 <div class="tabs">
   <button class="tab active" id="tabBtn-search" onclick="switchTab('search')">Recherche</button>
   <button class="tab" id="tabBtn-client" onclick="switchTab('client')">Client</button>
+  <button class="tab" id="tabBtn-expiry" onclick="switchTab('expiry')">Dates 🔒</button>
   <button class="tab" id="tabBtn-scan" onclick="switchTab('scan')">Scan 🔒</button>
   <button class="tab" id="tabBtn-add" onclick="switchTab('add')">Plan 🔒</button>
   <button id="lockButton" onclick="lockApp()" title="Verrouiller la session" style="display:none;flex:none;width:36px;padding:0;border:none;background:none;font-size:17px;cursor:pointer;color:#6b7280;touch-action:manipulation">🔓</button>
@@ -51,6 +52,87 @@
     </div>
     <div id="editorSessionInfo" class="inline-note">Optionnel — jamais obligatoire. Si vous mettez un nom, il sert à savoir qui a modifié quoi et à étiqueter les données pour l'IA. Vous pouvez l'ignorer.</div>
     <div id="backendStatusInfo" class="inline-note">Vérification de la base partagee...</div>
+  </div>
+</div>
+
+<!-- ── EXPIRY TAB ── -->
+<div id="expiry" class="section content">
+  <div class="expiry-mode-tabs" role="tablist" aria-label="Suivi des dates">
+    <button type="button" id="expiryModeScan" class="expiry-mode-tab active" onclick="setExpiryMode('scan')">Scanner un produit</button>
+    <button type="button" id="expiryModeBoard" class="expiry-mode-tab" onclick="setExpiryMode('board')">Tableau des dates</button>
+  </div>
+
+  <div id="expiryScanView">
+    <div class="card expiry-intro-card">
+      <div class="section-title">Date la plus proche</div>
+      <div class="field expiry-initials-field">
+        <label class="label" for="expiryInitials">Initiales de l’employé</label>
+        <input id="expiryInitials" type="text" maxlength="12" autocomplete="off" autocapitalize="characters"
+               placeholder="Ex: AM" oninput="saveExpiryInitials()"/>
+      </div>
+    </div>
+
+    <div class="card scanner expiry-scanner">
+      <div class="scanner-viewport">
+        <video id="expiryCameraPreview" playsinline muted></video>
+        <div id="expiryHtml5Reader"></div>
+      </div>
+      <div class="scanner-bar">
+        <span id="expiryScannerStatus" class="pill">Caméra arrêtée</span>
+        <button class="btn btn-outline btn-inline" id="expiryTorchButton" onclick="toggleTorch()" style="display:none" title="Lampe de poche">💡</button>
+        <input type="range" id="expiryZoomSlider" min="1" max="5" step="0.5" value="1" style="display:none;width:72px;accent-color:#c8102e" title="Zoom" oninput="applyZoom(this.value)">
+        <span id="expiryZoomValue" style="display:none;font-size:12px;font-weight:700;min-width:32px;text-align:center;color:#c8102e;cursor:pointer" title="Réinitialiser le zoom" onclick="applyZoom(1);document.getElementById('expiryZoomSlider').value=1">1×</span>
+        <label class="btn btn-outline btn-inline expiry-photo-button" title="Photographier le code-barres" aria-label="Photographier le code-barres">
+          📷
+          <input type="file" accept="image/*" capture="environment" style="display:none" onchange="scanFromPhoto(this, 'expiry')">
+        </label>
+        <button class="btn btn-inline secondary" onclick="toggleExpiryCamera()" id="expiryCameraButton">Ouvrir caméra</button>
+      </div>
+    </div>
+
+    <div class="card expiry-barcode-card">
+      <label class="label" for="expiryScanInput">UPC / GTIN</label>
+      <div class="expiry-barcode-row">
+        <input type="text" id="expiryScanInput" inputmode="numeric" autocomplete="off" autocapitalize="off"
+               spellcheck="false" placeholder="Code-barres"
+               onkeydown="handleExpiryInputKey(event)"/>
+        <button type="button" class="btn btn-inline" onclick="lookupExpiryFromInput()">Vérifier</button>
+        <button type="button" class="expiry-clear-code" onclick="clearExpiryLookup()" title="Effacer" aria-label="Effacer">×</button>
+      </div>
+    </div>
+
+    <div id="expiryLookupResult" aria-live="polite"></div>
+  </div>
+
+  <div id="expiryBoardView" hidden>
+    <div class="card expiry-board-toolbar">
+      <div class="expiry-board-heading">
+        <div>
+          <div class="section-title">Produits suivis</div>
+          <div id="expiryBoardUpdated" class="small"></div>
+        </div>
+        <button type="button" class="expiry-refresh-button" onclick="loadExpiryBoard(true)" title="Actualiser" aria-label="Actualiser">↻</button>
+      </div>
+      <div id="expirySummary" class="expiry-summary"></div>
+      <div class="expiry-board-filters">
+        <div class="field">
+          <label class="label" for="expiryBoardSearch">Rechercher</label>
+          <input id="expiryBoardSearch" type="search" placeholder="Produit ou UPC" oninput="renderExpiryBoard()"/>
+        </div>
+        <div class="field">
+          <label class="label" for="expiryBoardFilter">Échéance</label>
+          <select id="expiryBoardFilter" onchange="renderExpiryBoard()">
+            <option value="all">Toutes les dates</option>
+            <option value="expired">Déjà dépassées</option>
+            <option value="7">Dans 7 jours</option>
+            <option value="30">Dans 30 jours</option>
+            <option value="60">Dans 60 jours</option>
+            <option value="later">Plus de 60 jours</option>
+          </select>
+        </div>
+      </div>
+    </div>
+    <div id="expiryBoardList" class="expiry-board-list" aria-live="polite"></div>
   </div>
 </div>
 
@@ -564,7 +646,7 @@
   <div style="background:#fff;border-radius:8px;padding:28px 22px 22px;width:min(380px,100%);box-shadow:0 16px 48px rgba(0,0,0,.35);text-align:center">
     <div style="font-size:34px;margin-bottom:8px" aria-hidden="true">🔒</div>
     <div style="font-weight:700;font-size:18px;margin-bottom:6px;color:#1e293b">Zone protégée</div>
-    <div style="font-size:13px;color:#64748b;margin-bottom:18px;line-height:1.45">Le mot de passe est demandé uniquement pour utiliser Scan et modifier le Plan.</div>
+    <div style="font-size:13px;color:#64748b;margin-bottom:18px;line-height:1.45">Le mot de passe est demandé uniquement pour utiliser Dates, Scan et modifier le Plan.</div>
     <label class="label" for="lockPasswordInput" style="text-align:left">Mot de passe</label>
     <input type="password" id="lockPasswordInput" placeholder="Mot de passe" autocomplete="current-password" maxlength="256"
       style="width:100%;padding:11px 14px;border:2px solid #e2e8f0;border-radius:8px;font-size:16px;box-sizing:border-box;margin-bottom:6px;outline:none"
@@ -585,6 +667,7 @@
 <script src="/static/gist-ui.js{{ asset_q }}"></script>
 <script src="/static/ai-ui.js{{ asset_q }}"></script>
 <script src="/static/scan-ui.js{{ asset_q }}"></script>
+<script src="/static/expiry-ui.js{{ asset_q }}"></script>
 <script src="/static/layout-ui.js{{ asset_q }}"></script>
 <script src="/static/main.js{{ asset_q }}"></script>
 

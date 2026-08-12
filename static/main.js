@@ -193,7 +193,7 @@ function setActiveTabUi(tab) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.getElementById(tab)?.classList.add('active');
-  const tabs = ['search','client','scan','add'];
+  const tabs = ['search','client','expiry','scan','add'];
   const button = document.querySelectorAll('.tab')[tabs.indexOf(tab)];
   if (button) button.classList.add('active');
   const moveReceipt = document.getElementById('planMoveReceipt');
@@ -220,6 +220,7 @@ async function switchTab(tab) {
     });
   }
   if (tab === 'scan') { if (typeof populateRayonAisleList === 'function') populateRayonAisleList(); window.setTimeout(focusScanInput, 50); }
+  if (tab === 'expiry') window.onExpiryTabActivated?.();
   if (tab === 'client') window.setTimeout(() => document.getElementById('clientQuestion')?.focus(), 50);
   if (tab === 'search') window.setTimeout(() => document.getElementById('searchInput')?.focus(), 50);
 }
@@ -271,7 +272,7 @@ window.addEventListener('pagehide', () => {
 
 function getStartupTab() {
   const savedTab = localStorage.getItem(STORAGE_KEYS.activeTab);
-  const validTabs = ['scan','search','client','add'];
+  const validTabs = ['scan','search','client','expiry','add'];
   const preferred = (savedTab && validTabs.includes(savedTab)) ? savedTab : 'search';
   return (LOCKED_TABS.has(preferred) && !isUnlocked()) ? 'search' : preferred;
 }
@@ -297,6 +298,7 @@ function runImmediateStartupEffects(tab) {
     if (typeof populateRayonAisleList === 'function') populateRayonAisleList();
     window.setTimeout(focusScanInput, 50);
   }
+  if (tab === 'expiry') window.onExpiryTabActivated?.();
   if (tab === 'client') window.setTimeout(() => document.getElementById('clientQuestion')?.focus(), 50);
   if (tab === 'search') window.setTimeout(() => document.getElementById('searchInput')?.focus(), 50);
 }
@@ -316,6 +318,7 @@ function runStartupTabEffects(tab) {
     if (typeof populateRayonAisleList === 'function') populateRayonAisleList();
     window.setTimeout(focusScanInput, 50);
   }
+  if (tab === 'expiry') window.onExpiryTabActivated?.();
   if (tab === 'client') window.setTimeout(() => document.getElementById('clientQuestion')?.focus(), 50);
   if (tab === 'search') window.setTimeout(() => document.getElementById('searchInput')?.focus(), 50);
 }
@@ -397,7 +400,7 @@ async function resumeAuthenticatedApp(preferredTab=null) {
 
 function resetAuthenticatedAppState() {
   dirtyLayoutAisles.clear();
-  for (const id of ['mapContent', 'scanResult']) {
+  for (const id of ['mapContent', 'scanResult', 'expiryLookupResult']) {
     const element = document.getElementById(id);
     if (element) element.textContent = '';
   }

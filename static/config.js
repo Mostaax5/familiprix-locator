@@ -21,6 +21,7 @@ const STORAGE_KEYS = {
   scanDraft: 'familiprixScanDraft',
   addDraft: 'familiprixAddDraft',
   clientDraft: 'familiprixClientDraft',
+  expiryInitials: 'familiprixExpiryInitials',
   editorSession: 'familiprixEditorSession',
   planSnapshot: 'familiprixPlanSnapshot',
   store: 'familiprixStore'
@@ -35,9 +36,9 @@ const STORES = [
   }
 ];
 
-// Customer service stays immediately available. Only the two tabs that can
-// change product locations or the store plan require a server-verified session.
-const LOCKED_TABS = new Set(['scan', 'add']);
+// Customer service stays immediately available. Store-maintenance views require
+// the same server-verified employee session.
+const LOCKED_TABS = new Set(['expiry', 'scan', 'add']);
 
 let backendInfo = {
   backend: 'sqlite',

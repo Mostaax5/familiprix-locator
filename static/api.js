@@ -94,6 +94,45 @@ async function apiGetProductByBarcode(barcode) {
   return normalizeProduct(data);
 }
 
+async function apiGetExpiryProduct(barcode, store='default') {
+  const {res, data} = await apiFetch(
+    `/api/expiry/product/${encodeURIComponent(barcode)}?store=${encodeURIComponent(store)}`
+  );
+  if (!res.ok) {
+    const error = new Error(data?.error || 'Impossible de charger ce produit.');
+    error.status = res.status;
+    error.data = data;
+    throw error;
+  }
+  return data;
+}
+
+async function apiGetExpiryBoard(store='default') {
+  const {res, data} = await apiFetch(
+    `/api/expiry?store=${encodeURIComponent(store)}&limit=1000`
+  );
+  if (!res.ok) throw new Error(data?.error || 'Impossible de charger le tableau.');
+  return data;
+}
+
+async function apiSetExpiryDate(payload) {
+  const {res, data} = await apiFetch('/api/expiry', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', ...getEditorHeaders()},
+    body: JSON.stringify(payload),
+  });
+  return {ok: res.ok, status: res.status, data};
+}
+
+async function apiClearExpiryDate(barcode, payload) {
+  const {res, data} = await apiFetch(`/api/expiry/${encodeURIComponent(barcode)}`, {
+    method: 'DELETE',
+    headers: {'Content-Type': 'application/json', ...getEditorHeaders()},
+    body: JSON.stringify(payload),
+  });
+  return {ok: res.ok, status: res.status, data};
+}
+
 async function apiAddProduct(payload) {
   try {
     const {res, data} = await apiFetch('/api/products', {

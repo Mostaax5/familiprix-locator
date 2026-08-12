@@ -1,4 +1,4 @@
-// Server-backed protection for the Scan and Plan tabs. Search and Client are
+// Server-backed protection for Dates, Scan and Plan. Search and Client are
 // public; the password and session token never enter localStorage or source JS.
 let _pendingLockedTab = null;
 const _authState = {
@@ -50,6 +50,7 @@ function updateLockUi() {
   const labels = {
     search: 'Recherche',
     client: 'Client',
+    expiry: 'Dates',
     scan: 'Scan',
     add: 'Plan',
   };

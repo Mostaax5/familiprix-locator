@@ -32,7 +32,7 @@ _PRODUCT_SCHEMA_LOCK = threading.RLock()
 _POSTGRES_PRODUCT_SCHEMA_READY = False
 _POSTGRES_PRODUCT_SCHEMA_ERROR = ""
 _POSTGRES_SCHEMA_VERSION_SETTING = "database_schema_version"
-_POSTGRES_SCHEMA_VERSION = "2026-07-29-product-data-v1"
+_POSTGRES_SCHEMA_VERSION = "2026-08-12-expiry-tracking-v1"
 _PRODUCT_SEARCH_GENERATION = 0
 _PRODUCT_SEARCH_GENERATION_LOCK = threading.Lock()
 
@@ -709,6 +709,41 @@ def ensure_product_data_schema(db):
             UNIQUE(gtin_key, source)
         )
     """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS product_expiry_status (
+            store_key            TEXT NOT NULL,
+            gtin_key             TEXT NOT NULL,
+            barcode              TEXT NOT NULL,
+            product_name         TEXT NOT NULL DEFAULT '',
+            brand                TEXT DEFAULT '',
+            image_url            TEXT DEFAULT '',
+            product_code         TEXT DEFAULT '',
+            earliest_expiry_date TEXT NOT NULL,
+            checked_at           TEXT NOT NULL DEFAULT '',
+            checked_by           TEXT NOT NULL DEFAULT '',
+            recorded_by          TEXT NOT NULL DEFAULT '',
+            note                 TEXT DEFAULT '',
+            locations_json       TEXT DEFAULT '[]',
+            revision             INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY(store_key, gtin_key)
+        )
+    """)
+    db.execute(f"""
+        CREATE TABLE IF NOT EXISTS product_expiry_events (
+            id                   {id_type},
+            store_key            TEXT NOT NULL,
+            gtin_key             TEXT NOT NULL,
+            barcode              TEXT NOT NULL,
+            action               TEXT NOT NULL,
+            previous_expiry_date TEXT DEFAULT '',
+            expiry_date          TEXT DEFAULT '',
+            product_name         TEXT DEFAULT '',
+            initials             TEXT NOT NULL DEFAULT '',
+            recorded_by          TEXT NOT NULL DEFAULT '',
+            note                 TEXT DEFAULT '',
+            created_at           TEXT NOT NULL DEFAULT ''
+        )
+    """)
     db.execute("CREATE INDEX IF NOT EXISTS idx_products_gtin_key ON products(gtin_key)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_reference_gtin_key ON product_reference(gtin_key)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_product_identifiers_value ON product_identifiers(identifier_type, normalized_value, authority)")
@@ -721,6 +756,9 @@ def ensure_product_data_schema(db):
     db.execute("CREATE INDEX IF NOT EXISTS idx_product_aliases_value ON product_aliases(normalized_value)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_product_relationships_source ON product_relationships(source_product_id, relationship_type)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_product_relationships_target ON product_relationships(target_product_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_expiry_status_store_date ON product_expiry_status(store_key, earliest_expiry_date)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_expiry_status_barcode ON product_expiry_status(barcode)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_expiry_events_product ON product_expiry_events(store_key, gtin_key, created_at)")
 
 
 _PRODUCT_DATA_TABLES = (
@@ -728,6 +766,7 @@ _PRODUCT_DATA_TABLES = (
     "product_reference_evidence", "product_reference_identifiers",
     "product_data_issues", "product_aliases", "product_relationships",
     "product_quality_runs", "regulatory_sync_state", "regulatory_gtin_checks",
+    "product_expiry_status", "product_expiry_events",
 )
 
 _PRODUCT_REFERENCE_DATA_COLUMNS = (

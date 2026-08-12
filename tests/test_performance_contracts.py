@@ -202,7 +202,7 @@ class PerformanceContractTests(unittest.TestCase):
 
     def test_public_tabs_and_planogram_history_are_compact_by_default(self):
         source = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
-        self.assertIn("const LOCKED_TABS = new Set(['scan', 'add'])", (
+        self.assertIn("const LOCKED_TABS = new Set(['expiry', 'scan', 'add'])", (
             ROOT / "static" / "config.js"
         ).read_text(encoding="utf-8"))
         self.assertIn('id="tabBtn-search" onclick="switchTab(\'search\')">Recherche</button>', source)

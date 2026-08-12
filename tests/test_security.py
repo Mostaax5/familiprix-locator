@@ -93,6 +93,8 @@ class SecurityBoundaryTests(unittest.TestCase):
     def test_forged_browser_identity_cannot_read_private_api(self):
         for path in (
             "/api/export",
+            "/api/expiry",
+            "/api/expiry/product/063848907665",
             "/api/products/removed",
             "/api/planograms/history",
             "/api/gist/status",
@@ -378,6 +380,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 "product_reference_identifiers", "product_identifiers",
                 "product_field_evidence", "product_data_issues",
                 "product_aliases", "product_relationships",
+                "product_expiry_status", "product_expiry_events",
             },
         )
 

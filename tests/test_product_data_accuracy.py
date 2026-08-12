@@ -728,6 +728,26 @@ class ProductDataAccuracyTests(unittest.TestCase):
                VALUES (?, ?, 'same_product_family', 'Manual', 1, 'verified', ?)""",
             (first, second, "2026-07-22T00:00:00+00:00"),
         )
+        expiry_key = gtin_identity_key("063848966068")
+        source.execute(
+            """INSERT INTO product_expiry_status
+               (store_key, gtin_key, barcode, product_name,
+                earliest_expiry_date, checked_at, checked_by, recorded_by,
+                locations_json, revision)
+               VALUES ('default', ?, '063848966068', 'Exact package 50',
+                       '2026-10-01', '2026-07-22T00:00:00+00:00', 'AM',
+                       'manager', '[]', 1)""",
+            (expiry_key,),
+        )
+        source.execute(
+            """INSERT INTO product_expiry_events
+               (store_key, gtin_key, barcode, action, expiry_date,
+                product_name, initials, recorded_by, created_at)
+               VALUES ('default', ?, '063848966068', 'created', '2026-10-01',
+                       'Exact package 50', 'AM', 'manager',
+                       '2026-07-22T00:00:00+00:00')""",
+            (expiry_key,),
+        )
         upsert_reference_candidate(
             source,
             {
@@ -775,6 +795,23 @@ class ProductDataAccuracyTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(evidence["verification_status"], "verified")
         self.assertEqual(evidence["active"], 1)
+        expiry = target.execute(
+            """SELECT earliest_expiry_date, checked_by
+               FROM product_expiry_status
+               WHERE store_key='default' AND gtin_key=?""",
+            (expiry_key,),
+        ).fetchone()
+        self.assertEqual(expiry["earliest_expiry_date"], "2026-10-01")
+        self.assertEqual(expiry["checked_by"], "AM")
+
+        restore_product_data_backup(target, backup, id_map)
+        self.assertEqual(
+            target.execute(
+                "SELECT COUNT(*) FROM product_expiry_events WHERE gtin_key=?",
+                (expiry_key,),
+            ).fetchone()[0],
+            1,
+        )
         source.close()
         target.close()
 
