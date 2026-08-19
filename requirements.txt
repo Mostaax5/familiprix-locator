@@ -3,5 +3,5 @@ flask-compress==1.24
 gunicorn==26.0.0
 psycopg[binary,pool]==3.3.4
 pdfplumber==0.11.10
-pypdfium2==5.12.1
+pypdfium2==5.13.0
 idna==3.18
