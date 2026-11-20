@@ -298,6 +298,9 @@ def init_db():
     global _POSTGRES_PRODUCT_SCHEMA_ERROR
     db = connect_db()
     try:
+        from jobs import ensure_schema
+        ensure_schema(db)
+        db.commit()
         if db.backend == "postgres":
             # A deploy must never wait forever behind a transaction holding a
             # schema lock. A later worker can retry a best-effort migration.

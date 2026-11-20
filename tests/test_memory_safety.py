@@ -279,7 +279,7 @@ class MemorySafetyTests(unittest.TestCase):
             "regulatory_identifiers": [{"duplicate": True}],
         })
 
-        self.assertNotIn("modified_at", compact)
+        self.assertEqual(compact["modified_at"], "audit-only")  # Required write precondition.
         self.assertNotIn("primary_source", compact)
         self.assertNotIn("brand", compact)
         self.assertNotIn("description", compact)

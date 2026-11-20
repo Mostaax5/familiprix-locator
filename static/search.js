@@ -846,10 +846,12 @@ async function doSearchValue(q) {
     }
     try {
       const product = await apiGetProductByBarcode(q);
+      if (requestGeneration !== _searchRequestGeneration) return;
       div.innerHTML = productCard(product, false);
       startSearchImagePolling([product]);
       return;
     } catch (e) {
+      if (requestGeneration !== _searchRequestGeneration) return;
       if (e.status && e.status !== 404) {
         div.innerHTML = '<div class="msg error">Impossible de joindre la base pour le moment.</div>';
         return;

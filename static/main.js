@@ -93,14 +93,14 @@ function upsertCachedProduct(product) {
   else allProductsCache.push(normalized);
   if (typeof invalidateProductSearchIndexes === 'function') invalidateProductSearchIndexes();
   markProductsCacheChanged();
-  if (typeof savePlanSnapshot === 'function') savePlanSnapshot();
+  if (typeof schedulePlanSnapshotSave === 'function') schedulePlanSnapshotSave();
 }
 
 function removeCachedProduct(productId) {
   allProductsCache = allProductsCache.filter(item => Number(item.id) !== Number(productId));
   if (typeof invalidateProductSearchIndexes === 'function') invalidateProductSearchIndexes();
   markProductsCacheChanged();
-  if (typeof savePlanSnapshot === 'function') savePlanSnapshot();
+  if (typeof schedulePlanSnapshotSave === 'function') schedulePlanSnapshotSave();
 }
 
 // ── Utilities ────────────────────────────────────────────────────────────────

@@ -132,7 +132,7 @@ app.config["DB_BOOT_PENDING"] = DB_BOOT_PENDING
 
 # Keep local setup deterministic. On Render the same work runs below after the
 # app object is ready, so a busy PostgreSQL lock cannot block /healthz.
-if not _ASYNC_RENDER_BOOT:
+if not _ASYNC_RENDER_BOOT and os.environ.get("APP_START_SERVICES", "1") != "0":
     try:
         init_db()
     except Exception as exc:  # noqa: BLE001 — any DB failure must not kill the boot
@@ -214,6 +214,20 @@ ASSET_VERSION = _asset_version()
 @app.route("/")
 def index():
     return render_template("index.html", asset_version=ASSET_VERSION)
+
+
+@app.route("/livez")
+def livez():
+    return jsonify({"ok": True})
+
+
+@app.route("/health/dependencies")
+def dependencies():
+    from health import dependency_status
+    status = dependency_status()
+    response = jsonify({**status, "cached_search_available": product_search_cache_ready()})
+    response.headers["Cache-Control"] = "no-store"
+    return response, (200 if status["database_available"] else 503)
 
 
 @app.route("/healthz")
@@ -333,7 +347,7 @@ def add_security_headers(response):
     )
     csp = (
         "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; frame-src 'none'; object-src 'none'; "
-        "form-action 'self'; script-src 'self'; script-src-attr 'unsafe-inline'; "
+        "form-action 'self'; script-src 'self' 'wasm-unsafe-eval'; script-src-attr 'unsafe-inline'; "
         "style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; "
         "font-src 'self'; connect-src 'self'; media-src 'self' blob:; "
         "worker-src 'self' blob:; manifest-src 'self'"
@@ -681,6 +695,8 @@ def _start_persistence_services(*, background=False):
                 f"[BOOT] Service catalogue "
                 f"_restore_from_gist_if_empty impossible: {exc}"
             )
+        from jobs import start_embedded
+        start_embedded()
         ensure_catalogue_warmup_started()
         while catalogue_warmup_status().get("stage") != "ready":
             time.sleep(1)
@@ -744,11 +760,12 @@ def _finish_persistence_boot():
         _start_persistence_services()
 
 
-if _ASYNC_RENDER_BOOT:
-    threading.Thread(target=_finish_persistence_boot, daemon=True).start()
-else:
-    _finish_persistence_boot()
-_start_self_keepalive()
+if os.environ.get("APP_START_SERVICES", "1") != "0":
+    if _ASYNC_RENDER_BOOT:
+        threading.Thread(target=_finish_persistence_boot, daemon=True).start()
+    else:
+        _finish_persistence_boot()
+    _start_self_keepalive()
 
 if __name__ == "__main__":
     DEFAULT_CERT_PATH = os.path.join(os.path.dirname(__file__), "certs", "localhost.pem")

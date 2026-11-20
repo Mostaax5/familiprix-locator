@@ -12,7 +12,7 @@ from flask import Blueprint, request, jsonify, Response, g, stream_with_context
 from database import get_db
 from auth import require_editor, utc_now_iso
 from security import record_security_event
-from routes.layout import layout_metrics, normalize_layout_config, valid_aisle_name
+from domain.layout import layout_metrics, normalize_layout_config, valid_aisle_name
 from routes.products import (
     product_payload_error,
     release_optional_product_caches,
@@ -40,14 +40,8 @@ import_export_bp = Blueprint("import_export", __name__)
 # concurrent parses can exhaust Render's 512 MB instance (see parse_planogram_pdf).
 _PDF_PARSE_LOCK = threading.Lock()
 
-# ── Async parse jobs ─────────────────────────────────────────────────────────────
-# Parsing remains asynchronous because an unfamiliar PDF may need the slower
-# compatibility reader. The upload stores the file and returns a job id while a
-# background thread parses it, and the phone polls the status endpoint. Jobs live
-# as files in the temp dir so a gunicorn worker recycle can relaunch an interrupted
-# parse from the stored PDF instead of leaving it stuck.
+# Upload staging is temporary; accepted jobs and PDF bytes live in PostgreSQL.
 _JOBS_DIR = os.path.join(tempfile.gettempdir(), "plano-parse-jobs")
-_JOB_MAX_AGE_S = 6 * 3600
 
 
 def _bounded_env_int(name, default, minimum, maximum):
@@ -72,86 +66,6 @@ def _job_paths(job_id):
             os.path.join(_JOBS_DIR, f"{job_id}.pdf"))
 
 
-def _write_job(job_id, payload):
-    os.makedirs(_JOBS_DIR, exist_ok=True)
-    try:
-        os.chmod(_JOBS_DIR, 0o700)
-    except OSError:
-        pass
-    path = _job_paths(job_id)[0]
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, ensure_ascii=False)
-    try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
-    os.replace(tmp, path)   # atomic: a poll never sees a half-written file
-
-
-def _read_job(job_id):
-    try:
-        with open(_job_paths(job_id)[0], "r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return None
-
-
-def _cleanup_old_jobs():
-    try:
-        cutoff = time.time() - _JOB_MAX_AGE_S
-        for name in os.listdir(_JOBS_DIR):
-            path = os.path.join(_JOBS_DIR, name)
-            try:
-                if os.path.getmtime(path) < cutoff:
-                    os.remove(path)
-            except OSError:
-                pass
-    except OSError:
-        pass
-
-
-def _launch_parse_thread(job_id):
-    """Parse the job's stored PDF in a background thread and write the result."""
-    def worker():
-        json_path, pdf_path = _job_paths(job_id)
-        job_meta = _read_job(job_id) or {}
-        owner = str(job_meta.get("owner") or "")
-        try:
-            # The coordinate-aware PDFium path normally finishes in well under a
-            # second. It validates its row coverage and automatically falls back
-            # to pdfplumber for any unfamiliar document instead of risking a
-            # silently incomplete import.
-            with memory_intensive_task("planogram_pdf", priority=True):
-                release_optional_product_caches()
-                with _PDF_PARSE_LOCK:
-                    products, plano_meta, parse_method = _parse_planogram_file(pdf_path)
-            tablettes = {}
-            for p in products:
-                t = str(p["tablette"])
-                tablettes[t] = tablettes.get(t, 0) + 1
-            _write_job(job_id, {"status": "done", "success": True, "owner": owner,
-                                "products": products, "count": len(products),
-                                "tablettes": tablettes, "plano": plano_meta,
-                                "parse_method": parse_method})
-            try:
-                os.remove(pdf_path)   # done — the stored PDF is no longer needed
-            except OSError:
-                pass
-        except Exception as exc:
-            print(f"[SECURITY] Planogram parse failed for job {job_id}: {type(exc).__name__}: {exc}")
-            _write_job(job_id, {"status": "error", "success": False, "owner": owner,
-                                "error": "Le PDF est invalide, trop volumineux ou impossible a analyser."})
-            try:
-                os.remove(pdf_path)
-            except OSError:
-                pass
-        finally:
-            release_unused_memory()
-
-    threading.Thread(target=worker, daemon=True).start()
-
-
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @import_export_bp.route("/api/export", methods=["GET"])
@@ -166,6 +80,11 @@ def export_database():
 
 def _export_database_locked():
     db = get_db()
+    db.rollback()
+    if db.backend == "postgres":
+        db.execute("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+    else:
+        db.execute("BEGIN")
     filename = f"familiprix-backup-{utc_now_iso()[:10]}.json"
     fd, path = tempfile.mkstemp(prefix="familiprix-backup-", suffix=".json")
 
@@ -215,6 +134,7 @@ def _export_database_locked():
         except OSError:
             pass
         raise
+    db.rollback()  # Release the snapshot before the client downloads the file.
     release_unused_memory()
     cleanup_state = {"done": False}
     cleanup_lock = threading.Lock()
@@ -314,6 +234,15 @@ def _import_database_locked():
             ),
         )
         imported_layouts += 1
+
+    for layout in layouts_payload:
+        if isinstance(layout, dict) and valid_aisle_name(str(layout.get("aisle", "")).strip()):
+            try:
+                sort_order = max(0, int(layout.get("sort_order", 0)))
+            except (TypeError, ValueError):
+                sort_order = 0
+            db.execute("UPDATE aisle_layouts SET sort_order=? WHERE aisle=?",
+                       (sort_order, str(layout["aisle"]).strip()))
 
     for product in products_payload:
         if not isinstance(product, dict):
@@ -917,7 +846,6 @@ def parse_planogram_pdf():
     if len(filename) > 255 or not filename.lower().endswith(".pdf"):
         return jsonify({"success": False, "error": "Le fichier doit etre un PDF."}), 400
 
-    _cleanup_old_jobs()
     job_id = uuid.uuid4().hex
     json_path, pdf_path = _job_paths(job_id)
     os.makedirs(_JOBS_DIR, exist_ok=True)
@@ -949,11 +877,12 @@ def parse_planogram_pdf():
         except OSError:
             pass
         return jsonify({"success": False, "error": "Impossible de stocker le PDF en securite."}), 500
-    _write_job(job_id, {
-        "status": "running", "pid": os.getpid(), "created": time.time(),
-        "owner": str(getattr(g, "auth_session_hash", "")), "employee": username,
-    })
-    _launch_parse_thread(job_id)
+    from jobs import enqueue_pdf
+    try:
+        with open(pdf_path, "rb") as uploaded:
+            enqueue_pdf(job_id, str(getattr(g, "auth_session_hash", "")), uploaded.read())
+    finally:
+        os.remove(pdf_path)
     return jsonify({"success": True, "job": job_id})
 
 
@@ -961,7 +890,8 @@ def parse_planogram_pdf():
 def parse_planogram_status(job_id):
     if not re.fullmatch(r"[0-9a-f]{32}", str(job_id or "")):
         return jsonify({"success": False, "error": "Job invalide."}), 400
-    job = _read_job(job_id)
+    from jobs import status as job_status
+    job = job_status(job_id)
     if job is None:
         return jsonify({"success": False, "status": "unknown",
                         "error": "Analyse introuvable ou expirée. Re-choisissez le PDF."}), 404
@@ -970,11 +900,6 @@ def parse_planogram_status(job_id):
     ):
         return jsonify({"success": False, "error": "Analyse introuvable."}), 404
     if job.get("status") == "running":
-        # Self-heal: if the worker that started the parse was recycled mid-job
-        # (pid changed), the thread died with it — relaunch from the stored PDF.
-        if job.get("pid") != os.getpid() and os.path.exists(_job_paths(job_id)[1]):
-            _write_job(job_id, {**job, "pid": os.getpid()})
-            _launch_parse_thread(job_id)
         return jsonify({"success": True, "status": "running"})
     return jsonify({key: value for key, value in job.items()
                     if key not in {"owner", "employee", "pid", "created"}})

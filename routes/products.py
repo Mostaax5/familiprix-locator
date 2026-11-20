@@ -1692,7 +1692,7 @@ _BOOTSTRAP_REQUIRED_FIELDS = (
 _BOOTSTRAP_OPTIONAL_FIELDS = (
     "brand", "description", "image_url", "source_url", "search_terms",
     "usage_notes", "alternative_suggestions", "underneath_label",
-    "last_change_by", "last_change_at",
+    "last_change_by", "last_change_at", "modified_at",
 )
 
 
@@ -2664,7 +2664,7 @@ _SEARCH_CACHE_PRODUCT_FIELDS = frozenset({
     "underneath_label", "barcode", "product_code", "aisle", "side",
     "section", "shelf", "position", "facings", "is_plano", "in_stock",
     "linked_position", "flipped_label", "last_change_by", "last_change_at",
-    "data_status", "identity_status", "description_status", "image_status",
+    "modified_at", "data_status", "identity_status", "description_status", "image_status",
     "image_available_unverified", "description_available_unverified",
     "description_quarantined", "description_quality_issue",
 }) | frozenset(FIELD_NAMES)
@@ -7010,6 +7010,9 @@ def update_product(product_id):
     if missing:
         return jsonify({"error": f"Champs obligatoires manquants: {', '.join(missing)}"}), 400
     db = get_db()
+    if "expected_modified_at" not in data:
+        return jsonify({"success": False, "code": "precondition_required",
+                        "error": "Rechargez le produit avant de le modifier."}), 428
     existing = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
     if not existing:
         return jsonify({"error": "Produit non trouve"}), 404
@@ -7037,6 +7040,11 @@ def update_product(product_id):
             "error": f'Position déjà occupée par "{occupied["name"]}" (code {occupied["barcode"] or "sans code"}).'
         }), 409
 
+    expected = str(data.get("expected_modified_at") or "")
+    if expected != str(existing["modified_at"] or ""):
+        return jsonify({"success": False, "code": "stale_product",
+                        "error": "Produit modifié sur un autre appareil. Rechargez-le."}), 409
+
     # Never blank an image: keep the new one, else the existing one, else any
     # image already known for this barcode.
     new_barcode = str(data.get("barcode", existing["barcode"]) or "").strip()
@@ -7046,7 +7054,7 @@ def update_product(product_id):
 
     try:
         result = db.execute(
-            "UPDATE products SET name=?, brand=?, description=?, image_url=?, source_url=?, search_terms=?, usage_notes=?, alternative_suggestions=?, barcode=?, product_code=?, aisle=?, side=?, section=?, shelf=?, position=?, modified_by=?, modified_at=? WHERE id=?",
+            "UPDATE products SET name=?, brand=?, description=?, image_url=?, source_url=?, search_terms=?, usage_notes=?, alternative_suggestions=?, barcode=?, product_code=?, aisle=?, side=?, section=?, shelf=?, position=?, modified_by=?, modified_at=? WHERE id=? AND COALESCE(modified_at, '')=?",
             (
                 data["name"],
                 data.get("brand", existing["brand"]),
@@ -7060,11 +7068,15 @@ def update_product(product_id):
                 data.get("product_code", existing["product_code"]),
                 data["aisle"], data["side"], data.get("section", "1"),
                 data["shelf"], data["position"],
-                username, utc_now_iso(), product_id,
+                username, utc_now_iso(), product_id, expected,
             )
         )
     except DatabaseIntegrityError as exc:
         return jsonify({"error": integrity_conflict_message(exc)}), 409
+    if result.rowcount != 1:
+        db.rollback()
+        return jsonify({"success": False, "code": "stale_product",
+                        "error": "Produit modifié sur un autre appareil. Rechargez-le."}), 409
     db.commit()
     try:
         audit_product_data(

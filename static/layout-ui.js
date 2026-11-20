@@ -797,6 +797,10 @@ function updateBackendStatusInfo() {
   const target = document.getElementById('backendStatusInfo');
   if (!target) return;
   const msgs = [];
+  if (backendInfo.db_unreachable) {
+    target.textContent = 'Base temporairement indisponible. Les résultats mémorisés peuvent être anciens. Les modifications nécessitent une connexion au serveur.';
+    return;
+  }
   if (backendInfo.shared_sync) {
     msgs.push('Base partagee active: PostgreSQL. Les appareils connectes lisent la meme base.');
   } else {
@@ -3731,7 +3735,7 @@ async function importDatabase(input) {
     if (msg) { msg.className = 'msg error'; msg.textContent = 'Fichier invalide. Utilisez uniquement un fichier exporte par cette application.'; }
     return;
   }
-  if (payload.export_version !== 1) {
+  if (![1, 2].includes(payload.export_version)) {
     if (msg) { msg.className = 'msg error'; msg.textContent = 'Format non reconnu. Fichier incompatible.'; }
     return;
   }
