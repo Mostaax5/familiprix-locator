@@ -1,0 +1,158 @@
+[
+  [
+    "decimal dose",
+    "ACME 0.5 mg",
+    "ACME 5 mg",
+    false
+  ],
+  [
+    "decimal comma",
+    "ACME 0,5 mg",
+    "ACME 0.5 mg",
+    true
+  ],
+  [
+    "percent difference",
+    "ACME cream 0.5%",
+    "ACME cream 5%",
+    false
+  ],
+  [
+    "percent equivalence",
+    "ACME cream 1,0%",
+    "ACME cream 1%",
+    true
+  ],
+  [
+    "same bottle wrong dose",
+    "ACME 10 mg 100 ml",
+    "ACME 20 mg 100 ml",
+    false
+  ],
+  [
+    "same dose wrong bottle",
+    "ACME 10 mg 100 ml",
+    "ACME 10 mg 200 ml",
+    false
+  ],
+  [
+    "volume conversion",
+    "ACME 0.5 L",
+    "ACME 500 ml",
+    true
+  ],
+  [
+    "weight conversion",
+    "ACME 0.1 kg",
+    "ACME 100 g",
+    true
+  ],
+  [
+    "dose conversion",
+    "ACME 500 mcg",
+    "ACME 0.5 mg",
+    true
+  ],
+  [
+    "microgram symbol",
+    "ACME 500 µg",
+    "ACME 0.5 mg",
+    true
+  ],
+  [
+    "concentration equivalence",
+    "ACME 100mg/5ml",
+    "ACME 20mg/ml",
+    true
+  ],
+  [
+    "concentration conflict",
+    "ACME 100mg/5ml",
+    "ACME 100mg/ml",
+    false
+  ],
+  [
+    "zero denominator",
+    "ACME 100mg/0ml",
+    "ACME 100mg/ml",
+    false
+  ],
+  [
+    "bilingual flavour",
+    "ACME sirop menthe",
+    "ACME syrup mint",
+    true
+  ],
+  [
+    "wrong flavour",
+    "ACME sirop menthe",
+    "ACME sirop fraise",
+    false
+  ],
+  [
+    "bilingual colour",
+    "ACME brosse bleu",
+    "ACME brush blue",
+    true
+  ],
+  [
+    "wrong colour",
+    "ACME brosse bleu",
+    "ACME brush red",
+    false
+  ],
+  [
+    "plural dosage form",
+    "ACME 50 comprimes",
+    "ACME 50 capsules",
+    false
+  ],
+  [
+    "count equivalence",
+    "ACME CO50",
+    "ACME 50 tablets",
+    true
+  ],
+  [
+    "wrong count",
+    "ACME CO50",
+    "ACME 100 tablets",
+    false
+  ],
+  [
+    "multipack conflict",
+    "ACME 2x85",
+    "ACME 85 wipes",
+    false
+  ],
+  [
+    "multipack equivalence",
+    "ACME 2x85",
+    "ACME 170 wipes",
+    true
+  ],
+  [
+    "same brand wrong family",
+    "ACME dentifrice",
+    "ACME shampoing",
+    false
+  ],
+  [
+    "bilingual family",
+    "ACME dentifrice menthe",
+    "ACME toothpaste mint",
+    true
+  ],
+  [
+    "conditioner not shampoo",
+    "ACME après-shampoing",
+    "ACME shampoo",
+    false
+  ],
+  [
+    "ingredient combination",
+    "ACME 200mg 25mg",
+    "ACME 200mg 50mg",
+    false
+  ]
+]

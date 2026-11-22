@@ -1417,7 +1417,7 @@ async function enrichStoredProductWithAi(productId) {
   }
   const nextProduct = {
     ...product,
-    description: product.description || assistResult.assist.usage_notes || '',
+    description: product.description || '',
     search_terms: assistResult.assist.search_terms || product.search_terms || '',
     usage_notes: assistResult.assist.usage_notes || product.usage_notes || '',
     alternative_suggestions: assistResult.assist.alternative_suggestions || product.alternative_suggestions || ''

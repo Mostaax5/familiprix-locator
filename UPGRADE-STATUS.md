@@ -21,6 +21,26 @@ Branch: `upgrade/reliability-architecture`.
 - Regression tests for conflicts, request ordering, cancellation, backup restore,
   jobs and dependency reporting; PostgreSQL CI integration workflow.
 
+## Accuracy and free-operation upgrade
+
+- Exact entity/barcode validation; no cross-product hero images or inherited UPCs.
+- Decimal and bilingual package matching, unit conversion, concentration, count,
+  dosage form and known product-family conflict checks.
+- Trusted exact source selection before completeness/image scoring.
+- Verified-only public images/descriptions and customer-assistant evidence;
+  raw legacy values preserved. Repair of falsely labelled cached image evidence.
+- Immediate cached UPC lookup with separate missing-image enrichment.
+- Local catalogue assistance by default, paid model/embedding calls blocked;
+  optional bounded Cloudflare Workers Free inference with local fallback.
+- No generated usage text copied into product descriptions.
+- Offline reversible JSON catalogue cleanup preserving UPCs and placements.
+- 26 synthetic matching regressions: all pass, versus 7 on the preceding commit.
+  This is not measured real-store accuracy.
+
+See FREE-OPERATION.md for configuration and limits. No production data backup,
+new hosting deployment, per-employee authentication or multi-store tenancy has
+been completed. The requested full rebuild remains unfinished.
+
 ## Remaining work from the architecture review
 
 The full roadmap is **not complete**. This release is its correctness and

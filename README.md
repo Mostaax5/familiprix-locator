@@ -4,6 +4,13 @@ French-language product search, barcode placement, store layout, expiry tracking
 and evidence-grounded customer assistance. Python 3.13.7, Flask and PostgreSQL;
 SQLite is supported for isolated development.
 
+## Automatic matching and $0 operation
+
+See [FREE-OPERATION.md](FREE-OPERATION.md) for the implemented matching rules,
+free-by-default assistant, reversible catalogue cleanup and remaining hosting /
+commercial-readiness work. Unknown product descriptions and images are withheld;
+normal search does not depend on employees reviewing metadata.
+
 ## Run locally
 
 ```sh

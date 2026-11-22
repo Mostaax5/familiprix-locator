@@ -289,8 +289,8 @@ function renderLookupAssistPreview() {
   if (!pendingLookupAssist) {
     preview.innerHTML = '';
     status.textContent = backendInfo.ai_enabled
-      ? 'Optionnel: genere des mots-clés clients, une explication simple et des alternatives.'
-      : 'IA non configurée sur le serveur. Ajoutez une clé IA sur Render.';
+      ? 'Ajoute des mots-clés de recherche sans modifier les faits du produit.'
+      : 'La recherche par nom et code-barres reste disponible.';
     return;
   }
   status.textContent = 'Aide client generee. Elle sera sauvegardee avec ce produit.';
@@ -453,7 +453,7 @@ async function hydrateOnlineLookup(barcode) {
     if (!document.getElementById('scanProductBrand').value.trim()) document.getElementById('scanProductBrand').value = lookupProduct.brand || '';
     if (!document.getElementById('scanProductDescription').value.trim()) document.getElementById('scanProductDescription').value = lookupProduct.description || '';
     status.className = 'msg success';
-    status.textContent = `Trouve dans ${lookupProduct.source}. Verifiez avant de confirmer.`;
+    status.textContent = `Produit trouvé dans ${lookupProduct.source || 'le catalogue'}.`;
     const sourceUrl = safeHttpUrl(lookupProduct.source_url);
     const imageUrl = safeHttpUrl(lookupProduct.image_url);
     document.getElementById('lookupSource').innerHTML = sourceUrl ? `Source: <a href="${esc(sourceUrl)}" target="_blank" rel="noopener noreferrer">${esc(sourceUrl)}</a>` : '';
@@ -481,9 +481,7 @@ async function generateLookupAssist() {
     return;
   }
   pendingLookupAssist = result.assist;
-  if (!document.getElementById('scanProductDescription').value.trim() && pendingLookupAssist.usage_notes) {
-    document.getElementById('scanProductDescription').value = pendingLookupAssist.usage_notes;
-  }
+  // Generated assistance is separate from the exact product description.
   renderLookupAssistPreview();
 }
 

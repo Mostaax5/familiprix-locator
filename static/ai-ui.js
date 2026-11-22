@@ -168,6 +168,7 @@ function clientResultForStorage(result) {
   return {
     success: true,
     response_mode: normalizeClientResponseMode(result.response_mode),
+    answer_engine: String(result.answer_engine || ""),
     answer,
     answer_references: clientAnswerReferencesForStorage(
       result.answer_references, answer, products
@@ -671,7 +672,7 @@ function renderDocumentedClientDetails(result, exchangeId) {
 function renderClientResponseMode(result) {
   const mode = normalizeClientResponseMode(result?.response_mode);
   const className = mode === 'lookup' ? 'is-fast' : (mode === 'documented' ? 'is-documented' : 'is-detailed');
-  const label = mode === 'lookup' ? 'Recherche rapide' : (mode === 'documented' ? 'Réponse documentée' : 'Réponse avec IA');
+  const label = mode === 'lookup' ? 'Recherche rapide' : (result?.answer_engine === 'catalogue' ? 'Réponse du catalogue · sans IA générative' : (mode === 'documented' ? 'Réponse documentée' : 'Réponse avec IA'));
   return `<div class="client-response-mode ${className}">
     ${label}
   </div>`;

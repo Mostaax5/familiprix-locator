@@ -22,6 +22,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from database import DB_BACKEND, connect_db
+from free_ai import paid_ai_allowed
 
 
 def _env_flag(name, default=True):
@@ -31,7 +32,7 @@ def _env_flag(name, default=True):
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-SEMANTIC_SEARCH_ENABLED = _env_flag("SEMANTIC_SEARCH_ENABLED", True)
+SEMANTIC_SEARCH_ENABLED = paid_ai_allowed() and _env_flag("SEMANTIC_SEARCH_ENABLED", True)
 SEMANTIC_EMBEDDING_API_KEY = os.environ.get(
     "SEMANTIC_EMBEDDING_API_KEY",
     os.environ.get("GEMINI_API_KEY", ""),
@@ -214,6 +215,8 @@ def _safe_provider_error(exc):
 def _embed_texts(texts, task_type, timeout_seconds, max_attempts=3):
     if not texts:
         return []
+    if not paid_ai_allowed():
+        raise RuntimeError("Paid embedding requests are disabled")
     if not SEMANTIC_EMBEDDING_API_KEY:
         raise RuntimeError("cle d embedding absente")
     requests = [{

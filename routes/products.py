@@ -378,7 +378,7 @@ def _reference_corpus(db):
             """SELECT gtin_key, field_name, field_value
                FROM product_reference_evidence
                WHERE active=1 AND verification_status='verified'
-                 AND field_name IN ('name','brand')"""
+                 AND field_name IN ('name','brand','description')"""
         ):
             evidence = dict(evidence_row)
             verified_by_key.setdefault(evidence["gtin_key"], {})[
@@ -416,7 +416,7 @@ def _reference_corpus(db):
                 d.get("brand", "") if store_identity else ""
             )
             available_description = (
-                str(d.get("description", "") or "").strip()
+                str(verified.get("description", "") or "").strip()
             )
             gtin_key = gtin_identity_key(d.get("barcode", ""))
             identifiers = identifiers_by_key.get(gtin_key, [])
@@ -1033,13 +1033,6 @@ def _product_search_row(item, aliases=(), identifiers=()):
         " ".join(value for value in semantic_values if value)
     )
     hay_parts = [verified_semantics]
-    # Available unverified descriptions remain searchable, but they are
-    # evidence rather than identity and therefore receive less semantic weight
-    # than verified fields. A verified description is already present above.
-    if "description" not in verified_fields:
-        unverified_description = str(item.get("description", "") or "")
-        if not description_quality_issue(unverified_description):
-            hay_parts.append(normalize_search_text(unverified_description))
     identifier_text = " ".join(
         str(identifier.get("value", "") or "")
         for identifier in identifiers
@@ -2644,11 +2637,10 @@ def row_to_product(product):
     item["description_quality_issue"] = description_issue
     if description_issue:
         item["description_status"] = "possible_wrong"
-    # Availability and verification are separate concerns.  Employees need the
-    # best data already present in the catalogue now; the flags above preserve
-    # the review state without blanking pictures or descriptions.
-    item["image_url"] = raw_image
-    item["description"] = raw_description
+    # Keep uncertain media in the database/review queue, not in employee cards.
+    # A picture is an identity claim even when accompanied by a small badge.
+    item["image_url"] = raw_image if image_is_verified else ""
+    item["description"] = raw_description if description_is_verified else ""
     for field in FIELD_NAMES - {"name", "description", "image_url"}:
         if field not in verified_fields:
             item[field] = ""
@@ -2825,61 +2817,32 @@ def rejected_image_urls_for_barcode(db, barcode):
 
 
 def find_existing_image_for_barcode(db, barcode, exclude_id=None):
-    """Return the best available image already stored for this exact barcode."""
+    """Reuse one unambiguous VERIFIED image; cached does not mean verified."""
     if not str(barcode or "").strip():
         return ""
     rejected = rejected_image_urls_for_barcode(db, barcode)
-    verified_found = set()
-    available_found = set()
+    verified = set()
     for candidate in exact_gtin_variants(barcode):
-        q = "SELECT image_url, image_status FROM products WHERE barcode=? AND TRIM(COALESCE(image_url,'')) <> ''"
+        query = "SELECT image_url FROM products WHERE barcode=? AND image_status='verified'"
         params = [candidate]
         if exclude_id is not None:
-            q += " AND id<>?"
+            query += " AND id<>?"
             params.append(int(exclude_id))
-        q += " ORDER BY CASE WHEN image_status='verified' THEN 0 ELSE 1 END, id LIMIT 1"
-        row = db.execute(q, tuple(params)).fetchone()
-        if row:
-            item = dict(row)
-            image = safe_http_url(item.get("image_url", ""))
+        for row in db.execute(query, tuple(params)).fetchall():
+            image = safe_http_url(dict(row).get("image_url", ""))
             if image and image not in rejected:
-                available_found.add(image)
-                if item.get("image_status") == "verified":
-                    verified_found.add(image)
-    # The broad catalogue is never used as Client inventory.  Its exact-UPC
-    # picture can still illustrate the mapped product while awaiting review.
+                verified.add(image)
     key = gtin_identity_key(barcode)
     if key:
-        rows = db.execute(
+        for row in db.execute(
             """SELECT field_value FROM product_reference_evidence
                WHERE gtin_key=? AND field_name='image_url' AND active=1
-                 AND verification_status='verified'""",
-            (key,),
-        ).fetchall()
-        for row in rows:
+                 AND verification_status='verified'""", (key,),
+        ).fetchall():
             image = safe_http_url(dict(row).get("field_value", ""))
             if image and image not in rejected:
-                verified_found.add(image)
-    preferred = verified_found or available_found
-    if preferred:
-        # A conflict remains visible to the audit, but the employee still gets
-        # one stable picture, with verified evidence taking precedence.
-        return sorted(preferred)[0]
-    reference_rows = _rows_for_barcodes(
-        db, "product_reference", "barcode, image_url, source_priority", [barcode]
-    )
-    reference_rows.sort(
-        key=lambda row: (
-            -int(dict(row).get("source_priority") or 0),
-            str(dict(row).get("barcode", "")),
-        )
-    )
-    return next((
-        safe_http_url(dict(row).get("image_url", ""))
-        for row in reference_rows
-        if safe_http_url(dict(row).get("image_url", ""))
-        and safe_http_url(dict(row).get("image_url", "")) not in rejected
-    ), "")
+                verified.add(image)
+    return next(iter(verified)) if len(verified) == 1 else ""
 
 
 _REFERENCE_METADATA_FIELDS = (
@@ -3116,7 +3079,7 @@ def materialize_reference_rows(db, rows):
             "barcode": barcode,
             "name": str(metadata.get("name", "") or row.get("name", "") or "").strip(),
             "brand": str(metadata.get("brand", "") or row.get("brand", "") or "").strip(),
-            "description": description,
+            "description": "" if "description" in unverified_fields else description,
             "description_status": (
                 "possible_wrong" if "description" in quarantined_fields
                 else "unverified" if "description" in unverified_fields
@@ -3133,7 +3096,7 @@ def materialize_reference_rows(db, rows):
                 "foreign_language_description"
                 if "description" in quarantined_fields else ""
             ),
-            "image_url": str(metadata.get("image_url", "") or "").strip(),
+            "image_url": "" if "image_url" in unverified_fields else str(metadata.get("image_url", "") or "").strip(),
             "image_status": (
                 "unverified" if "image_url" in unverified_fields else "verified"
             ) if metadata.get("image_url") else "missing",
@@ -4352,21 +4315,30 @@ def schedule_image_fill(barcodes, priority=True):
                                 product, bc,
                             ):
                                 img = ""
-                    if img:
+                    if img and product is None:
+                        # Already verified cache data is read directly by the
+                        # image API. Never manufacture "manual" evidence for it.
+                        with _IMAGE_FILL_STATE_LOCK:
+                            _IMAGE_FILL_RETRY_AFTER.pop(bc, None)
+                    if img and product is not None:
                         now = utc_now_iso()
                         # Save both on the shelf and in the reusable UPC catalogue
                         # so a later re-import displays the picture immediately.
                         changed = persist_image_for_barcode(
                             db, bc, img, now=now,
-                            source=(product or {}).get("source", "Manual verified exact GTIN cache"),
+                            source=(product or {}).get("source", ""),
                             source_url=(product or {}).get("source_url", ""),
                             candidate=product,
                         )
                         if changed:
                             db.commit()
+                        verified_image = find_existing_image_for_barcode(db, bc)
                         with _IMAGE_FILL_STATE_LOCK:
-                            _IMAGE_FILL_RETRY_AFTER.pop(bc, None)
-                    else:
+                            if verified_image:
+                                _IMAGE_FILL_RETRY_AFTER.pop(bc, None)
+                            else:
+                                _IMAGE_FILL_RETRY_AFTER[bc] = time.time() + _IMAGE_MISS_RETRY_SECONDS
+                    elif not img:
                         print(f"[Images] aucune photo verifiee pour UPC {bc}")
                         with _IMAGE_FILL_STATE_LOCK:
                             _IMAGE_FILL_RETRY_AFTER[bc] = time.time() + _IMAGE_MISS_RETRY_SECONDS
@@ -6546,7 +6518,7 @@ def get_product_images():
     for row in rows:
         item = dict(row)
         value = safe_http_url(item.get("image_url", ""))
-        if value:
+        if value and item.get("image_status") == "verified":
             images[str(item["id"])] = value
         elif str(item.get("barcode", "") or "").strip():
             missing_by_id[str(item["id"])] = item["barcode"]
@@ -6557,7 +6529,7 @@ def get_product_images():
     missing_barcodes = []
     for product_id, barcode in missing_by_id.items():
         reference = reference_metadata_for_barcode(references, barcode)
-        value = safe_http_url(reference.get("image_url", ""))
+        value = "" if "image_url" in reference.get("_unverified_fields", []) else safe_http_url(reference.get("image_url", ""))
         if value:
             images[product_id] = value
         else:
@@ -6587,11 +6559,8 @@ def get_reference_product_images():
     images = {}
     missing_barcodes = []
     for barcode in barcodes:
-        image_url = safe_http_url(
-            reference_metadata_for_barcode(metadata_by_barcode, barcode).get(
-                "image_url", ""
-            )
-        )
+        reference = reference_metadata_for_barcode(metadata_by_barcode, barcode)
+        image_url = "" if "image_url" in reference.get("_unverified_fields", []) else safe_http_url(reference.get("image_url", ""))
         if image_url:
             images[barcode] = image_url
         else:

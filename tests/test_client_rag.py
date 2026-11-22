@@ -547,12 +547,15 @@ class ClientRagTests(unittest.TestCase):
     def test_rechargeable_brush_request_excludes_battery_models_and_heads(self):
         products = [{
             "name": "SONICARE BROSSE A DENTS ELECTRIQUE",
+            "description_status": "verified", "_verified_fields": ["description"],
             "description": "Brosse rechargeable avec cable USB.",
         }, {
             "name": "ORAL-B BROSSE A DENTS A PILE",
+            "description_status": "verified", "_verified_fields": ["description"],
             "description": "Brosse electrique alimentee par piles.",
         }, {
             "name": "ORAL-B TETE DE REMPLACEMENT",
+            "description_status": "verified", "_verified_fields": ["description"],
             "description": "Brossette compatible avec un manche rechargeable.",
         }]
 
@@ -1922,7 +1925,7 @@ class ClientRagTests(unittest.TestCase):
         self.assertEqual(result["key_points"][0]["heading"], "Choisir selon le besoin")
         self.assertEqual(
             result["comparisons"][0]["source_ids"],
-            ["catalog-description:1", "catalog:1"],
+            ["catalog:1"],
         )
         self.assertLessEqual(len(result["comparisons"][0]["difference"]), 420)
         self.assertTrue(result["pharmacist_referral"])
@@ -2356,14 +2359,10 @@ class ClientRagTests(unittest.TestCase):
             "corrected_query": "Que prendre pour un mal de tête?",
             "medical": True,
         }, include_live_regulatory=False)
-        description_document = next(
-            document for document in documents
-            if document["source_id"].startswith("catalog-description:")
-        )
-        self.assertEqual(
-            description_document["source_class"], "unverified_catalogue"
-        )
-        self.assertFalse(description_document["medical_claims_allowed"])
+        self.assertFalse(any(
+            document["source_id"].startswith("catalog-description:")
+            for document in documents
+        ))
 
     def test_medical_answer_must_cite_trusted_medical_evidence(self):
         query_plan = {
@@ -3360,6 +3359,7 @@ class ClientRagTests(unittest.TestCase):
         candidate = {
             "id": 8, "client_id": "product:8",
             "name": "GRAVOL 50MG CO20", "brand": "Gravol",
+            "description_status": "verified", "_verified_fields": ["description"],
             "description": "Produit du catalogue pour les nausees.",
             "barcode": "888", "aisle": "Labo", "side": "A",
             "section": "2", "shelf": "3", "position": "1", "in_stock": 1,
@@ -3442,6 +3442,7 @@ class ClientRagTests(unittest.TestCase):
         unrelated = {
             "id": 1, "client_id": "product:1",
             "name": "TASSE TRANSPARENTE 1", "brand": "Test",
+            "description_status": "verified", "_verified_fields": ["description"],
             "description": "Tasse en plastique transparent.",
             "barcode": "111", "aisle": "4", "side": "A",
             "section": "1", "shelf": "2", "position": "1",
@@ -3449,6 +3450,7 @@ class ClientRagTests(unittest.TestCase):
         dressing = {
             "id": 2, "client_id": "product:2",
             "name": "PARAMEDIC PANS TRANSP 5CMX1M", "brand": "Paramedic",
+            "description_status": "verified", "_verified_fields": ["description"],
             "description": "Pansement transparent pour proteger une blessure.",
             "barcode": "222", "aisle": "2", "side": "B",
             "section": "6", "shelf": "4", "position": "3",
@@ -4005,12 +4007,14 @@ class ClientRagTests(unittest.TestCase):
         candidates = [{
             "id": 1, "client_id": "product:1",
             "name": "SENSODYNE SENSIBILITE 100ML",
+            "description_status": "verified", "_verified_fields": ["description"],
             "description": "Dentifrice conçu pour les dents sensibles.",
             "barcode": "1001", "aisle": "3", "side": "A",
             "section": "4", "shelf": "2", "position": "1",
         }, {
             "id": 2, "client_id": "product:2",
             "name": "COLGATE BLANCHISSANT 120ML",
+            "description_status": "verified", "_verified_fields": ["description"],
             "description": "Dentifrice qui aide à retirer les taches de surface.",
             "barcode": "1002", "aisle": "3", "side": "A",
             "section": "4", "shelf": "2", "position": "2",

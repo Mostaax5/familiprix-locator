@@ -20,6 +20,7 @@ from product_data import (
     normalize_identifier,
     record_reference_evidence,
     repair_quarantined_descriptions,
+    repair_cached_image_provenance,
     upsert_product_identifier,
     upsert_reference_candidate,
 )
@@ -58,6 +59,27 @@ class ProductDataAccuracyTests(unittest.TestCase):
                VALUES (?, ?, '1', 'Gauche', '1', '1', ?)""",
             (name, barcode, position),
         ).lastrowid
+
+    def test_automatic_image_provenance_repair_preserves_upc_and_real_confirmations(self):
+        db = self.make_db()
+        product_id = self.insert_product(db)
+        from product_data import record_field_evidence
+        image = "https://example.com/cached.jpg"
+        db.execute("UPDATE products SET image_url=?, image_status='verified' WHERE id=?", (image, product_id))
+        record_field_evidence(db, product_id, "image_url", image,
+                              source="Manual verified exact GTIN cache", verification_status="verified", active=True)
+        self.assertEqual(repair_cached_image_provenance(db), 1)
+        row = dict(db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone())
+        self.assertEqual(row["barcode"], "063848966068")
+        self.assertEqual(row["image_url"], image)
+        self.assertEqual(row["image_status"], "unverified")
+        self.assertEqual(repair_cached_image_provenance(db), 0)
+        record_field_evidence(db, product_id, "image_url", image,
+                              source="Manual employee correction", verification_status="verified", active=True)
+        db.execute("UPDATE products SET image_status='verified' WHERE id=?", (product_id,))
+        repair_cached_image_provenance(db)
+        self.assertEqual(db.execute("SELECT image_status FROM products WHERE id=?", (product_id,)).fetchone()[0], "verified")
+        db.close()
 
     def test_standard_leading_zero_representation_is_same_exact_gtin(self):
         self.assertEqual(
@@ -475,7 +497,7 @@ class ProductDataAccuracyTests(unittest.TestCase):
         self.assertEqual(product["image_url"], "https://manufacturer.test/image.jpg")
         db.close()
 
-    def test_legacy_unproven_values_are_shown_and_sent_to_review(self):
+    def test_legacy_picture_is_withheld_and_preserved_for_review(self):
         db = self.make_db()
         product_id = self.insert_product(db)
         db.execute(
@@ -492,8 +514,10 @@ class ProductDataAccuracyTests(unittest.TestCase):
                 (product_id,),
             ).fetchall()
         }
-        self.assertEqual(public["description"], "Maybe wrong")
-        self.assertEqual(public["image_url"], "https://unknown.test/image.jpg")
+        self.assertEqual(public["description"], "")
+        self.assertEqual(raw["description"], "Maybe wrong")
+        self.assertEqual(public["image_url"], "")
+        self.assertEqual(raw["image_url"], "https://unknown.test/image.jpg")
         self.assertTrue(public["description_available_unverified"])
         self.assertTrue(public["image_available_unverified"])
         self.assertIn("possible_wrong_description", issue_types)
@@ -522,7 +546,7 @@ class ProductDataAccuracyTests(unittest.TestCase):
         self.assertEqual({row["product_id"] for row in din_rows}, {first, second})
         db.close()
 
-    def test_ai_context_includes_unverified_description_with_status(self):
+    def test_ai_context_omits_unverified_description(self):
         context = product_context_for_client_rag({
             "client_id": "product:1", "name": "Test product",
             "brand": "Wrong brand", "description": "Wrong description",
@@ -532,10 +556,10 @@ class ProductDataAccuracyTests(unittest.TestCase):
             "_verified_fields": [],
         })
         self.assertEqual(context["brand"], "")
-        self.assertEqual(context["description"], "Wrong description")
-        self.assertEqual(context["notes"], "Wrong description")
+        self.assertEqual(context["description"], "")
+        self.assertEqual(context["notes"], "")
         self.assertFalse(context["description_verified"])
-        self.assertTrue(context["unverified_description_included"])
+        self.assertFalse(context["unverified_description_included"])
         self.assertTrue(context["unverified_information_omitted"])
 
     def test_verified_name_status_does_not_verify_brand(self):
@@ -633,7 +657,7 @@ class ProductDataAccuracyTests(unittest.TestCase):
         self.assertNotIn("current", search_row["_identity_hay"])
         db.close()
 
-    def test_available_description_influences_search_before_review(self):
+    def test_unverified_description_does_not_influence_search(self):
         db = self.make_db()
         product_id = self.insert_product(db, name="Neutral item")
         db.execute(
@@ -642,8 +666,8 @@ class ProductDataAccuracyTests(unittest.TestCase):
         )
         products_module._PROD_CACHE.update(key=None, rows=[])
         item, search_row = products_module._products_corpus(db)[0]
-        self.assertEqual(item["description"], "transparent wound membrane")
-        self.assertIn("transparent wound membrane", search_row["_hay"])
+        self.assertEqual(item.get("description", ""), "")
+        self.assertNotIn("transparent wound membrane", search_row["_hay"])
         self.assertTrue(item["description_available_unverified"])
         db.close()
 
@@ -946,6 +970,13 @@ class ProductDataAccuracyTests(unittest.TestCase):
             "UPDATE products SET description='Traitement des piqures de moustiques.' "
             "WHERE name='AFTER BITE G/TRAIT 20G'"
         )
+        # Populate verified description evidence: unknown descriptions must not
+        # pollute this index or its performance measurement.
+        from product_data import record_field_evidence
+        for row in db.execute("SELECT id, description FROM products WHERE description<>''").fetchall():
+            record_field_evidence(db, row["id"], "description", row["description"],
+                                  source="Manufacturer", verification_status="verified", active=True)
+        db.execute("UPDATE products SET description_status='verified' WHERE description<>''")
         db.commit()
 
         corpus = _products_corpus(db, allow_identifier_stale=False)
