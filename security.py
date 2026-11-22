@@ -24,6 +24,7 @@ from flask import Blueprint, current_app, g, jsonify, request
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from database import ensure_auth_schema, get_db
+import employee_accounts as accounts
 
 
 auth_bp = Blueprint("auth", __name__)
@@ -34,9 +35,8 @@ SESSION_TTL_SECONDS = 8 * 60 * 60
 SESSION_IDLE_SECONDS = 30 * 60
 PASSWORD_SETTING = "auth_password_hash_v1"
 
-# One-time compatibility bridge for the old browser-only lock.  The digest was
-# already public in Git history, so a legacy login is allowed only to replace it
-# with a salted scrypt hash before any store API can be used.
+# Historical marker only: the public browser-lock digest is never accepted for
+# new logins or unconfigured legacy sessions. Bootstrap individual accounts.
 _LEGACY_PASSWORD_SHA256 = "1158a3823fa4014569a2b5f7f475a5539429ca8d6abcbab1d1cc7972470982e8"
 _INTERNAL_REQUEST_TOKEN = secrets.token_urlsafe(32)
 _AUDIT_SALT = secrets.token_bytes(32)
@@ -171,14 +171,10 @@ def _verify_password(db, password: str):
     password = _normalize_password(password)
     if not password or len(password) > 256:
         return False, False, "legacy"
-    supplied = _sha256(password)
-    # Temporary compatibility requested for the Scan and Plan tabs. The
-    # plaintext is never shipped to the browser or stored in this repository.
-    if hmac.compare_digest(supplied, _LEGACY_PASSWORD_SHA256):
-        return True, False, "protected_area"
     stored, rotation_required, source = _password_record(db)
     if source == "legacy":
-        return hmac.compare_digest(supplied, stored), False, source
+        # The old digest is public in repository history. Never accept it.
+        return False, False, source
     try:
         return bool(check_password_hash(stored, password)), rotation_required, source
     except (ValueError, TypeError):
@@ -209,13 +205,13 @@ def record_security_event(db, action: str, username: str = "", detail=None):
     _record_event(db, action, username, detail)
 
 
-def _create_session(db, username: str):
+def _create_session(db, username: str, account=None):
     now = int(time.time())
     raw_token = secrets.token_urlsafe(32)
     csrf_token = secrets.token_urlsafe(32)
     token_hash = _sha256(raw_token)
     password_hash, _rotation_required, _source = _password_record(db)
-    password_fingerprint = _sha256(password_hash)
+    password_fingerprint = _sha256(account["password_hash"] if account else password_hash)
     expires_at = now + SESSION_TTL_SECONDS
     db.execute(
         """
@@ -229,6 +225,8 @@ def _create_session(db, username: str):
             now, _request_identity(), _user_agent_hash(), password_fingerprint,
         ),
     )
+    if account:
+        db.execute("INSERT INTO employee_sessions(token_hash, account_id) VALUES (?,?)", (token_hash, account["id"]))
     return raw_token, token_hash, csrf_token, expires_at
 
 
@@ -263,6 +261,17 @@ def _load_session():
             )
             db.commit()
         return None
+    account_row = db.execute("""SELECT a.* FROM employee_sessions s
+        JOIN employee_accounts a ON a.id=s.account_id WHERE s.token_hash=?""", (token_hash,)).fetchone()
+    if account_row:
+        account = dict(account_row)
+        session["account"] = account
+        session["username"] = account["login"]
+        g.auth_role = account["role"]
+        g.auth_account = account
+    else:
+        g.auth_role = "legacy"
+        g.auth_account = None
     g.auth_username = _normalize_username(session.get("username"))
     g.auth_session_hash = token_hash
     g.auth_csrf_token = str(session.get("csrf_token") or "")
@@ -274,7 +283,15 @@ def _load_session():
 
 
 def _session_matches_password(db, session) -> bool:
+    account = session.get("account")
+    if account:
+        return bool(account["active"] and hmac.compare_digest(
+            str(session.get("password_fingerprint") or ""), _sha256(account["password_hash"])))
+    if accounts.enabled(db):
+        return False
     stored_password, _rotation_required, _source = _password_record(db)
+    if _source == "legacy":
+        return False
     expected = _sha256(stored_password)
     actual = str(session.get("password_fingerprint") or "")
     return bool(actual and hmac.compare_digest(actual, expected))
@@ -447,6 +464,8 @@ def protect_api_request():
         g.auth_csrf_token = ""
         g.auth_expires_at = int(time.time()) + 60
         return None
+    if request.path.startswith(("/api/auth/", "/api/admin/")) and request.content_length is not None and request.content_length > 8192:
+        return _json_error("Demande trop volumineuse.", 413, "request_too_large")
     if request.path in _PUBLIC_AUTH_PATHS:
         return None
     if _is_public_api_request():
@@ -472,8 +491,23 @@ def protect_api_request():
         _revoke_session(db, session)
         return _json_error("Les identifiants ont change. Reconnectez-vous.", 401, "credentials_changed")
     _stored, rotation_required, _source = _password_record(db)
+    if getattr(g, "auth_account", None):
+        rotation_required = False
     if rotation_required and request.path not in _ROTATION_PATHS:
         return _json_error("Le mot de passe doit etre remplace avant de continuer.", 428, "password_rotation_required")
+
+    role = getattr(g, "auth_role", "legacy")
+    if request.path.startswith("/api/admin/") and role != "owner":
+        return _json_error("Accès réservé au propriétaire.", 403, "owner_required")
+    if getattr(g, "auth_account", None):
+        owner_only = (request.path.startswith(("/api/import/", "/api/gist/"))
+                      or request.path in {"/api/export", "/api/import", "/api/reset", "/api/reference/seed",
+                                          "/api/ai/logs/export", "/api/products/bulk-import"})
+        if owner_only and role != "owner":
+            return _json_error("Accès réservé au propriétaire.", 403, "owner_required")
+        if role == "viewer" and request.method in _UNSAFE_METHODS and request.path not in {
+            "/api/auth/logout", "/api/auth/password"}:
+            return _json_error("Ce compte est en lecture seule.", 403, "read_only")
 
     if request.method in _UNSAFE_METHODS:
         if not _same_origin_request():
@@ -497,7 +531,7 @@ def auth_status():
         had_cookie = bool(request.cookies.get(_session_cookie_name(), ""))
         session = _load_session()
         if not session:
-            response = jsonify({"authenticated": False})
+            response = jsonify({"authenticated": False, "account_mode": accounts.enabled(get_db())})
             if had_cookie:
                 _clear_session_cookie(response)
                 response.headers["Clear-Site-Data"] = '"cache"'
@@ -505,7 +539,7 @@ def auth_status():
         db = get_db()
         if not _session_matches_password(db, session):
             _revoke_session(db, session)
-            response = jsonify({"authenticated": False, "reason": "credentials_changed"})
+            response = jsonify({"authenticated": False, "reason": "credentials_changed", "account_mode": accounts.enabled(db)})
             _clear_session_cookie(response)
             response.headers["Clear-Site-Data"] = '"cache"'
             return response
@@ -515,7 +549,10 @@ def auth_status():
             "username": g.auth_username,
             "csrf_token": g.auth_csrf_token,
             "expires_at": g.auth_expires_at,
-            "rotation_required": rotation_required,
+            "rotation_required": False if session.get("account") else rotation_required,
+            "account_mode": accounts.enabled(db),
+            "role": getattr(g, "auth_role", "legacy"),
+            "display_name": (session.get("account") or {}).get("display_name", g.auth_username),
         })
     except Exception:
         current_app.logger.exception("Authentication status failed")
@@ -545,12 +582,26 @@ def auth_login():
     try:
         db = get_db()
         ensure_auth_schema(db)
-        valid, rotation_required, _source = _verify_password(db, password)
+        account_mode = accounts.enabled(db)
+        retry = accounts.login_retry_after(db, body.get("username")) if account_mode else 0
+        if retry:
+            response, status = _json_error("Trop de tentatives. Réessayez plus tard.", 429, "login_locked")
+            response.headers["Retry-After"] = str(retry)
+            return response, status
+        account = accounts.authenticate(db, body.get("username"), password) if account_mode and len(password) <= 256 else None
+        if account_mode:
+            valid, rotation_required = bool(account), False
+            if account:
+                username = account["login"]
+        else:
+            valid, rotation_required, _source = _verify_password(db, password)
     except Exception:
         current_app.logger.exception("Authentication database unavailable")
         return _json_error("Le service se prepare. Reessayez dans un instant.", 503, "auth_unavailable")
 
     if not valid:
+        if account_mode:
+            accounts.record_login_failure(db, body.get("username"))
         retry = _register_login_failure(key)
         # A small fixed delay makes online guessing expensive without tying up a
         # worker for the full rate-limit window.
@@ -563,6 +614,8 @@ def auth_login():
 
     try:
         _clear_login_failures(key)
+        if account:
+            db.execute("DELETE FROM employee_login_limits WHERE account_id=?", (account["id"],))
         now = int(time.time())
         current_cookie = request.cookies.get(_session_cookie_name(), "")
         if current_cookie and len(current_cookie) <= 200:
@@ -578,7 +631,7 @@ def auth_login():
             (username, str(now)),
         )
         _prune_auth_data(db)
-        raw_token, token_hash, csrf_token, expires_at = _create_session(db, username)
+        raw_token, token_hash, csrf_token, expires_at = _create_session(db, username, account=account)
         _record_event(db, "login", username, {"rotation_required": rotation_required})
         db.commit()
     except Exception:
@@ -600,6 +653,9 @@ def auth_login():
         "csrf_token": csrf_token,
         "expires_at": expires_at,
         "rotation_required": rotation_required,
+        "account_mode": account_mode,
+        "role": account["role"] if account else "legacy",
+        "display_name": account["display_name"] if account else username,
     })
     _set_session_cookie(response, raw_token)
     return response
@@ -615,6 +671,29 @@ def change_password():
     if error:
         return _json_error(error, 400, "weak_password")
     db = get_db()
+    account = getattr(g, "auth_account", None)
+    if account:
+        if not accounts.authenticate(db, account["login"], _normalize_password(body.get("current_password"))):
+            return _json_error("Le mot de passe actuel est invalide.", 401, "invalid_credentials")
+        accounts.lock_accounts(db)
+        fresh = db.execute("SELECT * FROM employee_accounts WHERE id=?", (account["id"],)).fetchone()
+        if not fresh or not fresh["active"] or fresh["password_hash"] != account["password_hash"]:
+            db.rollback()
+            return _json_error("Reconnectez-vous.", 401, "credentials_changed")
+        new_hash = generate_password_hash(new_password, method="scrypt:32768:8:1", salt_length=32)
+        now = int(time.time())
+        db.execute("UPDATE employee_accounts SET password_hash=?, updated_at=? WHERE id=?", (new_hash, now, account["id"]))
+        db.execute("""UPDATE auth_sessions SET revoked_at=? WHERE token_hash IN
+            (SELECT token_hash FROM employee_sessions WHERE account_id=?)""", (now, account["id"]))
+        account["password_hash"] = new_hash
+        raw_token, token_hash, csrf_token, expires_at = _create_session(db, account["login"], account=account)
+        _record_event(db, "employee_password_changed", account["login"])
+        db.commit()
+        response = jsonify({"success": True, "authenticated": True, "username": account["login"],
+                            "csrf_token": csrf_token, "expires_at": expires_at,
+                            "account_mode": True, "role": account["role"], "display_name": account["display_name"]})
+        _set_session_cookie(response, raw_token)
+        return response
     _stored, rotation_required, source = _password_record(db)
     if source == "environment":
         return _json_error(
@@ -649,6 +728,8 @@ def change_password():
 
 @auth_bp.route("/api/auth/profile", methods=["POST"])
 def update_auth_profile():
+    if getattr(g, "auth_account", None):
+        return _json_error("Le nom du compte est géré par le propriétaire.", 403, "identity_managed")
     body = _json_object()
     if body is None:
         return _json_error("Un objet JSON est requis.", 400, "invalid_json")
@@ -682,8 +763,36 @@ def auth_logout():
     return response
 
 
+@auth_bp.route("/api/admin/employees", methods=["GET", "POST"])
+@auth_bp.route("/api/admin/employees/<account_id>", methods=["PATCH"])
+def manage_employees(account_id=None):
+    db = get_db()
+    if request.method == "GET":
+        rows = db.execute("SELECT * FROM employee_accounts ORDER BY display_name, login").fetchall()
+        return jsonify({"employees": [accounts.public_account(dict(row)) for row in rows]})
+    body = _json_object()
+    if body is None:
+        return _json_error("Un objet JSON est requis.", 400, "invalid_json")
+    try:
+        accounts.lock_accounts(db)
+        # Recheck inside the mutation lock: a concurrently revoked manager must
+        # not create another owner after being removed.
+        actor = db.execute("SELECT * FROM employee_accounts WHERE id=?", (g.auth_account["id"],)).fetchone()
+        if not actor or not actor["active"] or actor["role"] != "owner" or actor["password_hash"] != g.auth_account["password_hash"]:
+            db.rollback()
+            return _json_error("Accès réservé au propriétaire.", 403, "owner_required")
+        saved = accounts.save_account(db, body, account_id)
+        _record_event(db, "employee_updated" if account_id else "employee_created", g.auth_username,
+                      {"account_id": saved["id"], "role": saved["role"], "active": saved["active"]})
+        db.commit()
+        return jsonify({"success": True, "employee": saved}), 200 if account_id else 201
+    except ValueError as exc:
+        db.rollback()
+        return _json_error(str(exc), 400, "invalid_account")
+
+
 def install_security(app):
-    app.config.setdefault("AUTH_COOKIE_SECURE", bool(os.environ.get("RENDER_EXTERNAL_URL")))
+    app.config.setdefault("AUTH_COOKIE_SECURE", os.environ.get("AUTH_COOKIE_SECURE", "1" if os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("APP_EXTERNAL_URL", "").startswith("https://") else "0") == "1")
     app.before_request(protect_api_request)
 
     @app.after_request

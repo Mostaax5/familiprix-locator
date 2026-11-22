@@ -770,3 +770,16 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:#c8102e;box-sh
     justify-self: start;
   }
 }
+
+/* Employee administration */
+.employee-dialog{width:min(560px,calc(100vw - 32px));max-height:85vh;overflow:auto;box-sizing:border-box;border:0;border-radius:12px;padding:24px;color:#1e293b}
+.employee-dialog::backdrop{background:rgba(15,23,42,.65)}
+.employee-dialog h2{margin-top:0}
+.employee-dialog label{display:block;font-weight:600;margin-top:12px}
+.employee-dialog input:not([type=checkbox]):not([type=hidden]),.employee-dialog select{width:100%;box-sizing:border-box;min-height:44px;padding:10px;border:1px solid #cbd5e1;border-radius:6px;font:inherit}
+.employee-dialog [role=alert]{color:#b91c1c;min-height:1.2em}
+.employee-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid #e2e8f0}
+.employee-row button{min-height:44px;padding:6px 12px;cursor:pointer}
+[hidden]{display:none!important}
+.employee-dialog label:has(>input[type=checkbox]){display:flex;align-items:center;gap:8px}
+.employee-dialog input[type=checkbox]{width:auto;margin:0}

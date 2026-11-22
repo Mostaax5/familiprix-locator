@@ -37,9 +37,31 @@ Branch: `upgrade/reliability-architecture`.
 - 26 synthetic matching regressions: all pass, versus 7 on the preceding commit.
   This is not measured real-store accuracy.
 
-See FREE-OPERATION.md for configuration and limits. No production data backup,
-new hosting deployment, per-employee authentication or multi-store tenancy has
-been completed. The requested full rebuild remains unfinished.
+## Employee accounts, isolated deployment and cache recovery
+
+- Individual owner/employee/viewer accounts and mobile account-management UI.
+- No public registration or legacy password bypass; shared login stops once
+  employee accounts exist. Session revocation, owner-only imports/backups,
+  persistent per-account login throttling and a serialized last-owner guard.
+- Per-store process/database isolation, database binding checks and server-owned
+  store labels. Expiry endpoints ignore forged store selectors in isolated mode.
+- Non-root Docker/Compose deployment and a separate Render Free blueprint;
+  validated HTTPS/secure-cookie/zero-paid-AI startup and private owner bootstrap.
+- Complete SQLite backup with integrity and restoration checks, including accounts.
+- Partial live-cache recovery: 5,521 placements, 5,448 distinct UPCs and six
+  reconstructed aisle configurations. Original row IDs, UPCs and locations match
+  exactly. Original bytes and 25,324 quarantined fields are retained privately.
+- Isolated recovered-catalogue check: 25/25 exact UPC queries returned the requested
+  item; warm median 24.3 ms, maximum 26.9 ms locally. This is not internet latency,
+  concurrent load testing or description/photo accuracy ground truth.
+- Real mobile browser workflow: owner login, account creation, employee permissions,
+  password change, session restoration and persisted database records passed.
+
+See deploy/README.md and FREE-OPERATION.md. No live deployment or full production
+backup exists yet. Missing production data includes expiry history, original
+layout details, accounts/history and unplaced reference products. Shared-process
+multi-tenancy is intentionally not the isolation model. Commercial acceptance,
+actual hosting cutover and physical-device testing remain incomplete.
 
 ## Remaining work from the architecture review
 

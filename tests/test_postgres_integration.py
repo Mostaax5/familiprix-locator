@@ -62,3 +62,53 @@ def test_postgres_conditional_layout_update_rejects_stale_writer(postgres_jobs):
         first.close()
         second.close()
         db.close()
+
+
+def test_postgres_concurrent_owner_removal_preserves_one_owner(postgres_jobs):
+    import database
+    import employee_accounts as accounts
+    db = postgres_jobs()
+    with patch.object(database, '_POSTGRES_AUTH_SCHEMA_READY', False):
+        database.ensure_auth_schema(db)
+    owners = [accounts.save_account(db, {'login':name,'display_name':name,'role':'owner',
+              'password':'Disposable PostgreSQL owner phrase 2026!'}) for name in ['owner-one','owner-two']]
+    db.commit()
+    def deactivate(account):
+        connection = postgres_jobs()
+        try:
+            accounts.save_account(connection, {'active':False}, account['id'])
+            connection.commit()
+            return True
+        except ValueError:
+            connection.rollback()
+            return False
+        finally:
+            connection.close()
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(deactivate, owners))
+        assert sorted(results) == [False, True]
+        assert db.execute("SELECT COUNT(*) AS n FROM employee_accounts WHERE role='owner' AND active=1").fetchone()['n'] == 1
+    finally:
+        db.close()
+
+
+def test_postgres_store_binding_cannot_be_reassigned(postgres_jobs):
+    import database
+    from store_identity import bind_database, assert_database
+    db = postgres_jobs()
+    try:
+        with patch.object(database, '_POSTGRES_AUTH_SCHEMA_READY', False):
+            database.ensure_auth_schema(db)
+        with patch.dict(os.environ, {'STORE_ID':'first-store'}):
+            bind_database(db)
+            db.commit()
+            assert_database(db)
+        with patch.dict(os.environ, {'STORE_ID':'second-store'}):
+            with pytest.raises(RuntimeError, match='binding'):
+                bind_database(db)
+            db.rollback()
+        with patch.dict(os.environ, {'STORE_ID':'first-store'}):
+            assert_database(db)
+    finally:
+        db.close()

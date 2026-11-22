@@ -16,8 +16,11 @@ try:
 except ImportError:  # pragma: no cover - pool is optional (psycopg[pool])
     ConnectionPool = None
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "familiprix.db")
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+DB_PATH = os.environ.get("DB_PATH", "").strip() or (
+    DATABASE_URL[len("sqlite:///"):] if DATABASE_URL.startswith("sqlite:///")
+    else os.path.join(os.path.dirname(__file__), "familiprix.db")
+)
 DB_BACKEND = "postgres" if DATABASE_URL and not DATABASE_URL.startswith("sqlite:///") else "sqlite"
 PG_POOL_ENABLED = os.environ.get("PG_POOL_ENABLED", "").strip().lower() in {
     "1", "true", "yes", "on",
@@ -198,7 +201,18 @@ def pool_stats():
         return {"enabled": True, "stats_unavailable": True}
 
 
-def connect_db():
+def _checked_connection(db, validate_store):
+    if validate_store:
+        from store_identity import assert_database
+        try:
+            assert_database(db)
+        except Exception:
+            db.close()
+            raise
+    return db
+
+
+def connect_db(validate_store=True):
     if DB_BACKEND == "postgres":
         if psycopg is None:
             raise RuntimeError("psycopg is required when DATABASE_URL is set.")
@@ -209,24 +223,24 @@ def connect_db():
         if ConnectionPool is not None and PG_POOL_ENABLED:
             pool = _get_pg_pool()
             try:
-                return DatabaseConnection(pool.getconn(), "postgres", pool=pool)
+                return _checked_connection(DatabaseConnection(pool.getconn(), "postgres", pool=pool), validate_store)
             except Exception as exc:  # PoolTimeout/pool trouble — NEVER block the app on it
                 print(f"[DB] pool indisponible ({exc}) — connexion directe de secours. stats={pool_stats()}")
                 conn = psycopg.connect(
                     DATABASE_URL, row_factory=dict_row, connect_timeout=5, sslmode="require"
                 )
-                return DatabaseConnection(conn, "postgres")
+                return _checked_connection(DatabaseConnection(conn, "postgres"), validate_store)
         conn = psycopg.connect(
             DATABASE_URL, row_factory=dict_row, connect_timeout=5, sslmode="require"
         )
-        return DatabaseConnection(conn, "postgres")
+        return _checked_connection(DatabaseConnection(conn, "postgres"), validate_store)
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    return DatabaseConnection(conn, "sqlite")
+    return _checked_connection(DatabaseConnection(conn, "sqlite"), validate_store)
 
 
 def get_db():
@@ -296,8 +310,12 @@ def _postgres_existing_schema_compatible(db):
 def init_db():
     global _POSTGRES_AUTH_SCHEMA_READY, _POSTGRES_PRODUCT_SCHEMA_READY
     global _POSTGRES_PRODUCT_SCHEMA_ERROR
-    db = connect_db()
+    db = connect_db(validate_store=False)
     try:
+        ensure_auth_schema(db)
+        from store_identity import bind_database
+        bind_database(db)
+        db.commit()
         from jobs import ensure_schema
         ensure_schema(db)
         db.commit()
@@ -351,7 +369,8 @@ def _postgres_auth_schema_complete(db):
                 FROM information_schema.tables
                WHERE table_schema=current_schema()
                  AND table_name IN
-                     ('users','app_settings','auth_sessions','security_events'))
+                     ('users','app_settings','auth_sessions','security_events',
+                      'employee_accounts','employee_sessions','employee_login_limits'))
                AS table_count,
              (SELECT COUNT(*)
                 FROM information_schema.columns
@@ -361,7 +380,7 @@ def _postgres_auth_schema_complete(db):
     ).fetchone()
     values = dict(row) if row else {}
     return (
-        int(values.get("table_count") or 0) == 4
+        int(values.get("table_count") or 0) == 7
         and int(values.get("column_count") or 0) == 1
     )
 
@@ -449,6 +468,8 @@ def ensure_auth_schema(db):
                         "ALTER TABLE auth_sessions ADD COLUMN "
                         "password_fingerprint TEXT DEFAULT ''"
                     )
+            from employee_accounts import ensure_schema as ensure_employee_schema
+            ensure_employee_schema(db)
             db.commit()
             if db.backend == "postgres":
                 _POSTGRES_AUTH_SCHEMA_READY = True
@@ -1271,6 +1292,9 @@ def init_sqlite_db(db):
     if "sort_order" not in layout_columns:
         db.execute("ALTER TABLE aisle_layouts ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
     ensure_layout_sort_orders(db)
+
+    from employee_accounts import ensure_schema as ensure_employee_schema
+    ensure_employee_schema(db)
 
 
 def ensure_best_effort_unique_indexes(db):

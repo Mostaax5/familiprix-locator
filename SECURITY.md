@@ -3,7 +3,14 @@
 No internet application can be guaranteed unhackable. This project uses layered
 controls so that one failed control does not expose the store plan or write APIs.
 
-## Production password
+## Employee accounts
+
+New isolated deployments use individual owner, employee and viewer accounts.
+See deploy/README.md for private bootstrap, server-side role checks, session
+revocation and full backups. Public search remains intentionally public. Account
+passwords are salted scrypt hashes; never log plaintext bootstrap secrets.
+
+## Legacy single-store password
 
 Generate a password hash locally:
 
@@ -17,8 +24,9 @@ files, screenshots, logs, or chat. Use a unique passphrase of at least 15
 characters and store it in a password manager.
 
 Changing `APP_PASSWORD_HASH` immediately invalidates every existing session.
-The existing Scan/Plan password is also accepted temporarily for compatibility,
-without storing its plaintext in the browser or repository.
+The old public legacy digest is no longer accepted. Once employee accounts exist,
+shared-password login is disabled. Rotating APP_PASSWORD_HASH only affects legacy
+shared-password sessions; change/deactivate individual accounts to revoke theirs.
 
 ## Deployed protections
 
@@ -58,13 +66,17 @@ without storing its plaintext in the browser or repository.
 
 ## Incident response
 
-If compromise is suspected, rotate `APP_PASSWORD_HASH` first, then rotate API,
+If compromise is suspected, deactivate affected employee accounts (or rotate
+`APP_PASSWORD_HASH` for legacy deployments), then rotate API,
 GitHub, and database credentials. Review Render and GitHub logs, preserve evidence,
 redeploy the current main branch, and verify `/healthz`. Password rotation closes
 all active app sessions automatically.
 
-## Remaining architectural limit
+## Isolation and remaining limits
 
-The app currently uses one shared store password. That is substantially safer than
-the former browser-only lock, but individual employee accounts with passkeys or MFA
-would provide stronger identity, per-user revocation, and clearer audit trails.
+Each store deployment uses a separate process, database and hostname. STORE_ID
+binding checks prevent accidental database reassignment. The app does not route
+multiple stores through a shared process. Public search/catalogue data remains
+accessible without employee login. MFA/passkeys and self-service email recovery
+are not implemented. Owners manage/reset employee access; recovery of the final
+owner requires an operator-controlled database recovery procedure.

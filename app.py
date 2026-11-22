@@ -15,6 +15,7 @@ from database import (
     product_data_schema_status,
 )
 from auth import utc_now_iso
+from store_identity import configured_store
 from security import auth_bp, install_security, internal_request_headers
 from routes.products import (
     products_bp, first_column, schedule_backfill_missing,
@@ -86,10 +87,11 @@ app.config.update(
     MAX_FORM_PARTS=30,
 )
 
-_RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+_RENDER_EXTERNAL_URL = (os.environ.get("APP_EXTERNAL_URL") or os.environ.get("RENDER_EXTERNAL_URL", "")).strip()
 if _RENDER_EXTERNAL_URL:
     # Render terminates TLS one trusted proxy hop in front of Gunicorn.
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+    if os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("TRUST_PROXY") == "1":
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
     render_host = urlsplit(_RENDER_EXTERNAL_URL).hostname
     trusted = [host for host in (render_host, "localhost", "127.0.0.1", "[::1]") if host]
     extra_hosts = [host.strip() for host in os.environ.get("TRUSTED_HOSTS", "").split(",") if host.strip()]
@@ -213,7 +215,7 @@ ASSET_VERSION = _asset_version()
 
 @app.route("/")
 def index():
-    return render_template("index.html", asset_version=ASSET_VERSION)
+    return render_template("index.html", asset_version=ASSET_VERSION, store_config=configured_store())
 
 
 @app.route("/livez")

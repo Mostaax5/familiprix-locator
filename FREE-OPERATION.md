@@ -82,11 +82,13 @@ separate the static frontend, authenticated API, persistent data and durable job
 and test all existing features. Free tiers also have quotas/cold starts; $0 does
 not establish an always-on service guarantee.
 
-Commercial readiness still requires per-employee accounts, store isolation,
-restore testing, representative source/accuracy checks and real-device/concurrent
-workflow testing. These are not implemented/certified by the matching upgrade.
-Do not advertise this branch as a finished multi-store SaaS.
+Individual accounts, per-store process/database isolation, deployment packaging
+and a full local backup/restore check are now implemented; see deploy/README.md.
+Commercial readiness still needs representative source/accuracy checks,
+physical-device and concurrent workflow testing, and an actual hosting cutover.
 
-The live app reported PostgreSQL unreachable during this audit. Production export,
-restore and cutover remain blocked until that database can be accessed. No live
-catalogue data was copied, deleted or migrated during this work.
+The live database remains unreachable. A read-only cache recovery preserved
+5,521 placements and 5,448 distinct UPCs. This is a partial product recovery,
+not a full production backup: expiry history, field evidence, original layout
+configuration and other database records remain missing. Production was not
+modified. The recovery copy and its original bytes are stored privately.

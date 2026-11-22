@@ -11,6 +11,13 @@ free-by-default assistant, reversible catalogue cleanup and remaining hosting /
 commercial-readiness work. Unknown product descriptions and images are withheld;
 normal search does not depend on employees reviewing metadata.
 
+## Store deployment and employees
+
+See [deploy/README.md](deploy/README.md) for the Docker/Compose and Render Free
+profiles, owner bootstrap, employee roles, per-store database isolation and full
+backup recovery. New deployments use `python deploy/start.py`. Existing local
+development commands below remain available.
+
 ## Run locally
 
 ```sh
