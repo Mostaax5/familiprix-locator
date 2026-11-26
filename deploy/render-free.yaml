@@ -1,0 +1,36 @@
+# New store deployment; never creates Render's expiring free Postgres service.
+# DATABASE_URL must point to a durable free database (e.g. Neon Free).
+services:
+  - type: web
+    name: familiprix-store
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python deploy/start.py
+    healthCheckPath: /readyz
+    autoDeployTrigger: off
+    envVars:
+      - key: STORE_ID
+        sync: false
+      - key: STORE_NAME
+        sync: false
+      - key: STORE_ADDRESS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: INIT_OWNER_PASSWORD
+        sync: false
+      - key: INIT_OWNER_LOGIN
+        value: owner
+      - key: AUTH_COOKIE_SECURE
+        value: "1"
+      - key: AI_ALLOW_PAID
+        value: "0"
+      - key: SEMANTIC_SEARCH_ENABLED
+        value: "0"
+      - key: AI_AUTO_ENRICH
+        value: "0"
+      - key: AI_DEEP_LOOKUP
+        value: "0"
+      - key: MALLOC_ARENA_MAX
+        value: "2"

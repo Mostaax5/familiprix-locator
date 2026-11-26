@@ -8,6 +8,7 @@ from auth import require_editor, side_display_label, utc_now_iso
 from database import DatabaseIntegrityError, get_db
 from product_data import exact_gtin_variants, gtin_identity_key
 from routes.products import safe_http_url
+from store_identity import configured_store
 
 
 expiry_bp = Blueprint("expiry", __name__)
@@ -17,6 +18,9 @@ _DEFAULT_STORE = "default"
 
 
 def _clean_store_key(value):
+    store = configured_store()
+    if store["isolated"]:
+        return store["id"]
     raw = str(value or "").strip().lower()[:80]
     cleaned = re.sub(r"[^a-z0-9_-]+", "-", raw).strip("-")
     return cleaned or _DEFAULT_STORE
@@ -142,8 +146,8 @@ def _product_from_rows(rows, barcode):
         "product_code": str(primary.get("product_code", "") or ""),
         "name": str(primary.get("name", "") or "Produit sans nom"),
         "brand": str(primary.get("brand", "") or ""),
-        "description": str(primary.get("description", "") or ""),
-        "image_url": safe_http_url(primary.get("image_url", "")),
+        "description": str(primary.get("description", "") or "") if primary.get("description_status") == "verified" else "",
+        "image_url": safe_http_url(primary.get("image_url", "")) if primary.get("image_status") == "verified" else "",
         "locations": locations,
     }
 
@@ -158,10 +162,7 @@ def _resolve_product(db, barcode):
         where += " OR gtin_key=?"
         params.append(gtin_key)
     rows = db.execute(
-        f"""SELECT id, name, brand, description, image_url, barcode,
-                   product_code, aisle, side, section, shelf, position,
-                   in_stock, is_plano
-              FROM products
+        f"""SELECT * FROM products
              WHERE {where}
              ORDER BY in_stock DESC, is_plano DESC, id""",
         tuple(params),
@@ -192,8 +193,8 @@ def _resolve_product(db, barcode):
             "product_code": str(item.get("product_code", "") or ""),
             "name": str(item.get("name", "") or "Produit sans nom"),
             "brand": str(item.get("brand", "") or ""),
-            "description": str(item.get("description", "") or ""),
-            "image_url": safe_http_url(item.get("image_url", "")),
+            "description": "",
+            "image_url": "",
             "locations": [],
         }
 
@@ -223,7 +224,7 @@ def _status_payload(row, product=None, today=None):
     name = str(live_identity.get("name") or item.get("product_name") or "Produit sans nom")
     brand = str(live_identity.get("brand") or item.get("brand") or "")
     image_url = safe_http_url(
-        live_identity.get("image_url") or item.get("image_url") or ""
+        live_identity.get("image_url") or ""
     )
     product_code = str(
         live_identity.get("product_code") or item.get("product_code") or ""

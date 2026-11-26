@@ -86,6 +86,9 @@ class LayoutDeletionTests(unittest.TestCase):
                 return client.post(path, json=payload, headers={"X-User-Name": "tester"})
 
     def put(self, path, payload):
+        payload = dict(payload)
+        row = self.db.execute("SELECT modified_at FROM aisle_layouts WHERE aisle=?", (path.rsplit('/',1)[-1],)).fetchone()
+        payload.setdefault('expected_modified_at', row['modified_at'] if row else '')
         with patch("routes.layout.get_db", return_value=self.db), \
              patch("auth.get_db", return_value=self.db):
             with self.app.test_client() as client:
@@ -257,6 +260,20 @@ class LayoutDeletionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM products").fetchone()[0], 3)
         self.assertEqual(self.stored_config()["sides"]["Gauche"]["sections"][0]["shelves"][0], 0)
+
+    def test_autosave_checks_version_atomically_when_another_writer_commits(self):
+        def concurrent_edit(*args):
+            self.db.execute("UPDATE aisle_layouts SET modified_at='other-writer' WHERE aisle='A1'")
+            self.db.commit()
+            return []
+        with patch('routes.layout.products_outside_layout', side_effect=concurrent_edit):
+            response = self.put('/api/layout/aisles/A1', {
+                'config': self.config, 'expected_modified_at': ''
+            })
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()['code'], 'stale_layout')
+        row = self.db.execute("SELECT modified_at FROM aisle_layouts WHERE aisle='A1'").fetchone()
+        self.assertEqual(row['modified_at'], 'other-writer')
 
     def test_stale_autosave_cannot_overwrite_a_newer_layout(self):
         self.db.execute(

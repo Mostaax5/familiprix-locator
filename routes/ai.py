@@ -14,6 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from flask import Blueprint, request, jsonify, Response, g, current_app
+from free_ai import paid_ai_allowed, cloudflare_configured, structured_request as free_structured_request, MODEL as FREE_AI_MODEL
 from database import connect_db, get_db
 from auth import require_editor, utc_now_iso, side_display_label
 from memory_guard import memory_intensive_task, release_unused_memory
@@ -97,6 +98,11 @@ class _SameHostRedirectHandler(HTTPRedirectHandler):
 
 def _safe_urlopen(request_obj, timeout):
     target_url = request_obj.full_url if isinstance(request_obj, Request) else str(request_obj)
+    if not paid_ai_allowed() and any(
+        target_url.startswith(str(globals().get(key, "https://invalid.invalid")) + "/")
+        for key in ("GEMINI_BASE_URL", "OPENAI_BASE_URL", "KIMI_BASE_URL", "DEEPSEEK_BASE_URL")
+    ):
+        raise URLError("Paid AI requests are disabled")
     if not _outbound_url_allowed(target_url):
         raise URLError("Unsafe outbound URL")
     host = urlparse(target_url).hostname
@@ -371,6 +377,10 @@ def _log_ai_usage(provider: str, input_tokens: int, output_tokens: int,
 
 
 def configured_ai_provider():
+    if cloudflare_configured():
+        return {"name": "cloudflare", "label": "Cloudflare Workers AI (gratuit)", "model": FREE_AI_MODEL}
+    if not paid_ai_allowed():
+        return {"name": "local", "label": "Assistant catalogue", "model": "catalogue-local-v1"}
     if KIMI_API_KEY:
         return {
             "name": "kimi", "label": "Kimi", "model": KIMI_MODEL,
@@ -453,10 +463,13 @@ def _lookup_has_image(product):
     return bool(str((product or {}).get("image_url", "")).strip())
 
 
-def _prefer_lookup_result(current, current_score, candidate, candidate_score, require_image=False):
-    """Prefer a real image during image enrichment, then use normal quality."""
+def _prefer_lookup_result(current, current_score, candidate, candidate_score, require_image=False,
+                          verified=None):
+    """Prefer verified package evidence, then images and completeness."""
     if not candidate:
         return current, current_score
+    if verified is not None and bool(verified(candidate)) != bool(verified(current)):
+        return (candidate, candidate_score) if verified(candidate) else (current, current_score)
     current_candidates = list((current or {}).get("regulatory_identifiers") or [])
     candidate_candidates = list(candidate.get("regulatory_identifiers") or [])
     merged_candidates = merge_regulatory_candidates(
@@ -486,7 +499,7 @@ def _prefer_lookup_result(current, current_score, candidate, candidate_score, re
 
 
 def best_lookup_result(tasks, max_workers=8, good_enough=None, wait_for_cleanup=False,
-                       require_image=False):
+                       require_image=False, verified=None):
     """Run all tasks, return (best_product, best_score) by quality score. Returns
     as soon as a result reaches `good_enough` instead of waiting for the slowest
     source (e.g. an 8s scraper timeout) — this is what makes scanning fast."""
@@ -517,10 +530,11 @@ def best_lookup_result(tasks, max_workers=8, good_enough=None, wait_for_cleanup=
                 result = None
             s = _product_quality_score(result)
             best, best_score = _prefer_lookup_result(
-                best, best_score, result, s, require_image=require_image
+                best, best_score, result, s, require_image=require_image, verified=verified
             )
             if (good_enough is not None and best_score >= good_enough
-                    and (not require_image or _lookup_has_image(best))):
+                    and (not require_image or _lookup_has_image(best))
+                    and (verified is None or verified(best))):
                 break   # good enough — don't wait for slower sources
             submit_next()
     finally:
@@ -746,14 +760,12 @@ def sanitize_title(title, source_name):
 
 
 def page_mentions_barcode(html, barcode_candidates):
-    digits_only_html = normalized_digits(html)
-    for candidate in barcode_candidates or []:
-        cleaned = normalized_digits(candidate)
-        if not cleaned:
-            continue
-        if candidate in (html or "") or cleaned in digits_only_html:
-            return True
-    return False
+    # Never concatenate unrelated prices, dates or identifiers across markup.
+    keys = {gtin_identity_key(value) for value in barcode_candidates or []}
+    keys.discard("")
+    return any(gtin_identity_key(value) in keys for value in re.findall(
+        r"(?<!\d)\d{8,14}(?!\d)", html or ""
+    ))
 
 
 def infer_brand_from_title(title):
@@ -804,8 +816,9 @@ def collect_structured_products(value, bucket):
 def structured_product_matches_barcode(product, barcode_candidates):
     product_codes = []
     for key in ["gtin", "gtin8", "gtin12", "gtin13", "gtin14", "upc"]:
-        cleaned = normalized_digits(product.get(key, ""))
-        if cleaned:
+        value = product.get(key, "")
+        cleaned = str(value).strip() if isinstance(value, (str, int)) else ""
+        if re.fullmatch(r"[0-9]{8}|[0-9]{12,14}", cleaned):
             product_codes.append(cleaned)
     if not product_codes:
         return False
@@ -876,23 +889,19 @@ def _find_product_node(obj, barcode_candidates, depth):
         return {}
     if isinstance(obj, dict):
         name = str(obj.get("name") or obj.get("title") or obj.get("productName") or "").strip()
-        if name and len(name) > 3:
-            obj_text = json.dumps(obj)
-            for candidate in (barcode_candidates or []):
-                cd = normalized_digits(candidate)
-                if cd and cd in normalized_digits(obj_text):
-                    raw_brand = obj.get("brand") or obj.get("brandName") or ""
-                    brand = str(raw_brand.get("name", "") if isinstance(raw_brand, dict) else raw_brand).strip()
-                    description = clean_html_text(str(obj.get("description") or obj.get("shortDescription") or ""))
-                    image = str(obj.get("image") or obj.get("imageUrl") or obj.get("thumbnail") or "").strip()
-                    product_code = str(
-                        obj.get("sku") or obj.get("productCode")
-                        or obj.get("productId") or ""
-                    ).strip()
-                    return {
-                        "name": name, "brand": brand, "description": description,
-                        "image_url": image, "product_code": product_code,
-                    }
+        # Identity must belong to THIS node. A parent's name must not be paired
+        # with a UPC buried in recommendations or another product's variants.
+        identifiers = dict(obj)
+        identifiers["upc"] = obj.get("upc") or obj.get("barcode") or obj.get("ean") or ""
+        if name and structured_product_matches_barcode(identifiers, barcode_candidates):
+            raw_brand = obj.get("brand") or obj.get("brandName") or ""
+            return {
+                "name": name,
+                "brand": extract_structured_brand(raw_brand),
+                "description": clean_product_description(str(obj.get("description") or obj.get("shortDescription") or "")),
+                "image_url": extract_structured_image(obj.get("image") or obj.get("imageUrl") or obj.get("thumbnail")),
+                "product_code": str(obj.get("sku") or obj.get("productCode") or obj.get("productId") or "").strip(),
+            }
         for value in obj.values():
             if isinstance(value, (dict, list)):
                 result = _find_product_node(value, barcode_candidates, depth + 1)
@@ -952,18 +961,21 @@ def parse_familiprix_product_page(html, url, barcode, barcode_candidates=None,
         return None
     embedded = extract_embedded_json_product(html, barcode_candidates)
     structured = extract_structured_product_data(html, barcode_candidates)
-    title = embedded.get("name") or structured.get("name") or first_regex(html, [
-        r"<h1[^>]*>(.*?)</h1>", r'<meta property="og:title" content="([^"]+)"', r"<title>(.*?)</title>",
-    ])
-    title = sanitize_title(clean_html_text(title), "Familiprix")
-    raw_description = structured.get("description") or first_regex(html, [
-        r'<meta name="description" content="([^"]+)"', r'<meta property="og:description" content="([^"]+)"',
-    ])
-    image_url = structured.get("image_url") or first_regex(html, [r'<meta property="og:image" content="([^"]+)"'])
-    brand = structured.get("brand") or infer_brand_from_title(title)
-    category = extract_familiprix_category(html, title)
-    specifications = extract_familiprix_specifications(html)
-    sections = extract_familiprix_sections(html)
+    entity = structured or embedded
+    if not entity:
+        return None
+    title = sanitize_title(clean_html_text(entity.get("name", "")), "Familiprix")
+    page_code = first_regex(str(url or ""), [r"/p/0*([0-9]+)(?:[/?#]|$)"])
+    entity_code = str(entity.get("product_code", "") or "")
+    if page_code and entity_code and _familiprix_code_key(page_code) != _familiprix_code_key(entity_code):
+        return None
+    page_bound = bool(page_code and entity_code and _familiprix_code_key(page_code) == _familiprix_code_key(entity_code))
+    raw_description = entity.get("description", "")
+    image_url = entity.get("image_url", "")
+    brand = entity.get("brand") or infer_brand_from_title(title)
+    category = extract_familiprix_category(html, title) if page_bound else ""
+    specifications = extract_familiprix_specifications(html) if page_bound else {}
+    sections = extract_familiprix_sections(html) if page_bound else {}
     dosage_form = specifications.get("forme", "")
     package_size, package_unit = _source_package_fields(title)
     purpose = ""
@@ -984,15 +996,7 @@ def parse_familiprix_product_page(html, url, barcode, barcode_candidates=None,
     description = build_precise_source_description(
         title, raw_description, category=category, dosage_form=dosage_form,
     )
-    page_product_code = (
-        embedded.get("product_code") or structured.get("product_code")
-        or first_regex(html, [
-            r'"sku"\s*:\s*"([^"]+)"',
-            r'"productCode"\s*:\s*"([^"]+)"',
-        ])
-    )
-    if not page_product_code:
-        page_product_code = first_regex(str(url or ""), [r"/p/0*([0-9]+)(?:[/?#]|$)"])
+    page_product_code = entity_code
     if product_code and page_product_code and (
         _familiprix_code_key(product_code) != _familiprix_code_key(page_product_code)
     ):
@@ -1016,7 +1020,7 @@ def parse_familiprix_product_page(html, url, barcode, barcode_candidates=None,
         "ingredients": ingredients,
         "purpose": purpose,
         "official_name_fr": title,
-    }, html)
+    }, html if page_bound else "")
 
 
 def lookup_familiprix_product(barcode, barcode_candidates=None, product_code="",
@@ -1091,21 +1095,18 @@ def parse_generic_pharmacy_product_page(source_name, html, url, barcode, barcode
         return None
     embedded = extract_embedded_json_product(html, barcode_candidates)
     structured = extract_structured_product_data(html, barcode_candidates)
-    title = sanitize_title(embedded.get("name") or structured.get("name") or clean_html_text(first_regex(html, [
-        r"<h1[^>]*>(.*?)</h1>", r'<meta property="og:title" content="([^"]+)"', r"<title>(.*?)</title>",
-    ])), source_name)
-    description = structured.get("description") or clean_html_text(first_regex(html, [
-        r'<meta name="description" content="([^"]+)"', r'<meta property="og:description" content="([^"]+)"',
-    ]))
-    image_url = structured.get("image_url") or first_regex(html, [r'<meta property="og:image" content="([^"]+)"'])
-    brand = structured.get("brand") or infer_brand_from_title(title)
+    entity = structured or embedded
+    if not entity:
+        return None
+    title = sanitize_title(entity.get("name", ""), source_name)
     if not title:
         return None
-    return attach_regulatory_candidates({
-        "name": title, "brand": brand, "description": description,
+    return {
+        "name": title, "brand": entity.get("brand") or infer_brand_from_title(title),
+        "description": entity.get("description", ""),
         "barcode": barcode, "source": source_name, "source_url": url,
-        "image_url": image_url,
-    }, html)
+        "image_url": entity.get("image_url", ""),
+    }
 
 
 def lookup_generic_pharmacy_product(source_name, base_url, barcode, barcode_candidates=None):
@@ -1148,6 +1149,8 @@ def lookup_open_facts_product(source_name, base_url, barcode):
     if payload.get("status") != 1:
         return None
     product = payload.get("product", {})
+    if gtin_identity_key(product.get("code", "")) != gtin_identity_key(barcode):
+        return None
     name = first_present(product, ["product_name_fr", "product_name", "product_name_en"])
     brand = first_present(product, ["brands"])
     generic_name = first_present(product, ["generic_name_fr", "generic_name"])
@@ -1183,7 +1186,11 @@ def lookup_upcitemdb(barcode):
     items = payload.get("items") or []
     if not items:
         return None
-    item = items[0]
+    item = next((entry for entry in items if isinstance(entry, dict) and
+                 any(gtin_identity_key(entry.get(field, "")) == gtin_identity_key(digits)
+                     for field in ("upc", "ean", "gtin"))), None)
+    if item is None:
+        return None
     name = str(item.get("title", "")).strip()
     brand = str(item.get("brand", "")).strip()
     description = str(item.get("description", "")).strip()
@@ -1376,15 +1383,13 @@ def product_context_for_client_help(product):
     ctx = {
         "name":     str(product.get("name", "")).strip(),
         "brand":    verified_value("brand"),
-        "notes":    description,
+        "notes":    description if description_verified else "",
         "description_verified": description_verified,
         "description_status": str(
             "possible_wrong" if quarantined_description
             else product.get("description_status", "unverified") or "unverified"
         ),
-        "unverified_description_included": bool(
-            description and not description_verified
-        ),
+        "unverified_description_included": False,
         "description_quarantined": quarantined_description,
         "location": location,
         # The UPC is essential context: without it a question that names a UPC
@@ -1564,6 +1569,18 @@ def _attach_locatable_recommendations(advice, candidate_objs):
 
 def generate_product_assist_payload(name, brand, description, barcode):
     provider = configured_ai_provider()
+    if provider["name"] in {"local", "cloudflare"}:
+        # Search vocabulary may be generated; package facts and usage must never
+        # be inferred from a barcode or a model's prior knowledge.
+        if provider["name"] == "cloudflare":
+            parsed = free_structured_request(
+                "Propose uniquement des mots-clés français/anglais équivalents au nom fourni. N'invente aucun ingrédient, usage, dosage ou produit alternatif.",
+                {"name": name, "brand": brand}, 250,
+                {"type": "object", "properties": {"search_terms": {"type": "array", "items": {"type": "string"}}}, "required": ["search_terms"]},
+            )
+            if isinstance(parsed, dict) and isinstance(parsed.get("search_terms"), list):
+                return {"search_terms": ", ".join(str(term)[:80] for term in parsed["search_terms"][:12]), "usage_notes": "", "alternative_suggestions": ""}
+        return {"search_terms": ", ".join(dict.fromkeys(value for value in (name, brand, barcode) if value)), "usage_notes": "", "alternative_suggestions": ""}
     if provider["name"] == "kimi":
         return generate_product_assist_payload_kimi(name, brand, description, barcode)
     if provider["name"] == "deepseek":
@@ -2250,6 +2267,8 @@ def _provider_structured_request(system_prompt, user_payload, max_tokens,
                                  quality_mode=False, timeout_seconds=None,
                                  realtime_model=False, model_override=""):
     provider = configured_ai_provider()["name"]
+    if provider == "cloudflare":
+        return free_structured_request(system_prompt, user_payload, max_tokens, schema, timeout_seconds)
     if provider == "kimi":
         return _kimi_json_request([
             {"role": "system", "content": system_prompt},
@@ -2709,7 +2728,7 @@ def product_context_for_client_rag(product):
     context = product_context_for_client_help(product)
     verified_fields = set(product.get("_verified_fields") or [])
     description = str(product.get("description", "") or "").strip()
-    if description_quality_issue(description):
+    if not context["description_verified"] or description_quality_issue(description):
         description = ""
     verified_identifiers, unconfirmed_identifier_candidates = (
         _client_rag_identifier_groups(product)
@@ -4042,41 +4061,6 @@ def retrieve_client_documentation(products, query_plan=None, include_live_regula
         name = str(product.get("name", "") or "").strip()
         candidate_id = str(product.get("client_id", "") or "")
         description = str(product.get("description", "") or "").strip()
-        if description and "description" not in verified_fields:
-            source_index += 1
-            provenance = field_sources.get("description") or {}
-            source = str(
-                provenance.get("source", "")
-                or product.get("source", "")
-                or "Catalogue interne"
-            ).strip()
-            source_url = str(
-                provenance.get("source_url", "")
-                or product.get("source_url", "")
-                or ""
-            ).strip()
-            status = str(
-                product.get("description_status", "") or "unverified"
-            ).strip()
-            description_excerpt = _description_excerpt_for_ai(
-                description, max_chars=1300,
-            )
-            documents.append({
-                "source_id": f"catalog-description:{source_index}",
-                "title": f"Description catalogue \u00e0 confirmer - {name}",
-                "publisher": source,
-                "url": source_url if source_url.startswith("https://") else "",
-                "evidence": (
-                    f"Statut: {status}; cette description aide \u00e0 identifier le "
-                    f"produit mais doit \u00eatre confirm\u00e9e sur l'emballage. "
-                    f"Description: {description_excerpt}"
-                )[:1800],
-                "candidate_ids": [candidate_id] if candidate_id else [],
-                "verification_status": status,
-                "source_class": "unverified_catalogue",
-                "trust_level": 30,
-                "medical_claims_allowed": False,
-            })
         for (source, source_url), facts in grouped.items():
             source_index += 1
             source_text = normalize_text(f"{source} {source_url}")
@@ -6401,7 +6385,7 @@ def online_matches_catalog(cat_name, cat_brand, online, cat_barcode=""):
     shares a meaningful word (brand/product) with it. Prevents attaching a random
     description/image to the right product (the 'match super wrong' problem)."""
     candidate = dict(online or {})
-    candidate_barcode = str(candidate.get("barcode", "") or cat_barcode or "")
+    candidate_barcode = str(candidate.get("barcode", "") or "")
     candidate["barcode"] = candidate_barcode
     catalog = {
         "barcode": str(cat_barcode or candidate_barcode),
@@ -6424,6 +6408,7 @@ def reference_lookup(barcode):
                 d = dict(row)
                 key = gtin_identity_key(d.get("barcode", ""))
                 verified_values = {}
+                field_values = defaultdict(set)
                 if key:
                     for evidence_row in db.execute(
                         """SELECT field_name, field_value FROM product_reference_evidence
@@ -6432,7 +6417,8 @@ def reference_lookup(barcode):
                         (key,),
                     ).fetchall():
                         evidence = dict(evidence_row)
-                        verified_values[evidence["field_name"]] = evidence["field_value"]
+                        field_values[evidence["field_name"]].add(evidence["field_value"])
+                verified_values = {field: next(iter(values)) for field, values in field_values.items() if len(values) == 1}
                 source_type, _priority = classify_source(
                     d.get("source", ""), d.get("source_url", "")
                 )
@@ -6598,15 +6584,23 @@ def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False,
     def _cap(n):
         return min(n, max_workers) if max_workers else n
 
+    def _verified(product):
+        return bool(product) and assess_metadata_candidate(
+            {"barcode": barcode, "name": ""}, product, match_method="exact_gtin"
+        ).auto_apply
+
     def _satisfactory(product, score):
-        return score >= GOOD_ENOUGH and (not require_image or _lookup_has_image(product))
+        return (_verified(product) and score >= GOOD_ENOUGH
+                and (not require_image or _lookup_has_image(product)))
 
     def _merge_candidate(product, score, candidate, candidate_score):
         return _prefer_lookup_result(
             product, score, candidate, candidate_score,
-            require_image=require_image,
+            require_image=require_image, verified=_verified,
         )
 
+    # Open-database results are provisional: early completion here saves latency,
+    # but _satisfactory still requires a trusted exact match before skipping phase 2.
     # Phase 1 — fast structured JSON databases: Open Facts (food / beauty / drug /
     # general) + UPC Item DB + Datakick + Brocade. Covers most everyday products.
     tasks = []
@@ -6644,7 +6638,7 @@ def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False,
             p2, s2 = best_lookup_result(
                 tasks, max_workers=_cap(8), good_enough=GOOD_ENOUGH,
                 wait_for_cleanup=wait_for_cleanup,
-                require_image=require_image,
+                require_image=require_image, verified=_verified,
             )
             best, best_score = _merge_candidate(best, best_score, p2, s2)
 
@@ -6657,7 +6651,7 @@ def lookup_product_online(barcode, max_workers=None, wait_for_cleanup=False,
         p3, s3 = best_lookup_result(
             tasks, max_workers=_cap(6), good_enough=GOOD_ENOUGH,
             wait_for_cleanup=wait_for_cleanup,
-            require_image=require_image,
+            require_image=require_image, verified=_verified,
         )
         best, best_score = _merge_candidate(best, best_score, p3, s3)
 
@@ -6716,46 +6710,35 @@ def lookup_regulatory_product_online(barcode):
 def lookup_barcode(barcode):
     if not barcode.strip():
         return jsonify({"found": False, "error": "Code-barres manquant"}), 400
-
-    # 1) Local reference catalogue FIRST — the imported planograms + past scans. Instant,
-    #    free, and guarantees a real product NAME even when the online sources miss it.
     ref = reference_lookup(barcode)
-
-    # 2) Online sources add a nicer description + a product image (as before).
-    online = lookup_product_online(barcode)
-
-    product = None
     if ref and len(str(ref.get("name", "")).strip()) >= 2:
-        # Keep the reliable catalogue name/code; enrich the rest from online where blank —
-        # but ONLY if the online result actually matches this product (guards wrong hits).
-        product = dict(ref)
-        if online and online_matches_catalog(
-            product.get("name", ""), product.get("brand", ""), online,
-            product.get("barcode", ""),
-        ):
-            assessment = assess_metadata_candidate(
-                product, online, match_method="exact_gtin"
-            )
-            if assessment.auto_apply:
-                for field in ("description", "brand", "image_url"):
-                    if not str(product.get(field, "")).strip() and online.get(field):
-                        product[field] = online[field]
-            else:
-                product["unverified_suggestion"] = {
-                    field: online.get(field, "")
-                    for field in ("name", "brand", "description", "image_url", "source", "source_url")
-                    if str(online.get(field, "") or "").strip()
-                }
-                product["verification_status"] = "requires_review"
-    elif online:
-        product = dict(online)
-        product["verification_status"] = "requires_review"
-        product["unverified_suggestion"] = True
-
-    if product:
-        enrich_lookup_product_with_ai(product)
-        return jsonify({"found": True, "product": product})
-    return jsonify({"found": False, "error": "Aucun produit trouve"})
+        # Scanning a known UPC must never wait for multiple web scrapers.
+        # Missing images are enriched independently with the same evidence gate.
+        if not ref.get("image_url"):
+            from routes.products import schedule_image_fill
+            schedule_image_fill([barcode])
+        return jsonify({"found": True, "product": ref, "cache_hit": True})
+    online = lookup_product_online(barcode)
+    if not online:
+        return jsonify({"found": False, "error": "Aucun produit trouve"})
+    assessment = assess_metadata_candidate(
+        {"barcode": barcode, "name": online.get("name", "")}, online,
+        match_method="exact_gtin",
+    )
+    if not assessment.accepted:
+        return jsonify({"found": False, "error": "Aucune correspondance exacte disponible"})
+    product = dict(online)
+    product["verification_status"] = assessment.verification_status
+    if not assessment.auto_apply:
+        # Retain suggestions as evidence, without letting the scan form turn
+        # an uncertain description/photo into an employee-confirmed fact.
+        product["unverified_suggestion"] = {
+            field: product.get(field, "") for field in ("description", "image_url", "source", "source_url")
+        }
+        product["description"] = ""
+        product["image_url"] = ""
+    reference_save(online)
+    return jsonify({"found": True, "product": product, "cache_hit": False})
 
 
 @ai_bp.route("/api/reference/count", methods=["GET"])
@@ -7588,7 +7571,8 @@ def client_help():
     # First-turn discovery is handled by independent lexical + vector
     # retrievers. The answer model must read the products, not guess which
     # catalogue words should be searched before any products are available.
-    query_plan["semantic_search"] = response_mode != "lookup"
+    local_mode = response_mode != "lookup" and configured_ai_provider()["name"] == "local"
+    query_plan["semantic_search"] = response_mode != "lookup" and not local_mode
     if response_mode != "lookup":
         if not configured_ai_provider()["name"]:
             return jsonify({
@@ -7596,7 +7580,7 @@ def client_help():
                 "error": "Aucune clé IA n’est configurée sur le serveur.",
             }), 503
 
-        if not _check_ai_rate_limit():
+        if not local_mode and not _check_ai_rate_limit():
             return jsonify({
                 "success": False,
                 "error": "Trop de requêtes IA. Réessayez dans une heure.",
@@ -7627,6 +7611,7 @@ def client_help():
     semantic_planner_used = False
     if (
         response_mode != "lookup"
+        and not local_mode
         and not identifier_queries
         and (follow_up or selected_text or focus_product_id)
     ):
@@ -7689,7 +7674,7 @@ def client_help():
         and not identifier_queries
         and client_candidates_need_semantic_retry(question, candidates)
     )
-    if retrieval_uncertain and not semantic_planner_used:
+    if retrieval_uncertain and not semantic_planner_used and not local_mode:
         semantic_plan = generate_client_query_plan(question, history)
         if isinstance(semantic_plan, dict):
             semantic_planner_used = True
@@ -7773,10 +7758,15 @@ def client_help():
             include_live_regulatory=False,
         )
         mark_stage("documentation_ready_ms")
-        verified = generate_documented_client_answer(
-            question, query_plan, answer_candidates, documents, history,
-            selected_text=selected_text, focus_product_id=focus_product_id,
+        verified = (
+            grounded_documented_fallback(query_plan, answer_candidates, documents, degraded=False)
+            if local_mode else generate_documented_client_answer(
+                question, query_plan, answer_candidates, documents, history,
+                selected_text=selected_text, focus_product_id=focus_product_id,
+            )
         )
+    elif local_mode:
+        verified = grounded_documented_fallback(query_plan, answer_candidates, [], degraded=False)
     else:
         verified = generate_verified_client_answer(
             question, query_plan, answer_candidates, history,
@@ -7800,6 +7790,7 @@ def client_help():
 
     if (
         response_mode != "documented"
+        and not local_mode
         and answer_candidates
         and not verified.get("selected_product_ids")
         and (
@@ -7935,6 +7926,7 @@ def client_help():
     response_payload = {
         "success": True,
         "response_mode": response_mode,
+        "answer_engine": "catalogue" if local_mode or verified.get("local_summary") else str(configured_ai_provider()["name"]),
         "answer": answer,
         "answer_references": verified.get("answer_references", []),
         "products": public_products,

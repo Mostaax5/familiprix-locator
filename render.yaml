@@ -19,29 +19,12 @@ services:
         value: "2"
       - key: APP_PASSWORD_HASH
         sync: false
-      - key: KIMI_API_KEY
-        sync: false
-      # Used only for multilingual catalogue embeddings. Kimi remains the
-      # answer model; pgvector stores these embeddings persistently in Aiven.
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: SEMANTIC_EMBEDDING_MODEL
-        value: gemini-embedding-2
-      - key: SEMANTIC_INDEX_BATCH_SIZE
-        value: "40"
-      - key: SEMANTIC_INDEX_BATCH_PAUSE_SECONDS
-        value: "31"
-      - key: KIMI_MODEL
-        value: kimi-k2.6
-      - key: KIMI_REALTIME_MODEL
-        value: kimi-k2.6
-      - key: KIMI_PLANNER_MODEL
-        value: moonshot-v1-8k
-      - key: KIMI_DOCUMENTED_MODEL
-        value: kimi-k3
-      - key: KIMI_REALTIME_REASONING_EFFORT
-        value: low
-      - key: KIMI_SYNC_DOCUMENTED_REASONING_EFFORT
-        value: low
-      - key: AI_DOCUMENTED_REQUEST_TIMEOUT
-        value: "15"
+      # Strict $0 default: existing paid keys do not activate model calls.
+      - key: AI_ALLOW_PAID
+        value: "0"
+      - key: SEMANTIC_SEARCH_ENABLED
+        value: "0"
+      - key: AI_AUTO_ENRICH
+        value: "0"
+      - key: AI_DEEP_LOOKUP
+        value: "0"

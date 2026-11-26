@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#c8102e">
+  <title>Trouver un produit · {{ store_config.name }}</title>
+  <link rel="icon" href="/static/icon.svg">
+  <link rel="stylesheet" href="/static/catalogue.css?v={{ asset_version }}">
+  <script type="module" src="/static/catalogue/app.js?v={{ asset_version }}"></script>
+</head>
+<body>
+  <a class="skip" href="#query">Aller à la recherche</a>
+  <header class="masthead">
+    <a class="wordmark" href="/" aria-label="Localisateur, accueil"><span class="brand-icon" aria-hidden="true">f.</span><span>Localisateur<small>{{ store_config.name }}</small></span></a>
+    <nav aria-label="Navigation principale"><a href="/operations">Espace équipe <span aria-hidden="true">→</span></a></nav>
+  </header>
+  <main>
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="eyebrow">LE BON PRODUIT. AU BON ENDROIT.</div>
+      <h1 id="hero-title">Trouvez-le.<br><span>Sans détour.</span></h1>
+      <p>Un nom, un format ou un code-barres.<br class="mobile-break"> Tous les emplacements, en un seul endroit.</p>
+      <form id="search-form" class="search-box" role="search">
+        <label class="sr-only" for="query">Nom, format ou code-barres</label>
+        <span class="search-icon" aria-hidden="true">⌕</span>
+        <input id="query" name="q" type="search" autocomplete="off" placeholder="Ex. Advil 200 mg, shampoing, UPC…" maxlength="500">
+        <button class="scan-button" type="button" id="scan-open" aria-label="Scanner un code-barres"><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M3 8V3h5m8 0h5v5M3 16v5h5m8 0h5v-5M7 7v10m3-10v10m4-10v10m3-10v10" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
+        <button class="primary search-submit" type="submit">Trouver <span aria-hidden="true">→</span></button>
+      </form>
+      <div class="hero-foot"><span id="catalogue-count">Chargement du catalogue…</span><span class="connection" id="connection">Catalogue du magasin</span></div>
+    </section>
+
+    <section class="browse" aria-labelledby="results-heading">
+      <div class="browse-top"><div><div class="eyebrow">EXPLORER LE MAGASIN</div><h2 id="results-heading">Les produits, simplement.</h2></div><button type="button" id="reset" class="text-button" hidden>Tout afficher</button></div>
+      <div class="filters">
+        <label>Rayon<select id="category"><option value="">Tous les rayons</option></select></label>
+        <label>Emplacement<select id="aisle"><option value="">Toutes les allées</option></select></label>
+        <span id="result-count" role="status" aria-live="polite"></span>
+      </div>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <div id="suggestions" class="suggestions"></div>
+      <div id="results" class="product-grid" aria-busy="true"></div>
+      <div id="empty" class="empty" hidden><span aria-hidden="true">⌕</span><h3>Aucun produit pour cette recherche</h3><p>Essayez le nom sur l’emballage ou son code-barres. Vous pouvez aussi explorer un rayon.</p><button id="interpret" type="button" class="secondary" hidden>Comprendre ma demande</button></div>
+      <button id="more" type="button" class="secondary more" hidden>Voir plus de produits</button>
+    </section>
+    <aside class="help-strip"><div class="help-mark" aria-hidden="true">→</div><div><strong>Une question sur le bon choix pour vous ?</strong><p>L’équipe en pharmacie peut vous accompagner. Les emplacements indiquent où chercher; ils ne garantissent pas le stock en temps réel.</p></div><a href="/operations">Outils de l’équipe →</a></aside>
+  </main>
+  <footer><span>{{ store_config.name }}</span><span>Des repères clairs, du comptoir au rayon.</span></footer>
+
+  <div id="compare-bar" class="compare-bar" hidden><span id="compare-count"></span><button id="compare-open" type="button" class="primary">Comparer</button><button id="compare-clear" type="button" class="text-button">Effacer</button></div>
+  <dialog id="detail" class="detail-dialog"><div class="dialog-top"><span>FICHE PRODUIT</span><button type="button" class="icon-button" data-close="detail" aria-label="Fermer la fiche">×</button></div><div id="detail-content"></div></dialog>
+  <dialog id="comparison" class="comparison-dialog"><div class="dialog-top"><span>COMPARER LES FORMATS</span><button type="button" class="icon-button" data-close="comparison" aria-label="Fermer la comparaison">×</button></div><div id="comparison-content"></div><p class="subtle">La comparaison présente les faits du catalogue. Elle ne signifie pas que ces produits sont équivalents ou interchangeables.</p></dialog>
+  <dialog id="scanner" class="scanner-dialog"><div class="dialog-top"><span>SCANNER UN PRODUIT</span><button type="button" class="icon-button" data-close="scanner" aria-label="Fermer le scanner">×</button></div><video id="scan-video" playsinline muted></video><p id="scan-status" role="status">Préparation de la caméra…</p><p class="subtle">Vous pouvez aussi saisir le code dans la recherche ou utiliser un lecteur USB/Bluetooth.</p></dialog>
+</body>
+</html>

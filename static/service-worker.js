@@ -1,4 +1,4 @@
-const CACHE_NAME = 'familiprix-locator-v34';
+const CACHE_NAME = 'familiprix-locator-v36';
 const OFFLINE_CACHE = [
   '/',
   '/manifest.json',
@@ -24,6 +24,13 @@ self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
 
+  // ES module dependencies have stable paths. Revalidate them instead of
+  // mixing a newly deployed entry point with an older cached dependency.
+  if (url.pathname.startsWith('/static/catalogue/')) {
+    event.respondWith(fetch(event.request));
+    return;
+  }
+
   if (url.pathname.startsWith('/api/')) {
     // Pass the request through UNCHANGED: each API call carries its own cache
     // mode ('no-store' by default; 'no-cache' for the big product/layout lists
@@ -47,10 +54,10 @@ async function networkFirstNavigation(request) {
   const cache = await caches.open(CACHE_NAME);
   try {
     const response = await fetch(request);
-    if (response?.ok) await cache.put('/', response.clone());
+    if (response?.ok) await cache.put(request, response.clone());
     return response;
   } catch (_) {
-    return (await cache.match('/')) || new Response('Hors ligne', {status: 503});
+    return (await cache.match(request)) || new Response('Hors ligne — reconnectez-vous pour consulter le magasin.', {status: 503});
   }
 }
 

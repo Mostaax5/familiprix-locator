@@ -451,8 +451,7 @@ async function ensureQuaggaLoaded() {
   if ('Quagga' in window) return true;
   if (quaggaLibraryPromise) return quaggaLibraryPromise;
   const sources = [
-    'https://cdn.jsdelivr.net/npm/@ericblade/quagga2/dist/quagga.min.js',
-    'https://unpkg.com/@ericblade/quagga2/dist/quagga.min.js'
+    '/static/vendor/quagga-1.10.2.min.js'
   ];
   quaggaLibraryPromise = (async () => {
     for (const src of sources) {
@@ -468,8 +467,7 @@ async function ensureOcrLoaded() {
   if ('Tesseract' in window) return true;
   if (ocrLibraryPromise) return ocrLibraryPromise;
   const sources = [
-    'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js',
-    'https://unpkg.com/tesseract.js@5/dist/tesseract.min.js'
+    '/static/vendor/ocr/tesseract.min.js'
   ];
   ocrLibraryPromise = (async () => {
     for (const src of sources) {
@@ -485,8 +483,7 @@ async function ensureZXingLoaded() {
   if (window.ZXing) return true;
   if (zxingLibraryPromise) return zxingLibraryPromise;
   const sources = [
-    'https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js',
-    'https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js'
+    '/static/vendor/zxing-library-0.21.3.min.js'
   ];
   zxingLibraryPromise = (async () => {
     for (const src of sources) {
@@ -642,6 +639,9 @@ async function _smartOcrDigits(video, status) {
     if (!canvas) return;
 
     const result = await window.Tesseract.recognize(canvas, 'eng', {
+      workerPath: '/static/vendor/ocr/worker.min.js',
+      corePath: '/static/vendor/ocr',
+      langPath: '/static/vendor/ocr',
       logger: () => {},
       tessedit_char_whitelist: '0123456789'
     });
@@ -743,6 +743,9 @@ async function maybeRunOcrFallbackOnVideo(video, status) {
                || _ocrCrop(video, 0.05, 0.58, 0.90, 0.28, 2.2);
     if (!canvas) return;
     const result = await window.Tesseract.recognize(canvas, 'eng', {
+      workerPath: '/static/vendor/ocr/worker.min.js',
+      corePath: '/static/vendor/ocr',
+      langPath: '/static/vendor/ocr',
       logger: () => {},
       tessedit_char_whitelist: '0123456789'
     });
@@ -945,6 +948,9 @@ async function ocrBarcodeFromCanvas(canvas) {
   for (const crop of crops) {
     try {
       const { data } = await window.Tesseract.recognize(crop, 'eng', {
+      workerPath: '/static/vendor/ocr/worker.min.js',
+      corePath: '/static/vendor/ocr',
+      langPath: '/static/vendor/ocr',
         logger: () => {},
         tessedit_char_whitelist: '0123456789 ',
         tessedit_pageseg_mode: '6',
@@ -1221,6 +1227,9 @@ async function recognizeBarcodeDigitsFromVideo(reader) {
   if (!canvas) return null;
 
   const result = await window.Tesseract.recognize(canvas, 'eng', {
+      workerPath: '/static/vendor/ocr/worker.min.js',
+      corePath: '/static/vendor/ocr',
+      langPath: '/static/vendor/ocr',
     logger: () => {},
     tessedit_char_whitelist: '0123456789'
   });
@@ -1262,6 +1271,9 @@ async function maybeRunOcrFallback(reader, status) {
     const canvas = _ocrCrop(video, 0.06, 0.10, 0.88, 0.75, 3.0);
     if (!canvas) return;
     const result = await window.Tesseract.recognize(canvas, 'eng', {
+      workerPath: '/static/vendor/ocr/worker.min.js',
+      corePath: '/static/vendor/ocr',
+      langPath: '/static/vendor/ocr',
       logger: () => {},
       tessedit_char_whitelist: '0123456789',
       preserve_interword_spaces: '1'

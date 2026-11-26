@@ -326,7 +326,7 @@ class SecurityBoundaryTests(unittest.TestCase):
         ).fetchone()
         self.assertGreater(int(row["revoked_at"]), 0)
 
-    def test_temporary_protected_area_password_does_not_force_rotation(self):
+    def test_public_legacy_digest_cannot_bypass_configured_password(self):
         self.password_patcher.stop()
         replacement_hash = generate_password_hash(
             "A different configured passphrase 2026",
@@ -340,11 +340,9 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.password_patcher.start()
         temporary_digest = hashlib.sha256(self.password.encode("utf-8")).hexdigest()
         with patch.object(security, "_LEGACY_PASSWORD_SHA256", temporary_digest):
-            response, payload = self.login()
-            self.assertFalse(payload["rotation_required"])
-            with patch("routes.import_export.get_db", return_value=self.db):
-                protected = self.client.get("/api/export", base_url="https://localhost")
-        self.assertEqual(protected.status_code, 200)
+            response = self.client.post('/api/auth/login', json={'password': self.password},
+                                        base_url='https://localhost')
+        self.assertEqual(response.status_code, 401)
 
     def test_database_export_streams_a_complete_restorable_payload(self):
         self.db.execute(

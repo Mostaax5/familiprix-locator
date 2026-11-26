@@ -1,12 +1,8 @@
 // ── Store selection ───────────────────────────────────────────────────────────
-// The only configured store is selected automatically. The selected store is
-// attached to AI requests so future multi-store data stays grouped correctly.
+// Each deployment serves one database-bound store; localStorage cannot select another store.
 
 function getCurrentStore() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEYS.store);
-    return raw ? JSON.parse(raw) : null;
-  } catch (_) { return null; }
+  return STORES[0] || null;
 }
 
 function getCurrentStoreName() {

@@ -60,13 +60,13 @@ class DatabaseConnectionTests(unittest.TestCase):
     def test_postgres_auth_schema_requires_all_tables_and_session_column(self):
         db = Mock()
         db.execute.return_value.fetchone.return_value = {
-            "table_count": 4,
+            "table_count": 7,
             "column_count": 1,
         }
         self.assertTrue(database._postgres_auth_schema_complete(db))
 
         db.execute.return_value.fetchone.return_value = {
-            "table_count": 4,
+            "table_count": 7,
             "column_count": 0,
         }
         self.assertFalse(database._postgres_auth_schema_complete(db))

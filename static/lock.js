@@ -6,6 +6,9 @@ const _authState = {
   csrfToken: '',
   expiresAt: 0,
   username: '',
+  accountMode: false,
+  role: '',
+  displayName: '',
 };
 
 function csrfToken() {
@@ -25,6 +28,9 @@ function _applyAuthState(data) {
   _authState.csrfToken = String(data?.csrf_token || '');
   _authState.expiresAt = Number(data?.expires_at || 0);
   _authState.username = String(data?.username || '');
+  _authState.accountMode = Boolean(data?.account_mode);
+  _authState.role = String(data?.role || '');
+  _authState.displayName = String(data?.display_name || '');
   updateLockUi();
 }
 
@@ -33,6 +39,8 @@ function _clearAuthState() {
   _authState.csrfToken = '';
   _authState.expiresAt = 0;
   _authState.username = '';
+  _authState.role = '';
+  _authState.displayName = '';
   updateLockUi();
 }
 
@@ -48,8 +56,8 @@ function clearSensitiveBrowserData() {
 function updateLockUi() {
   const unlocked = isUnlocked();
   const labels = {
-    search: 'Recherche',
-    client: 'Client',
+    search: 'Accueil',
+    client: 'Trouver',
     expiry: 'Dates',
     scan: 'Scan',
     add: 'Plan',
@@ -60,6 +68,7 @@ function updateLockUi() {
   }
   const lockButton = document.getElementById('lockButton');
   if (lockButton) lockButton.style.display = unlocked ? '' : 'none';
+  if (typeof updateEmployeeAccountUi === 'function') updateEmployeeAccountUi();
 }
 
 function _savedEditorName() {
@@ -103,6 +112,7 @@ async function initializeAuth() {
       skipAuthHandling: true,
     });
     const data = await response.json();
+    if (typeof data.account_mode === 'boolean') _authState.accountMode = data.account_mode;
     if (!response.ok || !data.authenticated) {
       _clearAuthState();
       clearSensitiveBrowserData();
@@ -134,7 +144,7 @@ async function unlockApp() {
   try {
     const credentials = JSON.stringify({
       password: passwordInput.value,
-      username: _savedEditorName(),
+      username: _authState.accountMode ? (document.getElementById('employeeLogin')?.value || '').trim() : _savedEditorName(),
     });
     let response = null;
     let data = {};

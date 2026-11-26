@@ -15,6 +15,7 @@ from database import (
     product_data_schema_status,
 )
 from auth import utc_now_iso
+from store_identity import configured_store
 from security import auth_bp, install_security, internal_request_headers
 from routes.products import (
     products_bp, first_column, schedule_backfill_missing,
@@ -33,6 +34,7 @@ from routes.regulatory import (
     schedule_regulatory_enrichment_after,
 )
 from routes.expiry import expiry_bp
+from routes.catalogue import catalogue_bp
 from observability import maybe_log_operational_warning, record_request
 from semantic_search import (
     maybe_resume_semantic_product_index,
@@ -86,10 +88,11 @@ app.config.update(
     MAX_FORM_PARTS=30,
 )
 
-_RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+_RENDER_EXTERNAL_URL = (os.environ.get("APP_EXTERNAL_URL") or os.environ.get("RENDER_EXTERNAL_URL", "")).strip()
 if _RENDER_EXTERNAL_URL:
     # Render terminates TLS one trusted proxy hop in front of Gunicorn.
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+    if os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("TRUST_PROXY") == "1":
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
     render_host = urlsplit(_RENDER_EXTERNAL_URL).hostname
     trusted = [host for host in (render_host, "localhost", "127.0.0.1", "[::1]") if host]
     extra_hosts = [host.strip() for host in os.environ.get("TRUSTED_HOSTS", "").split(",") if host.strip()]
@@ -132,7 +135,7 @@ app.config["DB_BOOT_PENDING"] = DB_BOOT_PENDING
 
 # Keep local setup deterministic. On Render the same work runs below after the
 # app object is ready, so a busy PostgreSQL lock cannot block /healthz.
-if not _ASYNC_RENDER_BOOT:
+if not _ASYNC_RENDER_BOOT and os.environ.get("APP_START_SERVICES", "1") != "0":
     try:
         init_db()
     except Exception as exc:  # noqa: BLE001 — any DB failure must not kill the boot
@@ -147,10 +150,11 @@ app.register_blueprint(import_export_bp)
 app.register_blueprint(regulatory_bp)
 app.register_blueprint(expiry_bp)
 app.register_blueprint(auth_bp)
+app.register_blueprint(catalogue_bp)
 
 
 _PRODUCT_DATA_BLUEPRINTS = {
-    "products", "ai", "gist", "import_export", "regulatory", "expiry",
+    "products", "ai", "gist", "import_export", "regulatory", "expiry", "catalogue",
 }
 
 
@@ -193,6 +197,9 @@ def _asset_version():
     if render_commit:
         return render_commit[:12]
     tracked_assets = (
+        "templates/catalogue.html", "static/catalogue.css", "static/catalogue/app.js",
+        "static/catalogue/view.js", "static/catalogue/scanner.js",
+        "static/operations.css",
         "templates/index.html", "static/style.css", "static/scanner.js",
         "static/api.js", "static/config.js", "static/store.js", "static/lock.js",
         "static/search.js", "static/gist-ui.js", "static/ai-ui.js",
@@ -213,7 +220,26 @@ ASSET_VERSION = _asset_version()
 
 @app.route("/")
 def index():
-    return render_template("index.html", asset_version=ASSET_VERSION)
+    return render_template("catalogue.html", asset_version=ASSET_VERSION, store_config=configured_store())
+
+
+@app.route("/operations")
+def operations():
+    return render_template("index.html", asset_version=ASSET_VERSION, store_config=configured_store())
+
+
+@app.route("/livez")
+def livez():
+    return jsonify({"ok": True})
+
+
+@app.route("/health/dependencies")
+def dependencies():
+    from health import dependency_status
+    status = dependency_status()
+    response = jsonify({**status, "cached_search_available": product_search_cache_ready()})
+    response.headers["Cache-Control"] = "no-store"
+    return response, (200 if status["database_available"] else 503)
 
 
 @app.route("/healthz")
@@ -227,6 +253,12 @@ def healthz():
 @app.route("/readyz")
 def readyz():
     """Tell Render when this revision is ready for employee traffic."""
+    if os.environ.get('LEGACY_CATALOGUE_MAINTENANCE', '0') != '1':
+        from catalogue.service import readiness as catalogue_ready, start_warmup
+        if not DB_BOOT_PENDING:
+            start_warmup()
+        status = catalogue_ready()
+        return jsonify(ok=status['ready'], catalogue=status), (200 if status['ready'] else 503)
     warmup = reconcile_catalogue_warmup_state()
     # A completed search snapshot proves that PostgreSQL was readable even if
     # a slower background migration still holds the boot flag. Let the payload
@@ -333,7 +365,7 @@ def add_security_headers(response):
     )
     csp = (
         "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; frame-src 'none'; object-src 'none'; "
-        "form-action 'self'; script-src 'self'; script-src-attr 'unsafe-inline'; "
+        "form-action 'self'; script-src 'self' 'wasm-unsafe-eval'; script-src-attr 'unsafe-inline'; "
         "style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; "
         "font-src 'self'; connect-src 'self'; media-src 'self' blob:; "
         "worker-src 'self' blob:; manifest-src 'self'"
@@ -354,7 +386,7 @@ def add_security_headers(response):
             else "no-store, max-age=0"
         )
         response.vary.add("Cookie")
-    elif path in {"/", "/service-worker.js"}:
+    elif path in {"/", "/operations", "/service-worker.js"} or path.startswith('/static/catalogue/'):
         response.headers["Cache-Control"] = "no-cache, max-age=0, must-revalidate"
     if path.startswith("/api/") and response.status_code == 401:
         response.headers.setdefault("Clear-Site-Data", '"cache"')
@@ -681,6 +713,16 @@ def _start_persistence_services(*, background=False):
                 f"[BOOT] Service catalogue "
                 f"_restore_from_gist_if_empty impossible: {exc}"
             )
+        from jobs import start_embedded
+        start_embedded()
+        # The new catalogue owns acquisition. Do not concurrently run the old
+        # description/semantic/image fanout against every placement.
+        from catalogue.acquisition import start_embedded as start_catalogue_acquisition
+        from catalogue.service import start_warmup
+        start_warmup()
+        start_catalogue_acquisition()
+        if os.environ.get('LEGACY_CATALOGUE_MAINTENANCE', '0') != '1':
+            return
         ensure_catalogue_warmup_started()
         while catalogue_warmup_status().get("stage") != "ready":
             time.sleep(1)
@@ -744,11 +786,12 @@ def _finish_persistence_boot():
         _start_persistence_services()
 
 
-if _ASYNC_RENDER_BOOT:
-    threading.Thread(target=_finish_persistence_boot, daemon=True).start()
-else:
-    _finish_persistence_boot()
-_start_self_keepalive()
+if os.environ.get("APP_START_SERVICES", "1") != "0":
+    if _ASYNC_RENDER_BOOT:
+        threading.Thread(target=_finish_persistence_boot, daemon=True).start()
+    else:
+        _finish_persistence_boot()
+    _start_self_keepalive()
 
 if __name__ == "__main__":
     DEFAULT_CERT_PATH = os.path.join(os.path.dirname(__file__), "certs", "localhost.pem")

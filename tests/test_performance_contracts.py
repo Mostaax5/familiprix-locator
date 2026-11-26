@@ -17,7 +17,7 @@ class PerformanceContractTests(unittest.TestCase):
         self.assertIn("return readyz()", app_source[health_start:ready_decorator])
         ready_start = app_source.index("def readyz")
         ready_route = app_source[ready_start:ready_start + 450]
-        self.assertIn("product_search_cache_ready()", ready_route)
+        self.assertIn("catalogue_ready", ready_route)
         self.assertNotIn("get_db()", ready_route)
         warmup_start = app_source.index("def _catalogue_warmup_worker")
         warmup_end = app_source.index("def ensure_catalogue_warmup_started")
@@ -52,14 +52,9 @@ class PerformanceContractTests(unittest.TestCase):
         self.assertIn("threads = 4", gunicorn_config)
         self.assertIn("max_requests = 1000", gunicorn_config)
         self.assertIn("MALLOC_ARENA_MAX", render_config)
-        self.assertIn("value: kimi-k3", render_config)
-        documented_effort = render_config.index(
-            "- key: KIMI_SYNC_DOCUMENTED_REASONING_EFFORT"
-        )
-        self.assertIn(
-            "value: low",
-            render_config[documented_effort:documented_effort + 100],
-        )
+        self.assertIn('plan: free', render_config)
+        self.assertIn('- key: AI_ALLOW_PAID\n        value: "0"', render_config)
+        self.assertNotIn('- key: KIMI_API_KEY', render_config)
 
     def test_ready_catalogue_releases_a_stale_background_boot_gate(self):
         import app as app_module
@@ -205,8 +200,8 @@ class PerformanceContractTests(unittest.TestCase):
         self.assertIn("const LOCKED_TABS = new Set(['expiry', 'scan', 'add'])", (
             ROOT / "static" / "config.js"
         ).read_text(encoding="utf-8"))
-        self.assertIn('id="tabBtn-search" onclick="switchTab(\'search\')">Recherche</button>', source)
-        self.assertIn('id="tabBtn-client" onclick="switchTab(\'client\')">Client</button>', source)
+        self.assertIn('id="tabBtn-search" onclick="switchTab(\'search\')">Accueil</button>', source)
+        self.assertIn('id="tabBtn-client" onclick="window.location.assign(\'/\')">Trouver</button>', source)
         self.assertIn('<details class="card plano-history-card" id="planoHistoryPanel"', source)
         self.assertNotIn('<details class="card plano-history-card" id="planoHistoryPanel" open', source)
         self.assertLess(source.index('id="planoHistoryPanel"'), source.index('Catalogue — tous les planogrammes'))

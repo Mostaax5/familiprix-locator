@@ -299,7 +299,7 @@ class PlanogramMetadataTests(unittest.TestCase):
         schedule.assert_called_once_with(["012345678901"], priority=True)
         db.close()
 
-    def test_product_image_endpoint_returns_unreviewed_exact_upc_image(self):
+    def test_product_image_endpoint_withholds_unreviewed_exact_upc_image(self):
         db = self.make_db()
         db.execute(
             """INSERT INTO products
@@ -319,10 +319,9 @@ class PlanogramMetadataTests(unittest.TestCase):
                 response = client.get("/api/products/images?ids=1")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["images"], {
-            "1": "https://img.test/catalogue-razor.jpg",
-        })
-        schedule.assert_called_once_with([])
+        self.assertEqual(response.get_json()["images"], {})
+        schedule.assert_called_once_with(["063848966068"])
+        self.assertEqual(db.execute("SELECT image_url FROM product_reference").fetchone()[0], "https://img.test/catalogue-razor.jpg")
         db.close()
 
     def test_rejected_image_is_removed_for_exact_package_and_never_reused(self):
@@ -445,7 +444,7 @@ class PlanogramMetadataTests(unittest.TestCase):
         self.assertEqual(first_result["errors"], 0)
         self.assertEqual(first_result["layout"]["aisle"], "1")
         self.assertEqual(first_result["products"][0]["barcode"], "123456789012")
-        self.assertEqual(first_result["products"][0]["description"], "Reference description")
+        self.assertEqual(first_result["products"][0]["description"], "")
         self.assertEqual(after_first["description"], "Reference description")
         self.assertEqual(after_first["image_url"], "https://img.test/ref.jpg")
         self.assertEqual(after_first["brand"], "Reference Brand")

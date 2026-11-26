@@ -7,7 +7,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from flask import Blueprint, current_app, request, jsonify
 from database import get_db
 from auth import require_editor, utc_now_iso
-from routes.layout import layout_metrics, normalize_layout_config, valid_aisle_name
+from domain.layout import layout_metrics, normalize_layout_config, valid_aisle_name
 from routes.products import product_payload_error, safe_http_url
 from product_backup import (
     PRODUCT_DATA_TABLE_COLUMNS,

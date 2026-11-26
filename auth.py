@@ -4,9 +4,9 @@ from database import get_db
 
 
 def utc_now_iso():
-    # Millisecond precision keeps ETag/cache fingerprints distinct when an
+    # Microsecond precision keeps ETag/cache fingerprints distinct when an
     # employee performs multiple edits or imports inside the same second.
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def side_display_label(side):

@@ -6,6 +6,14 @@ async function secureFetch(url, options = {}) {
   const opts = {...options};
   const skipAuthHandling = Boolean(opts.skipAuthHandling);
   delete opts.skipAuthHandling;
+  const timeoutMs = Number(opts.timeoutMs) || (target.pathname.includes('/import') ? 180000 : target.pathname.includes('/client/help') ? 60000 : 15000);
+  delete opts.timeoutMs;
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort(options.signal?.reason);
+  if (options.signal?.aborted) forwardAbort();
+  else options.signal?.addEventListener('abort', forwardAbort, {once: true});
+  opts.signal = controller.signal;
+  const deadline = window.setTimeout(() => controller.abort(), timeoutMs);
   opts.cache = options.cache || 'no-store';
   opts.credentials = 'same-origin';
   opts.headers = {...(options.headers || {})};
@@ -16,11 +24,19 @@ async function secureFetch(url, options = {}) {
       opts.headers['X-CSRF-Token'] = csrfToken;
     }
   }
-  const res = await fetch(`${target.pathname}${target.search}${target.hash}`, opts);
+  let res;
+  try {
+    res = await fetch(`${target.pathname}${target.search}${target.hash}`, opts);
+  } finally {
+    window.clearTimeout(deadline);
+    options.signal?.removeEventListener('abort', forwardAbort);
+  }
   if (!skipAuthHandling && (res.status === 401 || res.status === 428)) {
     let payload = {};
     try { payload = await res.clone().json(); } catch (_) {}
-    window.AppLock?.handleAuthFailure?.(res.status, payload);
+    if (payload.code !== 'precondition_required') {
+      window.AppLock?.handleAuthFailure?.(res.status, payload);
+    }
   }
   return res;
 }
@@ -151,7 +167,7 @@ async function apiUpdateProduct(product) {
     const {res, data} = await apiFetch(`/api/products/${product.id}`, {
       method: 'PUT',
       headers: {'Content-Type':'application/json', ...getEditorHeaders()},
-      body: JSON.stringify(product)
+      body: JSON.stringify({...product, expected_modified_at: product.modified_at ?? product.last_change_at ?? ''})
     });
     return res.ok ? data : {success: false, error: data.error || 'Erreur de sauvegarde.'};
   } catch (error) {
@@ -452,6 +468,6 @@ async function apiSetIsPlano(id, isPlano) {
 
 async function apiGetSystemInfo() {
   const {res, data} = await apiFetch('/api/system/info');
-  if (!res.ok) throw new Error('system-info');
+  if (!res.ok && !data?.db_unreachable) throw new Error('system-info');
   return data;
 }

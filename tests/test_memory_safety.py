@@ -279,7 +279,7 @@ class MemorySafetyTests(unittest.TestCase):
             "regulatory_identifiers": [{"duplicate": True}],
         })
 
-        self.assertNotIn("modified_at", compact)
+        self.assertEqual(compact["modified_at"], "audit-only")  # Required write precondition.
         self.assertNotIn("primary_source", compact)
         self.assertNotIn("brand", compact)
         self.assertNotIn("description", compact)
@@ -498,7 +498,8 @@ class MemorySafetyTests(unittest.TestCase):
         class ReferenceDatabase:
             def execute(self, query, _params=()):
                 if "FROM product_reference_evidence" in query:
-                    return []
+                    return [{"gtin_key": "gtin:00062600142320", "field_name": "description",
+                             "field_value": "Acetaminophene pour le soulagement de la douleur."}]
                 if "FROM product_reference_identifiers" in query:
                     return [{
                         "gtin_key": "gtin:00062600142320",
@@ -646,7 +647,8 @@ class MemorySafetyTests(unittest.TestCase):
     def test_online_image_lookup_continues_to_familiprix_phase(self):
         text_only = {"name": "Known razor", "image_url": ""}
         with_image = {
-            "name": "Known razor", "image_url": "https://img.test/razor.jpg"
+            "name": "Known razor", "image_url": "https://img.test/razor.jpg",
+            "barcode": "063848966068", "source": "Familiprix"
         }
         with patch.object(
             ai, "best_lookup_result",

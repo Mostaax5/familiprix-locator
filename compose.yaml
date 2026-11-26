@@ -1,0 +1,28 @@
+services:
+  locator:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:10000:10000"
+    environment:
+      STORE_ID: ${STORE_ID:?Set a unique store ID}
+      STORE_NAME: ${STORE_NAME:?Set the store name}
+      STORE_ADDRESS: ${STORE_ADDRESS:-}
+      APP_EXTERNAL_URL: ${APP_EXTERNAL_URL:-http://localhost:10000}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-0}
+      TRUST_PROXY: ${TRUST_PROXY:-0}
+      INIT_OWNER_LOGIN: ${INIT_OWNER_LOGIN:-owner}
+      INIT_OWNER_NAME: ${INIT_OWNER_NAME:-Propriétaire}
+      INIT_OWNER_PASSWORD_FILE: /run/secrets/owner_password
+    volumes:
+      - store_data:/data
+    secrets:
+      - owner_password
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+secrets:
+  owner_password:
+    file: ${OWNER_PASSWORD_FILE:?Set a private owner password file}
+volumes:
+  store_data:

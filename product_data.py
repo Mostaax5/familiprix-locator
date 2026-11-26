@@ -14,6 +14,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Iterable
 
+from domain.package_identity import package_facts, product_families
+
 
 GTIN_LENGTHS = {8, 12, 13, 14}
 VERIFICATION_STATUSES = {
@@ -72,44 +74,6 @@ _GENERIC_NAME_WORDS = {
     "regular", "un", "une", "de", "des", "du", "la", "le", "les",
 }
 _BRAND_NOISE = {"inc", "ltd", "limited", "corp", "corporation", "co", "canada"}
-
-_UNIT_ALIASES = {
-    "mcg": "mcg", "ug": "mcg", "microgramme": "mcg", "microgrammes": "mcg",
-    "mg": "mg", "g": "g", "kg": "kg", "ml": "ml", "l": "l",
-    "oz": "oz", "fl oz": "fl_oz", "%": "%",
-}
-_COUNT_WORDS = {
-    "comprime": "tablet", "comprimes": "tablet", "tablet": "tablet",
-    "tablets": "tablet", "caplet": "tablet", "caplets": "tablet",
-    "capsule": "capsule", "capsules": "capsule", "gelule": "capsule",
-    "gelules": "capsule", "dose": "dose", "doses": "dose",
-    "unite": "unit", "unites": "unit", "unit": "unit", "units": "unit",
-    "sachet": "sachet", "sachets": "sachet", "piece": "unit", "pieces": "unit",
-    "lingette": "wipe", "lingettes": "wipe", "wipe": "wipe", "wipes": "wipe",
-}
-_FORMAT_GROUPS = (
-    {"shampoo", "shampoing"},
-    {"conditioner", "revitalisant", "apres shampoing"},
-    {"refill", "recharge", "replacement", "remplacement"},
-    {"device", "appareil", "machine", "brosse electrique"},
-    {"liquid", "liquide", "suspension", "sirop"},
-    {"tablet", "tablette", "comprime", "caplet"},
-    {"capsule", "gelule", "liqui gel", "liquigel"},
-    {"cream", "creme"},
-    {"lotion"},
-    {"spray", "vaporisateur"},
-)
-_FLAVOURS = {
-    "menthe", "mint", "raisin", "grape", "fraise", "strawberry", "cerise",
-    "cherry", "orange", "citron", "lemon", "lime", "framboise", "raspberry",
-    "vanille", "vanilla", "chocolat", "chocolate", "original", "sans saveur",
-    "unflavoured", "unflavored",
-}
-_COLOURS = {
-    "rouge", "red", "bleu", "blue", "vert", "green", "noir", "black",
-    "blanc", "white", "rose", "pink", "brun", "brown", "gris", "grey", "gray",
-    "violet", "purple", "orange", "jaune", "yellow",
-}
 
 _FOREIGN_DESCRIPTION_SCRIPT_RE = re.compile(
     r"[\u0400-\u052f\u0590-\u08ff\u0900-\u0dff\u3040-\u30ff"
@@ -304,7 +268,12 @@ def normalize_identifier(identifier_type, value, authority="") -> str:
 
 def classify_source(source="", source_url="") -> tuple[str, int]:
     value = normalize_text(f"{source} {source_url}")
-    if any(token in value for token in (
+    if str(source or "").strip() == "Manual verified exact GTIN cache":
+        return "unknown", SOURCE_PRIORITIES["unknown"]
+    # An AI citing a retailer is still an AI suggestion, never a retailer record.
+    if any(token in value for token in ("recherche ia", "ai suggestion", "deepseek", "gemini", "kimi", "openai", "cloudflare ai")):
+        source_type = "ai_suggestion"
+    elif any(token in value for token in (
         "familiprix", "planogramme", "store catalogue", "catalogue magasin",
         "fiche magasin", "store product",
     )):
@@ -332,48 +301,20 @@ def classify_source(source="", source_url="") -> tuple[str, int]:
     return source_type, SOURCE_PRIORITIES[source_type]
 
 
-def _decimal(value) -> str:
-    raw = str(value or "").replace(",", ".")
-    try:
-        number = float(raw)
-    except ValueError:
-        return raw
-    return str(int(number)) if number.is_integer() else (f"{number:.4f}".rstrip("0").rstrip("."))
-
-
 def extract_package_facts(*values) -> dict[str, set[str]]:
-    text = normalize_text(" ".join(str(value or "") for value in values))
-    facts = {
-        "sizes": set(), "counts": set(), "strengths": set(), "formats": set(),
-        "flavours": set(), "colours": set(),
-    }
-    for number, unit in re.findall(r"\b(\d+(?:[.,]\d+)?)\s*(mcg|ug|mg|kg|ml|g|l|oz|%)\b", text):
-        normalized = f"{_decimal(number)}:{_UNIT_ALIASES.get(unit, unit)}"
-        facts["sizes"].add(normalized)
-    for number, unit in re.findall(
-        r"\b(\d+)\s*(comprimes?|tablets?|caplets?|capsules?|gelules?|doses?|unites?|units?|sachets?|pieces?|lingettes?|wipes?)\b",
-        text,
-    ):
-        facts["counts"].add(f"{int(number)}:{_COUNT_WORDS.get(unit, unit)}")
-    for count in re.findall(r"\b(?:ca|co|caps?|ct|x)\s*(\d{1,4})\b", text):
-        facts["counts"].add(f"{int(count)}:unit")
-    for left, left_unit, right, right_unit in re.findall(
-        r"\b(\d+(?:[.,]\d+)?)\s*(mcg|ug|mg|g|%)\s*(?:/|par)\s*(\d+(?:[.,]\d+)?)?\s*(ml|l|dose)?\b",
-        text,
-    ):
-        facts["strengths"].add(
-            f"{_decimal(left)}:{_UNIT_ALIASES.get(left_unit, left_unit)}/"
-            f"{_decimal(right or '1')}:{_UNIT_ALIASES.get(right_unit or 'dose', right_unit or 'dose')}"
-        )
-    def contains_term(term):
-        return bool(re.search(rf"(?:^| ){re.escape(term)}(?: |$)", text))
+    return package_facts(*values)
 
-    for group in _FORMAT_GROUPS:
-        for term in group:
-            if contains_term(term):
-                facts["formats"].add(term)
-    facts["flavours"] = {term for term in _FLAVOURS if contains_term(term)}
-    facts["colours"] = {term for term in _COLOURS if re.search(rf"\b{re.escape(term)}\b", text)}
+
+def _identity_facts(row):
+    facts = extract_package_facts(*(row.get(field) for field in (
+        "name", "variant", "flavour", "colour", "dosage_form",
+    )))
+    package = extract_package_facts(" ".join(str(row.get(field, "") or "") for field in ("package_size", "package_unit")))
+    strength = extract_package_facts(row.get("strength"))
+    # Field context disambiguates 1 g of active ingredient from a 1 g package.
+    facts["strengths"].update(strength["strengths"] | strength["sizes"])
+    facts["sizes"].update(package["sizes"] | package["strengths"])
+    facts["counts"].update(package["counts"])
     return facts
 
 
@@ -459,30 +400,38 @@ def assess_metadata_candidate(existing, candidate, match_method="exact_gtin") ->
         elif not canonical_gtin(existing.get("barcode", ""), require_valid=True):
             issues.append({"type": "upc_conflict", "field": "barcode", "reason": "invalid_gtin_check_digit"})
     elif match_method in {"exact_familiprix_code", "exact_manufacturer_part", "exact_supplier_code"}:
-        exact_identifier = True
+        identifier_field = {
+            "exact_familiprix_code": "product_code",
+            "exact_manufacturer_part": "manufacturer_part_number",
+            "exact_supplier_code": "supplier_item_number",
+        }[match_method]
+        left = str(existing.get(identifier_field, "") or "").strip()
+        right = str(candidate.get(identifier_field, "") or "").strip()
+        if identifier_field == "product_code" and left.isdigit() and right.isdigit():
+            left, right = left.lstrip("0"), right.lstrip("0")
+        exact_identifier = bool(left and right and left == right)
+        if not exact_identifier:
+            issues.append({"type": "identifier_conflict", "field": identifier_field, "reason": "missing_or_different_identifier"})
     else:
         issues.append({"type": "multiple_possible_matches", "field": "identity", "reason": "non_deterministic_match"})
 
     if _brand_conflicts(existing.get("brand"), candidate.get("brand")):
         issues.append({"type": "brand_conflict", "field": "brand", "reason": "different_brand"})
 
-    existing_facts = extract_package_facts(
-        existing.get("name"), existing.get("description"), existing.get("package_size"),
-        existing.get("strength"), existing.get("variant"), existing.get("flavour"),
-        existing.get("colour"), existing.get("dosage_form"),
-    )
-    candidate_facts = extract_package_facts(
-        candidate.get("name"), candidate.get("description"), candidate.get("package_size"),
-        candidate.get("strength"), candidate.get("variant"), candidate.get("flavour"),
-        candidate.get("colour"), candidate.get("dosage_form"),
-    )
+    if _set_conflict(product_families(existing.get("name")), product_families(candidate.get("name"))):
+        issues.append({"type": "product_name_conflict", "field": "name", "reason": "different_product_family"})
+
+    existing_facts = _identity_facts(existing)
+    candidate_facts = _identity_facts(candidate)
     for fact_name, issue_type in (
         ("sizes", "package_size_conflict"),
         ("strengths", "strength_conflict"),
         ("flavours", "variant_conflict"),
         ("colours", "variant_conflict"),
     ):
-        if _set_conflict(existing_facts[fact_name], candidate_facts[fact_name]):
+        left, right = existing_facts[fact_name], candidate_facts[fact_name]
+        conflict = bool(left and right and (left != right if fact_name == "strengths" else left.isdisjoint(right)))
+        if conflict:
             issues.append({"type": issue_type, "field": fact_name, "reason": "different_package_attribute"})
     if _count_conflict(existing_facts["counts"], candidate_facts["counts"]):
         issues.append({
@@ -490,17 +439,10 @@ def assess_metadata_candidate(existing, candidate, match_method="exact_gtin") ->
             "reason": "different_package_attribute",
         })
 
-    if existing_facts["formats"] and candidate_facts["formats"]:
-        existing_groups = {
-            index for index, group in enumerate(_FORMAT_GROUPS)
-            if existing_facts["formats"] & group
-        }
-        candidate_groups = {
-            index for index, group in enumerate(_FORMAT_GROUPS)
-            if candidate_facts["formats"] & group
-        }
-        if existing_groups and candidate_groups and existing_groups.isdisjoint(candidate_groups):
-            issues.append({"type": "format_conflict", "field": "dosage_form", "reason": "different_format"})
+    if _set_conflict(existing_facts["formats"], candidate_facts["formats"]):
+        issues.append({"type": "format_conflict", "field": "dosage_form", "reason": "different_format"})
+    if "invalid:zero_denominator" in existing_facts["strengths"] | candidate_facts["strengths"]:
+        issues.append({"type": "strength_conflict", "field": "strength", "reason": "invalid_concentration"})
 
     if (
         source_type not in {"store_catalog", "manual"}
@@ -1030,6 +972,40 @@ def field_evidence_for_value(db, product_id, field_name, field_value):
         return dict(row) if row else {}
     except Exception:
         return {}
+
+
+def repair_cached_image_provenance(db):
+    """Demote the legacy worker's fabricated manual proof, without deleting data.
+
+    Actual employee confirmations and independently verified evidence survive.
+    The caller owns the transaction. Re-running this repair is harmless.
+    """
+    legacy_source = "Manual verified exact GTIN cache"
+    changed = 0
+    for table in ("product_field_evidence", "product_reference_evidence"):
+        cursor = db.execute(
+            f"""UPDATE {table} SET active=0, verification_status='requires_review',
+                    source_type='unknown', source_priority=0, confidence=0
+                WHERE source=? AND field_name='image_url'
+                  AND (active<>0 OR verification_status='verified' OR source_type='manual')""",
+            (legacy_source,),
+        )
+        changed += max(cursor.rowcount, 0)
+    db.execute(
+        """UPDATE products SET image_status='unverified'
+           WHERE EXISTS (SELECT 1 FROM product_field_evidence e
+                         WHERE e.product_id=products.id AND e.field_name='image_url'
+                           AND e.field_value=products.image_url AND e.source=?)
+             AND NOT EXISTS (SELECT 1 FROM product_field_evidence e
+                             WHERE e.product_id=products.id AND e.field_name='image_url'
+                               AND e.field_value=products.image_url AND e.active=1
+                               AND e.verification_status='verified')""", (legacy_source,),
+    )
+    db.execute(
+        """UPDATE product_reference SET verification_status='requires_review'
+           WHERE source=?""", (legacy_source,),
+    )
+    return changed
 
 
 def create_review_issue(

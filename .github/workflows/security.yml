@@ -50,3 +50,43 @@ jobs:
           for test_file in tests/*.js; do
             node "$test_file"
           done
+      - name: Install browser verification dependencies
+        run: |
+          npm install --prefix /tmp/locator-browser --no-package-lock --no-save playwright@1.62.1
+          /tmp/locator-browser/node_modules/.bin/playwright install --with-deps chromium
+      - name: Employee workflow in a real browser
+        run: node tests/e2e_employee_accounts.cjs
+        env:
+          NODE_PATH: /tmp/locator-browser/node_modules
+          TEST_PYTHON: python
+      - name: Catalogue search and comparison in a real browser
+        run: node tests/e2e_catalogue.cjs
+        env:
+          NODE_PATH: /tmp/locator-browser/node_modules
+          TEST_PYTHON: python
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build non-root store container
+        run: docker build -t locator-test .
+      - name: Verify bootstrap and HTTP readiness
+        shell: bash
+        run: |
+          docker run -d --name locator-smoke -p 127.0.0.1:10000:10000 \
+            -e STORE_ID=ci-store -e STORE_NAME='CI store' \
+            -e APP_EXTERNAL_URL=http://localhost:10000 -e AUTH_COOKIE_SECURE=0 \
+            -e INIT_OWNER_PASSWORD='Disposable CI owner password 2026!' locator-test
+          trap 'docker logs locator-smoke; docker rm -f locator-smoke' EXIT
+          for attempt in $(seq 1 45); do
+            if curl -fsS http://localhost:10000/livez >/dev/null; then
+              curl -fsS http://localhost:10000/api/auth/status | python -c 'import json,sys; assert json.load(sys.stdin)["account_mode"]'
+              test "$(docker exec locator-smoke id -u)" = 10001
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1

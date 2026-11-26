@@ -27,14 +27,12 @@ const STORAGE_KEYS = {
   store: 'familiprixStore'
 };
 
-// Known stores. Add new ones here as they come online.
-const STORES = [
-  {
-    id: 'richelieu',
-    name: 'Familiprix Richelieu',
-    address: '1111 Chemin des Patriotes, Richelieu, Quebec J3L 4W6'
-  }
-];
+// Store identity is supplied by the server, never selected by browser input.
+const STORES = (() => {
+  const element = document.getElementById('store-config');
+  if (!element) return [];
+  try { return [JSON.parse(element.textContent)]; } catch (_) { return []; }
+})();
 
 // Customer service stays immediately available. Store-maintenance views require
 // the same server-verified employee session.
