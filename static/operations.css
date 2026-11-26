@@ -1,10 +1,10 @@
 /* Operational tools retain their tested write flows and share the new shell. */
 body {
-  background: #f7f8f2;
-  color: #172f2c;
+  background: #ffffff;
+  color: #25252b;
 }
 .header {
-  background: #154c43;
+  background: #c8102e;
   position: relative;
   box-shadow: none;
   padding: 22px 24px;
@@ -23,17 +23,17 @@ body {
 }
 .tabs {
   top: 0;
-  border-bottom: 1px solid #dce4dc;
+  border-bottom: 1px solid #e8e3e5;
   box-shadow: none;
 }
 .tab.active {
-  color: #154c43;
-  border-bottom-color: #154c43;
+  color: #c8102e;
+  border-bottom-color: #c8102e;
 }
 .card,
 .shell-banner {
   border-radius: 14px;
-  border-color: #dce4dc;
+  border-color: #e8e3e5;
   box-shadow: none;
 }
 .team-intro {
@@ -43,7 +43,7 @@ body {
   font-size: 10px;
   letter-spacing: 1.8px;
   font-weight: 700;
-  color: #647e5f;
+  color: #a50d26;
 }
 .team-intro h2 {
   font-size: 29px;
@@ -52,7 +52,7 @@ body {
 }
 .team-intro p {
   font-size: 14px;
-  color: #657570;
+  color: #66636b;
 }
 .team-actions {
   display: grid;
@@ -64,9 +64,9 @@ body {
   display: block;
   text-align: left;
   background: #fff;
-  color: #172f2c;
+  color: #25252b;
   padding: 24px;
-  border: 1px solid #dce4dc;
+  border: 1px solid #e8e3e5;
   border-radius: 14px;
   text-decoration: none;
   cursor: pointer;
@@ -74,8 +74,8 @@ body {
   min-height: 130px;
 }
 .team-action:hover {
-  border-color: #718e6d;
-  background: #f0f4e9;
+  border-color: #c8102e;
+  background: #fff5f7;
 }
 .team-action strong {
   font-size: 16px;
@@ -87,7 +87,7 @@ body {
 .team-action p {
   font-size: 12px;
   line-height: 1.7;
-  color: #657570;
+  color: #66636b;
   margin-top: 10px;
 }
 .team-advanced {
@@ -97,15 +97,15 @@ body {
   font-size: 12px;
   cursor: pointer;
   padding: 16px;
-  color: #526b4c;
-  border: 1px solid #dce4dc;
+  color: #a50d26;
+  border: 1px solid #e8e3e5;
   border-radius: 10px;
 }
 .team-advanced[open] > summary {
   margin-bottom: 16px;
 }
 .team-action:focus-visible {
-  outline: 3px solid #be6224;
+  outline: 3px solid #a80d27;
   outline-offset: 3px;
 }
 @media (max-width: 600px) {
