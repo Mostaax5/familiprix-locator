@@ -5,6 +5,24 @@ Branch: `upgrade/reliability-architecture`.
 
 ## Implemented
 
+### Catalogue redesign
+
+- New normalized package identities, preserved placement mapping, source history
+  and transactional cross-worker revisions with incremental projection/indexing.
+- New mobile/desktop finder, bilingual fact search, category/aisle filters,
+  all-location details, comparison and a lazy camera decoder.
+- New employee home screen; established inventory/write tools remain compatible.
+- Description-independent retrieval, contextual label expansion and automatic,
+  resumable per-package source acquisition. Supplier feeds can grow references.
+- Optional schema-constrained local Ollama/Workers Free query interpretation;
+  no generated facts or descriptions, no paid inference or silent substitutions.
+- All 5,448 recovered UPC searches pass, all 5,521 placements match; source
+  snapshots remain private. Three bounded live Familiprix source checks succeed.
+
+See CATALOGUE-ARCHITECTURE.md for current behavior and measured limits. The new
+catalogue replaces the older finder as the primary UI. The remaining-work list
+below records broader legacy/production work, not a completed commercial rollout.
+
 - Atomic stale-write protection for full product updates and layout autosaves,
   including version propagation through the compact catalogue API.
 - Barcode response ordering protection and bounded API request-header waits
@@ -73,8 +91,8 @@ execution foundation. Remaining work includes:
 - Moving enrichment, embeddings, image fetching, quality audits and AI jobs to
   the durable worker, with idempotency/checkpoints specific to each operation.
 - Replacing the remaining import-time lifecycle with an application factory.
-- Durable catalogue revisions and incremental cache/index updates across workers.
-- Separating catalogue identity from placement through a tested data migration.
+- Migrating legacy writes completely off the compatibility placement table;
+  the new catalogue already separates package identity and placement reads.
 - Frontend ES modules, unified state management, asynchronous snapshot storage
   and per-feature loading; module extraction of the large search/AI components.
 - Representative AI evaluation fixtures, measured provider round-trip reduction,

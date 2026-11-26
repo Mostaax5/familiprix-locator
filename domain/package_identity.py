@@ -101,9 +101,9 @@ def package_facts(*values):
         amount, dimension = quantity(match[1], match[2])
         target = "strengths" if match[2] in {"mcg", "ug", "mg", "%"} else "sizes"
         facts[target].add(f"{amount.normalize()}:{dimension}")
-    for count in re.findall(r"\b(\d+)\s*(?:comprimes?|tablets?|caplets?|capsules?|gelules?|doses?|unites?|units?|sachets?|pieces?|lingettes?|wipes?|ct)\b", text):
+    for count in re.findall(r"\b(\d+)\s*(?:comprimes?|tablets?|caplets?|capsules?|gelules?|doses?|unites?|units?|un|sachets?|pieces?|lingettes?|wipes?|ct)\b", text):
         facts["counts"].add(f"{int(count)}:unit")
-    for count in re.findall(r"\b(?:ca|co|caps?|ct)\s*(\d{1,4})\b", text):
+    for count in re.findall(r"\b(?:ca|co|caps?|capsules?|capt|caplets?|gelcaps?|comprimes?|tablets?|gelules?|ct)\s*(\d{1,4})\b(?![.,]\d)(?!\s*(?:mcg|ug|mg|kg|g|ml|l|oz|%)\b)", text):
         facts["counts"].add(f"{int(count)}:unit")
     for packs, count in re.findall(r"\b(\d+)\s*[x×]\s*(\d+)\b(?!\s*(?:ml|mg|g|l|oz)\b)", text):
         facts["counts"].add(f"{int(packs) * int(count)}:unit")

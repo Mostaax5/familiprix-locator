@@ -16,17 +16,19 @@
 <link rel="preconnect" href="https://magasiner.familiprix.com"/>
 <title>FamiliPrix - Localisateur</title>
 <link rel="stylesheet" href="/static/style.css{{ asset_q }}"/>
+<link rel="stylesheet" href="/static/operations.css{{ asset_q }}"/>
 </head>
 <body>
 
 <div class="header">
-  <h1>Localisateur produits</h1>
-  <p>Scan mobile, confirmation, puis prochaine position.</p>
+  <h1>Espace équipe</h1>
+  <p>Emplacements, inventaire et organisation du magasin.</p>
+  <a href="/" style="color:inherit;font-size:13px">← Trouver un produit</a>
 </div>
 
 <div class="tabs">
-  <button class="tab active" id="tabBtn-search" onclick="switchTab('search')">Recherche</button>
-  <button class="tab" id="tabBtn-client" onclick="switchTab('client')">Client</button>
+  <button class="tab active" id="tabBtn-search" onclick="switchTab('search')">Accueil</button>
+  <button class="tab" id="tabBtn-client" onclick="window.location.assign('/')">Trouver</button>
   <button class="tab" id="tabBtn-expiry" onclick="switchTab('expiry')">Dates 🔒</button>
   <button class="tab" id="tabBtn-scan" onclick="switchTab('scan')">Scan 🔒</button>
   <button class="tab" id="tabBtn-add" onclick="switchTab('add')">Plan 🔒</button>
@@ -51,7 +53,7 @@
       </div>
       <button class="btn btn-inline" onclick="saveEditorName()">Nommer</button>
     </div>
-    <div id="editorSessionInfo" class="inline-note">Optionnel — jamais obligatoire. Si vous mettez un nom, il sert à savoir qui a modifié quoi et à étiqueter les données pour l'IA. Vous pouvez l'ignorer.</div>
+    <div id="editorSessionInfo" class="inline-note">Votre session permet d’identifier les modifications du magasin.</div>
     <div id="employeeAccountInfo" class="inline-note" hidden></div>
     <button id="employeeManageButton" class="btn btn-outline" onclick="openEmployeeManager()" hidden>Gérer les employés</button>
     <button id="employeePasswordButton" class="btn btn-outline" onclick="openEmployeePassword()" hidden>Changer mon mot de passe</button>
@@ -237,6 +239,14 @@
 
 <!-- ── SEARCH TAB ── -->
 <div id="search" class="section active content">
+  <div class="team-intro"><span>VOTRE MAGASIN, AU QUOTIDIEN</span><h2>Que souhaitez-vous faire ?</h2><p>Retrouvez vos outils de travail au même endroit.</p></div>
+  <div class="team-actions">
+    <a href="/" class="team-action"><strong>Trouver un produit <span>→</span></strong><p>Rechercher, comparer et voir tous les emplacements.</p></a>
+    <button type="button" class="team-action" onclick="switchTab('scan')"><strong>Placer des produits <span>→</span></strong><p>Scanner les codes-barres et organiser une tablette.</p></button>
+    <button type="button" class="team-action" onclick="switchTab('expiry')"><strong>Suivre les dates <span>→</span></strong><p>Consulter les produits suivis et les prochaines échéances.</p></button>
+    <button type="button" class="team-action" onclick="switchTab('add')"><strong>Organiser le magasin <span>→</span></strong><p>Gérer le plan, les emplacements et les planogrammes.</p></button>
+  </div>
+  <details class="team-advanced"><summary>Recherche avancée par identifiant (DIN, NPN, fournisseur…)</summary>
   <div class="card">
     <div class="section-title">Recherche rapide</div>
     <div class="section-note">Scannez un code-barres avec la camera pour trouver directement le produit. Vous pouvez aussi chercher par nom, marque, mots-clés clients ou les 4 derniers chiffres du code.</div>
@@ -301,6 +311,7 @@
     <button class="btn btn-outline btn-inline" style="font-size:12px" onclick="filterByHomeBrand('')">Toutes marques maison</button>
   </div>
   <div id="searchResults"></div>
+  </details>
 </div>
 
 <!-- ── CLIENT TAB ── -->

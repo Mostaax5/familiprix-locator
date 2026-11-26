@@ -1,5 +1,11 @@
 # Free operation and automatic product matching
 
+The primary finder now uses the redesigned catalogue described in
+[CATALOGUE-ARCHITECTURE.md](CATALOGUE-ARCHITECTURE.md). It needs no descriptions or
+model calls to search, locate or compare products. Optional local Ollama or
+Workers Free inference interprets unmatched employee requests only. The new
+durable source queue replaces legacy automatic enrichment by default.
+
 ## Employee workflow
 
 A known UPC resolves from the local catalogue without waiting for online lookup.

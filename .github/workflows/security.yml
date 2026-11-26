@@ -59,6 +59,11 @@ jobs:
         env:
           NODE_PATH: /tmp/locator-browser/node_modules
           TEST_PYTHON: python
+      - name: Catalogue search and comparison in a real browser
+        run: node tests/e2e_catalogue.cjs
+        env:
+          NODE_PATH: /tmp/locator-browser/node_modules
+          TEST_PYTHON: python
 
   container:
     runs-on: ubuntu-latest

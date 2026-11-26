@@ -88,8 +88,8 @@ async function run() {
   const initiallyAuthenticated = await lock.initializeAuth();
   assert.strictEqual(initiallyAuthenticated, false);
   assert.strictEqual(elements.get('lockModal').style.display, 'none', 'public startup must stay modal-free');
-  assert.strictEqual(elements.get('tabBtn-search').textContent, 'Recherche');
-  assert.strictEqual(elements.get('tabBtn-client').textContent, 'Client');
+  assert.strictEqual(elements.get('tabBtn-search').textContent, 'Accueil');
+  assert.strictEqual(elements.get('tabBtn-client').textContent, 'Trouver');
   assert(elements.get('tabBtn-scan').textContent.endsWith('🔒'));
   assert(elements.get('tabBtn-add').textContent.endsWith('🔒'));
 

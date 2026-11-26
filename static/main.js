@@ -203,6 +203,7 @@ function setActiveTabUi(tab) {
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
 async function switchTab(tab) {
+  if (tab === 'client') { window.location.assign('/'); return; }
   // All store views require the server-verified, non-expired employee session.
   // The 8h timer is fixed from unlock time — NOT refreshed on use — so the
   // session truly expires 8h after the password was entered (one per shift).
@@ -272,7 +273,7 @@ window.addEventListener('pagehide', () => {
 
 function getStartupTab() {
   const savedTab = localStorage.getItem(STORAGE_KEYS.activeTab);
-  const validTabs = ['scan','search','client','expiry','add'];
+  const validTabs = ['scan','search','expiry','add'];
   const preferred = (savedTab && validTabs.includes(savedTab)) ? savedTab : 'search';
   return (LOCKED_TABS.has(preferred) && !isUnlocked()) ? 'search' : preferred;
 }

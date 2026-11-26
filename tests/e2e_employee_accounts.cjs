@@ -51,7 +51,7 @@ db.close()
       if (route.request().url().startsWith(origin+'/')) return route.continue();
       return route.abort();
     });
-    await page.goto(origin);
+    await page.goto(origin+'/operations');
     await page.waitForFunction(() => typeof _authState !== 'undefined' && _authState.accountMode);
     assert.equal(await page.locator('#storeLabel').innerText(), 'Magasin de test');
     await page.evaluate(() => localStorage.setItem('familiprixStore', JSON.stringify({id:'other-store',name:'Other store'})));

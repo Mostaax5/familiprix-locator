@@ -56,8 +56,8 @@ function clearSensitiveBrowserData() {
 function updateLockUi() {
   const unlocked = isUnlocked();
   const labels = {
-    search: 'Recherche',
-    client: 'Client',
+    search: 'Accueil',
+    client: 'Trouver',
     expiry: 'Dates',
     scan: 'Scan',
     add: 'Plan',

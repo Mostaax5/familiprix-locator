@@ -53,6 +53,9 @@ _PUBLIC_API_GET_PATHS = {
     "/api/products/reference-search",
     "/api/client/find",
     "/api/layout/aisles",
+    "/api/catalogue/search",
+    "/api/catalogue/summary",
+    "/api/catalogue/item",
 }
 _PUBLIC_API_GET_PREFIXES = (
     "/api/products/barcode/",

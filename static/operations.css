@@ -1,0 +1,123 @@
+/* Operational tools retain their tested write flows and share the new shell. */
+body {
+  background: #f7f8f2;
+  color: #172f2c;
+}
+.header {
+  background: #154c43;
+  position: relative;
+  box-shadow: none;
+  padding: 22px 24px;
+}
+.header h1 {
+  font-size: 22px;
+  letter-spacing: -0.6px;
+}
+.header p {
+  font-size: 13px;
+}
+.header a {
+  display: inline-block;
+  margin-top: 10px;
+  text-decoration: none;
+}
+.tabs {
+  top: 0;
+  border-bottom: 1px solid #dce4dc;
+  box-shadow: none;
+}
+.tab.active {
+  color: #154c43;
+  border-bottom-color: #154c43;
+}
+.card,
+.shell-banner {
+  border-radius: 14px;
+  border-color: #dce4dc;
+  box-shadow: none;
+}
+.team-intro {
+  padding: 20px 0 24px;
+}
+.team-intro > span {
+  font-size: 10px;
+  letter-spacing: 1.8px;
+  font-weight: 700;
+  color: #647e5f;
+}
+.team-intro h2 {
+  font-size: 29px;
+  letter-spacing: -1px;
+  margin: 9px 0;
+}
+.team-intro p {
+  font-size: 14px;
+  color: #657570;
+}
+.team-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 26px;
+}
+.team-action {
+  display: block;
+  text-align: left;
+  background: #fff;
+  color: #172f2c;
+  padding: 24px;
+  border: 1px solid #dce4dc;
+  border-radius: 14px;
+  text-decoration: none;
+  cursor: pointer;
+  font: inherit;
+  min-height: 130px;
+}
+.team-action:hover {
+  border-color: #718e6d;
+  background: #f0f4e9;
+}
+.team-action strong {
+  font-size: 16px;
+  font-weight: 650;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+.team-action p {
+  font-size: 12px;
+  line-height: 1.7;
+  color: #657570;
+  margin-top: 10px;
+}
+.team-advanced {
+  margin: 25px 0;
+}
+.team-advanced > summary {
+  font-size: 12px;
+  cursor: pointer;
+  padding: 16px;
+  color: #526b4c;
+  border: 1px solid #dce4dc;
+  border-radius: 10px;
+}
+.team-advanced[open] > summary {
+  margin-bottom: 16px;
+}
+.team-action:focus-visible {
+  outline: 3px solid #be6224;
+  outline-offset: 3px;
+}
+@media (max-width: 600px) {
+  .team-actions {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .team-action {
+    min-height: 0;
+    padding: 20px;
+  }
+  .team-intro h2 {
+    font-size: 25px;
+  }
+}

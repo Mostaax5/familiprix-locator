@@ -112,3 +112,46 @@ def test_postgres_store_binding_cannot_be_reassigned(postgres_jobs):
             assert_database(db)
     finally:
         db.close()
+
+
+def test_postgres_catalogue_projection_and_cross_connection_revision(postgres_jobs):
+    from database import init_postgres_db, ensure_auth_schema
+    from catalogue.repository import ensure_schema, refresh, documents, state
+    from catalogue.acquisition import schedule, claim
+    import database
+    db = postgres_jobs()
+    other = None
+    try:
+        with patch.object(database, '_POSTGRES_AUTH_SCHEMA_READY', False):
+            ensure_auth_schema(db)
+        init_postgres_db(db)
+        db.commit()
+        ensure_schema(db)
+        db.execute("INSERT INTO products(name,barcode,aisle,side,shelf,position) VALUES('ADVIL 200MG CO24','062107004053','1','Gauche','1','1')")
+        db.execute("INSERT INTO products(name,barcode,aisle,side,shelf,position) VALUES('ADVIL 200MG CO24','062107004053','3','Gauche','1','1')")
+        db.commit()
+        first = refresh(db)
+        assert len(documents(db)) == 1
+        assert len(documents(db)[0]['locations']) == 2
+        db.commit()
+        other = postgres_jobs()
+        other.execute("UPDATE products SET name='ADVIL 200MG CO24 updated' WHERE aisle='1'")
+        other.commit()
+        assert state(db)['revision'] > first
+        refresh(db)
+        assert 'updated' in ' '.join(documents(db)[0]['original_labels'])
+        schedule(db,now=1)
+        db.commit()
+        def take(_):
+            conn = postgres_jobs()
+            try:
+                return claim(conn,now=2)
+            finally:
+                conn.close()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(take, range(2)))
+        assert len([r for r in results if r]) == 1
+    finally:
+        db.close()
+        if other:
+            other.close()

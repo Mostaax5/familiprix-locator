@@ -4,6 +4,15 @@ French-language product search, barcode placement, store layout, expiry tracking
 and evidence-grounded customer assistance. Python 3.13.7, Flask and PostgreSQL;
 SQLite is supported for isolated development.
 
+## New finder and catalogue
+
+The new `/` experience groups every product's locations, searches bilingual names
+and package facts without generated descriptions, and compares up to three
+products. `/operations` contains employee tools. The catalogue has durable source
+acquisition, transactional revisions and incremental indexing. See
+[CATALOGUE-ARCHITECTURE.md](CATALOGUE-ARCHITECTURE.md) for architecture, supplier
+imports, optional free AI, preservation checks and deployment limits.
+
 ## Automatic matching and $0 operation
 
 See [FREE-OPERATION.md](FREE-OPERATION.md) for the implemented matching rules,
@@ -50,7 +59,8 @@ completion; terminal job records expire after 24 hours. PDFs are capped by the
 existing upload limits and stored as base64 text for portable database support.
 At higher upload volumes, move payloads to durable object storage and retain
 only an object reference in the job row. Other enrichment jobs still use their
-existing execution paths; this release migrates PDF parsing only.
+existing execution paths only when legacy maintenance is explicitly enabled.
+The new catalogue source queue has its own durable worker.
 
 `APP_START_SERVICES=0` suppresses app import-time initialization and background
 services for tooling. Call `python migrate.py` explicitly when using that mode.
@@ -58,7 +68,7 @@ services for tooling. Call `python migrate.py` explicitly when using that mode.
 ## Availability
 
 - `/livez`: request process is running.
-- `/readyz`: a catalogue snapshot is ready for cached search (existing contract).
+- `/readyz`: the new catalogue index is warm and the database check succeeds.
 - `/health/dependencies`: recent database connectivity, separately from cached
   search. Probe results are cached for 10 seconds; 503 means unavailable/unknown.
   It does not certify database write privileges or every application dependency.
