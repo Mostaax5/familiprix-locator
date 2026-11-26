@@ -789,9 +789,13 @@ def manage_employees(account_id=None):
                       {"account_id": saved["id"], "role": saved["role"], "active": saved["active"]})
         db.commit()
         return jsonify({"success": True, "employee": saved}), 200 if account_id else 201
-    except ValueError as exc:
+    except accounts.AccountValidationError as exc:
         db.rollback()
-        return _json_error(str(exc), 400, "invalid_account")
+        return _json_error(accounts.account_error_message(exc.code), 400, "invalid_account")
+    except ValueError:
+        db.rollback()
+        current_app.logger.error("Unexpected employee account write failure")
+        return _json_error("Impossible d’enregistrer le compte. Réessayez plus tard.", 500, "account_write_failed")
 
 
 def install_security(app):

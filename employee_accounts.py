@@ -12,6 +12,29 @@ ROLES = {'owner', 'employee', 'viewer'}
 _DUMMY_HASH = generate_password_hash(secrets.token_urlsafe(32), method='scrypt:32768:8:1')
 
 
+ACCOUNT_ERRORS = {
+    'not_found': 'Compte introuvable.',
+    'already_initialized': 'Un propriétaire existe déjà. Utilisez la gestion des comptes.',
+    'invalid_identity': 'Identifiant de 3 à 60 caractères et nom de 1 à 60 caractères requis.',
+    'invalid_role': 'Rôle ou état invalide.',
+    'owner_required': 'Le premier compte doit être un propriétaire actif.',
+    'duplicate_login': 'Cet identifiant existe déjà.',
+    'last_owner': 'Conservez au moins un propriétaire actif.',
+    'weak_password': 'Utilisez une phrase de passe unique de 15 à 128 caractères, sans répétitions simples.',
+}
+
+
+def account_error_message(code):
+    # Only application-owned messages reach the API, never exception text.
+    return ACCOUNT_ERRORS.get(code, 'Informations du compte invalides.')
+
+
+class AccountValidationError(ValueError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(account_error_message(code))
+
+
 def ensure_schema(db):
     db.execute('''CREATE TABLE IF NOT EXISTS employee_accounts (
         id TEXT PRIMARY KEY, login TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL,
@@ -86,32 +109,32 @@ def save_account(db, payload, account_id=None, bootstrap=False):
     lock_accounts(db)
     old = db.execute('SELECT * FROM employee_accounts WHERE id=?', (account_id,)).fetchone() if account_id else None
     if account_id and not old:
-        raise ValueError('Compte introuvable.')
+        raise AccountValidationError('not_found')
     old = dict(old or {})
     if bootstrap and enabled(db):
-        raise ValueError('Un propriétaire existe déjà. Utilisez la gestion des comptes.')
+        raise AccountValidationError('already_initialized')
     login = login_key(payload.get('login', old.get('login')))
     name = str(payload.get('display_name', old.get('display_name', ''))).strip()
     role = payload.get('role', old.get('role', 'employee'))
     active = payload.get('active', bool(old.get('active', True)))
     if not login or not name or len(name) > 60 or any(ord(c) < 32 for c in name):
-        raise ValueError('Identifiant de 3 à 60 caractères et nom de 1 à 60 caractères requis.')
+        raise AccountValidationError('invalid_identity')
     if role not in ROLES or not isinstance(active, bool):
-        raise ValueError('Rôle ou état invalide.')
+        raise AccountValidationError('invalid_role')
     if bootstrap and (role != 'owner' or not active):
-        raise ValueError('Le premier compte doit être un propriétaire actif.')
+        raise AccountValidationError('owner_required')
     other = db.execute('SELECT id FROM employee_accounts WHERE login=?', (login,)).fetchone()
     if other and other['id'] != account_id:
-        raise ValueError('Cet identifiant existe déjà.')
+        raise AccountValidationError('duplicate_login')
     if old.get('role') == 'owner' and old.get('active') and (role != 'owner' or not active):
         count = db.execute("SELECT COUNT(*) AS n FROM employee_accounts WHERE role='owner' AND active=1").fetchone()['n']
         if count <= 1:
-            raise ValueError('Conservez au moins un propriétaire actif.')
+            raise AccountValidationError('last_owner')
     password = _normalize_password(payload.get('password'))
     if password or not old:
         error = password_validation_error(password)
         if error:
-            raise ValueError(error)
+            raise AccountValidationError('weak_password')
         password_hash = generate_password_hash(password, method='scrypt:32768:8:1', salt_length=32)
     else:
         password_hash = old['password_hash']

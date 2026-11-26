@@ -111,6 +111,25 @@ def test_deactivation_revokes_existing_session_immediately(store):
     assert accounts.enabled(db)
 
 
+def test_account_errors_keep_validation_help_without_exposing_internal_details(store):
+    app, db, owner, *_ = store
+    client, data = login(app)
+    response = mutate(client, '/api/admin/employees/'+owner['id'], {'active':False}, data['csrf_token'], 'PATCH')
+    assert response.status_code == 400
+    assert response.json['error'] == 'Conservez au moins un propriétaire actif.'
+
+    def fail_after_write(*args):
+        db.execute("UPDATE employee_accounts SET display_name='Uncommitted' WHERE id=?", (owner['id'],))
+        raise ValueError('internal database path /private/store.sqlite and secret details')
+
+    with patch('security.accounts.save_account', side_effect=fail_after_write):
+        response = mutate(client, '/api/admin/employees', {}, data['csrf_token'])
+    assert response.status_code == 500
+    assert response.json['code'] == 'account_write_failed'
+    assert 'private' not in response.text and 'secret' not in response.text
+    assert db.execute('SELECT display_name FROM employee_accounts WHERE id=?', (owner['id'],)).fetchone()['display_name'] == 'Owner'
+
+
 def test_password_change_revokes_other_sessions_but_not_other_employees(store):
     app, *_ = store
     first, first_data = login(app, 'employee')
