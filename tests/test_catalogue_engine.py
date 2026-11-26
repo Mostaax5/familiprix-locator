@@ -12,6 +12,22 @@ from catalogue.service import get_index
 from catalogue.acquisition import claim, schedule, store_candidate, run_once
 from catalogue.assistant import interpret, provider
 from catalogue_import import import_feed
+from catalogue.vocabulary import readable_label
+
+
+@pytest.mark.parametrize('label,expected', [
+    ('200MG CO24', '200 mg comprimés 24'),
+    ('250\t\nML', '250 ml'),
+    ('25\u00a0MCG', '25 mcg'),
+    ('1KG 2G 3L', '1 kg 2 g 3 l'),
+    ('200MGS', '200MGS'),
+    ('MG', 'MG'),
+    ('200' + ' ' * 100_000 + 'MG', '200 mg'),
+    ('200' + ' ' * 100_000 + 'X', '200 X'),
+    ('200 MGX ' * 10_000, ('200 MGX ' * 10_000).strip()),
+])
+def test_readable_units_preserve_labels_with_adversarial_whitespace(label, expected):
+    assert readable_label(label) == expected
 
 
 @pytest.fixture

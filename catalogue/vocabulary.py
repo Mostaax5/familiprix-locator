@@ -37,7 +37,9 @@ def readable_label(value):
     text = re.sub(r'\b(' + '|'.join(ABBREVIATIONS) + r')(?=\d)', r'\1 ', text)
     text = re.sub(r'\b(?:' + '|'.join(ABBREVIATIONS) + r')\b',
                   lambda m: ABBREVIATIONS[m[0]], text)
-    text = re.sub(r'(?<=\d)\s*(MCG|MG|ML|KG|G|L)\b', lambda m: ' ' + m[1].lower(), text)
+    # Whitespace was collapsed above. Bound this match to the single possible
+    # space so unit formatting never scans an unbounded whitespace run.
+    text = re.sub(r'(?<=\d) ?(MCG|MG|ML|KG|G|L)\b', lambda m: ' ' + m[1].lower(), text)
     # Explicit, unambiguous printed claims; no inference from a missing claim.
     text = re.sub(r'\bS/SUCRE\b', 'sans sucre', text)
     text = re.sub(r'\bS/PARFUM\b', 'sans parfum', text)

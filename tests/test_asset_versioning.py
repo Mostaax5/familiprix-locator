@@ -8,7 +8,7 @@ from jinja2 import Template
 class AssetVersioningTests(unittest.TestCase):
     def test_every_local_app_asset_uses_the_same_deployment_version(self):
         source = Path("templates/index.html").read_text(encoding="utf-8-sig")
-        html = Template(source).render(asset_version="release123", store_config={"id":"test-store","name":"Test store"})
+        html = Template(source, autoescape=True).render(asset_version="release123", store_config={"id":"test-store","name":"Test store"})
 
         scripts = re.findall(r'<script src="(/static/[^"]+)"', html)
         self.assertGreaterEqual(len(scripts), 10)
