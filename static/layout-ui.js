@@ -797,33 +797,26 @@ function updateBackendStatusInfo() {
   const target = document.getElementById('backendStatusInfo');
   if (!target) return;
   const msgs = [];
+  target.hidden = false;
   if (backendInfo.db_unreachable) {
     target.textContent = 'Base temporairement indisponible. Les résultats mémorisés peuvent être anciens. Les modifications nécessitent une connexion au serveur.';
     return;
   }
-  if (backendInfo.shared_sync) {
-    msgs.push('Base partagee active: PostgreSQL. Les appareils connectes lisent la meme base.');
-  } else {
-    msgs.push('Base locale active: SQLite. Pour une vraie synchronisation entre appareils, connectez Render Postgres et reglez DATABASE_URL.');
-  }
-  msgs.push(backendInfo.ai_enabled
-    ? 'Aide client IA active.'
-    : 'Aide client IA inactive tant qu’une clé IA n’est pas configurée.');
   if (Number(backendInfo.duplicate_slots || 0) > 0) msgs.push(`Attention: ${backendInfo.duplicate_slots} position(s) contiennent déjà plusieurs produits.`);
-  if (Number(backendInfo.duplicate_barcodes || 0) > 0) msgs.push(`Attention: ${backendInfo.duplicate_barcodes} code(s)-barres sont dupliques dans la base.`);
   target.textContent = msgs.join(' ');
+  target.hidden = !msgs.length;
 }
 
 function updateAppShellState() {
   const standalone = isStandaloneApp();
-  document.getElementById('appModeLabel').textContent = `${standalone ? 'Mode app' : 'Mode web'} - ${backendInfo.label || 'Base serveur'}`;
+  document.getElementById('appModeLabel').textContent = 'Votre espace de travail';
   document.getElementById('installHint').textContent = standalone
-    ? 'L app garde votre position et vos formulaires meme si Safari se ferme.'
-    : 'Sur mobile: ouvrez le site puis ajoutez-le a l ecran d accueil pour un acces rapide.';
+    ? 'Retrouvez les outils de votre magasin depuis votre écran d’accueil.'
+    : 'Sur mobile, ajoutez le site à l’écran d’accueil pour un accès rapide.';
   const session = loadEditorSession();
   document.getElementById('editorSessionInfo').textContent = session?.username && session.username !== 'appareil'
     ? `Cet appareil signe les changements avec le nom ${session.username}.`
-    : 'Aucun mot de passe. Si vous entrez un nom, il sera garde sur cet appareil pour suivre qui a change quoi.';
+    : 'Ajoutez votre nom pour identifier les modifications faites depuis cet appareil.';
   document.getElementById('editorName').value = session?.username === 'appareil' ? '' : (session?.username || '');
   updateBackendStatusInfo();
 }
